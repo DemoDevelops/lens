@@ -4,8 +4,10 @@
 pub mod discovery;
 pub mod index;
 pub mod obs;
+pub mod routing;
 pub mod sandbox;
 pub mod server;
 pub mod session;
 pub mod store;
 pub mod tools;
+pub mod wrap;

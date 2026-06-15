@@ -1,0 +1,10 @@
+{
+  "id": "0007_defines_connect_db",
+  "prompt": "Which file in the repo defines the function `connect_db`?",
+  "fixtures": ["fixtures/repo"],
+  "ground_truth": { "file": "db.rs" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["db.rs"],
+  "treatment": { "graph_op": "query", "name": "connect_db" }
+}

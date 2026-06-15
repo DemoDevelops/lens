@@ -1,0 +1,12 @@
+{
+  "id": "ed_01_unresolved_error",
+  "set": "error_decision",
+  "steps": [
+    { "hook": "UserPromptSubmit", "prompt": "Run the test suite and fix what breaks." },
+    { "hook": "PostToolUse", "tool_name": "Bash", "tool_input": { "command": "cargo test" }, "tool_response": "error[E0277]: the trait bound `Widget: Serialize` is not satisfied" }
+  ],
+  "followup": "What was the unresolved error we still need to fix?",
+  "ground_truth": { "error": "E0277" },
+  "check": "contains",
+  "evidence": ["E0277"]
+}

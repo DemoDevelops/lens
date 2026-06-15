@@ -1,0 +1,10 @@
+{
+  "id": "0010_defines_rotate_keys",
+  "prompt": "Which file defines the function `rotate_keys`?",
+  "fixtures": ["fixtures/repo"],
+  "ground_truth": { "file": "crypto.rs" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "evidence": ["crypto.rs"],
+  "treatment": { "queries": ["rotate_keys"] }
+}

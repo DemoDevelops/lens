@@ -1,0 +1,12 @@
+{
+  "id": "ft_02_task_inprogress",
+  "set": "file_task",
+  "steps": [
+    { "hook": "UserPromptSubmit", "prompt": "Add rate limiting to the public API." },
+    { "hook": "PostToolUse", "tool_name": "TodoWrite", "tool_input": { "todos": [ { "content": "implement token bucket limiter", "status": "in_progress" }, { "content": "write limiter tests", "status": "pending" } ] }, "tool_response": "todos updated" }
+  ],
+  "followup": "What task was in progress when we got cut off?",
+  "ground_truth": { "task": "token bucket" },
+  "check": "contains",
+  "evidence": ["token bucket"]
+}

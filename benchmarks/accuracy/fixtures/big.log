@@ -1,0 +1,65 @@
+2026-06-14T09:00:00Z INFO  boot: service starting, pid 4012
+2026-06-14T09:00:01Z INFO  boot: loaded configuration, 18 keys
+2026-06-14T09:00:02Z ERROR ConnectionTimeout: upstream db did not respond within 5000ms
+2026-06-14T09:00:03Z INFO  http: GET /healthz 200
+2026-06-14T09:00:04Z ERROR AuthFailure: token signature mismatch for user 5521
+2026-06-14T09:00:05Z INFO  http: GET /api/items 200
+2026-06-14T09:00:06Z ERROR ConnectionTimeout: upstream cache did not respond within 5000ms
+2026-06-14T09:00:07Z WARN  pool: connection pool at 80% utilization
+2026-06-14T09:00:08Z ERROR RateLimited: client 10.0.0.4 exceeded 100 req/s
+2026-06-14T09:00:09Z INFO  http: POST /api/orders 201
+2026-06-14T09:00:10Z ERROR ConnectionTimeout: upstream payments did not respond within 5000ms
+2026-06-14T09:00:11Z INFO  http: GET /api/items 200
+2026-06-14T09:00:12Z ERROR DiskFull: write to /var/log failed, no space left on device
+2026-06-14T09:00:13Z INFO  http: GET /healthz 200
+2026-06-14T09:00:14Z ERROR AuthFailure: token expired for user 5522
+2026-06-14T09:00:15Z ERROR ConnectionTimeout: upstream db did not respond within 5000ms
+2026-06-14T09:00:16Z WARN  pool: connection pool at 85% utilization
+2026-06-14T09:00:17Z ERROR ParseError: malformed JSON body on POST /api/orders
+2026-06-14T09:00:18Z INFO  http: GET /api/items 200
+2026-06-14T09:00:19Z ERROR ConnectionTimeout: upstream cache did not respond within 5000ms
+2026-06-14T09:00:20Z ERROR RateLimited: client 10.0.0.7 exceeded 100 req/s
+2026-06-14T09:00:21Z INFO  http: GET /healthz 200
+2026-06-14T09:00:22Z ERROR AuthFailure: token signature mismatch for user 5523
+2026-06-14T09:00:23Z ERROR ConnectionTimeout: upstream db did not respond within 5000ms
+2026-06-14T09:00:24Z INFO  http: POST /api/orders 201
+2026-06-14T09:00:25Z ERROR DiskFull: write to /var/log failed, no space left on device
+2026-06-14T09:00:26Z INFO  http: GET /api/items 200
+2026-06-14T09:00:27Z ERROR ConnectionTimeout: upstream payments did not respond within 5000ms
+2026-06-14T09:00:28Z WARN  pool: connection pool at 90% utilization
+2026-06-14T09:00:29Z ERROR ParseError: malformed JSON body on POST /api/items
+2026-06-14T09:00:30Z ERROR AuthFailure: token expired for user 5524
+2026-06-14T09:00:31Z INFO  http: GET /healthz 200
+2026-06-14T09:00:32Z ERROR ConnectionTimeout: upstream cache did not respond within 5000ms
+2026-06-14T09:00:33Z ERROR RateLimited: client 10.0.0.9 exceeded 100 req/s
+2026-06-14T09:00:34Z INFO  http: GET /api/items 200
+2026-06-14T09:00:35Z ERROR DiskFull: write to /var/data failed, no space left on device
+2026-06-14T09:00:36Z ERROR ConnectionTimeout: upstream db did not respond within 5000ms
+2026-06-14T09:00:37Z INFO  http: POST /api/orders 201
+2026-06-14T09:00:38Z ERROR AuthFailure: token signature mismatch for user 5525
+2026-06-14T09:00:39Z ERROR ParseError: malformed JSON body on POST /api/orders
+2026-06-14T09:00:40Z INFO  http: GET /healthz 200
+2026-06-14T09:00:41Z ERROR ConnectionTimeout: upstream payments did not respond within 5000ms
+2026-06-14T09:00:42Z ERROR RateLimited: client 10.0.0.3 exceeded 100 req/s
+2026-06-14T09:00:43Z INFO  http: GET /api/items 200
+2026-06-14T09:00:44Z ERROR DiskFull: write to /var/log failed, no space left on device
+2026-06-14T09:00:45Z ERROR AuthFailure: token expired for user 5526
+2026-06-14T09:00:46Z INFO  http: GET /healthz 200
+2026-06-14T09:00:47Z ERROR ConnectionTimeout: upstream cache did not respond within 5000ms
+2026-06-14T09:00:48Z ERROR ParseError: malformed JSON body on POST /api/items
+2026-06-14T09:00:49Z INFO  http: POST /api/orders 201
+2026-06-14T09:00:50Z ERROR RateLimited: client 10.0.0.8 exceeded 100 req/s
+2026-06-14T09:00:51Z ERROR AuthFailure: token signature mismatch for user 5527
+2026-06-14T09:00:52Z INFO  http: GET /api/items 200
+2026-06-14T09:00:53Z ERROR DiskFull: write to /var/data failed, no space left on device
+2026-06-14T09:00:54Z ERROR ConnectionTimeout: upstream db did not respond within 5000ms
+2026-06-14T09:00:55Z INFO  http: GET /healthz 200
+2026-06-14T09:00:56Z ERROR DiskFull: write to /var/log failed, no space left on device
+2026-06-14T09:00:57Z INFO  http: GET /api/items 200
+2026-06-14T09:00:58Z ERROR NullPointer: nil dereference in orders.handler at line 88
+2026-06-14T09:00:59Z INFO  http: POST /api/orders 500
+2026-06-14T09:01:00Z ERROR ConfigMissing: required key SMTP_HOST not set, alerts disabled
+2026-06-14T09:01:01Z INFO  http: GET /healthz 200
+2026-06-14T09:01:02Z ERROR NullPointer: nil dereference in cache.evict at line 142
+2026-06-14T09:01:03Z INFO  shutdown: draining connections
+2026-06-14T09:01:04Z INFO  shutdown: exiting cleanly

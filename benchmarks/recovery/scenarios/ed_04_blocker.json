@@ -1,0 +1,12 @@
+{
+  "id": "ed_04_blocker",
+  "set": "error_decision",
+  "steps": [
+    { "hook": "UserPromptSubmit", "prompt": "We're blocked on the missing staging credentials, so don't deploy yet." },
+    { "hook": "PostToolUse", "tool_name": "Bash", "tool_input": { "command": "git status" }, "tool_response": "On branch main, nothing to commit" }
+  ],
+  "followup": "What are we blocked on right now?",
+  "ground_truth": { "blocker": "staging credentials" },
+  "check": "contains",
+  "evidence": ["staging credentials"]
+}

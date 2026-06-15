@@ -1,0 +1,13 @@
+{
+  "id": "ft_04_continue_file",
+  "set": "file_task",
+  "steps": [
+    { "hook": "UserPromptSubmit", "prompt": "Wire up the new routing layer." },
+    { "hook": "PostToolUse", "tool_name": "Write", "tool_input": { "file_path": "src/server/router.rs" }, "tool_response": "created" },
+    { "hook": "PostToolUse", "tool_name": "Read", "tool_input": { "file_path": "src/server/mod.rs" }, "tool_response": "...contents..." }
+  ],
+  "followup": "Continue where we left off — what file should I keep editing?",
+  "ground_truth": { "file": "router.rs" },
+  "check": "contains",
+  "evidence": ["router.rs"]
+}

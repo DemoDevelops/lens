@@ -1,0 +1,38 @@
+[
+  {
+    "workload": "Code search (results across files)",
+    "mechanism": "index",
+    "before_bytes": 15915,
+    "after_bytes": 10627,
+    "savings_pct": 33,
+    "baseline": "Agent greps for the terms, then opens every matched file in full to read context.",
+    "detail": "6 queries, 30 hits returned, 12 matched files read by the naive path"
+  },
+  {
+    "workload": "Log debugging (buried root cause)",
+    "mechanism": "sandbox",
+    "before_bytes": 7210,
+    "after_bytes": 517,
+    "savings_pct": 93,
+    "baseline": "Agent loads the entire log into context to locate the one FATAL line.",
+    "detail": "grep over 7210 bytes -> 517 bytes of matching lines (+context)"
+  },
+  {
+    "workload": "Issue triage (structured payload)",
+    "mechanism": "compression",
+    "before_bytes": 8902,
+    "after_bytes": 3885,
+    "savings_pct": 56,
+    "baseline": "Agent loads the full structured triage payload (minified) into context.",
+    "detail": "reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via ctx_retrieve (raw file 8903 bytes)"
+  },
+  {
+    "workload": "Codebase exploration (subtree)",
+    "mechanism": "discovery",
+    "before_bytes": 2606,
+    "after_bytes": 2094,
+    "savings_pct": 20,
+    "baseline": "Agent reads every source file in the subtree to map its structure.",
+    "detail": "discover summary (30 nodes, 40 edges) + one scoped graph_query"
+  }
+]

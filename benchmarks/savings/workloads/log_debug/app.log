@@ -1,0 +1,103 @@
+2026-06-14T08:00:01Z INFO  startup: ctxforge-demo service booting, version 1.4.2
+2026-06-14T08:00:01Z INFO  config: loaded 14 settings from environment
+2026-06-14T08:00:01Z INFO  config: log_level=info db_url=postgres://db:5432/app
+2026-06-14T08:00:02Z INFO  db: opening connection pool size=16
+2026-06-14T08:00:02Z DEBUG db: connect attempt 1 to postgres://db:5432/app
+2026-06-14T08:00:02Z INFO  db: connection pool ready in 412ms
+2026-06-14T08:00:02Z INFO  cache: warming cache with 128 hot keys
+2026-06-14T08:00:03Z DEBUG cache: loaded key user:1001 ttl=300
+2026-06-14T08:00:03Z DEBUG cache: loaded key user:1002 ttl=300
+2026-06-14T08:00:03Z DEBUG cache: loaded key session:abc123 ttl=600
+2026-06-14T08:00:03Z INFO  http: listening on 0.0.0.0:8080
+2026-06-14T08:00:04Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:00:05Z INFO  http: request GET /api/users/1001 200 23ms
+2026-06-14T08:00:05Z DEBUG auth: token validated for user 1001
+2026-06-14T08:00:06Z INFO  http: request POST /api/orders 201 45ms
+2026-06-14T08:00:07Z INFO  http: request GET /api/users/1002 200 19ms
+2026-06-14T08:00:08Z WARN  cache: miss for key user:1003, falling back to db
+2026-06-14T08:00:08Z DEBUG db: query SELECT * FROM users WHERE id=1003
+2026-06-14T08:00:08Z INFO  http: request GET /api/users/1003 200 31ms
+2026-06-14T08:00:09Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:00:10Z INFO  http: request POST /api/orders 201 52ms
+2026-06-14T08:00:11Z DEBUG auth: token validated for user 1002
+2026-06-14T08:00:12Z INFO  http: request GET /api/products 200 17ms
+2026-06-14T08:00:13Z WARN  http: slow request GET /api/reports 200 1240ms
+2026-06-14T08:00:14Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:00:15Z DEBUG metrics: flushed 42 datapoints to collector
+2026-06-14T08:00:16Z INFO  http: request GET /api/users/1004 200 28ms
+2026-06-14T08:00:17Z INFO  http: request POST /api/orders 201 39ms
+2026-06-14T08:00:18Z WARN  cache: eviction triggered, over capacity by 12 keys
+2026-06-14T08:00:19Z INFO  http: request GET /api/products 200 21ms
+2026-06-14T08:00:20Z DEBUG db: query SELECT * FROM orders WHERE user_id=1001
+2026-06-14T08:00:21Z INFO  http: request GET /api/orders 200 33ms
+2026-06-14T08:00:22Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:00:23Z ERROR client: upstream payments-api returned 503, will retry
+2026-06-14T08:00:23Z DEBUG client: retry 1 of 3 for payments-api
+2026-06-14T08:00:24Z INFO  client: payments-api recovered on retry 1
+2026-06-14T08:00:25Z INFO  http: request POST /api/payments 200 210ms
+2026-06-14T08:00:26Z INFO  http: request GET /api/users/1005 200 26ms
+2026-06-14T08:00:27Z WARN  http: slow request GET /api/reports 200 1310ms
+2026-06-14T08:00:28Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:00:29Z DEBUG auth: token validated for user 1003
+2026-06-14T08:00:30Z INFO  http: request GET /api/products 200 18ms
+2026-06-14T08:00:31Z INFO  http: request POST /api/orders 201 41ms
+2026-06-14T08:00:32Z WARN  db: connection pool at 90% utilization
+2026-06-14T08:00:33Z INFO  http: request GET /api/users/1006 200 24ms
+2026-06-14T08:00:34Z DEBUG metrics: flushed 51 datapoints to collector
+2026-06-14T08:00:35Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:00:36Z WARN  db: slow query 870ms SELECT * FROM reports
+2026-06-14T08:00:37Z INFO  http: request GET /api/orders 200 35ms
+2026-06-14T08:00:38Z ERROR client: upstream inventory-api timeout after 5000ms
+2026-06-14T08:00:38Z DEBUG client: retry 1 of 3 for inventory-api
+2026-06-14T08:00:39Z DEBUG client: retry 2 of 3 for inventory-api
+2026-06-14T08:00:40Z WARN  client: inventory-api degraded, serving stale cache
+2026-06-14T08:00:41Z INFO  http: request GET /api/inventory 200 5012ms
+2026-06-14T08:00:42Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:00:43Z DEBUG db: query SELECT * FROM users WHERE id=1007
+2026-06-14T08:00:44Z INFO  http: request GET /api/users/1007 200 27ms
+2026-06-14T08:00:45Z WARN  cache: miss for key user:1008, falling back to db
+2026-06-14T08:00:46Z INFO  http: request GET /api/users/1008 200 30ms
+2026-06-14T08:00:47Z INFO  http: request POST /api/orders 201 44ms
+2026-06-14T08:00:48Z DEBUG metrics: flushed 47 datapoints to collector
+2026-06-14T08:00:49Z WARN  db: connection pool at 95% utilization
+2026-06-14T08:00:50Z ERROR db: connection acquire timed out after 3000ms (pool exhausted)
+2026-06-14T08:00:50Z WARN  db: 8 requests queued waiting for a connection
+2026-06-14T08:00:51Z ERROR db: connection acquire timed out after 3000ms (pool exhausted)
+2026-06-14T08:00:51Z FATAL db: connection pool exhausted and reaper thread panicked; cannot recover
+2026-06-14T08:00:51Z ERROR runtime: Traceback (most recent call last):
+2026-06-14T08:00:51Z ERROR runtime:   File "pool.rs", line 212, in reap_idle_connections
+2026-06-14T08:00:51Z ERROR runtime:   File "pool.rs", line 188, in acquire
+2026-06-14T08:00:51Z ERROR runtime: PanicException: pool reaper observed a poisoned mutex
+2026-06-14T08:00:52Z WARN  http: request GET /api/users/1009 503 3001ms
+2026-06-14T08:00:52Z WARN  http: request POST /api/orders 503 3002ms
+2026-06-14T08:00:53Z WARN  supervisor: db subsystem unhealthy, attempting restart 1 of 3
+2026-06-14T08:00:54Z INFO  db: opening connection pool size=16
+2026-06-14T08:00:54Z DEBUG db: connect attempt 1 to postgres://db:5432/app
+2026-06-14T08:00:55Z INFO  db: connection pool ready in 388ms
+2026-06-14T08:00:55Z INFO  supervisor: db subsystem restored
+2026-06-14T08:00:56Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:00:57Z INFO  http: request GET /api/users/1010 200 25ms
+2026-06-14T08:00:58Z INFO  http: request POST /api/orders 201 43ms
+2026-06-14T08:00:59Z DEBUG auth: token validated for user 1004
+2026-06-14T08:01:00Z INFO  http: request GET /api/products 200 20ms
+2026-06-14T08:01:01Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:01:02Z WARN  http: slow request GET /api/reports 200 1180ms
+2026-06-14T08:01:03Z INFO  http: request GET /api/users/1011 200 29ms
+2026-06-14T08:01:04Z DEBUG metrics: flushed 39 datapoints to collector
+2026-06-14T08:01:05Z INFO  http: request POST /api/orders 201 40ms
+2026-06-14T08:01:06Z INFO  http: request GET /api/products 200 19ms
+2026-06-14T08:01:07Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:01:08Z WARN  cache: eviction triggered, over capacity by 9 keys
+2026-06-14T08:01:09Z INFO  http: request GET /api/users/1012 200 26ms
+2026-06-14T08:01:10Z INFO  http: request POST /api/orders 201 47ms
+2026-06-14T08:01:11Z DEBUG auth: token validated for user 1005
+2026-06-14T08:01:12Z INFO  http: request GET /api/orders 200 34ms
+2026-06-14T08:01:13Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:01:14Z INFO  http: request GET /api/users/1013 200 28ms
+2026-06-14T08:01:15Z DEBUG metrics: flushed 44 datapoints to collector
+2026-06-14T08:01:16Z INFO  http: request POST /api/orders 201 42ms
+2026-06-14T08:01:17Z WARN  http: slow request GET /api/reports 200 1220ms
+2026-06-14T08:01:18Z INFO  http: request GET /api/products 200 22ms
+2026-06-14T08:01:19Z INFO  http: request GET /healthz 200 1ms
+2026-06-14T08:01:20Z INFO  shutdown: received SIGTERM, draining connections
+2026-06-14T08:01:20Z INFO  shutdown: 0 in-flight requests, exiting cleanly

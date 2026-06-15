@@ -1,0 +1,24 @@
+# Service configuration for the demo app.
+service:
+  name: ctxforge-demo
+  log_level: info
+
+server:
+  host: 0.0.0.0
+  default_port: 8080
+  read_timeout_ms: 5000
+  max_connections: 1024
+
+database:
+  url: postgres://db:5432/app
+  pool_size: 16
+  connect_timeout_s: 5
+
+cache:
+  backend: memory
+  ttl_seconds: 300
+  max_entries: 4096
+
+auth:
+  secret_env: AUTH_SECRET
+  token_ttl_minutes: 60

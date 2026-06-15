@@ -1,0 +1,14 @@
+{
+  "id": "0005_count_timeout_events",
+  "prompt": "In events.jsonl, how many events have type 'timeout'?",
+  "fixtures": ["fixtures/events.jsonl"],
+  "ground_truth": { "count": 12 },
+  "check": "numeric_tolerance",
+  "tolerance": 0,
+  "primary_mechanism": "sandbox",
+  "evidence": ["timeout"],
+  "treatment": {
+    "language": "bash",
+    "script": "echo 'timeout events:'; grep -c '\"type\":\"timeout\"' fixtures/events.jsonl"
+  }
+}

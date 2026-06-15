@@ -1,0 +1,254 @@
+{
+  "groups": [
+    {
+      "control_acc": 0.16666666666666666,
+      "control_tokens": 1847,
+      "mechanism": "sandbox",
+      "n": 6,
+      "treatment_acc": 1.0,
+      "treatment_tokens": 103
+    },
+    {
+      "control_acc": 0.6666666666666666,
+      "control_tokens": 987,
+      "mechanism": "discovery",
+      "n": 3,
+      "treatment_acc": 1.0,
+      "treatment_tokens": 467
+    },
+    {
+      "control_acc": 1.0,
+      "control_tokens": 432,
+      "mechanism": "search",
+      "n": 2,
+      "treatment_acc": 1.0,
+      "treatment_tokens": 314
+    }
+  ],
+  "mode": "real",
+  "model": "claude-opus-4-8 (via claude-pty)",
+  "tasks": [
+    {
+      "control": {
+        "answer": {
+          "distinct_error_types": 6,
+          "most_frequent": "ConnectionTimeout"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 500
+      },
+      "id": "0001_count_error_types",
+      "mechanism": "sandbox",
+      "treatment": {
+        "answer": {
+          "distinct_error_types": 7,
+          "most_frequent": "ConnectionTimeout"
+        },
+        "context_bytes": 288,
+        "correct": true,
+        "tokens": 72
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "count": 9
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 500
+      },
+      "id": "0002_count_connection_timeouts",
+      "mechanism": "sandbox",
+      "treatment": {
+        "answer": {
+          "count": 12
+        },
+        "context_bytes": 34,
+        "correct": true,
+        "tokens": 8
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "max_latency_ms": 5012
+        },
+        "context_bytes": 764,
+        "correct": true,
+        "tokens": 191
+      },
+      "id": "0003_max_latency",
+      "mechanism": "sandbox",
+      "treatment": {
+        "answer": {
+          "max_latency_ms": 5012
+        },
+        "context_bytes": 20,
+        "correct": true,
+        "tokens": 5
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "total_requests": 3463
+        },
+        "context_bytes": 764,
+        "correct": false,
+        "tokens": 191
+      },
+      "id": "0004_total_requests",
+      "mechanism": "sandbox",
+      "treatment": {
+        "answer": {
+          "total_requests": 2719
+        },
+        "context_bytes": 20,
+        "correct": true,
+        "tokens": 5
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "count": 11
+        },
+        "context_bytes": 1096,
+        "correct": false,
+        "tokens": 274
+      },
+      "id": "0005_count_timeout_events",
+      "mechanism": "sandbox",
+      "treatment": {
+        "answer": {
+          "count": 12
+        },
+        "context_bytes": 19,
+        "correct": true,
+        "tokens": 4
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "endpoint": "/api/items"
+        },
+        "context_bytes": 764,
+        "correct": false,
+        "tokens": 191
+      },
+      "id": "0006_busiest_endpoint",
+      "mechanism": "sandbox",
+      "treatment": {
+        "answer": {
+          "endpoint": "/healthz"
+        },
+        "context_bytes": 36,
+        "correct": true,
+        "tokens": 9
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "file": "db.rs"
+        },
+        "context_bytes": 1316,
+        "correct": true,
+        "tokens": 329
+      },
+      "id": "0007_defines_connect_db",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "file": "db.rs"
+        },
+        "context_bytes": 853,
+        "correct": true,
+        "tokens": 213
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "reachable": true
+        },
+        "context_bytes": 1316,
+        "correct": false,
+        "tokens": 329
+      },
+      "id": "0008_reachable_path",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "reachable": "yes"
+        },
+        "context_bytes": 538,
+        "correct": true,
+        "tokens": 134
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "kind": "struct"
+        },
+        "context_bytes": 1316,
+        "correct": true,
+        "tokens": 329
+      },
+      "id": "0009_kind_of_connection",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "kind": "struct"
+        },
+        "context_bytes": 481,
+        "correct": true,
+        "tokens": 120
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "file": "crypto.rs"
+        },
+        "context_bytes": 1316,
+        "correct": true,
+        "tokens": 329
+      },
+      "id": "0010_defines_rotate_keys",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "file": "/Users/gene/Documents/AI Stuff/ctxforge/benchmarks/accuracy/fixtures/repo/crypto.rs"
+        },
+        "context_bytes": 442,
+        "correct": true,
+        "tokens": 110
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "port": 8080
+        },
+        "context_bytes": 412,
+        "correct": true,
+        "tokens": 103
+      },
+      "id": "0011_default_port",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "port": "8080"
+        },
+        "context_bytes": 817,
+        "correct": true,
+        "tokens": 204
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "ft_03_last_file_of_many",
+  "set": "file_task",
+  "steps": [
+    { "hook": "PostToolUse", "tool_name": "Edit", "tool_input": { "file_path": "src/db/pool.rs" }, "tool_response": "ok" },
+    { "hook": "PostToolUse", "tool_name": "Edit", "tool_input": { "file_path": "src/db/query.rs" }, "tool_response": "ok" },
+    { "hook": "PostToolUse", "tool_name": "Edit", "tool_input": { "file_path": "src/db/migrate.rs" }, "tool_response": "ok" }
+  ],
+  "followup": "What was the most recent file we modified?",
+  "ground_truth": { "file": "migrate.rs" },
+  "check": "contains",
+  "evidence": ["migrate.rs"]
+}

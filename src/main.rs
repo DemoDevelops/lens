@@ -30,6 +30,7 @@ fn main() -> Result<()> {
         Some("stats") => return obs::stats::run_cli(&args[2..]),
         Some("verify") => return obs::verify::run_cli(&args[2..]),
         Some("dashboard") => return obs::dashboard::run_cli(&args[2..]),
+        Some("wrap") => return ctxforge::wrap::run_cli(&args[2..]),
         _ => {}
     }
     // `--explain` is an alias for CTXFORGE_EXPLAIN=1 (opt-in per-op trace).
@@ -53,7 +54,43 @@ async fn run_server() -> Result<()> {
     let forge = Forge::new()?;
     tracing::info!("ctxforge starting on stdio");
 
+    // Liveness heartbeat for the routing layer's MCP-ready guard (a separate
+    // hook process): it treats this server as reachable only while
+    // `<data_dir>/server.pid` is fresh. Re-touched periodically so a crashed
+    // server goes stale and routing falls back to passthrough.
+    let pidfile = heartbeat_path();
+    if let Some(p) = &pidfile {
+        write_heartbeat(p);
+        let p = p.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                write_heartbeat(&p);
+            }
+        });
+    }
+
     let service = forge.serve(stdio()).await?;
     service.waiting().await?;
+    if let Some(p) = &pidfile {
+        let _ = std::fs::remove_file(p);
+    }
     Ok(())
+}
+
+/// Resolve `<data_dir>/server.pid`, matching how the server/hook resolve the
+/// data dir (`$CTXFORGE_DIR`, else `<cwd>/.ctxforge`). `None` if unresolvable.
+fn heartbeat_path() -> Option<std::path::PathBuf> {
+    let dir = match std::env::var_os("CTXFORGE_DIR") {
+        Some(d) => std::path::PathBuf::from(d),
+        None => std::env::current_dir().ok()?.join(".ctxforge"),
+    };
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("server.pid"))
+}
+
+/// Best-effort write of the current pid; updates mtime so freshness checks pass.
+fn write_heartbeat(path: &std::path::Path) {
+    let _ = std::fs::write(path, std::process::id().to_string());
 }

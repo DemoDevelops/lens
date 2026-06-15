@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use super::{extract, snapshot, store::SessionStore, Event, RawEvent};
 use crate::index::Index;
+use crate::routing;
 
 /// Parsed subset of the Claude Code hook stdin payload.
 #[derive(Debug, Default, Deserialize)]
@@ -98,8 +99,26 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
 
     match event {
         "PreToolUse" => {
-            // Capture-only for now (no blocking, no routing enforcement).
-            Ok("{}".to_string())
+            // Routing is gated by CTXFORGE_ROUTING; `off` (the default) is a
+            // true no-op that returns `{}` without touching the store.
+            let level = routing::Level::from_env();
+            if level == routing::Level::Off {
+                return Ok("{}".to_string());
+            }
+            let tool = input.tool_name.clone().unwrap_or_default();
+            let ti = input.tool_input.clone().unwrap_or(json!({}));
+            let bin = std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "ctxforge".to_string());
+            let rc = routing::RouteCtx {
+                level,
+                mcp_ready: routing::mcp_ready(&data_dir),
+                bin: &bin,
+                data_dir: &data_dir,
+                session_id: &session_id,
+            };
+            let decision = routing::route(&tool, &ti, &rc);
+            Ok(routing::to_hook_json(&decision).to_string())
         }
         "PostToolUse" => {
             store.ensure_session(&session_id, &project_str, ts)?;
@@ -138,6 +157,19 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
         "SessionStart" => {
             let source = input.source.clone().unwrap_or_else(|| "startup".into());
             let ctx = session_start(&store, &data_dir, &session_id, &project, &project_str, ts, &source)?;
+            // Prepend the routing tool-selection guide when steering is active
+            // and the MCP server is reachable; otherwise leave `ctx` untouched.
+            let level = routing::Level::from_env();
+            let ctx = if level.steers() && routing::mcp_ready(&data_dir) {
+                let b = routing::session_block(level);
+                if ctx.is_empty() {
+                    b
+                } else {
+                    format!("{b}\n\n{ctx}")
+                }
+            } else {
+                ctx
+            };
             Ok(serde_json::to_string(&json!({
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",

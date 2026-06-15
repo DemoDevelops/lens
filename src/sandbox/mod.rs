@@ -27,6 +27,40 @@ pub async fn run(
     store: &Store,
     max_inline: usize,
 ) -> Result<ExecuteResponse, String> {
+    run_with_args(req, repo_dir, store, max_inline, &[]).await
+}
+
+/// Like [`run`], but injects `file_path` as the script's first CLI argument so
+/// the code can open/analyze that file while only its printed output returns.
+/// The path arrives as python `sys.argv[1]` / node `process.argv[2]` /
+/// bash `$1` / ruby `ARGV[0]` / go `os.Args[1]`.
+pub async fn run_file(
+    file_path: &std::path::Path,
+    req: ExecuteRequest,
+    repo_dir: &std::path::Path,
+    store: &Store,
+    max_inline: usize,
+) -> Result<ExecuteResponse, String> {
+    run_with_args(
+        req,
+        repo_dir,
+        store,
+        max_inline,
+        &[file_path.as_os_str().to_owned()],
+    )
+    .await
+}
+
+/// Shared sandbox runner. Spawns `runtime.program pre_args <script_path>`
+/// followed by `extra_args`, captures stdout/stderr, offloads oversized stdout
+/// to `store`, and bumps the savings counters.
+async fn run_with_args(
+    req: ExecuteRequest,
+    repo_dir: &std::path::Path,
+    store: &Store,
+    max_inline: usize,
+    extra_args: &[std::ffi::OsString],
+) -> Result<ExecuteResponse, String> {
     let runtime = runtimes::runtime_for(&req.language).ok_or_else(|| {
         format!(
             "unsupported language '{}': use one of python, javascript, typescript, bash, ruby, go",
@@ -49,6 +83,7 @@ pub async fn run(
     let mut cmd = tokio::process::Command::new(runtime.program);
     cmd.args(runtime.pre_args)
         .arg(&script_path)
+        .args(extra_args)
         .current_dir(repo_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -288,5 +323,62 @@ mod tests {
         };
         let r = run(req, dir.path(), &store, 8192).await.unwrap();
         assert_eq!(r.stdout.trim(), "HELLO");
+    }
+
+    #[tokio::test]
+    async fn run_file_passes_path_as_argv() {
+        // The file path is injected as argv; the code reads the file but only
+        // prints its byte length, so the contents never enter the result.
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+        let body = "z".repeat(1234);
+        let file = dir.path().join("data.txt");
+        std::fs::write(&file, &body).unwrap();
+        let req = ExecuteRequest {
+            language: "python".into(),
+            code: "import sys; print(len(open(sys.argv[1]).read()))".into(),
+            timeout_secs: 30,
+            stdin: None,
+        };
+        let r = run_file(&file, req, dir.path(), &store, 8192).await.unwrap();
+        assert_eq!(r.stdout.trim(), "1234");
+        // The file contents are not echoed back into the returned stdout.
+        assert!(!r.stdout.contains(&"z".repeat(50)));
+    }
+
+    #[tokio::test]
+    async fn run_file_passes_path_to_bash() {
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+        let file = dir.path().join("data.bin");
+        std::fs::write(&file, vec![b'q'; 4096]).unwrap();
+        let req = ExecuteRequest {
+            language: "bash".into(),
+            code: "wc -c < \"$1\"".into(),
+            timeout_secs: 30,
+            stdin: None,
+        };
+        let r = run_file(&file, req, dir.path(), &store, 8192).await.unwrap();
+        assert_eq!(r.stdout.trim(), "4096");
+    }
+
+    #[tokio::test]
+    async fn run_file_large_output_is_stored_and_retrievable() {
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+        let file = dir.path().join("any.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let req = ExecuteRequest {
+            language: "python".into(),
+            code: "print('A' * 50000)".into(),
+            timeout_secs: 30,
+            stdin: None,
+        };
+        let r = run_file(&file, req, dir.path(), &store, 8192).await.unwrap();
+        assert!(r.truncated);
+        let reference = r.retrieve_ref.expect("should have ref");
+        let full = store.get(&reference).unwrap().unwrap();
+        assert!(full.contains(&"A".repeat(50000)));
+        assert!(r.stdout.len() < full.len());
     }
 }

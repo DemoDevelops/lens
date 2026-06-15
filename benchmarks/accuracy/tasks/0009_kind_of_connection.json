@@ -1,0 +1,10 @@
+{
+  "id": "0009_kind_of_connection",
+  "prompt": "What kind of symbol is `Connection` (function, struct, enum, ...)?",
+  "fixtures": ["fixtures/repo"],
+  "ground_truth": { "kind": "struct" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["struct"],
+  "treatment": { "graph_op": "query", "name": "Connection" }
+}

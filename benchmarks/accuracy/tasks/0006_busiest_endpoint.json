@@ -1,0 +1,13 @@
+{
+  "id": "0006_busiest_endpoint",
+  "prompt": "Which endpoint in metrics.csv has the highest total requests (summed across rows)?",
+  "fixtures": ["fixtures/metrics.csv"],
+  "ground_truth": { "endpoint": "/healthz" },
+  "check": "contains",
+  "primary_mechanism": "sandbox",
+  "evidence": ["/healthz"],
+  "treatment": {
+    "language": "bash",
+    "script": "echo 'requests by endpoint:'; awk -F, 'NR>1{a[$2]+=$4} END{for(k in a)print a[k],k}' fixtures/metrics.csv | sort -rn | head -1"
+  }
+}

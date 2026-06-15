@@ -1,0 +1,10 @@
+{
+  "id": "0008_reachable_path",
+  "prompt": "Following call edges only, can `handle_request` reach `connect_db`? Answer yes or no.",
+  "fixtures": ["fixtures/repo"],
+  "ground_truth": { "reachable": "yes" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["connect_db"],
+  "treatment": { "graph_op": "path", "from": "handle_request", "to": "connect_db" }
+}

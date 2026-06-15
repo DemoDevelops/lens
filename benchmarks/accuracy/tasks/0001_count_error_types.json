@@ -1,0 +1,13 @@
+{
+  "id": "0001_count_error_types",
+  "prompt": "Looking at big.log, how many DISTINCT error types appear (the word after 'ERROR'), and which error type is most frequent?",
+  "fixtures": ["fixtures/big.log"],
+  "ground_truth": { "distinct_error_types": 7, "most_frequent": "ConnectionTimeout" },
+  "check": "exact_match",
+  "primary_mechanism": "sandbox",
+  "evidence": ["ConfigMissing", "NullPointer", "ConnectionTimeout"],
+  "treatment": {
+    "language": "bash",
+    "script": "echo 'error type counts:'; grep -oE 'ERROR [A-Za-z]+' fixtures/big.log | sort | uniq -c | sort -rn; echo 'distinct types:'; grep -oE 'ERROR [A-Za-z]+' fixtures/big.log | sed 's/ERROR //' | sort -u"
+  }
+}

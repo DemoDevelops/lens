@@ -1,0 +1,62 @@
+[package]
+name = "ctxforge"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "A token-saving MCP server: sandboxed execution, FTS5 search, tree-sitter code graph, reversible compression."
+
+[[bin]]
+name = "ctxforge"
+path = "src/main.rs"
+
+# --- Benchmark suite (see benchmarks/). These reuse the library crate and the
+# existing dependencies only; real Anthropic calls shell out to `curl`, so no new
+# dependency enters the production binary. ---
+[[bin]]
+name = "bench_savings"
+path = "benchmarks/savings/run_savings.rs"
+
+[[bin]]
+name = "bench_scale_curve"
+path = "benchmarks/savings/scale_curve.rs"
+
+[[bin]]
+name = "bench_accuracy"
+path = "benchmarks/accuracy/harness.rs"
+
+[[bin]]
+name = "bench_recovery"
+path = "benchmarks/recovery/harness.rs"
+
+[[bin]]
+name = "bench_report"
+path = "benchmarks/report/generate_report.rs"
+
+[dependencies]
+rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"
+streaming-iterator = "0.1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+blake3 = "1"
+walkdir = "2"
+ignore = "0.4"
+schemars = "1.0"
+tempfile = "3"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+# Client + child-process transport are only needed by the e2e test harness.
+rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-io", "macros"] }

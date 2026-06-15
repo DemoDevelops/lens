@@ -1,0 +1,14 @@
+{
+  "id": "0002_count_connection_timeouts",
+  "prompt": "How many ConnectionTimeout errors are in big.log?",
+  "fixtures": ["fixtures/big.log"],
+  "ground_truth": { "count": 12 },
+  "check": "numeric_tolerance",
+  "tolerance": 0,
+  "primary_mechanism": "sandbox",
+  "evidence": ["ConnectionTimeout"],
+  "treatment": {
+    "language": "bash",
+    "script": "echo 'ConnectionTimeout occurrences:'; grep -c ConnectionTimeout fixtures/big.log"
+  }
+}

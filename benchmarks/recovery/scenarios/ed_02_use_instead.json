@@ -1,0 +1,12 @@
+{
+  "id": "ed_02_use_instead",
+  "set": "error_decision",
+  "steps": [
+    { "hook": "UserPromptSubmit", "prompt": "For the shared counter, use tokio::sync::Mutex instead of the std Mutex." },
+    { "hook": "PostToolUse", "tool_name": "Edit", "tool_input": { "file_path": "src/state.rs" }, "tool_response": "ok" }
+  ],
+  "followup": "What did I tell you to use instead of the std Mutex?",
+  "ground_truth": { "use": "tokio::sync::Mutex" },
+  "check": "contains",
+  "evidence": ["tokio::sync::Mutex"]
+}

@@ -1,0 +1,581 @@
+//! Shared savings-benchmark logic, `#[path]`-included by `run_savings.rs` and
+//! `generate_report.rs`. Computes, for each workload archetype, the bytes that
+//! would enter context **without** ctxforge (a realistic naive-agent path) vs
+//! the bytes that actually enter **with** ctxforge, segmented by which tool did
+//! the saving. Deterministic: same committed fixtures -> same numbers.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use ctxforge::discovery::{self, query as gquery};
+use ctxforge::index::Index;
+use ctxforge::sandbox;
+use ctxforge::store::{compress, Store};
+use ctxforge::tools::ExecuteRequest;
+
+/// Token estimate convention: bytes / 4. Same rough approximation `ctx_stats`
+/// uses; raw byte counts are reported alongside so nobody has to trust the /4.
+pub fn est_tokens(bytes: usize) -> usize {
+    bytes / 4
+}
+
+/// One row of the savings table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavingsRow {
+    /// Human label for the workload.
+    pub workload: String,
+    /// Which ctxforge tool produced the saving (sandbox | index | discovery | compression).
+    pub mechanism: String,
+    /// Bytes a naive agent would load into context.
+    pub before_bytes: usize,
+    /// Bytes ctxforge actually returns to context.
+    pub after_bytes: usize,
+    /// Savings percentage, rounded to a whole number.
+    pub savings_pct: u32,
+    /// What the "without ctxforge" path concretely loads, and why a real session
+    /// would do that (the honesty / no-strawman note).
+    pub baseline: String,
+    /// Extra reproducibility detail (counts, query set, etc.).
+    pub detail: String,
+}
+
+impl SavingsRow {
+    fn new(
+        workload: &str,
+        mechanism: &str,
+        before_bytes: usize,
+        after_bytes: usize,
+        baseline: &str,
+        detail: &str,
+    ) -> Self {
+        let savings_pct = if before_bytes > 0 {
+            (((before_bytes.saturating_sub(after_bytes)) as f64 / before_bytes as f64) * 100.0)
+                .round() as u32
+        } else {
+            0
+        };
+        SavingsRow {
+            workload: workload.to_string(),
+            mechanism: mechanism.to_string(),
+            before_bytes,
+            after_bytes,
+            savings_pct,
+            baseline: baseline.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+}
+
+/// Absolute path to the `benchmarks/` directory, resolved at compile time so the
+/// runner works regardless of the current working directory.
+pub fn bench_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks")
+}
+
+/// Format an integer with thousands separators (e.g. 17765 -> "17,765").
+pub fn commas(n: usize) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::new();
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
+/// Render the headroom-style token table plus a raw-bytes / baseline table.
+/// Used by both `run_savings` (stdout) and `generate_report` (BENCHMARKS.md).
+pub fn render_savings_markdown(rows: &[SavingsRow]) -> String {
+    let mut s = String::new();
+    s.push_str("### Token savings (estimate = bytes / 4, matching `ctx_stats`)\n\n");
+    s.push_str("| Workload | Before | After | Savings | Mechanism |\n");
+    s.push_str("| --- | ---: | ---: | ---: | --- |\n");
+    for r in rows {
+        s.push_str(&format!(
+            "| {} | {} | {} | {}% | {} |\n",
+            r.workload,
+            commas(est_tokens(r.before_bytes)),
+            commas(est_tokens(r.after_bytes)),
+            r.savings_pct,
+            r.mechanism,
+        ));
+    }
+
+    s.push_str("\n### Raw bytes and naive-agent baseline (no /4 to trust)\n\n");
+    s.push_str("| Workload | Before (bytes) | After (bytes) | Without ctxforge, the agent… | Detail |\n");
+    s.push_str("| --- | ---: | ---: | --- | --- |\n");
+    for r in rows {
+        s.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            r.workload,
+            commas(r.before_bytes),
+            commas(r.after_bytes),
+            r.baseline,
+            r.detail,
+        ));
+    }
+    s
+}
+
+// --- Scale-curve diagnostic (§0.1) ------------------------------------------
+//
+// Drives the real ctxforge path at 1× / 10× / 50× the committed fixture and
+// reports how each weak workload's savings move with size. A mechanism whose
+// savings *rise* with scale was under-fixtured (artifact); one that stays
+// *flat/low* has a real weakness in the path. Deterministic: scaled fixtures
+// are the committed ones replicated with unique identifiers, so at 1× every row
+// reproduces the committed savings number exactly.
+
+/// Scale factors reported in the curve.
+pub const SCALES: [usize; 3] = [1, 10, 50];
+
+/// One cell of the scale curve.
+#[derive(Debug, Clone)]
+pub struct ScaleRow {
+    pub workload: String,
+    pub mechanism: String,
+    pub scale: usize,
+    pub before_bytes: usize,
+    pub after_bytes: usize,
+    pub savings_pct: u32,
+}
+
+fn pct(before: usize, after: usize) -> u32 {
+    if before == 0 {
+        return 0;
+    }
+    (((before.saturating_sub(after)) as f64 / before as f64) * 100.0).round() as u32
+}
+
+/// Replicate every file under `src` `scale` times into `dst`. Copy 0 keeps the
+/// original filename and bytes (so scale=1 is byte-identical to the committed
+/// fixture); copies 1.. get a `_cN` filename + a leading comment so they are
+/// distinct files/nodes.
+fn replicate_tree(src: &Path, dst: &Path, scale: usize) {
+    for entry in walkdir::WalkDir::new(src).into_iter().flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(src).unwrap();
+        let content = match std::fs::read_to_string(entry.path()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let stem = rel.file_stem().and_then(|s| s.to_str()).unwrap_or("f");
+        let ext = rel.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let parent = rel.parent();
+        for k in 0..scale {
+            let name = if k == 0 {
+                rel.file_name().unwrap().to_string_lossy().to_string()
+            } else if ext.is_empty() {
+                format!("{stem}_c{k}")
+            } else {
+                format!("{stem}_c{k}.{ext}")
+            };
+            let out_dir = match parent {
+                Some(p) => dst.join(p),
+                None => dst.to_path_buf(),
+            };
+            std::fs::create_dir_all(&out_dir).unwrap();
+            let body = if k == 0 {
+                content.clone()
+            } else {
+                format!("// copy {k}\n{content}")
+            };
+            std::fs::write(out_dir.join(name), body).unwrap();
+        }
+    }
+}
+
+/// Code-search (index) before/after at a given scale.
+pub fn code_search_at(scale: usize) -> (usize, usize) {
+    let src = bench_root().join("savings/workloads/code_search");
+    let tmp = tempfile::tempdir().unwrap();
+    replicate_tree(&src, tmp.path(), scale);
+
+    let queries: Vec<String> = ["Logger", "retry", "config", "connect", "validate", "cache"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap();
+    index.index_path(tmp.path(), true).unwrap();
+    let resp = index.search(&queries, 5).unwrap();
+    let after = serde_json::to_string(&resp).unwrap().len();
+
+    let lqueries: Vec<String> = queries.iter().map(|q| q.to_ascii_lowercase()).collect();
+    let mut before = 0usize;
+    for entry in walkdir::WalkDir::new(tmp.path()).into_iter().flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+            let lc = content.to_ascii_lowercase();
+            if lqueries.iter().any(|q| lc.contains(q)) {
+                before += content.len();
+            }
+        }
+    }
+    (before, after)
+}
+
+/// Codebase-exploration (discovery) before/after at a given scale.
+///
+/// Mirrors the production `Forge::maybe_compact`: a subgraph that would
+/// serialize past the inline limit is columnar-compacted through the store, so
+/// the compact form (not the raw blob) is what reaches context.
+///
+/// CAVEAT: this replicates the same symbol names into every copy, so at 10×/50×
+/// the repo-wide call resolver links each call to all N copies of the callee —
+/// an O(N²) hairball a real repo (distinct symbols) would never have. The
+/// scaled discovery number is a pessimistic lower bound under a pathological
+/// input, not a realistic-repo figure.
+pub fn codebase_explore_at(scale: usize) -> (usize, usize) {
+    let src = bench_root().join("savings/workloads/codebase_explore/repo");
+    let tmp = tempfile::tempdir().unwrap();
+    replicate_tree(&src, tmp.path(), scale);
+
+    let mut before = 0usize;
+    for entry in walkdir::WalkDir::new(tmp.path()).into_iter().flatten() {
+        if entry.file_type().is_file() {
+            if let Ok(s) = std::fs::read_to_string(entry.path()) {
+                before += s.len();
+            }
+        }
+    }
+
+    let outcome = discovery::discover(tmp.path(), None).unwrap();
+    let summary = serde_json::to_string(&outcome.response).unwrap();
+    let view = gquery::query(&outcome.graph, "handle", None, 20);
+
+    const MAX_INLINE: usize = 8192;
+    let raw = serde_json::json!({ "nodes": view.nodes, "edges": view.edges });
+    let view_bytes = raw.to_string().len();
+    let view_after = if view_bytes > MAX_INLINE {
+        serde_json::to_string(&compress::compact_json(&raw)).unwrap().len()
+    } else {
+        view_bytes
+    };
+    (before, summary.len() + view_after)
+}
+
+/// Issue-triage (compression) before/after at a given scale.
+///
+/// Replicates the committed 24-issue array `scale` times. Copy 0 is untouched
+/// (so scale=1 == committed). Copies 1.. get a unique id/title/body suffix so
+/// the prose columns do NOT trivially dedupe — only the categorical columns
+/// (status/priority/component/assignee/labels/created), drawn from the small
+/// real vocabulary, repeat. That is the honest, realistic triage shape and
+/// exactly the columnar compactor's best case.
+pub fn issue_triage_at(scale: usize) -> (usize, usize) {
+    let file = bench_root().join("savings/workloads/issue_triage/issues.json");
+    let raw = std::fs::read_to_string(&file).unwrap();
+    let base: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+
+    let mut all: Vec<serde_json::Value> = Vec::new();
+    for k in 0..scale {
+        for issue in &base {
+            let mut obj = issue.clone();
+            if k > 0 {
+                if let Some(map) = obj.as_object_mut() {
+                    for key in ["id", "title", "body"] {
+                        if let Some(serde_json::Value::String(s)) = map.get(key) {
+                            let v = format!("{s} (dup {k})");
+                            map.insert(key.to_string(), serde_json::Value::String(v));
+                        }
+                    }
+                }
+            }
+            all.push(obj);
+        }
+    }
+    let value = serde_json::Value::Array(all);
+    let before = serde_json::to_string(&value).unwrap().len();
+    let after = serde_json::to_string(&compress::compact_json(&value)).unwrap().len();
+    (before, after)
+}
+
+/// Compute the full scale curve for the three weak workloads.
+pub fn compute_scale_curve() -> Vec<ScaleRow> {
+    let workloads: [(&str, &str, fn(usize) -> (usize, usize)); 3] = [
+        ("Code search", "index", code_search_at),
+        ("Issue triage", "compression", issue_triage_at),
+        ("Codebase exploration", "discovery", codebase_explore_at),
+    ];
+    let mut rows = Vec::new();
+    for (name, mech, f) in workloads {
+        for s in SCALES {
+            let (before, after) = f(s);
+            rows.push(ScaleRow {
+                workload: name.to_string(),
+                mechanism: mech.to_string(),
+                scale: s,
+                before_bytes: before,
+                after_bytes: after,
+                savings_pct: pct(before, after),
+            });
+        }
+    }
+    rows
+}
+
+/// Render the scale curve plus the artifact-vs-real classification.
+pub fn render_scale_curve_markdown(rows: &[ScaleRow]) -> String {
+    let mut s = String::new();
+    s.push_str("### Scale curve (real path at 1× / 10× / 50× the committed fixture)\n\n");
+    s.push_str("The §0.1 diagnostic: savings that *rise* with size mean the fixture was too small (artifact); savings that stay *flat/low* mean a real weakness in the path.\n\n");
+    s.push_str("| Workload | Mechanism | Scale | Before (bytes) | After (bytes) | Savings |\n");
+    s.push_str("| --- | --- | ---: | ---: | ---: | ---: |\n");
+    for r in rows {
+        s.push_str(&format!(
+            "| {} | {} | {}× | {} | {} | {}% |\n",
+            r.workload,
+            r.mechanism,
+            r.scale,
+            commas(r.before_bytes),
+            commas(r.after_bytes),
+            r.savings_pct,
+        ));
+    }
+    s.push_str(concat!(
+        "\n**Classification.**\n",
+        "- **Code search (index): artifact.** 37% → 94% → 99%. The mechanism returns a fixed set of capped snippets regardless of corpus size, so savings rise sharply as the naive \"read every matched file\" baseline grows. The original 33% was the 12-file fixture, not the path.\n",
+        "- **Issue triage (compression): real weakness, now fixed.** Was flat at 33–37% across scale — the compactor was a naive value-dictionary that still repeated every field name on every row. After faithfully porting SmartCrusher's columnar schema-extraction (`DECISIONS.md`), it is 56% at 1× and 56→61% across scale. The 61% residual is unique prose issue *bodies*, which no deterministic codec compresses — reported honestly rather than forced higher.\n",
+        "- **Codebase exploration (discovery): small-fixture artifact.** 1× = 20% because the 2.6 KB / 7-file fixture is a toy, not a real \"explore a codebase\" session. The scaled figures use a duplicate-symbol replication whose repo-wide call resolver builds an O(N²) cross-copy edge hairball a real (distinct-symbol) repo never has, so they are a pessimistic lower bound, not a realistic number. The production fat-subgraph case is bounded by `Forge::maybe_compact`, which now inherits the columnar win — that is why 10× recovered from 0% to 18% with no discovery-path change.\n",
+    ));
+    s
+}
+
+/// Render the realistic-scale **headline** savings table for the clean
+/// `BENCHMARKS.md`. Editorial rule (CTXFORGE_CLEAN_REPORT_PLAN.md §2.2): the
+/// size-sensitive mechanisms headline their at-scale figure (the 1× fixtures
+/// were diagnostic-sized), the size-insensitive ones headline the committed
+/// fixture, and codebase exploration headlines no number because no single one
+/// is honest. **No value here is new** — every cell is one of the
+/// live-recomputed `SavingsRow` / `ScaleRow` numbers already shown in full in
+/// the appendix.
+pub fn render_headline_savings_markdown(rows: &[SavingsRow], scale: &[ScaleRow]) -> String {
+    let find_scale =
+        |wl: &str, s: usize| scale.iter().find(|r| r.workload == wl && r.scale == s).unwrap();
+    let find_row = |mech: &str| rows.iter().find(|r| r.mechanism == mech).unwrap();
+
+    // Code search (index): realistic session = 10×/50× (94–99%); anchor bytes at 10×.
+    let cs10 = find_scale("Code search", 10);
+    let cs50 = find_scale("Code search", 50);
+    // Issue triage (compression): at-scale ceiling ~61%; anchor bytes at 10×.
+    let it10 = find_scale("Issue triage", 10);
+    // Log debugging (sandbox): size-insensitive, headline the committed fixture.
+    let log = find_row("sandbox");
+    // Codebase exploration (discovery): committed fixture, headlined as "see note".
+    let cb = find_row("discovery");
+
+    let mut s = String::new();
+    s.push_str("Headline savings are at **realistic session scale**, not the 1× diagnostic fixtures. Each row stays segmented by the ctxforge mechanism that produced it — never a single blended percentage.\n\n");
+    s.push_str("| Workload | Mechanism | Before (bytes) | After (bytes) | Savings |\n");
+    s.push_str("| --- | --- | ---: | ---: | ---: |\n");
+    s.push_str(&format!(
+        "| Code search | index | {} | {} | **{}–{}%** |\n",
+        commas(cs10.before_bytes),
+        commas(cs10.after_bytes),
+        cs10.savings_pct,
+        cs50.savings_pct,
+    ));
+    s.push_str(&format!(
+        "| Log debugging | sandbox | {} | {} | **{}%** |\n",
+        commas(log.before_bytes),
+        commas(log.after_bytes),
+        log.savings_pct,
+    ));
+    s.push_str(&format!(
+        "| Issue triage | compression | {} | {} | **~{}%** |\n",
+        commas(it10.before_bytes),
+        commas(it10.after_bytes),
+        it10.savings_pct,
+    ));
+    s.push_str(&format!(
+        "| Codebase exploration | discovery | {} | {} | see note |\n",
+        commas(cb.before_bytes),
+        commas(cb.after_bytes),
+    ));
+    s.push_str(&format!(
+        "\nCode search and issue triage are shown at 10× the committed fixture (code search reaches {}% at 50×); log debugging is size-insensitive and shown at the committed fixture. The full 1×/10×/50× curve and the artifact-vs-real classification are in the appendix.\n",
+        cs50.savings_pct,
+    ));
+    s.push_str(&format!(
+        "\n_Codebase exploration has no single honest representative number: discovery saves {}% on the committed fixture, the scaled replication is a known-pessimistic O(N²) lower bound (appendix), and the production case is bounded by `Forge::maybe_compact`. Discovery replaces multi-file reads with a scoped subgraph; we state that bound rather than headline a flattering extreme._\n",
+        cb.savings_pct,
+    ));
+    s
+}
+
+/// Run every workload and return the table rows in a fixed order.
+pub async fn compute_savings() -> anyhow::Result<Vec<SavingsRow>> {
+    Ok(vec![
+        code_search().await?,
+        log_debug().await?,
+        issue_triage().await?,
+        codebase_explore().await?,
+    ])
+}
+
+/// Sum the byte length of every UTF-8 file under `dir`.
+fn sum_file_bytes(dir: &Path) -> usize {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .map(|s| s.len())
+        .sum()
+}
+
+// --- Code search: mechanism = index -----------------------------------------
+//
+// Naive path: to answer "where / how is X used", an agent greps for the terms,
+// then opens every file that matched to read the surrounding code. So "before"
+// is the full content of every file containing a hit. "With ctxforge": one
+// ctx_index + ctx_search call returns ranked snippets, so only the snippets
+// enter context.
+async fn code_search() -> anyhow::Result<SavingsRow> {
+    let dir = bench_root().join("savings/workloads/code_search");
+    let queries: Vec<String> = ["Logger", "retry", "config", "connect", "validate", "cache"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let data = tempfile::tempdir()?;
+    let index = Index::open(data.path())?;
+    index.index_path(&dir, true)?;
+    // Realistic top-k per query (the ctx_search default neighbourhood).
+    let resp = index.search(&queries, 5)?;
+    let after = serde_json::to_string(&resp)?.len();
+    let hits: usize = resp.results.iter().map(|r| r.hits.len()).sum();
+
+    // "before" = every file containing at least one query term, read in full.
+    let lqueries: Vec<String> = queries.iter().map(|q| q.to_ascii_lowercase()).collect();
+    let mut before = 0usize;
+    let mut matched_files = 0usize;
+    for entry in walkdir::WalkDir::new(&dir).into_iter().flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+            let lc = content.to_ascii_lowercase();
+            if lqueries.iter().any(|q| lc.contains(q)) {
+                before += content.len();
+                matched_files += 1;
+            }
+        }
+    }
+
+    Ok(SavingsRow::new(
+        "Code search (results across files)",
+        "index",
+        before,
+        after,
+        "Agent greps for the terms, then opens every matched file in full to read context.",
+        &format!(
+            "{} queries, {} hits returned, {} matched files read by the naive path",
+            queries.len(),
+            hits,
+            matched_files
+        ),
+    ))
+}
+
+// --- Log debugging: mechanism = sandbox -------------------------------------
+//
+// Naive path: load the whole log into context to find the buried FATAL. With
+// ctxforge: ctx_execute runs grep in a subprocess and only the matching lines
+// (plus a little context) return.
+async fn log_debug() -> anyhow::Result<SavingsRow> {
+    let dir = bench_root().join("savings/workloads/log_debug");
+    let log = dir.join("app.log");
+    let before = std::fs::read_to_string(&log)?.len();
+
+    let data = tempfile::tempdir()?;
+    let store = Store::open(&data.path().join(".ctxforge"))?;
+    let req = ExecuteRequest {
+        language: "bash".into(),
+        code: "grep -n -B2 -A2 -E 'FATAL|panic|Traceback' app.log".into(),
+        timeout_secs: 30,
+        stdin: None,
+    };
+    let resp = sandbox::run(req, &dir, &store, 8192)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let after = resp.stdout.len() + resp.stderr.len();
+
+    Ok(SavingsRow::new(
+        "Log debugging (buried root cause)",
+        "sandbox",
+        before,
+        after,
+        "Agent loads the entire log into context to locate the one FATAL line.",
+        &format!(
+            "grep over {} bytes -> {} bytes of matching lines (+context)",
+            before, after
+        ),
+    ))
+}
+
+// --- Issue triage: mechanism = compression ----------------------------------
+//
+// Naive path: load the full structured triage payload. With ctxforge: the same
+// deterministic dictionary compaction ctxforge applies to large graph results
+// (`store::compress::compact_json`) shrinks the repeated field values. "before"
+// is the minified JSON (not the pretty file) so the number isolates the
+// compaction effect from whitespace.
+async fn issue_triage() -> anyhow::Result<SavingsRow> {
+    let file = bench_root().join("savings/workloads/issue_triage/issues.json");
+    let raw = std::fs::read_to_string(&file)?;
+    let value: serde_json::Value = serde_json::from_str(&raw)?;
+    let before = serde_json::to_string(&value)?.len();
+    let compact = compress::compact_json(&value);
+    let after = serde_json::to_string(&compact)?.len();
+
+    Ok(SavingsRow::new(
+        "Issue triage (structured payload)",
+        "compression",
+        before,
+        after,
+        "Agent loads the full structured triage payload (minified) into context.",
+        &format!(
+            "reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via ctx_retrieve (raw file {} bytes)",
+            raw.len()
+        ),
+    ))
+}
+
+// --- Codebase exploration: mechanism = discovery ----------------------------
+//
+// Naive path: read every source file in the subtree to "understand" it. With
+// ctxforge: ctx_discover builds the structural graph once (a compact summary),
+// then a graph_query returns just the relevant neighborhood.
+async fn codebase_explore() -> anyhow::Result<SavingsRow> {
+    let dir = bench_root().join("savings/workloads/codebase_explore/repo");
+    let before = sum_file_bytes(&dir);
+
+    let outcome = discovery::discover(&dir, None)?;
+    let summary = serde_json::to_string(&outcome.response)?;
+    // Representative scoped query an agent would run after discovery.
+    let view = gquery::query(&outcome.graph, "handle", None, 20);
+    let view_json = serde_json::to_string(&view)?;
+    let after = summary.len() + view_json.len();
+
+    Ok(SavingsRow::new(
+        "Codebase exploration (subtree)",
+        "discovery",
+        before,
+        after,
+        "Agent reads every source file in the subtree to map its structure.",
+        &format!(
+            "discover summary ({} nodes, {} edges) + one scoped graph_query",
+            outcome.response.nodes, outcome.response.edges
+        ),
+    ))
+}

@@ -1,0 +1,12 @@
+{
+  "id": "ed_03_constraint",
+  "set": "error_decision",
+  "steps": [
+    { "hook": "UserPromptSubmit", "prompt": "Whatever you change, the API must stay backwards compatible with v1 clients." },
+    { "hook": "PostToolUse", "tool_name": "Edit", "tool_input": { "file_path": "src/api/v2.rs" }, "tool_response": "ok" }
+  ],
+  "followup": "What constraint did I give about the API?",
+  "ground_truth": { "constraint": "backwards compatible" },
+  "check": "contains",
+  "evidence": ["backwards compatible"]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "0004_total_requests",
+  "prompt": "What is the sum of the requests column across all rows of metrics.csv?",
+  "fixtures": ["fixtures/metrics.csv"],
+  "ground_truth": { "total_requests": 2719 },
+  "check": "numeric_tolerance",
+  "tolerance": 0,
+  "primary_mechanism": "sandbox",
+  "evidence": ["2719"],
+  "treatment": {
+    "language": "bash",
+    "script": "awk -F, 'NR>1{s+=$4} END{print \"total_requests=\"s}' fixtures/metrics.csv"
+  }
+}

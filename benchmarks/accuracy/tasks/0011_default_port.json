@@ -1,0 +1,11 @@
+{
+  "id": "0011_default_port",
+  "prompt": "What is the default server port in the config?",
+  "fixtures": ["fixtures/config.yaml"],
+  "ground_truth": { "port": 8080 },
+  "check": "numeric_tolerance",
+  "tolerance": 0,
+  "primary_mechanism": "search",
+  "evidence": ["8080"],
+  "treatment": { "queries": ["default_port", "port"] }
+}

@@ -1,0 +1,244 @@
+{
+  "groups": [
+    {
+      "cm_available": 4,
+      "cm_tokens": 5070,
+      "context_mode": 0.75,
+      "ctxforge": 1.0,
+      "ctxforge_tokens": 202,
+      "n": 4,
+      "no_continuity": 0.0,
+      "set": "file_task"
+    },
+    {
+      "cm_available": 4,
+      "cm_tokens": 5136,
+      "context_mode": 0.75,
+      "ctxforge": 1.0,
+      "ctxforge_tokens": 302,
+      "n": 4,
+      "no_continuity": 0.0,
+      "set": "error_decision"
+    }
+  ],
+  "mode": "real",
+  "model": "claude-opus-4-8 (via claude-pty)",
+  "scenarios": [
+    {
+      "arms": [
+        {
+          "arm": "no_continuity",
+          "available": true,
+          "context_bytes": 0,
+          "survived": false,
+          "tokens": 0
+        },
+        {
+          "arm": "context_mode",
+          "available": true,
+          "context_bytes": 5120,
+          "survived": false,
+          "tokens": 1280
+        },
+        {
+          "arm": "ctxforge",
+          "available": true,
+          "context_bytes": 237,
+          "survived": true,
+          "tokens": 59
+        }
+      ],
+      "id": "ed_01_unresolved_error",
+      "set": "error_decision"
+    },
+    {
+      "arms": [
+        {
+          "arm": "no_continuity",
+          "available": true,
+          "context_bytes": 0,
+          "survived": false,
+          "tokens": 0
+        },
+        {
+          "arm": "context_mode",
+          "available": true,
+          "context_bytes": 5147,
+          "survived": true,
+          "tokens": 1286
+        },
+        {
+          "arm": "ctxforge",
+          "available": true,
+          "context_bytes": 296,
+          "survived": true,
+          "tokens": 74
+        }
+      ],
+      "id": "ed_02_use_instead",
+      "set": "error_decision"
+    },
+    {
+      "arms": [
+        {
+          "arm": "no_continuity",
+          "available": true,
+          "context_bytes": 0,
+          "survived": false,
+          "tokens": 0
+        },
+        {
+          "arm": "context_mode",
+          "available": true,
+          "context_bytes": 5152,
+          "survived": true,
+          "tokens": 1288
+        },
+        {
+          "arm": "ctxforge",
+          "available": true,
+          "context_bytes": 303,
+          "survived": true,
+          "tokens": 75
+        }
+      ],
+      "id": "ed_03_constraint",
+      "set": "error_decision"
+    },
+    {
+      "arms": [
+        {
+          "arm": "no_continuity",
+          "available": true,
+          "context_bytes": 0,
+          "survived": false,
+          "tokens": 0
+        },
+        {
+          "arm": "context_mode",
+          "available": true,
+          "context_bytes": 5130,
+          "survived": true,
+          "tokens": 1282
+        },
+        {
+          "arm": "ctxforge",
+          "available": true,
+          "context_bytes": 377,
+          "survived": true,
+          "tokens": 94
+        }
+      ],
+      "id": "ed_04_blocker",
+      "set": "error_decision"
+    },
+    {
+      "arms": [
+        {
+          "arm": "no_continuity",
+          "available": true,
+          "context_bytes": 0,
+          "survived": false,
+          "tokens": 0
+        },
+        {
+          "arm": "context_mode",
+          "available": true,
+          "context_bytes": 5135,
+          "survived": true,
+          "tokens": 1283
+        },
+        {
+          "arm": "ctxforge",
+          "available": true,
+          "context_bytes": 292,
+          "survived": true,
+          "tokens": 73
+        }
+      ],
+      "id": "ft_01_active_file",
+      "set": "file_task"
+    },
+    {
+      "arms": [
+        {
+          "arm": "no_continuity",
+          "available": true,
+          "context_bytes": 0,
+          "survived": false,
+          "tokens": 0
+        },
+        {
+          "arm": "context_mode",
+          "available": true,
+          "context_bytes": 5114,
+          "survived": false,
+          "tokens": 1278
+        },
+        {
+          "arm": "ctxforge",
+          "available": true,
+          "context_bytes": 230,
+          "survived": true,
+          "tokens": 57
+        }
+      ],
+      "id": "ft_02_task_inprogress",
+      "set": "file_task"
+    },
+    {
+      "arms": [
+        {
+          "arm": "no_continuity",
+          "available": true,
+          "context_bytes": 0,
+          "survived": false,
+          "tokens": 0
+        },
+        {
+          "arm": "context_mode",
+          "available": true,
+          "context_bytes": 4903,
+          "survived": true,
+          "tokens": 1225
+        },
+        {
+          "arm": "ctxforge",
+          "available": true,
+          "context_bytes": 122,
+          "survived": true,
+          "tokens": 30
+        }
+      ],
+      "id": "ft_03_last_file_of_many",
+      "set": "file_task"
+    },
+    {
+      "arms": [
+        {
+          "arm": "no_continuity",
+          "available": true,
+          "context_bytes": 0,
+          "survived": false,
+          "tokens": 0
+        },
+        {
+          "arm": "context_mode",
+          "available": true,
+          "context_bytes": 5139,
+          "survived": true,
+          "tokens": 1284
+        },
+        {
+          "arm": "ctxforge",
+          "available": true,
+          "context_bytes": 169,
+          "survived": true,
+          "tokens": 42
+        }
+      ],
+      "id": "ft_04_continue_file",
+      "set": "file_task"
+    }
+  ]
+}

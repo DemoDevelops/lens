@@ -1,0 +1,14 @@
+{
+  "id": "0003_max_latency",
+  "prompt": "What is the maximum latency_ms value in metrics.csv?",
+  "fixtures": ["fixtures/metrics.csv"],
+  "ground_truth": { "max_latency_ms": 5012 },
+  "check": "numeric_tolerance",
+  "tolerance": 0,
+  "primary_mechanism": "sandbox",
+  "evidence": ["5012"],
+  "treatment": {
+    "language": "bash",
+    "script": "awk -F, 'NR>1{if($3>m)m=$3} END{print \"max_latency_ms=\"m}' fixtures/metrics.csv"
+  }
+}

@@ -27,6 +27,20 @@ pub struct ExecuteRequest {
     pub stdin: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExecuteFileRequest {
+    /// Path to the file to analyze (relative to repo root, or absolute).
+    pub path: String,
+    /// Language to run the analysis code in: python | javascript | typescript | bash | ruby | go.
+    pub language: String,
+    /// Analysis code. It receives the file path as its first CLI argument
+    /// (python sys.argv[1] / node process.argv[2] / bash $1); only what it prints returns to context.
+    pub code: String,
+    /// Wall-clock timeout in seconds (default 30).
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ExecuteResponse {
     /// Captured stdout (truncated to a head+tail preview if it exceeded the inline limit).

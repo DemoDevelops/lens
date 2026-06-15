@@ -123,6 +123,69 @@ impl Forge {
         }
     }
 
+    /// Analyze a file in the sandbox: the code receives the file path as its
+    /// first CLI argument and only its printed output returns to context. Large
+    /// output is offloaded to the reversible store and replaced with a preview + ref.
+    #[tool(
+        description = "Analyze a file in the sandbox: your `code` receives the file path as its first CLI argument (python sys.argv[1] / node process.argv[2] / bash $1); only what it prints returns to context, not the file contents. Large output is offloaded and retrievable via ctx_retrieve."
+    )]
+    async fn ctx_execute_file(
+        &self,
+        Parameters(req): Parameters<ExecuteFileRequest>,
+    ) -> Result<Json<ExecuteResponse>, ErrorData> {
+        let op = self.ops.start(
+            "ctx_execute_file",
+            serde_json::json!({ "language": req.language, "path": req.path, "code_bytes": req.code.len() }),
+        );
+        let p = self.resolve(&req.path);
+        let exec = crate::tools::ExecuteRequest {
+            language: req.language.clone(),
+            code: req.code.clone(),
+            timeout_secs: req.timeout_secs,
+            stdin: None,
+        };
+        match sandbox::run_file(&p, exec, &self.repo_dir, &self.store, self.max_inline).await {
+            Ok(resp) => {
+                let raw_in = resp.stdout_bytes as u64;
+                let returned = (resp.stdout.len() + resp.stderr.len()) as u64;
+                let outcome = if resp.timed_out { "timed_out" } else { "ok" };
+                let note = if resp.timed_out {
+                    "process killed on timeout"
+                } else if resp.truncated {
+                    "large stdout stored, head+tail returned"
+                } else {
+                    ""
+                };
+                let explain = self.ops.explain(|| {
+                    let branch = if resp.truncated {
+                        format!(
+                            "stdout {} > inline cap {} → stored ref {}, returned head+tail",
+                            resp.stdout_bytes,
+                            self.max_inline,
+                            resp.retrieve_ref.as_deref().unwrap_or("?")
+                        )
+                    } else {
+                        format!("stdout {} ≤ inline cap {} → returned inline", resp.stdout_bytes, self.max_inline)
+                    };
+                    format!(
+                        "{branch}; exit_code={} timed_out={}; returned {} bytes (stdout {} + stderr {})",
+                        resp.exit_code,
+                        resp.timed_out,
+                        returned,
+                        resp.stdout.len(),
+                        resp.stderr.len()
+                    )
+                });
+                op.finish(raw_in, returned, resp.retrieve_ref.clone(), outcome, note, explain);
+                Ok(Json(resp))
+            }
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.clone(), None);
+                Err(ErrorData::internal_error(e, None))
+            }
+        }
+    }
+
     /// Fetch a full blob previously offloaded to the reversible store.
     #[tool(
         description = "Retrieve the full content for a retrieve_ref returned by another tool (reverses any truncation/compression)."

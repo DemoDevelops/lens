@@ -99,6 +99,7 @@ with `CTXFORGE_SETTINGS=/path/to/settings.json`.
 | Tool | Description | Example input |
 | :- | :- | :- |
 | `ctx_execute` | Run code in a sandbox; only stdout/stderr return, not the data the script read. Large output is offloaded. | `{"language":"python","code":"print(sum(len(l) for l in open('big.log')))"}` |
+| `ctx_execute_file` | Analyze a file in the sandbox; your `code` receives the file path as its first CLI arg (`sys.argv[1]` / `process.argv[2]` / `$1`). Only printed output returns. | `{"path":"big.log","language":"python","code":"import sys;print(sum(1 for _ in open(sys.argv[1])))"}` |
 | `ctx_index` | Index a file/dir into FTS5 (respects `.gitignore`). | `{"path":"src","recursive":true}` |
 | `ctx_search` | BM25 search, multiple queries per call. | `{"queries":["auth","retry"],"limit_per_query":5}` |
 | `ctx_discover` | Parse the repo into a symbol/relationship graph. | `{"path":".","languages":["rust"]}` |
@@ -121,12 +122,60 @@ with `CTXFORGE_SETTINGS=/path/to/settings.json`.
    `ctx_retrieve` only if you actually need the full version.
 6. Check `ctx_stats` to see measured savings.
 
+## Auto-routing (opt-in)
+
+The MCP tools only save tokens when the model *chooses* to call them. Auto-routing
+adds **interception at the hook layer** so savings happen automatically — the
+`PreToolUse` hook can deny, transparently rewrite, or nudge a built-in tool call,
+and `SessionStart` injects a short tool-selection guide.
+
+It is gated by `CTXFORGE_ROUTING` and **defaults to `off` (a true no-op:
+`PreToolUse` returns `{}`, identical to having no routing at all).** The four
+levels are the rollout — flip the level to widen the behavior:
+
+| `CTXFORGE_ROUTING` | Behavior |
+| :- | :- |
+| `off` (default) | Nothing. `PreToolUse` returns `{}`. |
+| `steer` | `WebFetch` → **deny** (fetch+process via `ctx_execute` instead); one-shot nudges for `Bash`/`Grep`; inject the `SessionStart` routing guide. No rewriting. |
+| `wrap` | Transparently rewrite allowlisted read-only `Bash` commands to `ctxforge wrap -- <cmd>` (deterministic savings, no reliance on model compliance). No deny/nudges. |
+| `full` | `steer` + `wrap` together, plus a one-shot `Read`→`ctx_execute_file` nudge. |
+
+**Bash wrap allowlist (read-only, high-output only).** Wrapping is restricted to
+commands whose every pipeline segment leads with an allowlisted program:
+`find`, `cat`, `ls`, `tree`, `rg`/`grep`/`egrep`/`fgrep`, `tail`, `head`, `wc`,
+`sort`, `uniq`, `nl`, `curl`, `wget`, `gradle`/`gradlew`/`mvn`/`sbt`,
+`pytest`/`jest`/`vitest`, and **subcommand-aware** `git` (`log`/`diff`/`show`/
+`status`/`blame`/…), `cargo` (`test`/`build`/`check`/…), `go` (`test`/`build`/…),
+`npm`/`yarn`/`pnpm` (`test`/`run`/`build`/…). So `git log` is wrapped but
+`git commit` is not.
+
+**Stateful commands are never wrapped.** Anything that mutates persistent shell
+state — `cd`, `export`, `source`, assignments (`FOO=bar …`), `alias`, `eval`,
+function defs — or any `&&`/`||`/`;`/`|` chain containing such a segment passes
+through untouched. Wrapping them in a subshell would silently break the
+persistent-shell cwd/env that Claude Code relies on.
+
+**Lossless + observable.** `ctxforge wrap` runs the command via `sh -c`
+(preserving exit code and streaming stderr), offloads large stdout to the
+reversible store, and returns a head+tail preview + a `retrieve_ref` — recover
+the full output byte-for-byte with `ctx_retrieve` (or `ctxforge verify --roundtrip
+<ref>`). Every wrap writes one `ops.log` record (`tool: bash_wrap`), so the
+savings show up in `ctxforge stats` and on the dashboard.
+
+**Safety rails.** Routing engages only while the MCP server is reachable (a
+liveness heartbeat at `<data_dir>/server.pid`); if it is down, every decision
+falls through to passthrough. Nudges fire at most **once per session per type**.
+You can run the wrapper directly: `ctxforge wrap -- find . -name '*.rs'`.
+
 ## Configuration
 
 | Env var | Default | Meaning |
 | :- | :- | :- |
 | `CTXFORGE_DIR` | `<project>/.ctxforge` | Where `index.db`, `store.db`, and `graph.json` live. |
 | `CTXFORGE_MAX_INLINE` | `8192` | Stdout/subgraph byte threshold before offloading to the store. |
+| `CTXFORGE_ROUTING` | `off` | Auto-routing level: `off` \| `steer` \| `wrap` \| `full` (see above). |
+| `CTXFORGE_ROUTING_MCP` | *(auto)* | Override the MCP-ready guard: `up` forces routing on, `down` forces passthrough. Default reads the `server.pid` heartbeat. |
+| `CTXFORGE_MCP_TTL` | `90` | Seconds the `server.pid` heartbeat stays "fresh" for the routing guard. |
 | `CTXFORGE_SNAPSHOT_BUDGET` | `2048` | Byte budget for the session-resume snapshot (recovery half). |
 | `CTXFORGE_SETTINGS` | `~/.claude/settings.json` | Settings file `ctxforge session install` writes its hooks into. |
 | `RUST_LOG` | `info` | Log level (logs go to **stderr**; stdout is the MCP channel). |

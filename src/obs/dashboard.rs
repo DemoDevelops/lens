@@ -232,6 +232,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <h2>by mechanism</h2>
     <div class="mech" id="byMech"></div>
   </div>
+  <div class="seclabel">RTK shell savings &mdash; RTK's own measured savings on shell commands via <code>rtk gain</code></div>
+  <div class="panel">
+    <h2>RTK shell savings</h2>
+    <div class="cards" id="rtkCards"></div>
+  </div>
   <div class="seclabel">session activity &mdash; built-in tools (Read / Edit / Bash &hellip;) captured by hooks &middot; not token savings</div>
   <div class="panel">
     <h2>activity</h2>
@@ -329,6 +334,14 @@ async function tick(){
     `<span>${m.mechanism} <b>${m.ops}</b> ops · <b>${humanCount(m.saved)}</b> tok</span>`
   ).join('')||'<span style="color:var(--dim)">—</span>';
 
+  // RTK shell savings — RTK's own measured numbers from `rtk gain` (third plane).
+  const r=d.rtk||{installed:false};
+  document.getElementById('rtkCards').innerHTML=r.installed?
+    card('commands',(r.total_commands||0).toLocaleString())+
+    card('tokens saved',humanCount(r.total_saved||0),'~'+(r.total_saved||0).toLocaleString())+
+    card('avg savings',((r.avg_savings_pct||0).toFixed(1))+'%')
+    :card('RTK not installed','—','run ctxforge rtk install');
+
   // session activity (built-in tools, via hooks) — the "first plane"
   const a=d.activity||{total_events:0,sessions:0,by_category:[],last_ts:null};
   histAct.push({t:now,ev:a.total_events});
@@ -398,12 +411,19 @@ mod tests {
         // Session-activity block reflects the seeded hook event.
         assert_eq!(v["activity"]["total_events"], json!(1));
         assert_eq!(v["activity"]["by_category"][0]["category"], json!("file"));
+        // The RTK plane (third plane) is always present; its `installed` flag is a
+        // bool whose value depends on machine state, so assert structure only.
+        assert!(v["rtk"].is_object(), "snapshot must carry an rtk object");
+        assert!(v["rtk"]["installed"].is_boolean(), "rtk.installed is a bool");
 
         let (s2, ct2, body2) = route("/", dir.path(), None);
         assert_eq!(s2, 200);
         assert!(ct2.contains("html"));
         assert!(body2.contains("ctxforge"));
         assert!(body2.contains("/api/stats"));
+        // The RTK shell-savings panel markup is baked into the self-contained page.
+        assert!(body2.contains("RTK shell savings"));
+        assert!(body2.contains("rtkCards"));
 
         let (s3, _, _) = route("/nope", dir.path(), None);
         assert_eq!(s3, 404);

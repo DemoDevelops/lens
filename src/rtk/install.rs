@@ -236,8 +236,20 @@ fn download_and_extract(version: &str, triple: &str, bin_dir: &Path, managed: &P
     Ok(())
 }
 
-/// Report install state: binary path, `--version`, hook registration, and a
-/// one-line gain summary. Best-effort — never errors when RTK is absent.
+/// Does `name` resolve on `PATH`? Mirrors the hook's own `command -v <name>`
+/// check, so `status` reports exactly what the live hook will find.
+fn cmd_exists(name: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {name}"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Report install state: binary path, `--version`, hook registration, whether the
+/// hook can rewrite live (rtk on PATH + jq), and a one-line gain summary.
+/// Best-effort — never errors when RTK is absent.
 pub fn status() -> Result<()> {
     match super::rtk_bin_path() {
         Some(bin) => {
@@ -260,6 +272,31 @@ pub fn status() -> Result<()> {
             "not registered"
         }
     );
+
+    // The registered hook (`rtk-rewrite.sh`) only rewrites commands live if it can
+    // find `rtk` on PATH and has `jq` (it shells out to both). We install to
+    // `~/.ctxforge/bin`, which isn't on PATH by default, so surface what's needed
+    // to actually activate live rewriting (vs. just having the hook registered).
+    let on_path = cmd_exists("rtk");
+    let jq = cmd_exists("jq");
+    if on_path && jq {
+        println!("rewrite:    live (rtk on PATH, jq present)");
+    } else {
+        let mut needs = Vec::new();
+        if !on_path {
+            match super::bin_dir() {
+                Some(b) => needs.push(format!("add {} to PATH", b.display())),
+                None => needs.push("put rtk on PATH".to_string()),
+            }
+        }
+        if !jq {
+            needs.push("install jq".to_string());
+        }
+        println!(
+            "rewrite:    inactive (hook registered) — to enable live rewriting: {}",
+            needs.join("; ")
+        );
+    }
 
     let gain_line = match gain::read_gain(Scope::Global) {
         Ok(g) => format!(

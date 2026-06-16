@@ -268,6 +268,16 @@ sync        read `rtk gain` and append shell-savings deltas to the ctxforge op l
     );
 }
 
+/// Shared guard serializing the unit tests that mutate the process-global
+/// `CTXFORGE_HOME` env var (env is global; `cargo test` runs in parallel). Used
+/// here and by `obs::stats` tests. Poison-tolerant: a panicked holder still yields
+/// the guard so one failing test doesn't cascade.
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +314,7 @@ mod tests {
 
     #[test]
     fn home_root_honors_ctxforge_home_override() {
+        let _g = env_test_lock();
         std::env::set_var("CTXFORGE_HOME", "/tmp/ctxforge-home-test");
         assert_eq!(home_root().unwrap(), PathBuf::from("/tmp/ctxforge-home-test"));
         assert_eq!(

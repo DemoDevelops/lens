@@ -199,7 +199,7 @@ existing behavior is identical.
 
 ```sh
 ctxforge rtk install     # download the pinned RTK binary to ~/.ctxforge/bin/rtk
-                         #   and register RTK's hook (rtk init --global --auto-patch)
+                         #   and register RTK's hook (rtk init --global --hook-only)
 ctxforge rtk status      # installed? which version? hook registered? + rtk gain summary
 ctxforge rtk sync        # fold RTK's measured savings delta into ops.log (rtk_shell op)
 ctxforge rtk uninstall   # remove RTK's Claude hook (rtk init --global --uninstall)

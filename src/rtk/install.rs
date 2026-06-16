@@ -4,10 +4,11 @@
 //! [`install`] detects the platform target triple, downloads the pinned release
 //! `rtk-<triple>.<ext>` with `curl`, extracts it (`tar`/`unzip`) into
 //! `~/.ctxforge/bin/rtk`, `chmod +x`'s it, verifies `rtk --version`, then registers
-//! the Claude hook by shelling out to `rtk init --global --auto-patch` (exactly what
-//! headroom's `register_claude_hooks` does). [`uninstall`] runs `rtk init --global
-//! --uninstall`; [`status`] reports the resolved binary, version, hook registration,
-//! and a one-line gain summary.
+//! the Claude hook by shelling out to `rtk init --global --hook-only --auto-patch`
+//! (headroom registers via `rtk init --global --auto-patch`; we add `--hook-only`
+//! so only the PreToolUse hook is written, not RTK.md / a CLAUDE.md edit). [`uninstall`]
+//! runs `rtk init --global --uninstall`; [`status`] reports the resolved binary,
+//! version, hook registration, and a one-line gain summary.
 //!
 //! Everything shells out via `std::process::Command` (`curl`/`tar`/`unzip`/`chmod`) —
 //! no extra crate dependency. The network download path is verified on-machine only
@@ -140,16 +141,20 @@ pub fn install() -> Result<()> {
         println!("Installed {reported} at {}", managed.display());
     }
 
-    // --- Register the Claude hook (headroom: `rtk init --global --auto-patch`). ---
+    // --- Register the Claude hook (`rtk init --global --hook-only --auto-patch`). ---
+    // We use `--hook-only` (vs. headroom's full `--auto-patch`): it writes ONLY the
+    // PreToolUse hook (`~/.claude/hooks/rtk-rewrite.sh`) + patches settings.json, and
+    // does NOT create RTK.md or touch the user's CLAUDE.md. ctxforge owns the
+    // model-facing guidance, so injecting RTK's instructions would be redundant.
     // A nonzero exit / spawn failure is a warning, not fatal: the binary is usable
     // and the hook can be (re)registered later via `ctxforge rtk install`.
-    match super::run_rtk(&["init", "--global", "--auto-patch"]) {
+    match super::run_rtk(&["init", "--global", "--hook-only", "--auto-patch"]) {
         Ok(out) if out.status.success() => {
-            println!("Registered RTK Claude hook (rtk init --global --auto-patch).");
+            println!("Registered RTK Claude hook (rtk init --global --hook-only --auto-patch).");
         }
         Ok(out) => {
             eprintln!(
-                "warning: `rtk init --global --auto-patch` exited {}: {}",
+                "warning: `rtk init --global --hook-only --auto-patch` exited {}: {}",
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
             );

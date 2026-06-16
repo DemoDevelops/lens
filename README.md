@@ -167,6 +167,54 @@ liveness heartbeat at `<data_dir>/server.pid`); if it is down, every decision
 falls through to passthrough. Nudges fire at most **once per session per type**.
 You can run the wrapper directly: `ctxforge wrap -- find . -name '*.rs'`.
 
+## RTK shell savings (opt-in)
+
+ctxforge's MCP tools and the Bash wrap above only compress what gets routed
+through ctxforge. The shell commands Claude Code runs most (every `cd "<proj>" &&
+…` chain) slip past, because wrapping a stateful chain would break the persistent
+shell. [RTK](https://github.com/rtk-ai/rtk) (Rust Token Killer, Apache-2.0) is
+built for exactly that case: it rewrites commands *per segment* through its own
+Claude Code hook and ships per-command compactors, so it fires constantly where
+ctxforge's wrap cannot.
+
+Rather than re-author RTK, ctxforge adopts the **headroom pattern**
+(`chopratejas/headroom`): ship the prebuilt RTK binary, let RTK own Bash, and
+surface RTK's *own* measured savings. The division of labor:
+
+- **RTK owns Bash command rewriting.** ctxforge installs the pinned RTK binary and
+  lets RTK's hook rewrite shell commands. While RTK is active, ctxforge's
+  `PreToolUse` passes `Bash` straight through, so the two hooks never double-wrap.
+  Non-Bash routing (WebFetch-deny, Read/Grep nudges) is unaffected.
+- **ctxforge surfaces RTK's savings.** `ctxforge rtk sync` reads `rtk gain --format
+  json` and appends the delta to `ops.log` as an `rtk_shell` op whose
+  `tokens_saved_est` is RTK's own measured `total_saved` (never a ctxforge
+  re-estimate). `ctxforge stats` and the dashboard then show an **RTK shell
+  savings** plane next to ctxforge's MCP-tool savings.
+- **ctxforge keeps its lane.** Sandboxed execution (`ctx_execute`), FTS5 search,
+  the code graph, session continuity, and reversible compression stay the
+  downstream context tools, unchanged.
+
+Fully opt-in and additive: with no RTK installed every path here is a no-op and
+existing behavior is identical.
+
+```sh
+ctxforge rtk install     # download the pinned RTK binary to ~/.ctxforge/bin/rtk
+                         #   and register RTK's hook (rtk init --global --auto-patch)
+ctxforge rtk status      # installed? which version? hook registered? + rtk gain summary
+ctxforge rtk sync        # fold RTK's measured savings delta into ops.log (rtk_shell op)
+ctxforge rtk uninstall   # remove RTK's Claude hook (rtk init --global --uninstall)
+```
+
+`install` is version-pinned (RTK `v0.28.2`, the headroom pin) and idempotent;
+re-running it re-registers the hook without re-downloading. Run `ctxforge rtk
+sync` periodically to keep the dashboard current. The dashboard (`ctxforge
+dashboard`) then renders three planes: ctxforge MCP tool savings, **RTK shell
+savings**, and session activity.
+
+> Tests are network-free: a stub `rtk` placed on `CTXFORGE_HOME/bin` answers
+> `--version` / `gain --format json`, so `cargo test` never downloads. The real
+> download is exercised on-machine only.
+
 ## Configuration
 
 | Env var | Default | Meaning |
@@ -178,6 +226,9 @@ You can run the wrapper directly: `ctxforge wrap -- find . -name '*.rs'`.
 | `CTXFORGE_MCP_TTL` | `90` | Seconds the `server.pid` heartbeat stays "fresh" for the routing guard. |
 | `CTXFORGE_SNAPSHOT_BUDGET` | `2048` | Byte budget for the session-resume snapshot (recovery half). |
 | `CTXFORGE_SETTINGS` | `~/.claude/settings.json` | Settings file `ctxforge session install` writes its hooks into. |
+| `CTXFORGE_HOME` | `~/.ctxforge` | Global home for the managed RTK binary (`<home>/bin/rtk`). Distinct from the per-project `CTXFORGE_DIR`. |
+| `CTXFORGE_DEFER_BASH_TO_RTK` | *(auto)* | Override the "RTK owns Bash" gate: `1` forces ctxforge to defer `Bash`, `0` forces normal routing. Default detects the RTK binary + its registered hook. |
+| `CTXFORGE_RTK_VERSION` | `v0.28.2` | RTK release that `ctxforge rtk install` downloads. |
 | `RUST_LOG` | `info` | Log level (logs go to **stderr**; stdout is the MCP channel). |
 
 ## Development

@@ -16,7 +16,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::data_dir;
-use super::stats::snapshot_json;
+use super::stats::snapshot_json_since;
 
 const DEFAULT_PORT: u16 = 7878;
 const DEFAULT_HOST: &str = "127.0.0.1";
@@ -87,18 +87,31 @@ fn handle(mut stream: TcpStream, dir: &Path, session: Option<&str>) {
     let _ = write_response(&mut stream, status, content_type, &body);
 }
 
-/// Route a request path (query stripped) to (status, content-type, body).
+/// Route a request path to (status, content-type, body). `/api/stats` honors a
+/// `?since=<unix-seconds>` cutoff (the page's load time) so the dashboard shows
+/// only sessions live since it was opened.
 fn route(target: &str, dir: &Path, session: Option<&str>) -> (u16, &'static str, String) {
-    let path = target.split('?').next().unwrap_or("/");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
     match path {
         "/" | "/index.html" => (200, "text/html; charset=utf-8", INDEX_HTML.to_string()),
-        "/api/stats" => (
-            200,
-            "application/json",
-            snapshot_json(dir, session).to_string(),
-        ),
+        "/api/stats" => {
+            let since = query_param(query, "since").and_then(|v| v.parse::<i64>().ok());
+            (
+                200,
+                "application/json",
+                snapshot_json_since(dir, session, since).to_string(),
+            )
+        }
         _ => (404, "text/plain; charset=utf-8", "not found".to_string()),
     }
+}
+
+/// Value of `key` in a `k=v&k2=v2` query string, if present.
+fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k == key).then_some(v)
+    })
 }
 
 /// Read an HTTP request and return its target (the path from the request line).
@@ -208,7 +221,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
   <div class="saved-top" id="savedTop">— saved</div>
 </header>
 <main>
-  <div class="seclabel">ctxforge MCP tool savings &mdash; only when the agent calls ctx_execute / ctx_search / graph_*</div>
+  <div class="seclabel">ctxforge MCP tool savings &mdash; ctx_execute / ctx_search / graph_* &middot; <b>live sessions only</b> (since you opened this page)</div>
   <div class="cards" id="cards"></div>
   <div class="row2">
     <div class="panel">
@@ -232,12 +245,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <h2>by mechanism</h2>
     <div class="mech" id="byMech"></div>
   </div>
-  <div class="seclabel">RTK shell savings &mdash; RTK's own measured savings on shell commands via <code>rtk gain</code></div>
+  <div class="seclabel">RTK shell savings &mdash; RTK's own measured savings on shell commands via <code>rtk gain</code> &middot; global / all-time</div>
   <div class="panel">
     <h2>RTK shell savings</h2>
     <div class="cards" id="rtkCards"></div>
   </div>
-  <div class="seclabel">session activity &mdash; built-in tools (Read / Edit / Bash &hellip;) captured by hooks &middot; not token savings</div>
+  <div class="seclabel">session activity &mdash; built-in tools (Read / Edit / Bash &hellip;) captured by hooks &middot; <b>live sessions only</b> &middot; not token savings</div>
   <div class="panel">
     <h2>activity</h2>
     <div class="cards" id="actCards"></div>
@@ -252,6 +265,10 @@ const hist=[];           // {t, saved, bytes}
 const savedSeries=[], bytesSeries=[];
 const histAct=[], actSeries=[];   // {t, ev} for session-activity rate
 const MAXPTS=60;
+// "Live since the page loaded": every poll scopes savings + activity to sessions
+// active at/after this instant, so previous sessions never show. Refresh to reset.
+const SINCE=Math.floor(Date.now()/1000);
+const SINCE_LABEL=new Date(SINCE*1000).toLocaleTimeString();
 
 function humanBytes(n){
   const u=['B','KB','MB','GB','TB']; let v=n,i=0;
@@ -289,10 +306,10 @@ function setStale(){
 }
 async function tick(){
   let d;
-  try{ d=await (await fetch('/api/stats',{cache:'no-store'})).json(); }
+  try{ d=await (await fetch('/api/stats?since='+SINCE,{cache:'no-store'})).json(); }
   catch(e){ setStale(); return; }
   document.getElementById('dot').classList.remove('stale');
-  document.getElementById('status').textContent='live · '+(d.session?('session '+d.session):'all sessions');
+  document.getElementById('status').textContent='live · since '+SINCE_LABEL+(d.session?(' · session '+d.session):'')+' · '+(d.activity&&d.activity.sessions||0)+' live session(s)';
   document.getElementById('savedTop').textContent=humanCount(d.tokens_saved_est)+' tokens saved';
 
   const now=Date.now()/1000;

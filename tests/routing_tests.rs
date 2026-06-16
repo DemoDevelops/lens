@@ -27,6 +27,10 @@ fn run_hook(event: &str, payload: &Value, envs: &[(&str, &str)], data_dir: &Path
         // Determinism: never inherit routing env from the test runner.
         .env_remove("CTXFORGE_ROUTING")
         .env_remove("CTXFORGE_ROUTING_MCP")
+        // RTK coexistence (plan T4): force the defer-Bash-to-RTK gate OFF so these
+        // Bash-wrap assertions are deterministic regardless of whether RTK happens
+        // to be installed + hooked on the host machine.
+        .env("CTXFORGE_DEFER_BASH_TO_RTK", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

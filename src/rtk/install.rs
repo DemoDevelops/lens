@@ -141,33 +141,159 @@ pub fn install() -> Result<()> {
         println!("Installed {reported} at {}", managed.display());
     }
 
-    // --- Register the Claude hook (`rtk init --global --hook-only --auto-patch`). ---
-    // We use `--hook-only` (vs. headroom's full `--auto-patch`): it writes ONLY the
-    // PreToolUse hook (`~/.claude/hooks/rtk-rewrite.sh`) + patches settings.json, and
-    // does NOT create RTK.md or touch the user's CLAUDE.md. ctxforge owns the
-    // model-facing guidance, so injecting RTK's instructions would be redundant.
-    // A nonzero exit / spawn failure is a warning, not fatal: the binary is usable
-    // and the hook can be (re)registered later via `ctxforge rtk install`.
-    match super::run_rtk(&["init", "--global", "--hook-only", "--auto-patch"]) {
-        Ok(out) if out.status.success() => {
-            println!("Registered RTK Claude hook (rtk init --global --hook-only --auto-patch).");
+    // --- Register the Claude hook in the dir THIS Claude Code reads. ---
+    if let Err(e) = register_hook() {
+        eprintln!("warning: could not register RTK hook: {e:#}");
+    } else if super::rtk_hook_registered() {
+        match super::claude_settings_path() {
+            Some(p) => println!("RTK hook registered in {}", p.display()),
+            None => println!("RTK hook registered in Claude settings."),
         }
-        Ok(out) => {
-            eprintln!(
-                "warning: `rtk init --global --hook-only --auto-patch` exited {}: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        Err(e) => {
-            eprintln!("warning: could not register RTK hook: {e:#}");
-        }
-    }
-
-    if super::rtk_hook_registered() {
-        println!("RTK hook is registered in Claude settings.");
     }
     Ok(())
+}
+
+/// Register the RTK PreToolUse hook in the active Claude config dir's settings.json.
+///
+/// `rtk init --global` ignores `$CLAUDE_CONFIG_DIR` (it always writes `~/.claude`),
+/// so ctxforge owns the settings patch: generate the hook SCRIPT via `rtk init
+/// --hook-only --no-patch`, then patch [`claude_settings_path`] ourselves — copying
+/// the script into that dir's `hooks/` when it differs from rtk's default `~/.claude`,
+/// so the hook is self-contained under the dir the running Claude Code actually reads.
+/// `--hook-only` writes only the script (no RTK.md / CLAUDE.md edits); ctxforge owns
+/// the model-facing guidance.
+fn register_hook() -> Result<()> {
+    // 1. Generate the hook script (no settings patch — ctxforge owns that).
+    match super::run_rtk(&["init", "--global", "--hook-only", "--no-patch"]) {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => eprintln!(
+            "warning: `rtk init --hook-only --no-patch` exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => return Err(e),
+    }
+
+    let settings = super::claude_settings_path().context("cannot resolve Claude settings path")?;
+    let settings_dir = settings.parent().context("settings path has no parent")?;
+    let canonical =
+        super::rtk_default_hook_script().context("cannot resolve rtk hook script path")?;
+
+    // 2. Resolve the script path the entry will point at — inside the config dir.
+    let target_script = settings_dir.join("hooks").join("rtk-rewrite.sh");
+    let command_path = if canonical == target_script {
+        canonical // rtk's default dir IS the config dir — use the script in place.
+    } else if canonical.is_file() {
+        if let Some(parent) = target_script.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::copy(&canonical, &target_script)
+            .with_context(|| format!("copying hook script to {}", target_script.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&target_script, std::fs::Permissions::from_mode(0o755));
+        }
+        target_script
+    } else {
+        canonical // no script produced (e.g. a stub rtk in tests) — register the path anyway.
+    };
+
+    // 3. Idempotently patch the settings.json with the PreToolUse Bash entry.
+    let cmd = command_path.to_str().context("hook script path is not UTF-8")?;
+    ensure_hook_entry(&settings, cmd).with_context(|| format!("patching {}", settings.display()))
+}
+
+/// Idempotently ensure `settings_path` has a PreToolUse Bash hook running `command`.
+/// Creates the file/parents if missing; backs up to `*.json.bak` before writing.
+/// No-op (no write) if the exact command is already present.
+fn ensure_hook_entry(settings_path: &Path, command: &str) -> Result<()> {
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut root = read_settings(settings_path)?;
+    if hook_command_present(&root, command) {
+        return Ok(());
+    }
+    let obj = root.as_object_mut().context("settings.json is not a JSON object")?;
+    let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
+    let hooks_obj = hooks.as_object_mut().context("`hooks` is not an object")?;
+    let pre = hooks_obj
+        .entry("PreToolUse")
+        .or_insert_with(|| serde_json::json!([]));
+    let arr = pre.as_array_mut().context("`hooks.PreToolUse` is not an array")?;
+    arr.push(serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": command }],
+    }));
+    write_settings(settings_path, &root)
+}
+
+/// Remove every PreToolUse entry whose command contains `needle`. Returns whether
+/// anything changed.
+fn remove_hook_entry(settings_path: &Path, needle: &str) -> Result<bool> {
+    if !settings_path.is_file() {
+        return Ok(false);
+    }
+    let mut root = read_settings(settings_path)?;
+    let Some(arr) = root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("PreToolUse"))
+        .and_then(|p| p.as_array_mut())
+    else {
+        return Ok(false);
+    };
+    let before = arr.len();
+    arr.retain(|entry| !entry_command_contains(entry, needle));
+    if arr.len() == before {
+        return Ok(false);
+    }
+    write_settings(settings_path, &root)?;
+    Ok(true)
+}
+
+fn read_settings(path: &Path) -> Result<serde_json::Value> {
+    if !path.is_file() {
+        return Ok(serde_json::json!({}));
+    }
+    let raw = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn write_settings(path: &Path, root: &serde_json::Value) -> Result<()> {
+    if path.is_file() {
+        let _ = std::fs::copy(path, path.with_extension("json.bak"));
+    }
+    let body = serde_json::to_string_pretty(root)?;
+    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))
+}
+
+fn hook_command_present(root: &serde_json::Value, command: &str) -> bool {
+    root.get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+        .is_some_and(|arr| arr.iter().any(|e| entry_command_eq(e, command)))
+}
+
+fn entry_command_eq(entry: &serde_json::Value, command: &str) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command)))
+}
+
+fn entry_command_contains(entry: &serde_json::Value, needle: &str) -> bool {
+    entry.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+        hs.iter().any(|h| {
+            h.get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| c.contains(needle))
+        })
+    })
 }
 
 /// Download `rtk-<triple>.<ext>` to a temp file via `curl`, then extract the single
@@ -310,30 +436,27 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
-/// Remove RTK's Claude hook (`rtk init --global --uninstall`). Best-effort: the
-/// contract is unregistering the hook, not deleting the binary. Returns `Ok` even
-/// when RTK is absent.
+/// Remove ctxforge's RTK hook from the active Claude config dir's settings.json and
+/// drop the script copy ctxforge placed there. Scoped to ctxforge's own changes: it
+/// does **not** run `rtk init --uninstall` (that would also delete a pre-existing
+/// `RTK.md` and rtk's own `~/.claude` artifacts). Best-effort; returns `Ok` even when
+/// nothing is present. The binary at `~/.ctxforge/bin/rtk` is left in place.
 pub fn uninstall() -> Result<()> {
-    match super::run_rtk(&["init", "--global", "--uninstall"]) {
-        Ok(out) if out.status.success() => {
-            let msg = String::from_utf8_lossy(&out.stdout);
-            let msg = msg.trim();
-            if msg.is_empty() {
-                println!("Removed RTK Claude hook (rtk init --global --uninstall).");
-            } else {
-                println!("{msg}");
-            }
-        }
-        Ok(out) => {
-            eprintln!(
-                "warning: `rtk init --global --uninstall` exited {}: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        Err(e) => {
-            // No binary to run (or spawn failed) — nothing to unregister.
-            eprintln!("rtk not installed or not runnable; nothing to uninstall ({e:#}).");
+    let settings = super::claude_settings_path().context("cannot resolve Claude settings path")?;
+    match remove_hook_entry(&settings, "rtk-rewrite.sh") {
+        Ok(true) => println!("Removed RTK hook from {}", settings.display()),
+        Ok(false) => println!(
+            "no RTK hook found in {} (nothing to remove)",
+            settings.display()
+        ),
+        Err(e) => eprintln!("warning: could not edit {}: {e:#}", settings.display()),
+    }
+    // Remove the script copy ctxforge placed in a non-default config dir; leave
+    // rtk's own ~/.claude/hooks/rtk-rewrite.sh (rtk's artifact) untouched.
+    if let (Some(dir), Some(canonical)) = (settings.parent(), super::rtk_default_hook_script()) {
+        let copied = dir.join("hooks").join("rtk-rewrite.sh");
+        if copied != canonical && copied.is_file() {
+            let _ = std::fs::remove_file(&copied);
         }
     }
     Ok(())

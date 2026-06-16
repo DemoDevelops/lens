@@ -126,8 +126,13 @@ Type notes that bit us if wrong:
 `-g/--global` (patch `~/.claude/...`), `--show`, `--claude-md` (legacy), `--hook-only`
 (hook, no RTK.md), `--auto-patch` (patch settings.json non-interactively), `--no-patch`,
 `--uninstall` (remove all RTK artifacts — **requires `--global`**).
-- **Register (mirror headroom `installer.py::register_claude_hooks`):**
-  `rtk init --global --auto-patch`
+- **Register:** `rtk init --global --hook-only --auto-patch`. Headroom uses
+  `rtk init --global --auto-patch` (full: hook + RTK.md + a CLAUDE.md `@RTK.md`
+  reference). ctxforge adds `--hook-only` so ONLY the PreToolUse hook +
+  settings.json patch are written (`run_hook_only_mode` in `init.rs` does exactly
+  that, no RTK.md / CLAUDE.md mutation) — ctxforge owns the model-facing guidance,
+  so RTK's instructions would be redundant and more invasive to the user's config.
+  `--hook-only` (mode group) and `--auto-patch` (patch group) are compatible.
 - **Unregister:** `rtk init --global --uninstall`
 
 **`rtk gain`** (`Commands::Gain`): `-p/--project` (scope to cwd), `--format <text|json|csv>`,

@@ -143,17 +143,22 @@ pub fn run_rtk(args: &[&str]) -> Result<std::process::Output> {
 // ---------------------------------------------------------------------------
 
 /// Path to the Claude settings file RTK patches. Honors `$CTXFORGE_CLAUDE_SETTINGS`
-/// (test seam) and `$CLAUDE_CONFIG_DIR`, else `~/.claude/settings.json`.
+/// (test seam), else `~/.claude/settings.json`.
+///
+/// We deliberately mirror RTK's own resolution (`rtk` `src/init.rs::resolve_claude_dir`
+/// = `dirs::home_dir()/.claude`, which on unix is `$HOME/.claude`) and **ignore**
+/// `$CLAUDE_CONFIG_DIR`: `rtk init --global` (v0.28.2) writes the hook to `~/.claude`
+/// regardless of `$CLAUDE_CONFIG_DIR`, so detection must read exactly where RTK
+/// writes — otherwise `status`/`rtk_active` would miss a hook this very session's
+/// `$CLAUDE_CONFIG_DIR` points elsewhere (verified at integration: this machine runs
+/// with `CLAUDE_CONFIG_DIR=~/.claude-personal`).
 pub fn claude_settings_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CTXFORGE_CLAUDE_SETTINGS") {
         if !p.is_empty() {
             return Some(PathBuf::from(p));
         }
     }
-    let base = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| home_dir().map(|h| h.join(".claude")))?;
-    Some(base.join("settings.json"))
+    home_dir().map(|h| h.join(".claude").join("settings.json"))
 }
 
 /// True if RTK's PreToolUse hook is registered in Claude settings — any

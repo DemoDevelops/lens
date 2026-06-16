@@ -116,6 +116,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 bin: &bin,
                 data_dir: &data_dir,
                 session_id: &session_id,
+                rtk_active: crate::rtk::rtk_active(&data_dir),
             };
             let decision = routing::route(&tool, &ti, &rc);
             Ok(routing::to_hook_json(&decision).to_string())

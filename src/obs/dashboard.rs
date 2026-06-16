@@ -296,7 +296,10 @@ async function tick(){
   document.getElementById('savedTop').textContent=humanCount(d.tokens_saved_est)+' tokens saved';
 
   const now=Date.now()/1000;
-  hist.push({t:now,saved:d.tokens_saved_est,bytes:d.bytes_returned});
+  // MCP plane (cards + this rate chart) reads MCP-only savings; RTK shell savings
+  // have their own plane below, so a `rtk sync` doesn't spike this as MCP savings.
+  const savedMcp=(d.tokens_saved_mcp!==undefined?d.tokens_saved_mcp:d.tokens_saved_est);
+  hist.push({t:now,saved:savedMcp,bytes:d.bytes_returned});
   if(hist.length>1){
     const a=hist[hist.length-2], b=hist[hist.length-1], dt=Math.max(0.001,b.t-a.t);
     savedSeries.push(Math.max(0,(b.saved-a.saved)/dt*60));
@@ -313,7 +316,7 @@ async function tick(){
     card('ops total',d.ops.toLocaleString(),`${d.errors} err · ${d.timeouts} timeout`)+
     card('raw bytes in',humanBytes(d.raw_bytes_in))+
     card('bytes returned',humanBytes(d.bytes_returned))+
-    card('tokens saved',humanCount(d.tokens_saved_est),'~'+d.tokens_saved_est.toLocaleString())+
+    card('tokens saved',humanCount(savedMcp),'~'+savedMcp.toLocaleString()+' · MCP tools only')+
     card('offloaded',d.offloaded_ops+' ops',humanBytes(d.offloaded_bytes)+' to store')+
     card('lock wait',d.lock_wait_ms+' ms');
 

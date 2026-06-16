@@ -263,6 +263,13 @@ pub fn snapshot_json(dir: &Path, session: Option<&str>) -> serde_json::Value {
         .map(|(m, (ops, saved))| serde_json::json!({ "mechanism": m, "ops": ops, "saved": saved }))
         .collect();
 
+    // The MCP-tool-savings plane must read MCP-only: exclude the synced `rtk_shell`
+    // op so a `ctxforge rtk sync` doesn't relabel RTK's shell savings as MCP savings.
+    // RTK savings keep their own plane (`rtk` block + `by_mechanism` "shell"); the
+    // grand-total `tokens_saved_est` still includes them (the ledger reconciles).
+    let rtk_shell_saved: i64 = t.by_tool.get("rtk_shell").map(|a| a.saved).unwrap_or(0);
+    let tokens_saved_mcp = t.tokens_saved_est - rtk_shell_saved;
+
     // The "first plane": built-in tool activity captured by the session hooks.
     let activity = SessionStore::open(dir)
         .and_then(|s| s.activity(session))
@@ -284,6 +291,7 @@ pub fn snapshot_json(dir: &Path, session: Option<&str>) -> serde_json::Value {
         "raw_bytes_in": t.raw_bytes_in,
         "bytes_returned": t.bytes_returned,
         "tokens_saved_est": t.tokens_saved_est,
+        "tokens_saved_mcp": tokens_saved_mcp,
         "errors": t.errors,
         "timeouts": t.timeouts,
         "lock_wait_ms": t.lock_wait_ms,
@@ -539,6 +547,8 @@ esac
     #[cfg(unix)]
     #[test]
     fn rtk_plane_present_and_absent_and_buckets_shell() {
+        // Serialize with other CTXFORGE_HOME mutators (env is process-global).
+        let _g = crate::rtk::env_test_lock();
         // --- 1. PRESENT: point CTXFORGE_HOME at a home holding the stub rtk. ---
         let home = tempdir().unwrap();
         write_stub_rtk(home.path());

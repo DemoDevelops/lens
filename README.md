@@ -211,6 +211,14 @@ sync` periodically to keep the dashboard current. The dashboard (`ctxforge
 dashboard`) then renders three planes: ctxforge MCP tool savings, **RTK shell
 savings**, and session activity.
 
+**Activating live rewriting.** `ctxforge rtk install` lands the binary at
+`~/.ctxforge/bin/rtk` and registers RTK's hook, but RTK's `rtk-rewrite.sh` finds
+`rtk` via `PATH` and needs `jq`. So to have RTK actually rewrite shell commands
+going forward, add `~/.ctxforge/bin` to your `PATH` and install `jq`. `ctxforge
+rtk status` reports whether live rewriting is active or what is missing.
+(`ctxforge rtk sync` and the dashboard work regardless, since ctxforge calls the
+binary by absolute path.)
+
 > Tests are network-free: a stub `rtk` placed on `CTXFORGE_HOME/bin` answers
 > `--version` / `gain --format json`, so `cargo test` never downloads. The real
 > download is exercised on-machine only.

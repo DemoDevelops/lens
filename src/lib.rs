@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod index;
 pub mod obs;
 pub mod routing;
+pub mod rtk;
 pub mod sandbox;
 pub mod server;
 pub mod session;

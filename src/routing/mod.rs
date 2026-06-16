@@ -127,6 +127,9 @@ pub struct RouteCtx<'a> {
     pub data_dir: &'a Path,
     /// Current session id (scopes one-shot nudge throttling).
     pub session_id: &'a str,
+    /// True when RTK owns Bash (see [`crate::rtk::rtk_active`]); makes [`route`]
+    /// pass Bash through so RTK's hook and ctxforge's never double-wrap.
+    pub rtk_active: bool,
 }
 
 // ── Reason / nudge prose (original wording) ────────────────────────────────
@@ -168,7 +171,13 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 Decision::Passthrough
             }
         }
-        "Bash" => bash_decision(tool_input, ctx),
+        "Bash" => {
+            if ctx.rtk_active {
+                Decision::Passthrough
+            } else {
+                bash_decision(tool_input, ctx)
+            }
+        }
         "Grep" => {
             if ctx.level.steers() && throttle_once(ctx, "grep") {
                 Decision::Context(GREP_NUDGE.to_string())
@@ -683,6 +692,7 @@ mod tests {
             bin: "/path with space/ctxforge",
             data_dir: dir,
             session_id: "sess-1",
+            rtk_active: false,
         }
     }
 
@@ -785,6 +795,38 @@ mod tests {
             route("Bash", &ti, &rc(Level::Wrap, true, d.path())),
             Decision::Passthrough
         );
+    }
+
+    #[test]
+    fn bash_defers_to_rtk_when_active() {
+        let d = tempdir().unwrap();
+        // RTK active: Bash passes through (RTK's hook owns the rewrite) while
+        // WebFetch is unaffected (still denied under steer/full).
+        let active = RouteCtx {
+            level: Level::Full,
+            mcp_ready: true,
+            bin: "/path with space/ctxforge",
+            data_dir: d.path(),
+            session_id: "sess-1",
+            rtk_active: true,
+        };
+        assert_eq!(
+            route("Bash", &json!({"command": "find . -type f"}), &active),
+            Decision::Passthrough
+        );
+        assert_eq!(
+            route("WebFetch", &json!({"url": "http://x"}), &active),
+            Decision::Deny(WEBFETCH_REASON.to_string())
+        );
+        // Same ctx but RTK inactive: today's wrap behavior is unchanged.
+        let inactive = RouteCtx {
+            rtk_active: false,
+            ..active
+        };
+        assert!(matches!(
+            route("Bash", &json!({"command": "find . -type f"}), &inactive),
+            Decision::Modify { .. }
+        ));
     }
 
     #[test]

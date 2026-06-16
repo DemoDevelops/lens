@@ -135,13 +135,38 @@ pub fn aggregate(records: &[OpRecord]) -> Totals {
 }
 
 /// Which mechanism a tool belongs to (sandbox / index / discovery / retrieve).
+/// `rtk_shell` records (RTK's own shell-command savings, synced into the op log)
+/// bucket under "shell" so they read as a distinct lane in the mechanism rollup.
 fn mechanism(tool: &str) -> &'static str {
     match tool {
         "ctx_execute" => "sandbox",
         "ctx_index" | "ctx_search" => "index",
         "ctx_discover" | "graph_query" | "graph_neighbors" | "graph_path" => "discovery",
         "ctx_retrieve" => "retrieve",
+        "rtk_shell" => "shell",
         _ => "other",
+    }
+}
+
+/// Best-effort snapshot of RTK's *own* measured shell-command savings, read from
+/// `rtk gain` (never re-estimated by ctxforge). Returns
+/// `{"installed": false}` when RTK isn't installed or the call fails; otherwise
+/// `{"installed": true, ...}` with RTK's global summary totals. Cheap: skips the
+/// subprocess entirely unless a binary is resolvable.
+fn rtk_snapshot() -> serde_json::Value {
+    if !crate::rtk::rtk_available() {
+        return serde_json::json!({ "installed": false });
+    }
+    match crate::rtk::gain::read_gain(crate::rtk::gain::Scope::Global) {
+        Ok(g) => serde_json::json!({
+            "installed": true,
+            "total_commands": g.summary.total_commands,
+            "total_saved": g.summary.total_saved,
+            "avg_savings_pct": g.summary.avg_savings_pct,
+            "total_input": g.summary.total_input,
+            "total_output": g.summary.total_output,
+        }),
+        Err(_) => serde_json::json!({ "installed": false }),
     }
 }
 
@@ -266,6 +291,7 @@ pub fn snapshot_json(dir: &Path, session: Option<&str>) -> serde_json::Value {
         "offloaded_bytes": t.offloaded_bytes,
         "by_tool": by_tool,
         "by_mechanism": by_mechanism,
+        "rtk": rtk_snapshot(),
         "store_size": store_size,
         "index_chunks": index_chunks,
         "graph_nodes": graph_nodes,
@@ -347,6 +373,26 @@ fn render(dir: &Path, filters: &Filters) -> String {
     o.push_str("  by mechanism:\n");
     for (m, (ops, saved)) in &mech {
         o.push_str(&format!("    {m:<16} {ops:>6} ops  {saved:>11} saved~tok\n"));
+    }
+    o.push('\n');
+
+    // RTK shell savings: RTK's *own* measured savings on shell commands (via
+    // `rtk gain`) — never re-estimated by ctxforge. Best-effort; degrades to a
+    // "not installed" line when no RTK binary resolves.
+    let rtk = rtk_snapshot();
+    o.push_str("  RTK shell savings (rtk gain):\n");
+    if rtk.get("installed").and_then(|v| v.as_bool()) == Some(true) {
+        let cmds = rtk.get("total_commands").and_then(|v| v.as_u64()).unwrap_or(0);
+        let saved = rtk.get("total_saved").and_then(|v| v.as_u64()).unwrap_or(0);
+        let pct = rtk.get("avg_savings_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        o.push_str(&format!("    commands        : {cmds}\n"));
+        o.push_str(&format!(
+            "    tokens saved    : {saved} (~{})\n",
+            human_count(saved)
+        ));
+        o.push_str(&format!("    avg savings     : {pct:.1}%\n"));
+    } else {
+        o.push_str("    not installed   : run `ctxforge rtk install` to enable\n");
     }
     o.push('\n');
 
@@ -458,5 +504,108 @@ mod tests {
         let only_s1 = read_records(dir.path(), Some("s1"));
         assert_eq!(only_s1.len(), 1);
         assert_eq!(only_s1[0].session_id.as_deref(), Some("s1"));
+    }
+
+    /// Write an executable stub `<home>/bin/rtk` that answers `--version` and
+    /// `gain --format json` (tolerating a trailing `--project`), so RTK-dependent
+    /// surfacing can be tested offline against canned totals (RTK_NOTES.md §8).
+    #[cfg(unix)]
+    fn write_stub_rtk(home: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = bin.join("rtk");
+        // total_saved=2268362, total_commands=3753, avg_savings_pct=61.47..., etc.
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+case "$1" in
+  --version) echo "rtk 0.28.2" ;;
+  gain) cat <<'JSON'
+{"summary":{"total_commands":3753,"total_input":3689788,"total_output":1424127,"total_saved":2268362,"avg_savings_pct":61.47675693020845,"total_time_ms":2990161,"avg_time_ms":796}}
+JSON
+  ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// RTK-dependent assertions live in ONE test: `CTXFORGE_HOME` is process-global
+    /// and `cargo test` runs in parallel, so we set it, run every rtk assertion,
+    /// then remove it within this single test to keep the mutation tightly scoped.
+    /// Data dirs are independent tempdirs passed straight to `snapshot_json`.
+    #[cfg(unix)]
+    #[test]
+    fn rtk_plane_present_and_absent_and_buckets_shell() {
+        // --- 1. PRESENT: point CTXFORGE_HOME at a home holding the stub rtk. ---
+        let home = tempdir().unwrap();
+        write_stub_rtk(home.path());
+        std::env::set_var("CTXFORGE_HOME", home.path());
+
+        // Seed an `rtk_shell` OpRecord (RTK's own number, raw/returned bytes 0)
+        // plus a regular MCP op, so by_mechanism/by_tool can be checked.
+        let data = tempdir().unwrap();
+        let log = OpLog::open(data.path());
+        log.start("ctx_execute", json!({}))
+            .finish(8000, 100, Some("a".into()), "ok", "", None);
+        // OpHandle::finish derives tokens_saved_est from bytes; rtk_shell carries
+        // RTK's own figure instead, so append the record directly.
+        log.append(&OpRecord {
+            ts: super::super::iso8601_now(),
+            session_id: None,
+            agent_id: "test".into(),
+            pid: std::process::id(),
+            tool: "rtk_shell".into(),
+            input_summary: json!({"total_input": 100, "total_output": 40}),
+            raw_bytes_in: 0,
+            bytes_returned: 0,
+            tokens_saved_est: 60,
+            store_ref: None,
+            duration_ms: 0,
+            lock_wait_ms: 0,
+            outcome: "ok".into(),
+            note: String::new(),
+        });
+
+        let snap = snapshot_json(data.path(), None);
+        let rtk = &snap["rtk"];
+        assert_eq!(rtk["installed"], json!(true));
+        assert_eq!(rtk["total_commands"], json!(3753));
+        assert_eq!(rtk["total_saved"], json!(2268362));
+        assert_eq!(rtk["total_input"], json!(3689788));
+        assert_eq!(rtk["total_output"], json!(1424127));
+        assert!((rtk["avg_savings_pct"].as_f64().unwrap() - 61.476_756_930_208_45).abs() < 1e-9);
+
+        // by_mechanism has a "shell" lane carrying the rtk_shell op's saved tokens.
+        let mechs = snap["by_mechanism"].as_array().unwrap();
+        let shell = mechs
+            .iter()
+            .find(|m| m["mechanism"] == json!("shell"))
+            .expect("by_mechanism should include a 'shell' lane for rtk_shell");
+        assert_eq!(shell["ops"], json!(1));
+        assert_eq!(shell["saved"], json!(60));
+        // by_tool includes the rtk_shell tool automatically.
+        let tools = snap["by_tool"].as_array().unwrap();
+        assert!(
+            tools.iter().any(|t| t["tool"] == json!("rtk_shell")),
+            "by_tool should include rtk_shell, got: {tools:?}"
+        );
+
+        // --- 2. ABSENT: empty home (no bin/rtk). PATH has no managed rtk here
+        // (the real binary lives only under ~/.ctxforge, which we've overridden).
+        let empty = tempdir().unwrap();
+        std::env::set_var("CTXFORGE_HOME", empty.path());
+        let snap2 = snapshot_json(data.path(), None);
+        let installed = snap2["rtk"]["installed"].as_bool();
+        // Normally false; if a stray `rtk` is on PATH it could read true — either
+        // way "installed" must be a bool and the key must exist.
+        assert!(installed.is_some(), "rtk.installed must be a bool");
+        if installed == Some(false) {
+            assert_eq!(snap2["rtk"], json!({ "installed": false }));
+        }
+
+        std::env::remove_var("CTXFORGE_HOME");
     }
 }

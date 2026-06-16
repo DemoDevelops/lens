@@ -199,15 +199,18 @@ existing behavior is identical.
 
 ```sh
 ctxforge rtk install     # download the pinned RTK binary to ~/.ctxforge/bin/rtk
-                         #   and register RTK's hook (rtk init --global --hook-only)
+                         #   and register RTK's hook in $CLAUDE_CONFIG_DIR (else ~/.claude)
 ctxforge rtk status      # installed? which version? hook registered? + rtk gain summary
 ctxforge rtk sync        # fold RTK's measured savings delta into ops.log (rtk_shell op)
 ctxforge rtk uninstall   # remove RTK's Claude hook (rtk init --global --uninstall)
 ```
 
 `install` is version-pinned (RTK `v0.28.2`, the headroom pin) and idempotent;
-re-running it re-registers the hook without re-downloading. Run `ctxforge rtk
-sync` periodically to keep the dashboard current. The dashboard (`ctxforge
+re-running it re-registers the hook without re-downloading. The hook is registered
+in the dir your Claude Code actually reads, `$CLAUDE_CONFIG_DIR` (else `~/.claude`):
+since `rtk init` itself only writes `~/.claude`, ctxforge patches that dir's
+`settings.json` and copies the hook script into its `hooks/` so the hook is
+self-contained. Run `ctxforge rtk sync` periodically to keep the dashboard current. The dashboard (`ctxforge
 dashboard`) then renders three planes: ctxforge MCP tool savings, **RTK shell
 savings**, and session activity.
 

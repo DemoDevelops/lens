@@ -48,18 +48,6 @@ esac\n"
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// A Claude `settings.json` carrying an RTK PreToolUse hook (simulates a machine
-/// where `rtk init` already registered the hook) so detection reports "registered".
-fn write_settings_with_rtk_hook(path: &Path) {
-    let settings = json!({
-        "hooks": { "PreToolUse": [{
-            "matcher": "Bash",
-            "hooks": [{ "type": "command", "command": "/home/u/.claude/hooks/rtk-rewrite.sh" }]
-        }]}
-    });
-    std::fs::write(path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
-}
-
 /// Run `ctxforge <args…>` with `envs` applied, return (success, stdout, stderr).
 fn run(args: &[&str], envs: &[(&str, &str)]) -> (bool, String, String) {
     let mut cmd = Command::new(bin());
@@ -119,16 +107,20 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
     let data = tempfile::tempdir().unwrap();
     let settings = home.path().join("settings.json");
     write_stub_rtk(home.path(), STUB_TOTAL_SAVED, STUB_COMMANDS);
-    write_settings_with_rtk_hook(&settings);
 
     let home_s = home.path().to_str().unwrap();
     let data_s = data.path().to_str().unwrap();
     let settings_s = settings.to_str().unwrap();
+    // HOME scopes rtk's default hook-script dir into the tempdir, so registration is
+    // hermetic: the stub's `init` writes no script and ctxforge registers the entry
+    // by path. CTXFORGE_CLAUDE_SETTINGS is the settings file ctxforge patches itself.
     let base = [
+        ("HOME", home_s),
         ("CTXFORGE_HOME", home_s),
         ("CTXFORGE_CLAUDE_SETTINGS", settings_s),
     ];
     let with_data = [
+        ("HOME", home_s),
         ("CTXFORGE_HOME", home_s),
         ("CTXFORGE_CLAUDE_SETTINGS", settings_s),
         ("CTXFORGE_DIR", data_s),
@@ -138,6 +130,14 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
     // idempotent path (verifies --version, registers the hook) WITHOUT a download.
     let (ok, out, err) = run(&["rtk", "install"], &base);
     assert!(ok, "rtk install (idempotent, stub) must succeed: {out}{err}");
+
+    // install patches the config-dir settings.json itself (rtk init can't target
+    // $CLAUDE_CONFIG_DIR): the PreToolUse entry now references rtk-rewrite.sh.
+    let written = std::fs::read_to_string(&settings).unwrap_or_default();
+    assert!(
+        written.contains("rtk-rewrite.sh") && written.contains("PreToolUse"),
+        "install must register the RTK hook in the settings file: {written}"
+    );
 
     // status: reports installed + version + hook-registered.
     let (ok, out, err) = run(&["rtk", "status"], &base);
@@ -215,9 +215,14 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
         "by_mechanism buckets rtk_shell under 'shell'"
     );
 
-    // uninstall: best-effort unregister via the stub; succeeds.
+    // uninstall: removes ctxforge's hook entry from the config-dir settings.json.
     let (ok, _, _) = run(&["rtk", "uninstall"], &base);
-    assert!(ok, "rtk uninstall must succeed against the stub");
+    assert!(ok, "rtk uninstall must succeed");
+    let after = std::fs::read_to_string(&settings).unwrap_or_default();
+    assert!(
+        !after.contains("rtk-rewrite.sh"),
+        "uninstall must remove the RTK hook entry: {after}"
+    );
 }
 
 // ---------------------------------------------------------------------------

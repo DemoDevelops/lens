@@ -126,14 +126,18 @@ Type notes that bit us if wrong:
 `-g/--global` (patch `~/.claude/...`), `--show`, `--claude-md` (legacy), `--hook-only`
 (hook, no RTK.md), `--auto-patch` (patch settings.json non-interactively), `--no-patch`,
 `--uninstall` (remove all RTK artifacts — **requires `--global`**).
-- **Register:** `rtk init --global --hook-only --auto-patch`. Headroom uses
-  `rtk init --global --auto-patch` (full: hook + RTK.md + a CLAUDE.md `@RTK.md`
-  reference). ctxforge adds `--hook-only` so ONLY the PreToolUse hook +
-  settings.json patch are written (`run_hook_only_mode` in `init.rs` does exactly
-  that, no RTK.md / CLAUDE.md mutation) — ctxforge owns the model-facing guidance,
-  so RTK's instructions would be redundant and more invasive to the user's config.
-  `--hook-only` (mode group) and `--auto-patch` (patch group) are compatible.
-- **Unregister:** `rtk init --global --uninstall`
+- **Register:** ctxforge does **not** rely on `rtk init` to patch settings, because
+  `rtk init --global` ignores `$CLAUDE_CONFIG_DIR` and only ever writes `~/.claude`
+  (`resolve_claude_dir = dirs::home_dir()/.claude`). A Claude Code launched with
+  `CLAUDE_CONFIG_DIR=~/.claude-personal` (this machine) would never see that hook.
+  So install runs `rtk init --global --hook-only --no-patch` (generates ONLY the
+  hook script at `~/.claude/hooks/rtk-rewrite.sh` — no settings patch, no RTK.md, no
+  CLAUDE.md edit), then **ctxforge patches the settings.json of the active config
+  dir itself** (`$CLAUDE_CONFIG_DIR` else `~/.claude`), copying the script into that
+  dir's `hooks/` so the hook is self-contained where the running Claude Code reads.
+- **Unregister:** ctxforge removes its own PreToolUse `rtk-rewrite.sh` entry from
+  that settings.json + the copied script (it does NOT run `rtk init --uninstall`,
+  which would also delete a pre-existing user `RTK.md`).
 
 **`rtk gain`** (`Commands::Gain`): `-p/--project` (scope to cwd), `--format <text|json|csv>`,
 plus `--graph/--history/--quota/--daily/--weekly/--monthly/--all/--failures`.
@@ -151,11 +155,13 @@ plus `--graph/--history/--quota/--daily/--weekly/--monthly/--all/--failures`.
 
 Idempotency = `hook_already_present`; uninstall greps `command.contains("rtk-rewrite.sh")`.
 
-**ctxforge detection (`rtk_hook_registered`, frozen in `rtk/mod.rs`):** read
-`~/.claude/settings.json`, scan `hooks.PreToolUse[].hooks[].command` for any string
-containing **`"rtk"`**. This catches v0.28.2's `rtk-rewrite.sh` **and** older `rtk hook`
-markers. Settings path honors `$CLAUDE_CONFIG_DIR`, plus `$CTXFORGE_CLAUDE_SETTINGS`
-(test seam).
+**ctxforge detection (`rtk_hook_registered` in `rtk/mod.rs`):** read the active
+config dir's `settings.json` (`claude_settings_path` = `$CTXFORGE_CLAUDE_SETTINGS`
+test seam, else `claude_config_dir()/settings.json` = `$CLAUDE_CONFIG_DIR` else
+`~/.claude`), scan `hooks.PreToolUse[].hooks[].command` for any string containing
+**`"rtk"`**. This catches v0.28.2's `rtk-rewrite.sh` **and** older `rtk hook` markers.
+Registration + detection share `claude_config_dir()`, so the hook ctxforge writes is
+exactly the one it reads (and the one the running Claude Code fires).
 
 **Live-machine state at T0:** `rtk` was NOT on PATH (binary absent), but
 `~/.claude/settings.json` already had a stale `"command": "rtk hook claude"` PreToolUse

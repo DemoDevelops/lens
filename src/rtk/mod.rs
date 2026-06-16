@@ -142,23 +142,41 @@ pub fn run_rtk(args: &[&str]) -> Result<std::process::Output> {
 // Hook registration detection (Claude settings.json; see RTK_NOTES.md §6)
 // ---------------------------------------------------------------------------
 
-/// Path to the Claude settings file RTK patches. Honors `$CTXFORGE_CLAUDE_SETTINGS`
-/// (test seam), else `~/.claude/settings.json`.
+/// The Claude config dir whose `settings.json` *this user's* Claude Code actually
+/// reads — `$CLAUDE_CONFIG_DIR` if set, else `~/.claude`. This is where ctxforge
+/// registers + detects the RTK hook, so the hook fires for the running Claude Code.
 ///
-/// We deliberately mirror RTK's own resolution (`rtk` `src/init.rs::resolve_claude_dir`
-/// = `dirs::home_dir()/.claude`, which on unix is `$HOME/.claude`) and **ignore**
-/// `$CLAUDE_CONFIG_DIR`: `rtk init --global` (v0.28.2) writes the hook to `~/.claude`
-/// regardless of `$CLAUDE_CONFIG_DIR`, so detection must read exactly where RTK
-/// writes — otherwise `status`/`rtk_active` would miss a hook this very session's
-/// `$CLAUDE_CONFIG_DIR` points elsewhere (verified at integration: this machine runs
-/// with `CLAUDE_CONFIG_DIR=~/.claude-personal`).
+/// NB: `rtk init --global` (v0.28.2) ignores `$CLAUDE_CONFIG_DIR` and always writes
+/// to `dirs::home_dir()/.claude` (see [`rtk_default_hook_script`]). So when
+/// `$CLAUDE_CONFIG_DIR` differs (e.g. this machine's `~/.claude-personal`), ctxforge
+/// patches the config-dir settings itself rather than relying on `rtk init`'s patch.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !d.is_empty() {
+            return Some(PathBuf::from(d));
+        }
+    }
+    home_dir().map(|h| h.join(".claude"))
+}
+
+/// Path to the Claude settings file ctxforge registers/detects the RTK hook in.
+/// Honors `$CTXFORGE_CLAUDE_SETTINGS` (test seam), else [`claude_config_dir`]'s
+/// `settings.json`.
 pub fn claude_settings_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CTXFORGE_CLAUDE_SETTINGS") {
         if !p.is_empty() {
             return Some(PathBuf::from(p));
         }
     }
-    home_dir().map(|h| h.join(".claude").join("settings.json"))
+    claude_config_dir().map(|d| d.join("settings.json"))
+}
+
+/// Where `rtk init` writes its hook script — always `dirs::home_dir()/.claude/
+/// hooks/rtk-rewrite.sh` (rtk ignores `$CLAUDE_CONFIG_DIR`). ctxforge copies this
+/// into the active config dir's `hooks/` when the two differ, so the hook is
+/// self-contained under the dir the running Claude Code reads.
+pub fn rtk_default_hook_script() -> Option<PathBuf> {
+    home_dir().map(|h| h.join(".claude").join("hooks").join("rtk-rewrite.sh"))
 }
 
 /// True if RTK's PreToolUse hook is registered in Claude settings — any

@@ -233,10 +233,26 @@ fn store_index_graph(dir: &Path) -> (u64, i64, i64, i64) {
 }
 
 /// Aggregate `ops.log` (optionally scoped to a session) into a JSON snapshot —
-/// the shape the web dashboard polls. Cumulative only; rate/throughput is the
-/// client's job (it diffs successive snapshots), keeping this stateless.
+/// the shape the web dashboard polls. Cumulative; rate/throughput is the client's
+/// job (it diffs successive snapshots), keeping this stateless.
 pub fn snapshot_json(dir: &Path, session: Option<&str>) -> serde_json::Value {
-    let records = read_records(dir, session);
+    snapshot_json_since(dir, session, None)
+}
+
+/// As [`snapshot_json`], but `since` (unix seconds) restricts ops + session
+/// activity to events at/after that instant — the dashboard's "live since the page
+/// loaded" scope, so only currently-active sessions show, never previous ones. The
+/// `rtk` plane stays global (it reflects `rtk gain`, not this data dir's sessions).
+pub fn snapshot_json_since(
+    dir: &Path,
+    session: Option<&str>,
+    since: Option<i64>,
+) -> serde_json::Value {
+    let mut records = read_records(dir, session);
+    if let Some(cut) = since {
+        let iso = super::iso8601_secs(cut);
+        records.retain(|r| r.ts.as_str() >= iso.as_str());
+    }
     let t = aggregate(&records);
     let (store_size, index_chunks, graph_nodes, graph_edges) = store_index_graph(dir);
 
@@ -272,7 +288,7 @@ pub fn snapshot_json(dir: &Path, session: Option<&str>) -> serde_json::Value {
 
     // The "first plane": built-in tool activity captured by the session hooks.
     let activity = SessionStore::open(dir)
-        .and_then(|s| s.activity(session))
+        .and_then(|s| s.activity(session, since))
         .unwrap_or_default();
     let act_categories: Vec<serde_json::Value> = activity
         .by_category
@@ -305,6 +321,7 @@ pub fn snapshot_json(dir: &Path, session: Option<&str>) -> serde_json::Value {
         "graph_nodes": graph_nodes,
         "graph_edges": graph_edges,
         "session": session,
+        "since": since,
         "activity": {
             "total_events": activity.total_events,
             "sessions": activity.sessions,
@@ -414,7 +431,7 @@ fn render(dir: &Path, filters: &Filters) -> String {
     // Session activity: the "first plane" — built-in tool use captured by the
     // hooks (NOT ctxforge MCP tool usage; that is the savings totals above).
     let activity = SessionStore::open(dir)
-        .and_then(|s| s.activity(filters.session.as_deref()))
+        .and_then(|s| s.activity(filters.session.as_deref(), None))
         .unwrap_or_default();
     o.push('\n');
     o.push_str("  session activity (built-in tools, via hooks):\n");
@@ -617,5 +634,27 @@ esac
         }
 
         std::env::remove_var("CTXFORGE_HOME");
+    }
+
+    #[test]
+    fn snapshot_since_scopes_ops_to_the_cutoff() {
+        let dir = tempdir().unwrap();
+        OpLog::open(dir.path())
+            .start("ctx_execute", json!({}))
+            .finish(8000, 100, Some("a".into()), "ok", "", None);
+
+        // No cutoff: the op is counted (today's behavior, unchanged).
+        assert_eq!(snapshot_json(dir.path(), None)["ops"], json!(1));
+
+        // Cutoff in the far future ⇒ the op (recorded "now") is before it ⇒ excluded.
+        let future = 32_503_680_000; // ~year 3000
+        let scoped = snapshot_json_since(dir.path(), None, Some(future));
+        assert_eq!(scoped["ops"], json!(0), "ops before the cutoff are dropped");
+        assert_eq!(scoped["tokens_saved_est"], json!(0));
+        assert_eq!(scoped["since"], json!(future));
+        assert!(scoped["by_tool"].as_array().unwrap().is_empty());
+
+        // Cutoff at the epoch ⇒ everything is at/after it ⇒ included.
+        assert_eq!(snapshot_json_since(dir.path(), None, Some(0))["ops"], json!(1));
     }
 }

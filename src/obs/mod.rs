@@ -315,6 +315,12 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+/// ISO-8601 (`...Z`, millis = 0) for a unix-seconds instant. Used as a lower-bound
+/// cutoff to compare against op-record `ts` strings (which sort chronologically).
+pub fn iso8601_secs(secs: i64) -> String {
+    iso8601(secs, 0)
+}
+
 /// Current UTC time as ISO-8601 with millisecond precision (`...Z`).
 pub fn iso8601_now() -> String {
     let now = SystemTime::now()

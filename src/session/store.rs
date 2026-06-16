@@ -212,7 +212,7 @@ impl SessionStore {
     /// Aggregate hook-captured activity, optionally scoped to one session.
     /// Read-only: aggregates rows in Rust so the (bounded, per-session) event
     /// set needs no extra indexes or grouped queries.
-    pub fn activity(&self, session: Option<&str>) -> Result<Activity> {
+    pub fn activity(&self, session: Option<&str>, since: Option<i64>) -> Result<Activity> {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare("SELECT session_id, category, source_hook, timestamp FROM session_events")?;
@@ -233,6 +233,13 @@ impl SessionStore {
         for (sid, cat, hook, ts) in rows.flatten() {
             if let Some(f) = session {
                 if sid != f {
+                    continue;
+                }
+            }
+            // `since` cutoff: keep only events at/after it (the dashboard's
+            // "live since the page loaded" scope).
+            if let Some(cut) = since {
+                if ts < cut {
                     continue;
                 }
             }
@@ -412,7 +419,7 @@ mod tests {
         ])
         .unwrap();
 
-        let all = s.activity(None).unwrap();
+        let all = s.activity(None, None).unwrap();
         assert_eq!(all.total_events, 4);
         assert_eq!(all.sessions, 2);
         assert_eq!(all.last_ts, Some(40));
@@ -420,9 +427,16 @@ mod tests {
         assert_eq!(all.by_category[0], ("file".into(), 3));
         assert_eq!(all.by_category[1], ("error".into(), 1));
 
-        let only_s1 = s.activity(Some("s1")).unwrap();
+        let only_s1 = s.activity(Some("s1"), None).unwrap();
         assert_eq!(only_s1.total_events, 3);
         assert_eq!(only_s1.sessions, 1);
+
+        // `since` cutoff keeps only events at/after it (the dashboard live scope):
+        // ts >= 20 drops the ts=10 event, leaving 3 events across both sessions.
+        let live = s.activity(None, Some(20)).unwrap();
+        assert_eq!(live.total_events, 3);
+        assert_eq!(live.sessions, 2);
+        assert_eq!(live.last_ts, Some(40));
     }
 
     #[test]

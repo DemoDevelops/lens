@@ -163,24 +163,35 @@ pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Grep results may 
 /// Contextual guidance steering analysis-reads into the sandbox.
 pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from the file? Use ctx_execute_file(path, language, code) — the bytes stay in the sandbox and only what your code prints enters your conversation.\n  </tip>\n</context_guidance>";
 
+/// Port of context-mode's `mcpRedirect` (core/routing.mjs #230): a decision that
+/// redirects the agent to an MCP-backed tool (deny WebFetch, rewrite curl/build into
+/// `ctx_execute`) is only safe to emit when the server is reachable — otherwise the
+/// agent is told to use a tool that isn't there and stalls. So gate ONLY these on
+/// `mcp_ready`; nudges and sub-agent injection are NOT gated (they fire regardless,
+/// matching context-mode, which never wraps `guidanceOnce`/Agent in `mcpRedirect`).
+fn mcp_redirect(ctx: &RouteCtx, d: Decision) -> Decision {
+    if ctx.mcp_ready {
+        d
+    } else {
+        Decision::Passthrough
+    }
+}
+
 /// Route one PreToolUse call to a [`Decision`].
 ///
-/// Order matters: `Off` and `!mcp_ready` short-circuit to [`Decision::Passthrough`]
-/// before any per-tool logic, so routing is inert whenever it should be.
+/// `Off` short-circuits to [`Decision::Passthrough`]. There is NO blanket
+/// `!mcp_ready` gate (that was a divergence from context-mode): readiness gates
+/// only the MCP-redirect decisions via [`mcp_redirect`], so nudges and sub-agent
+/// injection keep firing even before the server's heartbeat lands.
 pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if ctx.level == Level::Off {
-        return Decision::Passthrough;
-    }
-    // Master safety gate: never wedge a tool call when the server that backs the
-    // ctxforge tools is unreachable.
-    if !ctx.mcp_ready {
         return Decision::Passthrough;
     }
 
     match tool {
         "WebFetch" => {
             if ctx.level.steers() {
-                Decision::Deny(WEBFETCH_REASON.to_string())
+                mcp_redirect(ctx, Decision::Deny(WEBFETCH_REASON.to_string()))
             } else {
                 Decision::Passthrough
             }
@@ -259,10 +270,12 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     }
     // Network/build/inline-HTTP → hard redirect into ctx_execute (port of
     // context-mode's Bash redirects). Steering only; under wrap-only these fall
-    // through to the generic output-wrap below.
+    // through to the generic output-wrap below. Gated on `mcp_ready` via
+    // `mcp_redirect` (these point at ctx_execute); when the server is down the
+    // command passes through untouched rather than redirecting into a dead tool.
     if ctx.level.steers() {
         if let Some(d) = bash_redirect(cmd) {
-            return d;
+            return mcp_redirect(ctx, d);
         }
     }
     if is_wrappable(cmd) {
@@ -853,24 +866,42 @@ mod tests {
     }
 
     #[test]
-    fn mcp_not_ready_forces_passthrough_for_all_tools() {
+    fn mcp_not_ready_gates_only_redirects_not_nudges() {
+        // Port of context-mode's mcpRedirect (#230): when the server is unreachable,
+        // ONLY the MCP-redirect decisions passthrough (so the agent isn't sent to a
+        // dead tool). Nudges, wrap, and sub-agent injection still fire — they don't
+        // depend on the MCP server. (Old behavior blanket-passed everything; that was
+        // the divergence.)
         let d = tempdir().unwrap();
         let ctx = rc(Level::Full, false, d.path());
+        // MCP-redirect decisions → suppressed to passthrough when not ready:
         assert_eq!(
             route("WebFetch", &json!({"url": "http://x"}), &ctx),
-            Decision::Passthrough
+            Decision::Passthrough,
+            "WebFetch deny is an MCP redirect — suppressed when server down"
         );
         assert_eq!(
-            route("Bash", &json!({"command": "find ."}), &ctx),
-            Decision::Passthrough
+            route("Bash", &json!({"command": "curl https://api.example.com/data"}), &ctx),
+            Decision::Passthrough,
+            "curl→ctx_execute redirect suppressed when server down"
+        );
+        // Non-redirect decisions → still fire (not gated on mcp_ready):
+        assert!(
+            matches!(
+                route("Bash", &json!({"command": "find ."}), &ctx),
+                Decision::Modify { .. }
+            ),
+            "wrap rewrite uses the ctxforge CLI, not the MCP — fires regardless"
         );
         assert_eq!(
             route("Grep", &json!({"pattern": "x"}), &ctx),
-            Decision::Passthrough
+            Decision::Context(GREP_NUDGE.to_string()),
+            "Grep nudge is not an MCP redirect — fires regardless"
         );
         assert_eq!(
             route("Read", &json!({"file_path": "x"}), &ctx),
-            Decision::Passthrough
+            Decision::Context(READ_NUDGE.to_string()),
+            "Read nudge is not an MCP redirect — fires regardless"
         );
     }
 

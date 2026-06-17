@@ -205,22 +205,36 @@ fn bash_nudge_fires_once_then_passthrough_at_steer() {
 }
 
 // ---------------------------------------------------------------------------
-// §2/§4: MCP-ready guard — server down ⇒ everything passes through
+// §2/§4: MCP-ready guard (port of context-mode mcpRedirect #230) — server down
+// ⇒ only MCP-redirect decisions passthrough; wrap/nudges still fire.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mcp_down_forces_passthrough() {
+fn mcp_down_gates_redirects_not_wrap() {
     let d = tempfile::tempdir().unwrap();
     let envs = [("CTXFORGE_ROUTING", "full"), ("CTXFORGE_ROUTING_MCP", "down")];
+    // WebFetch deny is an MCP redirect → suppressed to passthrough when down.
     let (raw_wf, _) = run_hook("PreToolUse", &webfetch_payload(d.path(), "s1"), &envs, d.path());
-    assert_eq!(raw_wf, "{}", "server down → WebFetch passthrough");
-    let (raw_b, _) = run_hook(
+    assert_eq!(raw_wf, "{}", "server down → WebFetch deny suppressed");
+    // curl→ctx_execute is an MCP redirect → suppressed to passthrough when down.
+    let (raw_curl, _) = run_hook(
         "PreToolUse",
-        &bash_payload(d.path(), "s1", "find . -type f"),
+        &bash_payload(d.path(), "s1", "curl https://api.example.com/data"),
         &envs,
         d.path(),
     );
-    assert_eq!(raw_b, "{}", "server down → Bash passthrough");
+    assert_eq!(raw_curl, "{}", "server down → curl redirect suppressed");
+    // Wrap shells the ctxforge CLI (not the MCP server) → still fires when down.
+    let (_, v_b) = run_hook(
+        "PreToolUse",
+        &bash_payload(d.path(), "s2", "find . -type f"),
+        &envs,
+        d.path(),
+    );
+    assert_eq!(
+        v_b["hookSpecificOutput"]["permissionDecision"], "allow",
+        "server down → wrappable Bash still rewritten (wrap is CLI-backed, not MCP)"
+    );
 }
 
 // ---------------------------------------------------------------------------

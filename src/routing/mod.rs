@@ -5,18 +5,20 @@
 //!
 //!   * **steer** — deny `WebFetch`; redirect curl/wget/build/inline-HTTP `Bash`
 //!     commands into `ctx_execute`; inject the tool-selection guide into every
-//!     sub-agent (`Agent`/`Task`) prompt; and emit periodic non-blocking nudges
-//!     toward ctxforge tools for `Bash` / `Grep` / (at full) `Read`. Also injects
-//!     the guide at `SessionStart`. (Sub-agent injection + Bash redirects are ports
-//!     of context-mode's `hooks/core/routing.mjs`.)
+//!     sub-agent (`Agent`/`Task`) prompt; emit once-per-session non-blocking nudges
+//!     toward ctxforge tools for `Bash` / `Grep` / `Read` (structurally-bounded
+//!     commands are skipped); and a periodic nudge for external (non-ctxforge) MCP
+//!     tools. Also injects the guide at `SessionStart`. (All ports of context-mode's
+//!     `hooks/core/routing.mjs`.)
 //!   * **wrap** — transparently rewrite a read-only, high-output `Bash` command
 //!     into `ctxforge wrap -- <cmd>` so its output is offloaded losslessly.
 //!   * **full** — both of the above.
 //!
-//! Two hard safety rails: routing never engages unless the MCP server is
-//! reachable ([`mcp_ready`]), and stateful shell commands (anything that mutates
-//! shell state — `cd`, `export`, assignments, …) are always passed through
-//! untouched, because rewriting them would silently change session behavior.
+//! Safety rails: MCP-redirect decisions (WebFetch deny, curl/build rewrites) are
+//! gated on [`mcp_ready`] via [`mcp_redirect`] so the agent is never sent to a dead
+//! tool (nudges + sub-agent injection fire regardless); and stateful shell commands
+//! (anything that mutates shell state — `cd`, `export`, assignments, …) are always
+//! passed through untouched, because rewriting them would silently change behavior.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -165,6 +167,11 @@ pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Grep results may 
 /// Contextual guidance steering analysis-reads into the sandbox.
 pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from the file? Use ctx_execute_file(path, language, code) — the bytes stay in the sandbox and only what your code prints enters your conversation.\n  </tip>\n</context_guidance>";
 
+/// Periodic guidance for external (non-ctxforge) MCP tools whose payloads flood
+/// context (port of context-mode's `createExternalMcpGuidance`, tools mapped to
+/// ctxforge's).
+pub const EXTERNAL_MCP_NUDGE: &str = "<context_guidance>\n  <tip>\n    External MCP tools commonly return large payloads (channel history, file content, search results) that enter your conversation in full. When you intend to filter, count, or aggregate that data, pipe it through ctx_execute(language, code) — the raw payload stays in the sandbox and only the derived answer enters your conversation. For content you'll query later, ctx_index it then ctx_search(queries).\n  </tip>\n</context_guidance>";
+
 /// Port of context-mode's `mcpRedirect` (core/routing.mjs #230): a decision that
 /// redirects the agent to an MCP-backed tool (deny WebFetch, rewrite curl/build into
 /// `ctx_execute`) is only safe to emit when the server is reachable — otherwise the
@@ -206,14 +213,16 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             }
         }
         "Grep" => {
-            if ctx.level.steers() && throttle_periodic(ctx, "grep", NUDGE_PERIOD) {
+            if ctx.level.steers() && guidance_once(ctx, "grep") {
                 Decision::Context(GREP_NUDGE.to_string())
             } else {
                 Decision::Passthrough
             }
         }
+        // Read nudge fires whenever steering (context-mode nudges Read regardless of
+        // an aggressiveness tier), once per session so it never becomes noise.
         "Read" => {
-            if ctx.level == Level::Full && throttle_periodic(ctx, "read", NUDGE_PERIOD) {
+            if ctx.level.steers() && guidance_once(ctx, "read") {
                 Decision::Context(READ_NUDGE.to_string())
             } else {
                 Decision::Passthrough
@@ -225,6 +234,17 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
         "Agent" | "Task" => {
             if ctx.level.steers() {
                 agent_inject(tool_input, ctx)
+            } else {
+                Decision::Passthrough
+            }
+        }
+        // External (non-ctxforge) MCP tools return large payloads (channel history,
+        // file content, search results). Periodically nudge toward ctx_execute — a
+        // single one-shot nudge gets lost in long MCP-heavy sessions (port of
+        // context-mode's #529/#567 periodic external-MCP guidance).
+        other if ctx.level.steers() && is_external_mcp_tool(other) => {
+            if throttle_periodic(ctx, "external-mcp", EXTERNAL_MCP_PERIOD) {
+                Decision::Context(EXTERNAL_MCP_NUDGE.to_string())
             } else {
                 Decision::Passthrough
             }
@@ -295,12 +315,8 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 reason: WRAP_REASON.to_string(),
                 updated_input: updated,
             }
-        } else if ctx.level.steers() {
-            if throttle_periodic(ctx, "bash", NUDGE_PERIOD) {
-                Decision::Context(BASH_NUDGE.to_string())
-            } else {
-                Decision::Passthrough
-            }
+        } else if ctx.level.steers() && guidance_once(ctx, "bash") {
+            Decision::Context(BASH_NUDGE.to_string())
         } else {
             Decision::Passthrough
         }
@@ -656,6 +672,20 @@ pub(crate) fn is_structurally_bounded(command: &str) -> bool {
     }
 }
 
+/// Port of context-mode's `isExternalMcpTool` (#529): a non-ctxforge MCP tool, whose
+/// large payloads we nudge (periodically) toward `ctx_execute`. Claude's wire shape is
+/// `mcp__<server>__<tool>`; ctxforge's own server is excluded (its tools have dedicated
+/// handling / are the redirect target).
+fn is_external_mcp_tool(tool: &str) -> bool {
+    match tool.strip_prefix("mcp__") {
+        Some(rest) => {
+            let server = rest.split("__").next().unwrap_or("");
+            !server.is_empty() && !server.contains("ctxforge")
+        }
+        None => false,
+    }
+}
+
 /// Is the whole command line safe to wrap? Every pipeline/chain segment's
 /// leading program must be read-only and allowlisted, so a single mutating stage
 /// (`find … | xargs rm`) disqualifies the line.
@@ -673,18 +703,18 @@ fn is_wrappable(cmd: &str) -> bool {
     any
 }
 
-/// Re-injection cadence for per-tool guidance: fire on the 1st, then every
-/// `NUDGE_PERIOD`-th, call of a given `(session, tool)`. A one-shot nudge is too
-/// weak (the model forgets as context grows); a periodic reminder keeps the
-/// directive live (context-mode's `guidancePeriodic` approach).
-pub const NUDGE_PERIOD: u64 = 8;
+/// External-MCP nudge cadence: fire on the 1st, then every `EXTERNAL_MCP_PERIOD`-th
+/// matching call. context-mode's default (`EXTERNAL_MCP_NUDGE_DEFAULT`) is 10 — keeps
+/// the guidance fresh across an MCP-heavy run (50+ calls) without flooding context.
+/// Bash/Grep/Read use [`guidance_once`] (one shot) instead; only external MCP repeats.
+pub const EXTERNAL_MCP_PERIOD: u64 = 10;
 
 /// Fire a periodic nudge per `(session, key)`: returns `true` on calls 1,
 /// `period+1`, `2·period+1`, … Backed by a per-`(session,key)` counter file under
 /// `<data_dir>/throttle`; any IO error suppresses the nudge (returns `false`)
 /// rather than spamming. Best-effort under concurrency (the read-increment-write
 /// isn't atomic across parallel hook processes, but a missed/extra reminder is
-/// harmless).
+/// harmless). Port of context-mode's `guidancePeriodic`.
 fn throttle_periodic(ctx: &RouteCtx, key: &str, period: u64) -> bool {
     let dir = ctx.data_dir.join("throttle");
     let _ = std::fs::create_dir_all(&dir); // best effort
@@ -698,6 +728,22 @@ fn throttle_periodic(ctx: &RouteCtx, key: &str, period: u64) -> bool {
         return false;
     }
     period <= 1 || next % period == 1
+}
+
+/// Fire a nudge at most ONCE per `(session, key)` — port of context-mode's
+/// `guidanceOnce`. Returns `true` only on the first call: an atomic create-or-fail
+/// (`O_CREAT | O_EXCL`) on a marker file under `<data_dir>/throttle` means the first
+/// of the session's parallel hook processes wins and the rest get `false`. Any IO
+/// error suppresses the nudge rather than risking a repeat.
+fn guidance_once(ctx: &RouteCtx, key: &str) -> bool {
+    let dir = ctx.data_dir.join("throttle");
+    let _ = std::fs::create_dir_all(&dir); // best effort
+    let marker = dir.join(format!("{}.{}.once", sanitize(ctx.session_id), key));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .is_ok()
 }
 
 /// Replace every non-alphanumeric byte with `_` so a session id is filesystem
@@ -1195,22 +1241,60 @@ mod tests {
     }
 
     #[test]
-    fn read_nudges_only_at_full() {
+    fn read_nudges_once_when_steering() {
         let d = tempdir().unwrap();
         let ti = json!({"file_path": "big.rs"});
-        // steer alone does NOT nudge Read
-        assert_eq!(
-            route("Read", &ti, &rc(Level::Steer, true, d.path())),
-            Decision::Passthrough
-        );
-        // full nudges once
-        let d2 = tempdir().unwrap();
-        let ctx = rc(Level::Full, true, d2.path());
+        // Read nudges whenever steering (not gated to full anymore), once per session.
+        let ctx = rc(Level::Steer, true, d.path());
         assert_eq!(
             route("Read", &ti, &ctx),
-            Decision::Context(READ_NUDGE.to_string())
+            Decision::Context(READ_NUDGE.to_string()),
+            "Read nudges at steer (context-mode nudges Read whenever routing is active)"
         );
-        assert_eq!(route("Read", &ti, &ctx), Decision::Passthrough);
+        assert_eq!(
+            route("Read", &ti, &ctx),
+            Decision::Passthrough,
+            "and only once per session"
+        );
+        // wrap-only does not steer → no Read nudge.
+        let d2 = tempdir().unwrap();
+        assert_eq!(
+            route("Read", &ti, &rc(Level::Wrap, true, d2.path())),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn external_mcp_tool_nudged_periodically_when_steering() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let ti = json!({});
+        // First call to a non-ctxforge MCP tool nudges; throttled after.
+        assert_eq!(
+            route("mcp__slack__search", &ti, &ctx),
+            Decision::Context(EXTERNAL_MCP_NUDGE.to_string())
+        );
+        assert_eq!(route("mcp__slack__search", &ti, &ctx), Decision::Passthrough);
+        // ctxforge's own MCP tools are NOT treated as external.
+        assert_eq!(
+            route("mcp__ctxforge__ctx_execute", &ti, &ctx),
+            Decision::Passthrough
+        );
+        // not steering → no nudge.
+        let d2 = tempdir().unwrap();
+        assert_eq!(
+            route("mcp__slack__search", &ti, &rc(Level::Wrap, true, d2.path())),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn external_mcp_detection() {
+        assert!(is_external_mcp_tool("mcp__slack__post"));
+        assert!(is_external_mcp_tool("mcp__github__list"));
+        assert!(!is_external_mcp_tool("mcp__ctxforge__ctx_search"));
+        assert!(!is_external_mcp_tool("Bash"));
+        assert!(!is_external_mcp_tool("mcp__"));
     }
 
     #[test]

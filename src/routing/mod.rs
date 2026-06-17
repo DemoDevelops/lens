@@ -19,7 +19,9 @@
 //! untouched, because rewriting them would silently change session behavior.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
+use regex::Regex;
 use serde_json::{json, Value};
 
 /// Active routing level, parsed from `CTXFORGE_ROUTING`.
@@ -277,6 +279,12 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
         if let Some(d) = bash_redirect(cmd) {
             return mcp_redirect(ctx, d);
         }
+    }
+    // Structurally-bounded commands (git status, ls, --version probes, …) produce
+    // little output — nudging or wrapping them is noise that trains the agent to
+    // ignore the advisory. Skip both (port of context-mode #463).
+    if is_structurally_bounded(cmd) {
+        return Decision::Passthrough;
     }
     if is_wrappable(cmd) {
         if ctx.level.wraps() {
@@ -553,6 +561,99 @@ fn segment_allowlisted(seg: &str) -> bool {
         return ok;
     }
     PLAIN_ALLOW.contains(&prog)
+}
+
+/// Port of context-mode's `SAFE_COMMAND_PATTERNS` (core/routing.mjs #463/#470/#517):
+/// commands whose stdout is structurally bounded (system probes, simple read-only git
+/// subcommands, `--version` checks, silent filesystem ops). Compiled once per process.
+///
+/// The `regex` crate has no lookahead, so the five verbose/recursive carve-outs
+/// (mv/cp/rm/ln/ls) are handled separately in [`is_structurally_bounded`]; the rest
+/// port verbatim from the source.
+fn bounded_patterns() -> &'static Vec<Regex> {
+    static P: OnceLock<Vec<Regex>> = OnceLock::new();
+    P.get_or_init(|| {
+        [
+            r"^pwd$",
+            r"^whoami$",
+            r"^hostname(?:\s+-[a-zA-Z]+)?$",
+            r"^uname(?:\s+-[a-zA-Z]+)?$",
+            r"^id(?:\s+\S+)?$",
+            r"^date(?:\s+[^\r\n]+)?$",
+            r"^echo\s",
+            r"^printf\s",
+            r"^which\s+\S+(?:\s+\S+)*$",
+            r"^type\s+\S+(?:\s+\S+)*$",
+            r"^command\s+-v\s+\S+(?:\s+\S+)*$",
+            r"^readlink(?:\s+[^\r\n]+)?$",
+            r"^basename(?:\s+[^\r\n]+)?$",
+            r"^dirname(?:\s+[^\r\n]+)?$",
+            r"^realpath(?:\s+[^\r\n]+)?$",
+            r"^cd(?:\s+[^\r\n]+)?$",
+            r"^mkdir(?:\s+[^\r\n]+)?$",
+            r"^touch\s+[^\r\n]+$",
+            r"^git\s+status(?:\s+[^\r\n]+)?$",
+            r"^git\s+rev-parse(?:\s+[^\r\n]+)?$",
+            r"^git\s+remote(?:\s+-v|\s+show\s+\S+)?$",
+            r"^git\s+branch(?:\s+[^\r\n]+)?$",
+            r"^git\s+config\s+--get(?:\s+[^\r\n]+)?$",
+            r"^git\s+diff\s+--stat(?:\s+[^\r\n]+)?$",
+            r"^git\s+diff\s+--name-only(?:\s+[^\r\n]+)?$",
+            r"^git\s+stash\s+list$",
+            r"^git\s+tag(?:\s+-l(?:\s+[^\r\n]+)?)?$",
+            r"^git\s+log\s+-\d{1,2}(?:\s+[^\r\n]+)?$",
+            r"(?:^|\s)--version(?:\s|$)",
+            r"^\S+\s+-V(?:\s|$)",
+        ]
+        .iter()
+        .map(|p| Regex::new(p).expect("static bounded-command pattern compiles"))
+        .collect()
+    })
+}
+
+/// True when `cmd` is a single-dash flag bundle token (e.g. `-rvf`) containing `ch`.
+/// Mirrors context-mode's `-[a-zA-Z]*<ch>[a-zA-Z]*` lookahead carve-out.
+fn flag_bundle_has(cmd: &str, ch: char) -> bool {
+    cmd.split_whitespace().any(|tok| match tok.strip_prefix('-') {
+        Some(rest) => {
+            !rest.starts_with('-')
+                && !rest.is_empty()
+                && rest.chars().all(|c| c.is_ascii_alphabetic())
+                && rest.contains(ch)
+        }
+        None => false,
+    })
+}
+
+/// Port of context-mode's `isStructurallyBounded` (#463): is this command's output
+/// bounded enough that the routing nudge/wrap would be noise? Conservative — any
+/// shell control operator, or an unknown command, returns false.
+pub(crate) fn is_structurally_bounded(command: &str) -> bool {
+    let cmd = command.trim();
+    if cmd.is_empty() {
+        return false;
+    }
+    // Any control operator can compose a bounded command with an unbounded sink
+    // (`git status | xargs cat`), so disqualify — port of SHELL_CONTROL_OPERATORS.
+    // (The `regex` crate lacks lookahead; presence of any single operator char is
+    // sufficient to disqualify, which is exactly the source's intent.)
+    if cmd.contains(['|', '`', '\n', '\r', ';', '>', '<', '&']) || cmd.contains("$(") {
+        return false;
+    }
+    if bounded_patterns().iter().any(|re| re.is_match(cmd)) {
+        return true;
+    }
+    // Lookahead carve-outs: mv/cp/rm/ln are bounded only without a verbose flag
+    // (verbose prints one line per file → can flood); ls only without recursive.
+    match cmd.split_whitespace().next().unwrap_or("") {
+        "mv" | "cp" | "rm" | "ln" => {
+            cmd.split_whitespace().count() >= 2
+                && !flag_bundle_has(cmd, 'v')
+                && !cmd.contains("--verbose")
+        }
+        "ls" => !flag_bundle_has(cmd, 'R') && !cmd.contains("--recursive"),
+        _ => false,
+    }
 }
 
 /// Is the whole command line safe to wrap? Every pipeline/chain segment's
@@ -836,6 +937,51 @@ mod tests {
         // cd-chain handled by is_stateful, but as a pure allowlist check the
         // `cd` segment is also not allowlisted:
         assert!(!is_wrappable("cd x && find /"));
+    }
+
+    // ── is_structurally_bounded (#463 port) ────────────────────────────────
+
+    #[test]
+    fn bounded_commands_are_recognized() {
+        for c in [
+            "pwd", "whoami", "git status", "git status --short", "git rev-parse HEAD",
+            "git branch", "git diff --stat", "git log -5", "git stash list",
+            "node --version", "python3 --version", "cargo -V", "ls", "ls -la",
+            "cd /tmp", "echo hi", "mkdir -p a/b", "mv a b", "cp a b", "rm a",
+        ] {
+            assert!(is_structurally_bounded(c), "{c:?} should be bounded");
+        }
+    }
+
+    #[test]
+    fn unbounded_commands_are_rejected() {
+        for c in [
+            "find .", "cat file.txt", "grep -r foo", "git log", "git diff",
+            "ls -R", "ls --recursive", "cp -rv a b", "rm -v x", "mv --verbose a b",
+            "git status | xargs cat", "cat huge && echo done", "echo $(cat f)",
+            "", "rg pattern",
+        ] {
+            assert!(!is_structurally_bounded(c), "{c:?} should NOT be bounded");
+        }
+    }
+
+    #[test]
+    fn bounded_wrappable_command_passes_through_instead_of_wrapping() {
+        let d = tempdir().unwrap();
+        // `git status` and `ls` are both is_wrappable AND structurally bounded —
+        // they must passthrough (no wrap, no nudge) under wrap/full.
+        for cmd in ["git status", "ls -la"] {
+            assert_eq!(
+                route("Bash", &json!({"command": cmd}), &rc(Level::Full, true, d.path())),
+                Decision::Passthrough,
+                "{cmd:?} is bounded → not wrapped"
+            );
+        }
+        // `git log` (unbounded) is still wrapped.
+        assert!(matches!(
+            route("Bash", &json!({"command": "git log"}), &rc(Level::Wrap, true, d.path())),
+            Decision::Modify { .. }
+        ));
     }
 
     // ── route(): MCP-ready gate ────────────────────────────────────────────

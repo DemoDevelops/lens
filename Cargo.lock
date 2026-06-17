@@ -226,6 +226,7 @@ dependencies = [
  "blake3",
  "ignore",
  "predicates",
+ "regex",
  "rmcp",
  "rusqlite",
  "schemars",

@@ -158,10 +158,18 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
         "SessionStart" => {
             let source = input.source.clone().unwrap_or_else(|| "startup".into());
             let ctx = session_start(&store, &data_dir, &session_id, &project, &project_str, ts, &source)?;
-            // Prepend the routing tool-selection guide when steering is active
-            // and the MCP server is reachable; otherwise leave `ctx` untouched.
+            // Prepend the routing tool-selection guide whenever steering is active.
+            // NOT gated on mcp_ready (unlike PreToolUse): at SessionStart the MCP
+            // server is registered in the same config as this hook and is still
+            // booting, so its heartbeat (`server.pid`) usually isn't fresh yet. Gating
+            // here loses that race in every fresh session/worktree and suppresses the
+            // guide for the whole session — the model then never learns to reach for
+            // (or ToolSearch-load) the ctx tools. The guide is pure context, not a tool
+            // interception, so injecting it before the server is reachable is safe; the
+            // mcp_ready rail still gates PreToolUse, where denying/rewriting a call the
+            // server can't back would be wrong.
             let level = routing::Level::from_env();
-            let ctx = if level.steers() && routing::mcp_ready(&data_dir) {
+            let ctx = if level.steers() {
                 let b = routing::session_block(level);
                 if ctx.is_empty() {
                     b
@@ -425,6 +433,36 @@ mod tests {
 
         let store = SessionStore::open(&super::super::resolve_data_dir(dir.path())).unwrap();
         assert_eq!(store.count_events_for_project(&dir.path().to_string_lossy()).unwrap(), 0);
+    }
+
+    #[test]
+    fn sessionstart_injects_routing_guide_even_when_mcp_not_ready() {
+        // Regression: the SessionStart tool-selection guide must NOT be gated on a
+        // fresh server.pid. In a fresh worktree the MCP server is still booting when
+        // this hook fires, so server.pid isn't fresh yet (mcp_ready == false) — yet
+        // the guide has to inject anyway, or the model never learns to use the ctx
+        // tools. tempdir() has no server.pid, so mcp_ready is false here; the guide
+        // must still appear. (CTXFORGE_ROUTING is read by no other test.)
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("CTXFORGE_ROUTING").ok();
+        std::env::set_var("CTXFORGE_ROUTING", "full");
+
+        let mut ss = input_for(dir.path());
+        ss.source = Some("startup".into());
+        let out = handle("SessionStart", &ss).unwrap();
+
+        match prev {
+            Some(v) => std::env::set_var("CTXFORGE_ROUTING", v),
+            None => std::env::remove_var("CTXFORGE_ROUTING"),
+        }
+
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(
+            ctx.contains("<context_window_protection>"),
+            "guide must inject even when the MCP server isn't reachable yet"
+        );
+        assert!(ctx.contains("ToolSearch"), "carries the deferred-tool bootstrap");
     }
 
     #[test]

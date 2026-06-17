@@ -191,6 +191,7 @@ fn register_hook() -> Result<()> {
             .with_context(|| format!("reading {}", canonical.display()))?;
         let bin = super::bin_dir().context("cannot resolve ctxforge bin dir")?;
         let patched = inject_path_guard(&body, &bin);
+        let patched = inject_emit_path_prefix(&patched, &bin);
         if let Some(parent) = target_script.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -231,6 +232,40 @@ fn inject_path_guard(script: &str, bin_dir: &Path) -> String {
         }
     }
     format!("{note}\n{guard}\n{script}")
+}
+
+/// Make the *emitted* rewrite self-resolve the managed rtk. The top-of-script PATH
+/// guard only covers the hook's own process; the command the hook hands back
+/// (e.g. `rtk git status`, or `rtk ls && rtk read x` for compounds) runs later in
+/// the Bash tool shell, which does NOT inherit that guard — so a bare `rtk` there
+/// fails with "command not found". Prefix the emitted command with the same PATH
+/// export so every `rtk` in it resolves regardless of the tool shell's PATH.
+///
+/// Inserted right before the hook serializes `$REWRITTEN` into the tool input, so
+/// it only touches commands rtk actually rewrote (the no-rewrite paths exit
+/// earlier). Idempotent via a marker comment.
+fn inject_emit_path_prefix(script: &str, bin_dir: &Path) -> String {
+    let marker = "# ctxforge: self-resolve rtk in the emitted command (tool shell lacks this PATH)";
+    if script.contains(marker) {
+        return script.to_string();
+    }
+    // `\$PATH` stays literal in the emitted command so the *tool shell* expands it
+    // at run time (preserving its full PATH); `$REWRITTEN` expands now, in the hook.
+    let stmt = format!(
+        "{marker}\nREWRITTEN=\"export PATH=\\\"{}:\\$PATH\\\"; $REWRITTEN\"\n",
+        bin_dir.display()
+    );
+    // Anchor: the line that first consumes $REWRITTEN to build the updated tool
+    // input. Inserting before it guarantees the reassignment runs after rtk's
+    // no-change/no-rewrite guards but before emission.
+    if let Some(pos) = script.find("ORIGINAL_INPUT=") {
+        let (head, tail) = script.split_at(pos);
+        return format!("{head}{stmt}{tail}");
+    }
+    // Canonical hook shape changed (unknown rtk version): leave the script as-is
+    // rather than risk corrupting it. `status`/registration still work; only the
+    // emitted-command PATH fix is skipped.
+    script.to_string()
 }
 
 /// Idempotently ensure `settings_path` has a PreToolUse Bash hook running `command`.
@@ -508,6 +543,35 @@ mod tests {
         // No shebang → guard prepended at the top.
         let no_sh = inject_path_guard("rtk rewrite \"$1\"\n", &bin);
         assert!(no_sh.contains("export PATH=\"/Users/x/.ctxforge/bin:$PATH\""));
+    }
+
+    #[test]
+    fn emit_path_prefix_wraps_rewritten_before_emission_and_is_idempotent() {
+        let bin = PathBuf::from("/Users/x/.ctxforge/bin");
+        // A minimal stand-in for rtk's canonical hook tail.
+        let script = "#!/usr/bin/env bash\n\
+             REWRITTEN=$(rtk rewrite \"$CMD\" 2>/dev/null) || exit 0\n\
+             if [ \"$CMD\" = \"$REWRITTEN\" ]; then exit 0; fi\n\
+             ORIGINAL_INPUT=$(echo \"$INPUT\" | jq -c '.tool_input')\n\
+             UPDATED_INPUT=$(echo \"$ORIGINAL_INPUT\" | jq --arg cmd \"$REWRITTEN\" '.command = $cmd')\n";
+        let out = inject_emit_path_prefix(script, &bin);
+        // The reassignment carries the managed bin and re-quotes for the tool shell.
+        assert!(
+            out.contains(
+                "REWRITTEN=\"export PATH=\\\"/Users/x/.ctxforge/bin:\\$PATH\\\"; $REWRITTEN\""
+            ),
+            "got: {out}"
+        );
+        // It must land after the guards but before the command is serialized.
+        let prefix_at = out.find("export PATH=\\\"/Users/x").unwrap();
+        let anchor_at = out.find("ORIGINAL_INPUT=").unwrap();
+        assert!(prefix_at < anchor_at, "prefix must precede ORIGINAL_INPUT");
+        // Idempotent: re-injecting doesn't duplicate the reassignment.
+        let twice = inject_emit_path_prefix(&out, &bin);
+        assert_eq!(
+            twice.matches("self-resolve rtk in the emitted command").count(),
+            1
+        );
     }
 
     #[test]

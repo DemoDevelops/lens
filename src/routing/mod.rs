@@ -3,10 +3,12 @@
 //! Gated by `CTXFORGE_ROUTING` (off|steer|wrap|full); default `off` is a true
 //! no-op (PreToolUse returns `{}`). Three concerns layer on top of `off`:
 //!
-//!   * **steer** — deny `WebFetch` (fetch+process in the sandbox instead), and
-//!     emit one-shot non-blocking nudges toward ctxforge tools for `Bash` /
-//!     `Grep` / (at full) `Read`. Also injects a tool-selection guide at
-//!     `SessionStart`.
+//!   * **steer** — deny `WebFetch`; redirect curl/wget/build/inline-HTTP `Bash`
+//!     commands into `ctx_execute`; inject the tool-selection guide into every
+//!     sub-agent (`Agent`/`Task`) prompt; and emit periodic non-blocking nudges
+//!     toward ctxforge tools for `Bash` / `Grep` / (at full) `Read`. Also injects
+//!     the guide at `SessionStart`. (Sub-agent injection + Bash redirects are ports
+//!     of context-mode's `hooks/core/routing.mjs`.)
 //!   * **wrap** — transparently rewrite a read-only, high-output `Bash` command
 //!     into `ctxforge wrap -- <cmd>` so its output is offloaded losslessly.
 //!   * **full** — both of the above.
@@ -139,6 +141,15 @@ pub const WEBFETCH_REASON: &str = "ctxforge routing: fetch+process web content i
 /// Shown when a read-only Bash command is wrapped under `wrap`/`full`.
 pub const WRAP_REASON: &str = "ctxforge: wrapped a read-only command to offload large output losslessly (recover full output via ctx_retrieve).";
 
+/// Shown when a network fetch (curl/wget/inline HTTP) is redirected into ctx_execute.
+pub const NET_REDIRECT_REASON: &str = "ctxforge routing: redirected a network fetch into the ctx_execute sandbox (the raw response stays out of context).";
+
+/// Shown when a build command (gradle/mvn/sbt) is redirected into ctx_execute.
+pub const BUILD_REDIRECT_REASON: &str = "ctxforge routing: redirected a build command into the ctx_execute sandbox (the verbose log stays out of context).";
+
+/// Shown when the tool-selection guide is injected into a sub-agent prompt.
+pub const AGENT_INJECT_REASON: &str = "ctxforge routing: injected the tool-selection guide into the sub-agent prompt so it reaches for ctxforge tools.";
+
 // Per-tool `<context_guidance>` injected on PreToolUse (prose adapted from
 // context-mode's routing-block factory functions; tool names mapped to ctxforge).
 // Re-injected periodically (see `throttle_periodic`), not once per session.
@@ -195,7 +206,43 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 Decision::Passthrough
             }
         }
+        // Sub-agents never receive the SessionStart guide, so without this they
+        // default to Read/Grep/Bash and never touch the ctxforge tools. Inject the
+        // guide into the sub-agent's prompt (every call — each is a fresh context).
+        "Agent" | "Task" => {
+            if ctx.level.steers() {
+                agent_inject(tool_input, ctx)
+            } else {
+                Decision::Passthrough
+            }
+        }
         _ => Decision::Passthrough,
+    }
+}
+
+/// Inject the ctxforge tool-selection guide into a sub-agent's prompt. Port of
+/// context-mode's PreToolUse `Agent` branch (`hooks/core/routing.mjs`). No
+/// throttle: each sub-agent is a fresh context that needs its own copy, including
+/// the block's ToolSearch bootstrap so the deferred ctx_* tools are loadable
+/// inside the sub-agent (which doesn't inherit the parent's loaded schemas).
+fn agent_inject(tool_input: &Value, ctx: &RouteCtx) -> Decision {
+    // The Agent tool carries the sub-agent instructions under one of these keys
+    // (Claude uses `prompt`; the rest mirror context-mode's field list).
+    const FIELDS: &[&str] = &["prompt", "request", "objective", "question", "query", "task"];
+    let field = match FIELDS
+        .iter()
+        .copied()
+        .find(|f| tool_input.get(*f).and_then(Value::as_str).is_some())
+    {
+        Some(f) => f,
+        None => return Decision::Passthrough, // unknown sub-agent shape — leave it
+    };
+    let original = tool_input[field].as_str().unwrap_or("");
+    let mut updated = tool_input.clone();
+    updated[field] = Value::String(format!("{original}\n\n{}", session_block(ctx.level)));
+    Decision::Modify {
+        reason: AGENT_INJECT_REASON.to_string(),
+        updated_input: updated,
     }
 }
 
@@ -209,6 +256,14 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     // Stateful commands mutate shell state; rewriting them would change behavior.
     if is_stateful(cmd) {
         return Decision::Passthrough;
+    }
+    // Network/build/inline-HTTP → hard redirect into ctx_execute (port of
+    // context-mode's Bash redirects). Steering only; under wrap-only these fall
+    // through to the generic output-wrap below.
+    if ctx.level.steers() {
+        if let Some(d) = bash_redirect(cmd) {
+            return d;
+        }
     }
     if is_wrappable(cmd) {
         if ctx.level.wraps() {
@@ -230,6 +285,76 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
         }
     } else {
         Decision::Passthrough
+    }
+}
+
+/// Port of context-mode's curl/wget/build/inline-HTTP Bash redirects
+/// (`hooks/core/routing.mjs`): replace a context-flooding network or build command
+/// with an `echo` that tells the model to run it through `ctx_execute` instead, so
+/// the raw output stays in the sandbox. `None` for commands that don't match.
+fn bash_redirect(cmd: &str) -> Option<Decision> {
+    // Per-segment: a curl/wget that would dump the body to stdout, or a build tool.
+    for seg in segments(cmd) {
+        match basename(first_token(&seg)) {
+            "curl" | "wget" if is_unsafe_fetch(&seg) => return Some(net_redirect()),
+            "gradle" | "gradlew" | "mvn" | "mvnw" | "sbt" => return Some(build_redirect(cmd)),
+            _ => {}
+        }
+    }
+    // Whole-command: an interpreter one-liner that makes an HTTP call. Scanned on
+    // the full command (not per-segment) because the inlined code may contain
+    // `;`/`|` that `segments` would split mid-string.
+    if matches!(
+        basename(first_token(cmd)),
+        "python" | "python3" | "node" | "ruby" | "deno" | "bun" | "php" | "perl"
+    ) && has_inline_http(cmd)
+    {
+        return Some(net_redirect());
+    }
+    None
+}
+
+/// A curl/wget segment floods context unless it writes the body to a file
+/// (`-o`/`-O`/`>`) and not back to stdout (`-o -`, `/dev/stdout`).
+fn is_unsafe_fetch(seg: &str) -> bool {
+    let has_file_out = seg.contains(" -o ")
+        || seg.contains(" --output ")
+        || seg.contains(" -O ")
+        || seg.contains(" --output-document ")
+        || seg.contains('>');
+    let stdout_alias =
+        seg.contains(" -o -") || seg.contains(" -O -") || seg.contains("/dev/stdout");
+    !has_file_out || stdout_alias
+}
+
+/// Inline HTTP inside an interpreter one-liner (`python -c 'requests.get(...)'`).
+fn has_inline_http(cmd: &str) -> bool {
+    (cmd.contains("fetch(") && (cmd.contains("http://") || cmd.contains("https://")))
+        || cmd.contains("requests.get(")
+        || cmd.contains("requests.post(")
+        || cmd.contains("requests.put(")
+        || cmd.contains("http.get(")
+        || cmd.contains("http.request(")
+}
+
+/// Replace the command with guidance to fetch via `ctx_execute` in the sandbox.
+fn net_redirect() -> Decision {
+    let msg = "ctxforge routing: network fetch redirected. Call ctx_execute(language, code) to fetch the URL, derive your answer in code, and print only the result — the raw response body stays in the sandbox instead of entering your conversation. Full network access; retry the same call on a transient DNS error (EAI_AGAIN, ETIMEDOUT).";
+    Decision::Modify {
+        reason: NET_REDIRECT_REASON.to_string(),
+        updated_input: json!({ "command": format!("echo {}", q(msg)) }),
+    }
+}
+
+/// Replace a build command with guidance to run it through `ctx_execute`, keeping
+/// only the tail of the (verbose) log.
+fn build_redirect(cmd: &str) -> Decision {
+    let msg = format!(
+        "ctxforge routing: build command redirected. Run it in the sandbox so the verbose log stays out of context: ctx_execute(language: shell, code: \"{cmd} 2>&1 | tail -30\"). Swap tail for a grep over error/warning/FAIL lines to narrow further — only what you print returns."
+    );
+    Decision::Modify {
+        reason: BUILD_REDIRECT_REASON.to_string(),
+        updated_input: json!({ "command": format!("echo {}", q(&msg)) }),
     }
 }
 
@@ -918,6 +1043,117 @@ mod tests {
             route("Edit", &json!({"file_path": "x"}), &rc(Level::Full, true, d.path())),
             Decision::Passthrough
         );
+    }
+
+    // ── route(): Agent / Task sub-agent prompt injection ───────────────────
+
+    #[test]
+    fn agent_prompt_injected_when_steering() {
+        let d = tempdir().unwrap();
+        let ti = json!({"prompt": "map the auth subsystem", "subagent_type": "Explore"});
+        match route("Agent", &ti, &rc(Level::Full, true, d.path())) {
+            Decision::Modify { reason, updated_input } => {
+                assert_eq!(reason, AGENT_INJECT_REASON);
+                let p = updated_input["prompt"].as_str().unwrap();
+                assert!(p.starts_with("map the auth subsystem"), "original prompt preserved");
+                assert!(p.contains("<context_window_protection>"), "guide appended");
+                assert!(p.contains("ToolSearch"), "carries the deferred-tool bootstrap");
+                // sibling fields are untouched
+                assert_eq!(updated_input["subagent_type"], json!("Explore"));
+            }
+            other => panic!("expected Modify, got {other:?}"),
+        }
+        // `Task` is treated identically.
+        assert!(matches!(
+            route("Task", &json!({"prompt": "x"}), &rc(Level::Steer, true, d.path())),
+            Decision::Modify { .. }
+        ));
+    }
+
+    #[test]
+    fn agent_passthrough_when_not_steering_or_unknown_shape() {
+        let d = tempdir().unwrap();
+        let ti = json!({"prompt": "x"});
+        // wrap-only / off do not steer → no injection
+        assert_eq!(
+            route("Agent", &ti, &rc(Level::Wrap, true, d.path())),
+            Decision::Passthrough
+        );
+        assert_eq!(
+            route("Agent", &ti, &rc(Level::Off, true, d.path())),
+            Decision::Passthrough
+        );
+        // no recognized prompt field → leave the call alone
+        assert_eq!(
+            route("Agent", &json!({"foo": "bar"}), &rc(Level::Full, true, d.path())),
+            Decision::Passthrough
+        );
+    }
+
+    // ── route(): Bash network / build / inline-HTTP redirects ──────────────
+
+    #[test]
+    fn bash_curl_to_stdout_redirected_to_ctx_execute() {
+        let d = tempdir().unwrap();
+        let ti = json!({"command": "curl https://api.example.com/data | jq ."});
+        match route("Bash", &ti, &rc(Level::Full, true, d.path())) {
+            Decision::Modify { reason, updated_input } => {
+                assert_eq!(reason, NET_REDIRECT_REASON);
+                let c = updated_input["command"].as_str().unwrap();
+                assert!(c.starts_with("echo "), "command neutered to an echo: {c}");
+                assert!(c.contains("ctx_execute"), "guidance points to ctx_execute");
+            }
+            other => panic!("expected Modify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_curl_to_file_is_wrapped_not_redirected() {
+        let d = tempdir().unwrap();
+        // silent download to a file doesn't flood context → falls through to wrap
+        let ti = json!({"command": "curl -s -o out.json https://api.example.com/data"});
+        match route("Bash", &ti, &rc(Level::Full, true, d.path())) {
+            Decision::Modify { reason, .. } => {
+                assert_eq!(reason, WRAP_REASON, "wrapped, not redirected")
+            }
+            other => panic!("expected wrap Modify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_build_tool_redirected_to_ctx_execute() {
+        let d = tempdir().unwrap();
+        let ti = json!({"command": "./gradlew test"});
+        match route("Bash", &ti, &rc(Level::Full, true, d.path())) {
+            Decision::Modify { reason, updated_input } => {
+                assert_eq!(reason, BUILD_REDIRECT_REASON);
+                let c = updated_input["command"].as_str().unwrap();
+                assert!(c.starts_with("echo "));
+                assert!(c.contains("ctx_execute") && c.contains("tail -30"));
+            }
+            other => panic!("expected Modify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_inline_http_one_liner_redirected() {
+        let d = tempdir().unwrap();
+        let ti = json!({"command": "python3 -c 'import requests; requests.get(\"http://x\")'"});
+        match route("Bash", &ti, &rc(Level::Full, true, d.path())) {
+            Decision::Modify { reason, .. } => assert_eq!(reason, NET_REDIRECT_REASON),
+            other => panic!("expected Modify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_redirect_only_when_steering() {
+        let d = tempdir().unwrap();
+        // wrap-only steers nothing → curl is wrapped, not redirected
+        let ti = json!({"command": "curl https://api.example.com/data"});
+        match route("Bash", &ti, &rc(Level::Wrap, true, d.path())) {
+            Decision::Modify { reason, .. } => assert_eq!(reason, WRAP_REASON),
+            other => panic!("expected wrap Modify, got {other:?}"),
+        }
     }
 
     // ── throttle_periodic ───────────────────────────────────────────────────

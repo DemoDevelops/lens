@@ -179,16 +179,23 @@ fn register_hook() -> Result<()> {
     let canonical =
         super::rtk_default_hook_script().context("cannot resolve rtk hook script path")?;
 
-    // 2. Resolve the script path the entry will point at — inside the config dir.
-    let target_script = settings_dir.join("hooks").join("rtk-rewrite.sh");
-    let command_path = if canonical == target_script {
-        canonical // rtk's default dir IS the config dir — use the script in place.
-    } else if canonical.is_file() {
+    // 2. Write a ctxforge-MANAGED hook script (distinct from rtk's canonical
+    //    `rtk-rewrite.sh`) with a PATH guard injected, so the hook can locate `rtk`
+    //    no matter how the shell that launched Claude Code was initialized. Hooks run
+    //    OUTSIDE the user's interactive shell, so relying on the user's PATH (`.zshrc`
+    //    edits, etc.) is unreliable — ctxforge must make `rtk` discoverable itself, so
+    //    a clean install works in any repo/launcher without host PATH tweaks.
+    let target_script = settings_dir.join("hooks").join("ctxforge-rtk-rewrite.sh");
+    let command_path = if canonical.is_file() {
+        let body = std::fs::read_to_string(&canonical)
+            .with_context(|| format!("reading {}", canonical.display()))?;
+        let bin = super::bin_dir().context("cannot resolve ctxforge bin dir")?;
+        let patched = inject_path_guard(&body, &bin);
         if let Some(parent) = target_script.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::copy(&canonical, &target_script)
-            .with_context(|| format!("copying hook script to {}", target_script.display()))?;
+        std::fs::write(&target_script, patched)
+            .with_context(|| format!("writing {}", target_script.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -197,12 +204,33 @@ fn register_hook() -> Result<()> {
         }
         target_script
     } else {
-        canonical // no script produced (e.g. a stub rtk in tests) — register the path anyway.
+        // No script produced (e.g. a stub rtk in tests) — register the managed path
+        // anyway so the settings entry + detection are exercised.
+        target_script
     };
 
     // 3. Idempotently patch the settings.json with the PreToolUse Bash entry.
     let cmd = command_path.to_str().context("hook script path is not UTF-8")?;
     ensure_hook_entry(&settings, cmd).with_context(|| format!("patching {}", settings.display()))
+}
+
+/// Prepend a PATH guard to rtk's hook script so it can find `rtk` regardless of how
+/// the shell launching Claude Code was initialized — hooks run outside the user's
+/// interactive shell, so `.zshrc`/PATH additions don't reach them. Inserts
+/// `export PATH="<ctxforge bin>:$PATH"` right after the shebang. Idempotent.
+fn inject_path_guard(script: &str, bin_dir: &Path) -> String {
+    let guard = format!("export PATH=\"{}:$PATH\"", bin_dir.display());
+    if script.contains(&guard) {
+        return script.to_string();
+    }
+    let note = "# ctxforge: put the managed rtk on PATH (hooks run outside your interactive shell)";
+    if script.starts_with("#!") {
+        if let Some(nl) = script.find('\n') {
+            let (head, rest) = script.split_at(nl + 1);
+            return format!("{head}{note}\n{guard}\n{rest}");
+        }
+    }
+    format!("{note}\n{guard}\n{script}")
 }
 
 /// Idempotently ensure `settings_path` has a PreToolUse Bash hook running `command`.
@@ -399,21 +427,18 @@ pub fn status() -> Result<()> {
         }
     );
 
-    // The registered hook (`rtk-rewrite.sh`) only rewrites commands live if it can
-    // find `rtk` on PATH and has `jq` (it shells out to both). We install to
-    // `~/.ctxforge/bin`, which isn't on PATH by default, so surface what's needed
-    // to actually activate live rewriting (vs. just having the hook registered).
-    let on_path = cmd_exists("rtk");
+    // The managed hook (`ctxforge-rtk-rewrite.sh`) self-resolves `rtk` via an
+    // injected PATH guard, so live rewriting depends on the managed binary existing
+    // (not on `rtk` being on the *caller's* PATH) plus `jq` (the hook shells out to
+    // it). Report against those.
+    let rtk_ok = super::rtk_available();
     let jq = cmd_exists("jq");
-    if on_path && jq {
-        println!("rewrite:    live (rtk on PATH, jq present)");
+    if rtk_ok && jq {
+        println!("rewrite:    live (managed hook self-resolves rtk; jq present)");
     } else {
         let mut needs = Vec::new();
-        if !on_path {
-            match super::bin_dir() {
-                Some(b) => needs.push(format!("add {} to PATH", b.display())),
-                None => needs.push("put rtk on PATH".to_string()),
-            }
+        if !rtk_ok {
+            needs.push("install rtk (`ctxforge rtk install`)".to_string());
         }
         if !jq {
             needs.push("install jq".to_string());
@@ -451,12 +476,12 @@ pub fn uninstall() -> Result<()> {
         ),
         Err(e) => eprintln!("warning: could not edit {}: {e:#}", settings.display()),
     }
-    // Remove the script copy ctxforge placed in a non-default config dir; leave
-    // rtk's own ~/.claude/hooks/rtk-rewrite.sh (rtk's artifact) untouched.
-    if let (Some(dir), Some(canonical)) = (settings.parent(), super::rtk_default_hook_script()) {
-        let copied = dir.join("hooks").join("rtk-rewrite.sh");
-        if copied != canonical && copied.is_file() {
-            let _ = std::fs::remove_file(&copied);
+    // Remove ctxforge's managed hook script; leave rtk's own
+    // ~/.claude/hooks/rtk-rewrite.sh (rtk's artifact) untouched.
+    if let Some(dir) = settings.parent() {
+        let managed = dir.join("hooks").join("ctxforge-rtk-rewrite.sh");
+        if managed.is_file() {
+            let _ = std::fs::remove_file(&managed);
         }
     }
     Ok(())
@@ -465,6 +490,25 @@ pub fn uninstall() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn path_guard_injected_after_shebang_and_idempotent() {
+        let bin = PathBuf::from("/Users/x/.ctxforge/bin");
+        let script = "#!/usr/bin/env bash\nif ! command -v rtk; then exit 0; fi\n";
+        let out = inject_path_guard(script, &bin);
+        // Guard lands right after the shebang, before the rtk lookup.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "#!/usr/bin/env bash");
+        assert!(lines[2] == "export PATH=\"/Users/x/.ctxforge/bin:$PATH\"", "got: {out}");
+        assert!(out.contains("command -v rtk"), "original body preserved");
+        // Idempotent: re-injecting doesn't duplicate the guard.
+        let twice = inject_path_guard(&out, &bin);
+        assert_eq!(twice.matches("export PATH=").count(), 1);
+        // No shebang → guard prepended at the top.
+        let no_sh = inject_path_guard("rtk rewrite \"$1\"\n", &bin);
+        assert!(no_sh.contains("export PATH=\"/Users/x/.ctxforge/bin:$PATH\""));
+    }
 
     #[test]
     fn download_url_uses_release_layout_and_ext() {

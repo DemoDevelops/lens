@@ -287,6 +287,9 @@ fn rtk_absent_is_a_noop() {
     let envs = [
         ("CTXFORGE_HOME", home.path().to_str().unwrap()),
         ("CTXFORGE_DIR", data.path().to_str().unwrap()),
+        // Minimal PATH (sh available, no rtk) so "absent" is hermetic regardless of
+        // whatever rtk the host happens to have on PATH.
+        ("PATH", "/usr/bin:/bin"),
     ];
 
     // sync is a no-op (no rtk) and must not create an rtk_shell op.

@@ -238,9 +238,11 @@ fn sessionstart_injects_routing_block_when_steering() {
         d.path(),
     );
     let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-    assert!(ctx.contains("ctxforge_routing"), "routing block present: {ctx}");
+    assert!(ctx.contains("context_window_protection"), "routing block present: {ctx}");
     assert!(ctx.contains("ctx_execute"), "tool hierarchy names ctx_execute");
     assert!(ctx.contains("ctx_search"), "tool hierarchy names ctx_search");
+    assert!(ctx.contains("graph_query"), "tool hierarchy names the graph");
+    assert!(ctx.contains("ToolSearch"), "deferred-tool bootstrap present");
     assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
 
     // With routing off, no block is injected.
@@ -248,7 +250,10 @@ fn sessionstart_injects_routing_block_when_steering() {
     let ctxoff = voff["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap_or("");
-    assert!(!ctxoff.contains("ctxforge_routing"), "off injects no routing block");
+    assert!(
+        !ctxoff.contains("context_window_protection"),
+        "off injects no routing block"
+    );
 }
 
 // ---------------------------------------------------------------------------

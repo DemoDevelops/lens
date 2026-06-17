@@ -136,9 +136,9 @@ levels are the rollout — flip the level to widen the behavior:
 | `CTXFORGE_ROUTING` | Behavior |
 | :- | :- |
 | `off` (default) | Nothing. `PreToolUse` returns `{}`. |
-| `steer` | `WebFetch` → **deny** (fetch+process via `ctx_execute` instead); one-shot nudges for `Bash`/`Grep`; inject the `SessionStart` routing guide. No rewriting. |
+| `steer` | `WebFetch` → **deny** (fetch+process via `ctx_execute` instead); periodic per-tool guidance for `Bash`/`Grep`; inject the authoritative `SessionStart` tool-selection directive (`<context_window_protection>`: the *why*, a graph-first hierarchy, a nuanced when-not-to-use, and a deferred-tool `ToolSearch` bootstrap). No rewriting. |
 | `wrap` | Transparently rewrite allowlisted read-only `Bash` commands to `ctxforge wrap -- <cmd>` (deterministic savings, no reliance on model compliance). No deny/nudges. |
-| `full` | `steer` + `wrap` together, plus a one-shot `Read`→`ctx_execute_file` nudge. |
+| `full` | `steer` + `wrap` together, plus periodic `Read`→`ctx_execute_file` guidance. |
 
 **Bash wrap allowlist (read-only, high-output only).** Wrapping is restricted to
 commands whose every pipeline segment leads with an allowlisted program:
@@ -164,7 +164,9 @@ savings show up in `ctxforge stats` and on the dashboard.
 
 **Safety rails.** Routing engages only while the MCP server is reachable (a
 liveness heartbeat at `<data_dir>/server.pid`); if it is down, every decision
-falls through to passthrough. Nudges fire at most **once per session per type**.
+falls through to passthrough. Per-tool guidance re-injects on a **periodic cadence**
+(every Nth call per session per tool), so the directive stays live as context grows
+rather than firing once and being forgotten.
 You can run the wrapper directly: `ctxforge wrap -- find . -name '*.rs'`.
 
 ## RTK shell savings (opt-in)

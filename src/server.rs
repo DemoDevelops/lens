@@ -444,11 +444,29 @@ impl ServerHandler for Forge {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         let mut info = rmcp::model::ServerInfo::default();
         info.capabilities = rmcp::model::ServerCapabilities::builder().enable_tools().build();
+        // Imperative tool-selection guidance (adapted from context-mode's CLAUDE.md
+        // prose; tool names mapped to ctxforge). The MCP `instructions` ship on every
+        // session handshake regardless of routing, so this is the always-on layer.
         info.instructions = Some(
-            "ctxforge: token-saving tools. Use ctx_execute to process data in a sandbox \
-             (only printed output returns), ctx_index/ctx_search for FTS5 lookup, \
-             ctx_discover + graph_query/graph_neighbors/graph_path for code structure, \
-             ctx_retrieve to recover offloaded blobs, and ctx_stats for savings."
+            "Raw tool output floods your context window and costs reasoning capacity for \
+             the rest of the session. Keep raw data in the ctxforge sandbox and surface \
+             only the derived answer.\n\
+             THINK IN CODE: to analyze, count, filter, search, parse, or transform data, \
+             write a script via ctx_execute(language, code) and print only the answer — do \
+             NOT read raw data into context. One script replaces many tool calls.\n\
+             TOOL SELECTION: (1) code structure (who-calls-what, imports, how A reaches B, \
+             where a symbol lives) → ctx_discover once, then graph_query / graph_neighbors / \
+             graph_path on a scoped subgraph instead of reading many files. (2) where is X \
+             mentioned → ctx_index then ctx_search(queries). (3) derive an answer FROM data \
+             or a file → ctx_execute / ctx_execute_file. (4) recover an offloaded result → \
+             ctx_retrieve. (5) savings → ctx_stats.\n\
+             RULES: DO NOT use Read to analyze a file — use ctx_execute_file (Read is correct \
+             only when you will Edit it). DO NOT use Grep/Bash to count, filter, or aggregate \
+             — use ctx_search, graph_query, or ctx_execute. DO NOT use WebFetch — fetch and \
+             reduce the URL with ctx_execute. If a ctx_*/graph_* tool is reported not-found, \
+             it is deferred: load it with ToolSearch and retry — do not fall back to raw \
+             tools. Bash/Read stay correct for short fixed output or mutating state \
+             (git, mkdir, rm, mv, navigation)."
                 .into(),
         );
         info

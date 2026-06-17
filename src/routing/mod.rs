@@ -16,7 +16,6 @@
 //! shell state — `cd`, `export`, assignments, …) are always passed through
 //! untouched, because rewriting them would silently change session behavior.
 
-use std::fs::OpenOptions;
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -140,14 +139,18 @@ pub const WEBFETCH_REASON: &str = "ctxforge routing: fetch+process web content i
 /// Shown when a read-only Bash command is wrapped under `wrap`/`full`.
 pub const WRAP_REASON: &str = "ctxforge: wrapped a read-only command to offload large output losslessly (recover full output via ctx_retrieve).";
 
-/// One-shot nudge for non-wrapping steering on a wrappable Bash command.
-pub const BASH_NUDGE: &str = "ctxforge tip: for large read-only shell output, run it through ctx_execute (bash) — only the printed lines return to context and the full output stays recoverable via ctx_retrieve.";
+// Per-tool `<context_guidance>` injected on PreToolUse (prose adapted from
+// context-mode's routing-block factory functions; tool names mapped to ctxforge).
+// Re-injected periodically (see `throttle_periodic`), not once per session.
 
-/// One-shot nudge steering Grep toward the indexed search tool.
-pub const GREP_NUDGE: &str = "ctxforge tip: prefer ctx_search over Grep — it queries the FTS5 index for ranked snippets without spilling whole files into context (run ctx_index first if needed).";
+/// Contextual guidance when a read-only/high-output Bash command is observed.
+pub const BASH_NUDGE: &str = "<context_guidance>\n  <tip>\n    When you intend to PROCESS the output (filter, count, parse, aggregate), use ctx_execute(language: \"shell\", code: \"...\") — the raw output stays in the sandbox and only what you print enters your conversation. Bash stays the right surface when you intend to OBSERVE a short fixed output or when you are mutating state (git, mkdir, rm, mv, navigation).\n  </tip>\n</context_guidance>";
 
-/// One-shot nudge (full only) steering large reads into the sandbox.
-pub const READ_NUDGE: &str = "ctxforge tip: for large files, ctx_execute_file runs a script over the file in the sandbox and returns only what you print — keeping the raw bytes out of context.";
+/// Contextual guidance steering Grep toward indexed search / the graph.
+pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Grep results may be larger than you expect. When you intend to count, filter, or aggregate matches (not just spot-check one), run the search through ctx_execute(language: \"shell\", code: \"...\") — the raw match list stays in the sandbox and only your derived answer enters your conversation. For \"where is X\" or \"who calls X\", prefer ctx_search (after ctx_index) or graph_query over scanning files.\n  </tip>\n</context_guidance>";
+
+/// Contextual guidance steering analysis-reads into the sandbox.
+pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from the file? Use ctx_execute_file(path, language, code) — the bytes stay in the sandbox and only what your code prints enters your conversation.\n  </tip>\n</context_guidance>";
 
 /// Route one PreToolUse call to a [`Decision`].
 ///
@@ -179,14 +182,14 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             }
         }
         "Grep" => {
-            if ctx.level.steers() && throttle_once(ctx, "grep") {
+            if ctx.level.steers() && throttle_periodic(ctx, "grep", NUDGE_PERIOD) {
                 Decision::Context(GREP_NUDGE.to_string())
             } else {
                 Decision::Passthrough
             }
         }
         "Read" => {
-            if ctx.level == Level::Full && throttle_once(ctx, "read") {
+            if ctx.level == Level::Full && throttle_periodic(ctx, "read", NUDGE_PERIOD) {
                 Decision::Context(READ_NUDGE.to_string())
             } else {
                 Decision::Passthrough
@@ -217,7 +220,7 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 updated_input: updated,
             }
         } else if ctx.level.steers() {
-            if throttle_once(ctx, "bash") {
+            if throttle_periodic(ctx, "bash", NUDGE_PERIOD) {
                 Decision::Context(BASH_NUDGE.to_string())
             } else {
                 Decision::Passthrough
@@ -431,22 +434,31 @@ fn is_wrappable(cmd: &str) -> bool {
     any
 }
 
-/// Fire a one-shot nudge per `(session, key)`. Returns `true` exactly once: the
-/// first call creates a marker file with `O_EXCL` semantics; later calls see
-/// `AlreadyExists` and return `false`. Any other error also returns `false`, so
-/// a flaky filesystem suppresses the nudge rather than spamming it.
-fn throttle_once(ctx: &RouteCtx, key: &str) -> bool {
+/// Re-injection cadence for per-tool guidance: fire on the 1st, then every
+/// `NUDGE_PERIOD`-th, call of a given `(session, tool)`. A one-shot nudge is too
+/// weak (the model forgets as context grows); a periodic reminder keeps the
+/// directive live (context-mode's `guidancePeriodic` approach).
+pub const NUDGE_PERIOD: u64 = 8;
+
+/// Fire a periodic nudge per `(session, key)`: returns `true` on calls 1,
+/// `period+1`, `2·period+1`, … Backed by a per-`(session,key)` counter file under
+/// `<data_dir>/throttle`; any IO error suppresses the nudge (returns `false`)
+/// rather than spamming. Best-effort under concurrency (the read-increment-write
+/// isn't atomic across parallel hook processes, but a missed/extra reminder is
+/// harmless).
+fn throttle_periodic(ctx: &RouteCtx, key: &str, period: u64) -> bool {
     let dir = ctx.data_dir.join("throttle");
     let _ = std::fs::create_dir_all(&dir); // best effort
-    let marker = dir.join(format!("{}.{}", sanitize(ctx.session_id), key));
-    // `create_new` is O_EXCL: Ok only on the first creation. Any error
-    // (AlreadyExists, or a filesystem failure) means "don't fire" — suppress
-    // rather than risk spamming the nudge.
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)
-        .is_ok()
+    let marker = dir.join(format!("{}.{}.count", sanitize(ctx.session_id), key));
+    let prev = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let next = prev.saturating_add(1);
+    if std::fs::write(&marker, next.to_string()).is_err() {
+        return false;
+    }
+    period <= 1 || next % period == 1
 }
 
 /// Replace every non-alphanumeric byte with `_` so a session id is filesystem
@@ -486,40 +498,45 @@ pub fn mcp_ready(data_dir: &Path) -> bool {
     }
 }
 
-/// The tool-selection guide injected at `SessionStart` while steering is active.
-///
-/// Original prose: a small `<ctxforge_routing>` block giving the model a
-/// hierarchy for choosing ctxforge tools over the raw ones, plus the two routing
-/// behaviors it will observe (WebFetch denied, read-only shell wrapped). Kept
-/// well under ~500 tokens.
-pub fn session_block(level: Level) -> String {
-    let lvl = match level {
-        Level::Off => "off",
-        Level::Steer => "steer",
-        Level::Wrap => "wrap",
-        Level::Full => "full",
-    };
-    format!(
-        "<ctxforge_routing>\n\
-ctxforge routing is active (level: {lvl}). It keeps bulky data out of context by \
-preferring sandboxed/indexed tools over raw ones. Follow this tool-selection \
-hierarchy:\n\
-1. Process or transform data (parse, filter, fetch a URL, crunch a file): \
-ctx_execute runs a script in a sandbox and returns only what you print; \
-ctx_execute_file does the same scoped to one file. The raw data never enters \
-context and is recoverable with ctx_retrieve.\n\
-2. Search code or notes: ctx_index then ctx_search for ranked FTS5 snippets, \
-instead of reading whole files.\n\
-3. Understand structure (who-calls-what, imports, paths): ctx_discover once, \
-then graph_query to locate symbols and ctx_retrieve to expand any compacted \
-result.\n\
-4. Only drop to raw Read/Grep/Bash when no ctxforge tool fits.\n\
-Two behaviors you will observe: WebFetch is denied — fetch and reduce web \
-content via ctx_execute instead; and allowlisted read-only shell commands are \
-transparently wrapped via `ctxforge wrap` so their full output is offloaded \
-losslessly (recover it with ctx_retrieve).\n\
-</ctxforge_routing>"
-    )
+/// The authoritative tool-selection directive injected at `SessionStart` while
+/// steering is active. Replaces the old soft "prefer ctxforge tools" nudge with
+/// context-mode's `<context_window_protection>` pattern (prose adapted from
+/// `context-mode` `hooks/routing-block.mjs`, tool names mapped to ctxforge): the
+/// *why*, a hierarchy that puts the code graph first, a nuanced when-NOT-to-use,
+/// and a deferred-tool ToolSearch bootstrap — the ctxforge MCP tools are often
+/// deferred in-harness, so a willing model can't call them without loading first
+/// (a likely reason the tools sat unused). `_level` is unused (the block is
+/// level-agnostic; the caller already gates injection on `level.steers()`).
+pub fn session_block(_level: Level) -> String {
+    r##"<context_window_protection>
+  <priority_instructions>
+    Every byte a tool returns enters your conversation memory and costs reasoning capacity for the rest of the session. The ctxforge tools let you do the work in a sandbox and surface only the derived answer — the raw bytes stay out. Think-in-Code: program the analysis, do not compute it by reading raw data into your conversation.
+  </priority_instructions>
+  <deferred_tool_bootstrap>
+    The ctxforge tools may be DEFERRED in your harness — their schemas are not loaded yet, so calling them directly fails ("tool not found" / InputValidationError). Load them ONCE before your first ctx_*/graph_* call:
+    ToolSearch(query: "select:ctx_execute,ctx_execute_file,ctx_search,ctx_index,ctx_discover,graph_query,graph_neighbors,graph_path,ctx_retrieve")
+    After that they are callable. If any ctx_*/graph_* call fails as not-found, ToolSearch it and retry — do NOT fall back to Bash/Read/Grep just because the schema was not loaded yet.
+  </deferred_tool_bootstrap>
+  <tool_selection_hierarchy>
+    1. STRUCTURE: ctx_discover (once per repo), then graph_query / graph_neighbors / graph_path.
+       - Who-calls-what, imports, how A reaches B, where a symbol lives: query a scoped subgraph instead of reading many files. Expand any compacted node with ctx_retrieve.
+    2. SEARCH: ctx_index, then ctx_search(queries: ["q1", "q2", ...]).
+       - "Where is X mentioned" across code and notes. Batch related questions in one array; ranked snippets return, not whole files.
+    3. PROCESSING: ctx_execute(language, code) | ctx_execute_file(path, language, code).
+       - Derive answers FROM data: filter, count, aggregate, parse, transform. Only what you print() enters your conversation; the raw bytes stay in the sandbox.
+    4. RECOVER: ctx_retrieve(ref) — pull back the full version of an offloaded result only when you actually need it.
+  </tool_selection_hierarchy>
+  <when_not_to_use>
+    - You intend to PROCESS the output (filter, count, parse, aggregate) → use ctx_execute. Bash stays correct when you intend to OBSERVE a short fixed output (git status on a clean tree, whoami, pwd) or when you are mutating state (git, mkdir, rm, mv, navigation).
+    - You want to analyze, summarize, or extract from a file → use ctx_execute_file. Read stays correct when you intend to Edit the file (Edit needs the exact bytes in your conversation to match against).
+    - You want to find where something is, or who calls it → use ctx_search or graph_query, not repeated Read/Grep over many files.
+    - WebFetch is denied — fetch and reduce a URL with ctx_execute (python): fetch in the sandbox and print only what you need; the full response stays out of context and is recoverable via ctx_retrieve.
+  </when_not_to_use>
+  <session_continuity>
+    Skills, roles, and directives set during this session remain active until the user revokes them. Do not drop these behavioral directives as context grows.
+  </session_continuity>
+</context_window_protection>"##
+        .to_string()
 }
 
 #[cfg(test)]
@@ -903,17 +920,21 @@ mod tests {
         );
     }
 
-    // ── throttle_once ──────────────────────────────────────────────────────
+    // ── throttle_periodic ───────────────────────────────────────────────────
 
     #[test]
-    fn throttle_fires_exactly_once_per_key() {
+    fn throttle_fires_on_first_then_every_period() {
         let d = tempdir().unwrap();
         let ctx = rc(Level::Steer, true, d.path());
-        assert!(throttle_once(&ctx, "k"));
-        assert!(!throttle_once(&ctx, "k"));
-        // a different key is independent
-        assert!(throttle_once(&ctx, "other"));
-        assert!(!throttle_once(&ctx, "other"));
+        // period 3: fire on calls 1 and 4 (1, period+1), suppress 2,3,5,6.
+        let fires: Vec<bool> = (0..6).map(|_| throttle_periodic(&ctx, "k", 3)).collect();
+        assert_eq!(fires, vec![true, false, false, true, false, false]);
+        // a different key has an independent counter.
+        assert!(throttle_periodic(&ctx, "other", 3));
+        assert!(!throttle_periodic(&ctx, "other", 3));
+        // period 1 fires every time.
+        assert!(throttle_periodic(&ctx, "always", 1));
+        assert!(throttle_periodic(&ctx, "always", 1));
     }
 
     #[test]
@@ -957,8 +978,8 @@ mod tests {
     #[test]
     fn session_block_mentions_tools_and_behaviors() {
         let b = session_block(Level::Full);
-        assert!(b.starts_with("<ctxforge_routing>"));
-        assert!(b.contains("</ctxforge_routing>"));
+        assert!(b.starts_with("<context_window_protection>"));
+        assert!(b.contains("</context_window_protection>"));
         for needle in [
             "ctx_execute",
             "ctx_index",
@@ -966,11 +987,15 @@ mod tests {
             "ctx_execute_file",
             "ctx_discover",
             "graph_query",
+            "graph_neighbors",
+            "graph_path",
             "ctx_retrieve",
-            "hierarchy",
+            "tool_selection_hierarchy",
             "WebFetch is denied",
-            "ctxforge wrap",
-            "level: full",
+            // the highest-impact additions over the old soft nudge:
+            "ToolSearch",            // deferred-tool bootstrap
+            "Think-in-Code",         // authoritative framing
+            "when_not_to_use",       // nuanced credibility
         ] {
             assert!(b.contains(needle), "session_block missing {needle:?}");
         }

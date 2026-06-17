@@ -138,6 +138,11 @@ impl Forge {
             serde_json::json!({ "language": req.language, "path": req.path, "code_bytes": req.code.len() }),
         );
         let p = self.resolve(&req.path);
+        // The file's bytes never enter context (the whole point of this tool over
+        // Read), so they count as processed-but-saved: raw_in = file size + the
+        // script's stdout. Without this a file analysis that prints a small answer
+        // records raw == returned and zero savings.
+        let file_size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
         let exec = crate::tools::ExecuteRequest {
             language: req.language.clone(),
             code: req.code.clone(),
@@ -146,7 +151,12 @@ impl Forge {
         };
         match sandbox::run_file(&p, exec, &self.repo_dir, &self.store, self.max_inline).await {
             Ok(resp) => {
-                let raw_in = resp.stdout_bytes as u64;
+                let raw_in = resp.stdout_bytes as u64 + file_size;
+                // Mirror the credit into the persistent counter ctx_stats reads
+                // (the sandbox already counted stdout; add the file bytes).
+                if file_size > 0 {
+                    let _ = self.store.bump_stat("raw_bytes_processed", file_size as i64);
+                }
                 let returned = (resp.stdout.len() + resp.stderr.len()) as u64;
                 let outcome = if resp.timed_out { "timed_out" } else { "ok" };
                 let note = if resp.timed_out {
@@ -272,6 +282,10 @@ impl Forge {
             "ctx_search",
             serde_json::json!({ "queries": req.queries.len(), "limit_per_query": req.limit_per_query }),
         );
+        if let Err(e) = self.ensure_index() {
+            op.finish(0, 0, None, "error", "auto-index failed", None);
+            return Err(e);
+        }
         match self.index.search(&req.queries, req.limit_per_query) {
             Ok(resp) => {
                 let returned = obs::json_len(&resp);
@@ -309,26 +323,10 @@ impl Forge {
                 return Err(ErrorData::internal_error(e.to_string(), None));
             }
         };
-        if let Err(e) = outcome.graph.save(&self.graph_file()) {
-            op.finish(0, 0, None, "error", e.to_string(), None);
-            return Err(ErrorData::internal_error(e.to_string(), None));
-        }
-        let _ = self
-            .store
-            .set_stat("graph_nodes", outcome.response.nodes as i64);
-        let _ = self
-            .store
-            .set_stat("graph_edges", outcome.response.edges as i64);
-        // The graph itself is persisted to graph.json, not returned to context;
-        // only the summary counts come back.
-        let returned = obs::json_len(&outcome.response);
-        let note = format!(
-            "{} nodes, {} edges, {} files parsed",
-            outcome.response.nodes, outcome.response.edges, outcome.response.files_parsed
-        );
-        let explain = self.ops.explain(|| note.clone());
-        op.finish(returned, returned, None, "ok", note, explain);
-        Ok(Json(outcome.response))
+        // The graph is persisted to graph.json, not returned to context; only the
+        // summary counts come back. Shared with the lazy `ensure_graph` path.
+        let resp = self.finish_discovery(op, outcome, false)?;
+        Ok(Json(resp))
     }
 
     /// Find symbols by name and return their immediate connections.
@@ -346,7 +344,7 @@ impl Forge {
         let graph = match self.load_graph() {
             Ok(g) => g,
             Err(e) => {
-                op.finish(0, 0, None, "error", "graph not built; run ctx_discover", None);
+                op.finish(0, 0, None, "error", "graph build failed", None);
                 return Err(e);
             }
         };
@@ -372,7 +370,7 @@ impl Forge {
         let graph = match self.load_graph() {
             Ok(g) => g,
             Err(e) => {
-                op.finish(0, 0, None, "error", "graph not built; run ctx_discover", None);
+                op.finish(0, 0, None, "error", "graph build failed", None);
                 return Err(e);
             }
         };
@@ -398,7 +396,7 @@ impl Forge {
         let graph = match self.load_graph() {
             Ok(g) => g,
             Err(e) => {
-                op.finish(0, 0, None, "error", "graph not built; run ctx_discover", None);
+                op.finish(0, 0, None, "error", "graph build failed", None);
                 return Err(e);
             }
         };
@@ -471,6 +469,32 @@ impl ServerHandler for Forge {
         );
         info
     }
+
+    /// Stamp `anthropic/alwaysLoad` on every advertised tool so this server's tools
+    /// are exempt from Claude Code's tool-search deferral (loaded into context at
+    /// session start) with no host-side `.claude.json` edit. Overrides the
+    /// `#[tool_handler]`-generated `list_tools` (the macro skips its own when we
+    /// define one).
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
+        let mut tools = Self::tool_router().list_all();
+        for tool in &mut tools {
+            let mut meta = tool.meta.take().unwrap_or_default();
+            meta.0.insert(
+                "anthropic/alwaysLoad".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            tool.meta = Some(meta);
+        }
+        Ok(rmcp::model::ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
+    }
 }
 
 // Keep `data_dir` reachable for later phases (index/discovery) without dead-code warnings.
@@ -495,16 +519,97 @@ impl Forge {
         self.data_dir.join("graph.json")
     }
 
-    /// Load the structural graph, with a helpful error if discovery hasn't run.
+    /// Load the structural graph, building it on first use if discovery hasn't run
+    /// yet (so graph queries work on any repo without an explicit ctx_discover).
     fn load_graph(&self) -> Result<Graph, ErrorData> {
-        let path = self.graph_file();
-        if !path.exists() {
-            return Err(ErrorData::invalid_request(
-                "no graph found; run ctx_discover first".to_string(),
-                None,
-            ));
+        self.ensure_graph()?;
+        Graph::load(&self.graph_file())
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
+
+    /// Persist a freshly-built graph and its node/edge stats, then finalize `op`
+    /// with a summary. Shared by `ctx_discover` (explicit) and `ensure_graph`
+    /// (lazy); `auto` only adjusts the op note.
+    fn finish_discovery(
+        &self,
+        op: obs::OpHandle,
+        outcome: discovery::DiscoverOutcome,
+        auto: bool,
+    ) -> Result<DiscoverResponse, ErrorData> {
+        if let Err(e) = outcome.graph.save(&self.graph_file()) {
+            op.finish(0, 0, None, "error", e.to_string(), None);
+            return Err(ErrorData::internal_error(e.to_string(), None));
         }
-        Graph::load(&path).map_err(|e| ErrorData::internal_error(e.to_string(), None))
+        let _ = self
+            .store
+            .set_stat("graph_nodes", outcome.response.nodes as i64);
+        let _ = self
+            .store
+            .set_stat("graph_edges", outcome.response.edges as i64);
+        let returned = obs::json_len(&outcome.response);
+        let note = format!(
+            "{}{} nodes, {} edges, {} files parsed",
+            if auto { "auto-built: " } else { "" },
+            outcome.response.nodes,
+            outcome.response.edges,
+            outcome.response.files_parsed
+        );
+        let explain = self.ops.explain(|| note.clone());
+        op.finish(returned, returned, None, "ok", note, explain);
+        Ok(outcome.response)
+    }
+
+    /// Build the structural graph on first use if `graph.json` is missing, so graph
+    /// queries work on any repo without an explicit `ctx_discover`. A present graph
+    /// short-circuits; otherwise this walks the whole repo once and persists it.
+    fn ensure_graph(&self) -> Result<(), ErrorData> {
+        if self.graph_file().exists() {
+            return Ok(());
+        }
+        let op = self
+            .ops
+            .start("ctx_discover", serde_json::json!({ "auto": true }));
+        let outcome = match discovery::discover(&self.repo_dir, None) {
+            Ok(o) => o,
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                return Err(ErrorData::internal_error(e.to_string(), None));
+            }
+        };
+        self.finish_discovery(op, outcome, true)?;
+        Ok(())
+    }
+
+    /// Build the FTS index on first use if the code hasn't been indexed yet, so
+    /// `ctx_search` works on any repo without an explicit `ctx_index`. Gated on the
+    /// `index_chunks` stat — written only by code indexing, never by session-
+    /// continuity records — so session events don't mask an unindexed codebase.
+    fn ensure_index(&self) -> Result<(), ErrorData> {
+        if self.store.get_stat("index_chunks").unwrap_or(0) > 0 {
+            return Ok(());
+        }
+        let op = self
+            .ops
+            .start("ctx_index", serde_json::json!({ "auto": true }));
+        match self.index.index_path(&self.repo_dir, true) {
+            Ok(resp) => {
+                if let Ok(total) = self.index.chunk_count() {
+                    let _ = self.store.set_stat("index_chunks", total);
+                }
+                let returned = obs::json_len(&resp);
+                let note = format!(
+                    "auto-indexed {} files, {} chunks",
+                    resp.files_indexed, resp.chunks
+                );
+                let explain = self.ops.explain(|| note.clone());
+                op.finish(returned, returned, None, "ok", note, explain);
+                Ok(())
+            }
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                Err(ErrorData::internal_error(e.to_string(), None))
+            }
+        }
     }
 
     /// If a subgraph serializes larger than the inline limit, store the full

@@ -5,6 +5,8 @@
 //!   * `ctxforge hook <platform> <event>` → a short-lived session-continuity
 //!     lifecycle hook (stdin = hook payload, stdout = hook response).
 //!   * `ctxforge session <install|uninstall|status>` → manage the hooks.
+//!   * `ctxforge warmup [path]` → build the code graph + FTS index for a repo up
+//!     front, so graph_query / ctx_search work without the server's lazy first build.
 //!   * `ctxforge stats [...]` / `ctxforge verify [...]` → read-only observability
 //!     views over the op log + reversible store (separate processes, own stdout).
 //!
@@ -32,6 +34,7 @@ fn main() -> Result<()> {
         Some("dashboard") => return obs::dashboard::run_cli(&args[2..]),
         Some("wrap") => return ctxforge::wrap::run_cli(&args[2..]),
         Some("rtk") => return ctxforge::rtk::run_cli(&args[2..]),
+        Some("warmup") => return ctxforge::warmup::run_cli(&args[2..]),
         _ => {}
     }
     // `--explain` is an alias for CTXFORGE_EXPLAIN=1 (opt-in per-op trace).

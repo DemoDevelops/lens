@@ -245,7 +245,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <h2>by mechanism</h2>
     <div class="mech" id="byMech"></div>
   </div>
-  <div class="seclabel">RTK shell savings &mdash; RTK's own measured savings on shell commands via <code>rtk gain</code> &middot; global / all-time</div>
+  <div class="seclabel">RTK shell savings &mdash; RTK's own measured savings on shell commands via <code>rtk gain</code> &middot; <b>live since you opened this page</b></div>
   <div class="panel">
     <h2>RTK shell savings</h2>
     <div class="cards" id="rtkCards"></div>
@@ -269,6 +269,9 @@ const MAXPTS=60;
 // active at/after this instant, so previous sessions never show. Refresh to reset.
 const SINCE=Math.floor(Date.now()/1000);
 const SINCE_LABEL=new Date(SINCE*1000).toLocaleTimeString();
+// RTK plane baseline: `rtk gain` is cumulative/all-time, so snapshot its counters
+// on the first poll and render deltas — "live since you opened this page".
+let rtkBase=null;
 
 function humanBytes(n){
   const u=['B','KB','MB','GB','TB']; let v=n,i=0;
@@ -354,13 +357,25 @@ async function tick(){
     `<span>${m.mechanism} <b>${m.ops}</b> ops · <b>${humanCount(m.saved)}</b> tok</span>`
   ).join('')||'<span style="color:var(--dim)">—</span>';
 
-  // RTK shell savings — RTK's own measured numbers from `rtk gain` (third plane).
+  // RTK shell savings — RTK's own numbers from `rtk gain`, shown live since you
+  // opened this page (baseline captured on the first poll; rtk gain is cumulative).
   const r=d.rtk||{installed:false};
-  document.getElementById('rtkCards').innerHTML=r.installed?
-    card('commands',(r.total_commands||0).toLocaleString())+
-    card('tokens saved',humanCount(r.total_saved||0),'~'+(r.total_saved||0).toLocaleString())+
-    card('avg savings',((r.avg_savings_pct||0).toFixed(1))+'%')
-    :card('RTK not installed','—','run ctxforge rtk install');
+  if(r.installed){
+    if(!rtkBase) rtkBase={commands:r.total_commands||0,saved:r.total_saved||0,input:r.total_input||0};
+    const dCmd=Math.max(0,(r.total_commands||0)-rtkBase.commands);
+    const dSaved=Math.max(0,(r.total_saved||0)-rtkBase.saved);
+    const dInput=Math.max(0,(r.total_input||0)-rtkBase.input);
+    const pct=dInput>0?(dSaved/dInput*100):0;
+    document.getElementById('rtkCards').innerHTML=
+      card('commands',dCmd.toLocaleString(),'since you opened this page')+
+      card('tokens saved',humanCount(dSaved),'~'+dSaved.toLocaleString()+' · this session')+
+      card('avg savings',pct.toFixed(1)+'%',dCmd?('over '+dCmd.toLocaleString()+' cmds'):'no rtk commands yet');
+    // Top-line total reflects BOTH planes: MCP tool savings + RTK shell savings
+    // (this session). Without this it showed MCP-only (often 0) while RTK saved 1000s.
+    document.getElementById('savedTop').textContent=humanCount((d.tokens_saved_mcp||0)+dSaved)+' tokens saved';
+  } else {
+    document.getElementById('rtkCards').innerHTML=card('RTK not installed','—','run ctxforge rtk install');
+  }
 
   // session activity (built-in tools, via hooks) — the "first plane"
   const a=d.activity||{total_events:0,sessions:0,by_category:[],last_ts:null};

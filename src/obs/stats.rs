@@ -82,6 +82,10 @@ struct ToolAgg {
     saved: i64,
     errors: u64,
     timeouts: u64,
+    /// Ops that actually offloaded large output to the store (the only *measured*
+    /// savings — distinct from adoption, which is just `count`).
+    offloaded_ops: u64,
+    offloaded_bytes: u64,
 }
 
 /// Totals derived from the op log.
@@ -129,6 +133,10 @@ pub fn aggregate(records: &[OpRecord]) -> Totals {
         }
         if r.outcome == "timed_out" {
             agg.timeouts += 1;
+        }
+        if r.store_ref.is_some() && r.raw_bytes_in > r.bytes_returned {
+            agg.offloaded_ops += 1;
+            agg.offloaded_bytes += r.raw_bytes_in - r.bytes_returned;
         }
     }
     t
@@ -264,6 +272,7 @@ pub fn snapshot_json_since(
                 "tool": tool, "ops": a.count, "raw": a.raw,
                 "returned": a.returned, "saved": a.saved,
                 "errors": a.errors, "timeouts": a.timeouts,
+                "offloaded_ops": a.offloaded_ops, "offloaded_bytes": a.offloaded_bytes,
             })
         })
         .collect();

@@ -94,6 +94,10 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
     let project_str = project.to_string_lossy().to_string();
     let session_id = input.session_id();
     let data_dir = super::resolve_data_dir(&project);
+    // Publish the active session id where the long-lived MCP server can read it: the
+    // server process never receives the per-event hook payload, so this file is the
+    // only channel that lets it stamp its op records with the current session.
+    write_current_session(&data_dir, &session_id);
     let store = SessionStore::open(&data_dir)?;
     let ts = super::now_ts();
 
@@ -250,6 +254,17 @@ fn session_start(
     }
 }
 
+/// Best-effort: publish the active session id to `<data_dir>/current_session` so the
+/// MCP server (a separate, long-lived process) can stamp its op records with it.
+/// Atomic via temp-file + rename; any IO error is ignored — a hook must never fail.
+fn write_current_session(data_dir: &Path, session_id: &str) {
+    let _ = std::fs::create_dir_all(data_dir);
+    let tmp = data_dir.join(format!("current_session.{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, session_id).is_ok() {
+        let _ = std::fs::rename(&tmp, data_dir.join("current_session"));
+    }
+}
+
 /// Read project rule files from disk and turn them into rule events
 /// (path + content; content is what gets indexed for `ctx_search`).
 fn capture_rules(project: &Path) -> Vec<RawEvent> {
@@ -367,6 +382,18 @@ mod tests {
         assert_eq!(out, "{}");
         let evs = store.events_for_session("sess1").unwrap();
         assert!(evs.iter().any(|e| e.category == "file" && e.payload["path"] == "src/x.rs"));
+    }
+
+    #[test]
+    fn handle_publishes_current_session_for_server() {
+        let dir = tempdir().unwrap();
+        let mut input = input_for(dir.path());
+        input.tool_name = Some("Edit".into());
+        input.tool_input = Some(json!({"file_path": "x.rs"}));
+        input.tool_response = Some(json!("ok"));
+        let (_out, _store, data_dir) = run("PostToolUse", input);
+        let got = std::fs::read_to_string(data_dir.join("current_session")).unwrap();
+        assert_eq!(got.trim(), "sess1");
     }
 
     #[test]

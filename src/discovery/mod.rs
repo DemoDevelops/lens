@@ -24,6 +24,13 @@ pub struct DiscoverOutcome {
 /// Discover the structural graph under `root`. `languages` optionally filters to
 /// a subset (by language name). The graph is returned; the caller persists it.
 pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOutcome> {
+    // A non-existent root (commonly a shell-escaped path that survived as a literal,
+    // e.g. `AI\ Stuff`) makes the walk silently yield zero files. Fail loudly instead
+    // so callers never persist an empty graph over a good one.
+    if !root.exists() {
+        anyhow::bail!("discover root does not exist: {}", root.display());
+    }
+
     let lang_filter: Option<BTreeSet<String>> =
         languages.map(|ls| ls.iter().map(|l| l.to_ascii_lowercase()).collect());
 
@@ -167,6 +174,18 @@ mod tests {
         assert!(out.response.languages.contains(&"rust".to_string()));
         // a calls edge between main and helper exists
         assert!(out.graph.edges.iter().any(|e| e.kind == "calls"));
+    }
+
+    #[test]
+    fn discover_nonexistent_root_errors() {
+        // A path that doesn't exist (e.g. a shell-escaped `AI\ Stuff` that survived
+        // as a literal) must error, not silently return an empty graph.
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("AItestslash\\ Stuff");
+        let res = discover(&missing, None);
+        assert!(res.is_err(), "nonexistent root must error");
+        let err = res.err().unwrap();
+        assert!(err.to_string().contains("does not exist"), "got: {err}");
     }
 
     #[test]

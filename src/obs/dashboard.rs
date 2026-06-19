@@ -238,12 +238,19 @@ const INDEX_HTML: &str = r##"<!doctype html>
   <div class="panel">
     <h2>by tool</h2>
     <table id="byTool"><thead><tr>
-      <th>tool</th><th>ops</th><th>raw</th><th>returned</th><th>saved~tok</th>
+      <th>tool</th><th>ops</th><th>raw</th><th>returned</th><th>saved~tok</th><th>offloaded</th>
     </tr></thead><tbody></tbody></table>
   </div>
   <div class="panel">
     <h2>by mechanism</h2>
     <div class="mech" id="byMech"></div>
+  </div>
+  <div class="seclabel">tool adoption &mdash; which ctxforge tools are actually firing &middot; <b>live since you opened this page</b> &middot; counts, not savings (graph_* / ctx_search save by avoiding reads, not by offloading bytes)</div>
+  <div class="panel">
+    <h2>tool adoption</h2>
+    <table id="adoption"><thead><tr>
+      <th>tool</th><th>calls</th><th>offloaded</th><th>err</th><th>timeout</th>
+    </tr></thead><tbody></tbody></table>
   </div>
   <div class="seclabel">RTK shell savings &mdash; RTK's own measured savings on shell commands via <code>rtk gain</code> &middot; <b>live since you opened this page</b></div>
   <div class="panel">
@@ -262,6 +269,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <footer id="footer">—</footer>
 <script>
 const hist=[];           // {t, saved, bytes}
+// Canonical ctxforge MCP tools, for the adoption table (shown even at 0 calls).
+const ADOPTION_TOOLS=['ctx_execute','ctx_execute_file','ctx_search','ctx_index','ctx_discover','ctx_retrieve','graph_query','graph_neighbors','graph_path'];
 const savedSeries=[], bytesSeries=[];
 const histAct=[], actSeries=[];   // {t, ev} for session-activity rate
 const MAXPTS=60;
@@ -348,14 +357,27 @@ async function tick(){
   const maxRaw=Math.max(1,...d.by_tool.map(t=>t.raw));
   document.querySelector('#byTool tbody').innerHTML=d.by_tool.map(t=>{
     const w=Math.round(t.raw/maxRaw*60);
+    const off=(t.offloaded_ops||0)?((t.offloaded_ops)+' · '+humanBytes(t.offloaded_bytes||0)):'—';
     return `<tr><td>${t.tool}</td><td>${t.ops.toLocaleString()}</td>`+
       `<td><span class="bar" style="width:${w}px"></span> ${humanBytes(t.raw)}</td>`+
-      `<td>${humanBytes(t.returned)}</td><td>${t.saved.toLocaleString()}</td></tr>`;
-  }).join('')||'<tr><td colspan="5" style="color:var(--dim)">no ops yet</td></tr>';
+      `<td>${humanBytes(t.returned)}</td><td>${t.saved.toLocaleString()}</td><td>${off}</td></tr>`;
+  }).join('')||'<tr><td colspan="6" style="color:var(--dim)">no ops yet</td></tr>';
 
   document.getElementById('byMech').innerHTML=d.by_mechanism.map(m=>
     `<span>${m.mechanism} <b>${m.ops}</b> ops · <b>${humanCount(m.saved)}</b> tok</span>`
   ).join('')||'<span style="color:var(--dim)">—</span>';
+
+  // Tool adoption: the canonical ctxforge tools and whether they're firing at all.
+  // Listed explicitly so dormant tools (e.g. graph_neighbors) show as 0, not absent —
+  // "is this tool even being used" is the real question for non-offloading tools.
+  const tmap={}; d.by_tool.forEach(t=>tmap[t.tool]=t);
+  document.querySelector('#adoption tbody').innerHTML=ADOPTION_TOOLS.map(name=>{
+    const t=tmap[name];
+    const calls=t?t.ops:0, off=t?(t.offloaded_ops||0):0, err=t?t.errors:0, to=t?t.timeouts:0;
+    const dim=calls?'':' style="color:var(--dim)"';
+    return `<tr${dim}><td>${name}</td><td>${calls.toLocaleString()}</td>`+
+      `<td>${off||'—'}</td><td>${err||'—'}</td><td>${to||'—'}</td></tr>`;
+  }).join('');
 
   // RTK shell savings — RTK's own numbers from `rtk gain`, shown live since you
   // opened this page (baseline captured on the first poll; rtk gain is cumulative).
@@ -443,6 +465,9 @@ mod tests {
         assert_eq!(v["ops"], json!(1));
         assert!(v["tokens_saved_est"].as_i64().unwrap() > 0);
         assert_eq!(v["by_tool"][0]["tool"], json!("ctx_execute"));
+        // Per-tool offload breakdown for the measured-savings vs adoption split: the
+        // seeded op stored a blob (store_ref) with raw > returned, so it offloaded.
+        assert_eq!(v["by_tool"][0]["offloaded_ops"], json!(1));
         // Session-activity block reflects the seeded hook event.
         assert_eq!(v["activity"]["total_events"], json!(1));
         assert_eq!(v["activity"]["by_category"][0]["category"], json!("file"));
@@ -459,6 +484,10 @@ mod tests {
         // The RTK shell-savings panel markup is baked into the self-contained page.
         assert!(body2.contains("RTK shell savings"));
         assert!(body2.contains("rtkCards"));
+        // The tool-adoption panel and its canonical tool list are baked into the page.
+        assert!(body2.contains("tool adoption"));
+        assert!(body2.contains("ADOPTION_TOOLS"));
+        assert!(body2.contains("graph_neighbors"));
 
         let (s3, _, _) = route("/nope", dir.path(), None);
         assert_eq!(s3, 404);

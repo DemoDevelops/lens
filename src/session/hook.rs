@@ -50,6 +50,20 @@ impl HookInput {
     }
 
     fn project(&self) -> PathBuf {
+        let candidate = self.candidate_project();
+        // The hook fires from whatever directory the current sub-agent / skill /
+        // cd'd shell happens to be in — which may be a subdirectory of the
+        // project. The data dir must stay anchored to the repo root so we reuse
+        // the single `.ctxforge` the long-lived MCP server captured at startup,
+        // and never scatter a nested stray `.ctxforge` through the source tree
+        // (untracked dirs there break globbing build tools like xcodegen). Climb
+        // to the enclosing repo root if we can find one; else use the candidate.
+        repo_root(&candidate).unwrap_or(candidate)
+    }
+
+    /// The raw project path from the payload, before repo-root anchoring:
+    /// the payload `cwd`, else `$CLAUDE_PROJECT_DIR`, else the process cwd.
+    fn candidate_project(&self) -> PathBuf {
         if let Some(c) = &self.cwd {
             if !c.is_empty() {
                 return PathBuf::from(c);
@@ -68,6 +82,25 @@ impl HookInput {
             None => String::new(),
         }
     }
+}
+
+/// Nearest enclosing repo root at or above `start`: the deepest ancestor that
+/// holds a `.git` entry, or — failing that — one that already holds a
+/// `.ctxforge` data dir. `.git` is preferred so a pre-existing stray `.ctxforge`
+/// in a subdirectory can't pin the search below the real root. Returns `None`
+/// when neither marker is found, leaving the caller's candidate untouched (e.g.
+/// a tempdir under `/var` in tests).
+fn repo_root(start: &Path) -> Option<PathBuf> {
+    let mut ctx_root = None;
+    for dir in start.ancestors() {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        if ctx_root.is_none() && dir.join(".ctxforge").is_dir() {
+            ctx_root = Some(dir.to_path_buf());
+        }
+    }
+    ctx_root
 }
 
 /// CLI entry: `args` is everything after `hook` (i.e. `[platform, event]`).
@@ -394,6 +427,32 @@ mod tests {
         let (_out, _store, data_dir) = run("PostToolUse", input);
         let got = std::fs::read_to_string(data_dir.join("current_session")).unwrap();
         assert_eq!(got.trim(), "sess1");
+    }
+
+    #[test]
+    fn hook_anchors_data_dir_to_repo_root_not_subdir() {
+        // Regression: a hook fired with cwd set to a SUBDIRECTORY of the repo must
+        // resolve its data dir to the repo-root `.ctxforge` and must NOT scatter a
+        // nested stray `.ctxforge` under the subdir (that broke an xcodegen build).
+        let repo = tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let subdir = repo.path().join("Sources").join("Core");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let mut input = input_for(&subdir); // cwd = deep subdirectory
+        input.tool_name = Some("Edit".into());
+        input.tool_input = Some(json!({"file_path": "x.swift"}));
+        input.tool_response = Some(json!("ok"));
+
+        // project() climbs to the repo root (the .git dir), not the subdir.
+        assert_eq!(input.project().as_path(), repo.path());
+
+        handle("PostToolUse", &input).unwrap();
+
+        // Canonical data dir at the repo root; nothing scattered under the subdir.
+        assert!(repo.path().join(".ctxforge").is_dir());
+        assert!(!subdir.join(".ctxforge").exists());
+        assert!(!repo.path().join("Sources").join(".ctxforge").exists());
     }
 
     #[test]

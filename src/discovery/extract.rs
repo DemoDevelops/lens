@@ -135,6 +135,27 @@ pub fn all_specs() -> Vec<LangSpec> {
             "#,
             imports_query: r#"(import_declaration) @import"#,
         },
+        LangSpec {
+            name: "swift",
+            extensions: &["swift"],
+            language: || tree_sitter_swift::LANGUAGE.into(),
+            // tree-sitter-swift parses class/struct/enum all as `class_declaration`
+            // (the keyword is an anonymous token we can't capture), so they share
+            // the `class` kind. `function_declaration` carries two `name:` fields
+            // (the symbol name and the return type); constraining the capture to
+            // `(simple_identifier)` picks the name, not the `user_type` return.
+            defs_query: r#"
+                (function_declaration name: (simple_identifier) @function)
+                (protocol_function_declaration name: (simple_identifier) @function)
+                (class_declaration name: (type_identifier) @class)
+                (protocol_declaration name: (type_identifier) @protocol)
+            "#,
+            calls_query: r#"
+                (call_expression (simple_identifier) @call)
+                (call_expression (navigation_expression suffix: (navigation_suffix suffix: (simple_identifier) @call)))
+            "#,
+            imports_query: r#"(import_declaration) @import"#,
+        },
     ]
 }
 
@@ -159,6 +180,7 @@ fn fn_scope_kinds(lang: &str) -> &'static [&'static str] {
             "variable_declarator",
         ],
         "go" => &["function_declaration", "method_declaration"],
+        "swift" => &["function_declaration", "protocol_function_declaration"],
         _ => &[],
     }
 }
@@ -314,6 +336,51 @@ mod tests {
         k.sort();
         k.dedup();
         k
+    }
+
+    #[test]
+    fn swift_extraction() {
+        let src = r#"
+import Foundation
+
+protocol Greeter { func greet() -> String }
+
+struct Person: Greeter {
+    let name: String
+    func greet() -> String { return makeGreeting(name) }
+}
+
+class Widget {
+    func render() {
+        let p = Person(name: "x")
+        print(p.greet())
+    }
+}
+
+func makeGreeting(_ n: String) -> String { "hi" }
+"#;
+        let spec = spec_for_language("swift").unwrap();
+        let fx = extract_file("a.swift", src, &spec).unwrap();
+
+        let ks = kinds(&fx.defs);
+        assert!(ks.contains(&"function".to_string()), "kinds: {ks:?}");
+        assert!(ks.contains(&"class".to_string()), "kinds: {ks:?}"); // struct Person
+        assert!(ks.contains(&"protocol".to_string()), "kinds: {ks:?}");
+
+        let names: Vec<&str> = fx.defs.iter().map(|n| n.name.as_str()).collect();
+        for want in ["greet", "makeGreeting", "Person", "Widget", "Greeter"] {
+            assert!(names.contains(&want), "missing def {want}; got {names:?}");
+        }
+
+        let callees: Vec<&str> = fx.calls.iter().map(|(_, c)| c.as_str()).collect();
+        assert!(callees.contains(&"makeGreeting"), "callees: {callees:?}"); // greet() body
+        assert!(callees.contains(&"greet"), "callees: {callees:?}"); // p.greet()
+
+        assert!(
+            fx.imports.iter().any(|(s, _)| s == "Foundation"),
+            "imports: {:?}",
+            fx.imports
+        );
     }
 
     #[test]

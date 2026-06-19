@@ -55,6 +55,7 @@ ignore = "0.4"
 schemars = "1.0"
 tempfile = "3"
 regex = "1"
+tree-sitter-swift = "0.6"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -105,6 +105,21 @@ impl OpLog {
         self.explain_enabled
     }
 
+    /// The active session id the hook published to `<data_dir>/current_session`, if
+    /// any. This is how the long-lived MCP server learns which Claude session its
+    /// tool calls belong to (it never sees the per-event hook payload). `None` when
+    /// no hook has run yet or the file is empty/unreadable.
+    fn current_session(&self) -> Option<String> {
+        let dir = self.path.parent()?;
+        let s = std::fs::read_to_string(dir.join("current_session")).ok()?;
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
+    }
+
     /// Build the explain trail only when enabled, so callers pay nothing when off.
     pub fn explain<F: FnOnce() -> String>(&self, f: F) -> Option<String> {
         if self.explain_enabled {
@@ -247,7 +262,12 @@ impl OpHandle {
         let pid = std::process::id();
         let rec = OpRecord {
             ts: iso8601_now(),
-            session_id: std::env::var("CTXFORGE_SESSION_ID").ok(),
+            // Prefer the session id the hook published; fall back to the env var
+            // (tests / explicit overrides), else None.
+            session_id: self
+                .log
+                .current_session()
+                .or_else(|| std::env::var("CTXFORGE_SESSION_ID").ok()),
             agent_id: std::env::var("CTXFORGE_AGENT_ID").unwrap_or_else(|_| format!("pid-{pid}")),
             pid,
             tool: self.tool.to_string(),
@@ -381,6 +401,20 @@ mod tests {
         assert_eq!(rec.bytes_returned, 100);
         assert_eq!(rec.tokens_saved_est, (8000 - 100) / 4);
         assert_eq!(rec.store_ref.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn finish_uses_published_current_session() {
+        // The hook publishes the active session to <dir>/current_session; finish()
+        // must stamp the op record with it (this is the IPC the server relies on).
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("current_session"), "abc-123\n").unwrap();
+        let log = OpLog::open(dir.path());
+        log.start("ctx_execute", json!({}))
+            .finish(10, 5, None, "ok", "", None);
+        let raw = std::fs::read_to_string(dir.path().join("ops.log")).unwrap();
+        let rec: OpRecord = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(rec.session_id.as_deref(), Some("abc-123"));
     }
 
     #[test]

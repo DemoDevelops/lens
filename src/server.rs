@@ -314,7 +314,7 @@ impl Forge {
             "ctx_discover",
             serde_json::json!({ "path": req.path, "languages": req.languages }),
         );
-        let root = self.resolve(&req.path);
+        let root = self.discover_root(&req.path);
         let langs = req.languages.as_deref();
         let outcome = match discovery::discover(&root, langs) {
             Ok(o) => o,
@@ -514,6 +514,21 @@ impl Forge {
         }
     }
 
+    /// Resolve the root for `ctx_discover`, tolerant of a model-supplied path.
+    /// The model often hands back a *shell-escaped* absolute path (e.g.
+    /// `/Users/me/AI\ Stuff/repo`); that backslash is literal here, so the dir
+    /// doesn't exist and the walk silently finds nothing. Strip the common
+    /// `\<space>` escape, resolve it, and if it still doesn't exist fall back to
+    /// `repo_dir` (the repo root is what `ctx_discover` almost always means).
+    fn discover_root(&self, p: &str) -> PathBuf {
+        let candidate = self.resolve(&p.replace("\\ ", " "));
+        if candidate.exists() {
+            candidate
+        } else {
+            self.repo_dir.clone()
+        }
+    }
+
     /// Path to the persisted structural graph file.
     fn graph_file(&self) -> PathBuf {
         self.data_dir.join("graph.json")
@@ -536,6 +551,18 @@ impl Forge {
         outcome: discovery::DiscoverOutcome,
         auto: bool,
     ) -> Result<DiscoverResponse, ErrorData> {
+        // Never persist an empty graph. A 0-file discover (a wrong/escaped path, a
+        // `languages` filter that matches nothing, or a sourceless repo) would
+        // otherwise overwrite a good graph.json with `{"nodes":[],"edges":[]}` and
+        // silently break every later graph_query. Keep the existing graph instead.
+        if outcome.response.files_parsed == 0 {
+            let note =
+                "discover parsed 0 files — kept the existing graph (check the path/languages)"
+                    .to_string();
+            let explain = self.ops.explain(|| note.clone());
+            op.finish(0, 0, None, "error", note.clone(), explain);
+            return Err(ErrorData::internal_error(note, None));
+        }
         if let Err(e) = outcome.graph.save(&self.graph_file()) {
             op.finish(0, 0, None, "error", e.to_string(), None);
             return Err(ErrorData::internal_error(e.to_string(), None));
@@ -563,8 +590,13 @@ impl Forge {
     /// queries work on any repo without an explicit `ctx_discover`. A present graph
     /// short-circuits; otherwise this walks the whole repo once and persists it.
     fn ensure_graph(&self) -> Result<(), ErrorData> {
-        if self.graph_file().exists() {
-            return Ok(());
+        // A present graph short-circuits — UNLESS it's empty (0 nodes). An empty
+        // graph.json means a prior discover wrote a poisoned graph (e.g. an escaped
+        // path); rebuild it from repo_dir so the state self-heals.
+        if let Ok(g) = Graph::load(&self.graph_file()) {
+            if !g.nodes.is_empty() {
+                return Ok(());
+            }
         }
         let op = self
             .ops
@@ -683,6 +715,95 @@ mod tests {
         let data = dir.path().join(".ctxforge");
         let f = Forge::with_paths(dir.path().to_path_buf(), data, max_inline).unwrap();
         (f, dir)
+    }
+
+    /// A Forge over a temp repo containing one rust source file.
+    fn forge_with_source() -> (Forge, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn helper() -> i32 { 1 }\nfn main() { let _ = helper(); }\n",
+        )
+        .unwrap();
+        let data = dir.path().join(".ctxforge");
+        let f = Forge::with_paths(dir.path().to_path_buf(), data, 8192).unwrap();
+        (f, dir)
+    }
+
+    #[tokio::test]
+    async fn escaped_path_discover_falls_back_and_does_not_clobber() {
+        let (f, dir) = forge_with_source();
+        // Good graph via the explicit tool (default path ".").
+        let good = f
+            .ctx_discover(Parameters(DiscoverRequest {
+                path: ".".into(),
+                languages: None,
+            }))
+            .await
+            .unwrap();
+        let before = good.0.nodes;
+        assert!(before > 0, "baseline graph should be non-empty");
+
+        // A shell-escaped / nonexistent absolute path must fall back to repo_dir
+        // (rebuilding the same graph) rather than walking nothing and clobbering it.
+        let escaped = format!("{}\\ nonexistent", dir.path().display());
+        let _ = f
+            .ctx_discover(Parameters(DiscoverRequest {
+                path: escaped,
+                languages: None,
+            }))
+            .await;
+        let after = Graph::load(&f.graph_file()).unwrap().nodes.len();
+        assert_eq!(after, before, "graph must not be clobbered by a bad path");
+    }
+
+    #[tokio::test]
+    async fn zero_file_discover_errors_and_keeps_graph() {
+        let (f, _dir) = forge_with_source();
+        let good = f
+            .ctx_discover(Parameters(DiscoverRequest {
+                path: ".".into(),
+                languages: None,
+            }))
+            .await
+            .unwrap();
+        let before = good.0.nodes;
+        assert!(before > 0);
+
+        // An unsupported `languages` filter matches nothing → 0 files parsed. That
+        // must error and leave the existing graph untouched (never persist empty).
+        let res = f
+            .ctx_discover(Parameters(DiscoverRequest {
+                path: ".".into(),
+                languages: Some(vec!["swift".into()]),
+            }))
+            .await;
+        assert!(res.is_err(), "0-file discover should error, not succeed");
+        let after = Graph::load(&f.graph_file()).unwrap().nodes.len();
+        assert_eq!(after, before, "graph must be preserved on a 0-file discover");
+    }
+
+    #[tokio::test]
+    async fn empty_graph_self_heals_on_query() {
+        let (f, _dir) = forge_with_source();
+        // Poison the data dir with an empty graph (the bug's end state).
+        std::fs::create_dir_all(f.graph_file().parent().unwrap()).unwrap();
+        std::fs::write(f.graph_file(), r#"{"nodes":[],"edges":[]}"#).unwrap();
+        assert!(Graph::load(&f.graph_file()).unwrap().nodes.is_empty());
+
+        // graph_query triggers ensure_graph, which must rebuild because nodes == 0.
+        let _ = f
+            .graph_query(Parameters(GraphQueryRequest {
+                name: "helper".into(),
+                kind: None,
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !Graph::load(&f.graph_file()).unwrap().nodes.is_empty(),
+            "an empty graph.json must self-heal on the next graph query"
+        );
     }
 
     #[test]

@@ -46,6 +46,14 @@ pub fn warmup(root: &Path, data_dir: &Path) -> Result<()> {
 
     // --- Structural graph (tree-sitter → graph.json) ---
     let outcome = discovery::discover(root, None).context("building code graph")?;
+    // Never overwrite a good graph.json with an empty one (no supported source under
+    // `root`). Bail so the caller sees the problem instead of a silent empty graph.
+    if outcome.response.files_parsed == 0 {
+        anyhow::bail!(
+            "discover parsed 0 files under {} — refusing to write an empty graph (check the path)",
+            root.display()
+        );
+    }
     let graph_file = data_dir.join("graph.json");
     outcome
         .graph

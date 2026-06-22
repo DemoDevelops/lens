@@ -26,45 +26,76 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
 
     // ── Last Request (must) ──
     if let Some(p) = last_payload(events, "user-prompt", "prompt") {
-        sections.push(Section { rank: MUST, text: section("Last Request", &[cap(&p, 500)]) });
+        sections.push(Section {
+            rank: MUST,
+            text: section("Last Request", &[cap(&p, 500)]),
+        });
     }
 
     // ── Tasks (must) ── dedupe by text, keep latest status, render checkboxes.
     let tasks = tasks(events);
     if !tasks.is_empty() {
-        let lines: Vec<String> = tasks.iter().take(20).map(|(t, s)| {
-            let box_ = match s.as_str() {
-                "completed" | "done" => "[x]",
-                "in_progress" => "[~]",
-                _ => "[ ]",
-            };
-            format!("{box_} {} ({s})", cap(t, 120))
-        }).collect();
-        sections.push(Section { rank: MUST, text: section("Tasks", &lines) });
+        let lines: Vec<String> = tasks
+            .iter()
+            .take(20)
+            .map(|(t, s)| {
+                let box_ = match s.as_str() {
+                    "completed" | "done" => "[x]",
+                    "in_progress" => "[~]",
+                    _ => "[ ]",
+                };
+                format!("{box_} {} ({s})", cap(t, 120))
+            })
+            .collect();
+        sections.push(Section {
+            rank: MUST,
+            text: section("Tasks", &lines),
+        });
     }
 
     // ── Plans (optional) ──
-    let plans: Vec<String> = events.iter().filter(|e| e.category == "plan").filter_map(|e| {
-        let action = e.payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        let plan = e.payload.get("plan").and_then(|v| v.as_str()).unwrap_or("");
-        if action == "exit" && !plan.is_empty() { Some(format!("plan: {}", cap(plan, 240))) }
-        else if !action.is_empty() { Some(format!("plan {action}")) }
-        else { None }
-    }).collect();
+    let plans: Vec<String> = events
+        .iter()
+        .filter(|e| e.category == "plan")
+        .filter_map(|e| {
+            let action = e
+                .payload
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let plan = e.payload.get("plan").and_then(|v| v.as_str()).unwrap_or("");
+            if action == "exit" && !plan.is_empty() {
+                Some(format!("plan: {}", cap(plan, 240)))
+            } else if !action.is_empty() {
+                Some(format!("plan {action}"))
+            } else {
+                None
+            }
+        })
+        .collect();
     if !plans.is_empty() {
-        sections.push(Section { rank: 50, text: section("Plans", &dedup(plans, 5)) });
+        sections.push(Section {
+            rank: 50,
+            text: section("Plans", &dedup(plans, 5)),
+        });
     }
 
     // ── Key Decisions (must) ──
     let decisions = texts(events, "decision", "text", 8);
     if !decisions.is_empty() {
-        sections.push(Section { rank: MUST, text: section("Key Decisions", &decisions) });
+        sections.push(Section {
+            rank: MUST,
+            text: section("Key Decisions", &decisions),
+        });
     }
 
     // ── Files Modified (must) ──
     let files = files_modified(events);
     if !files.is_empty() {
-        sections.push(Section { rank: MUST, text: section("Files Modified", &files) });
+        sections.push(Section {
+            rank: MUST,
+            text: section("Files Modified", &files),
+        });
     }
 
     // ── Unresolved Errors + error→fix pairs (must) ──
@@ -77,86 +108,153 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
         for (err, fix) in pairs.iter().take(4) {
             lines.push(format!("fixed: {} → {}", cap(err, 120), cap(fix, 120)));
         }
-        sections.push(Section { rank: MUST, text: section("Unresolved Errors", &lines) });
+        sections.push(Section {
+            rank: MUST,
+            text: section("Unresolved Errors", &lines),
+        });
     }
 
     // ── Constraints (optional) ──
     let constraints = texts(events, "constraint", "text", 5);
     if !constraints.is_empty() {
-        sections.push(Section { rank: 60, text: section("Constraints", &constraints) });
+        sections.push(Section {
+            rank: 60,
+            text: section("Constraints", &constraints),
+        });
     }
 
     // ── Blockers (optional) ──
     let blockers = texts(events, "blocker", "text", 5);
     if !blockers.is_empty() {
-        sections.push(Section { rank: 60, text: section("Blockers", &blockers) });
+        sections.push(Section {
+            rank: 60,
+            text: section("Blockers", &blockers),
+        });
     }
 
     // ── Git ops (optional) ──
-    let gits: Vec<String> = events.iter().filter(|e| e.category == "git").filter_map(|e| {
-        let op = e.payload.get("op").and_then(|v| v.as_str()).unwrap_or("?");
-        let cmd = e.payload.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
-        Some(format!("{op}: {}", cap(cmd, 100)))
-    }).collect();
+    let gits: Vec<String> = events
+        .iter()
+        .filter(|e| e.category == "git")
+        .filter_map(|e| {
+            let op = e.payload.get("op").and_then(|v| v.as_str()).unwrap_or("?");
+            let cmd = e.payload.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+            Some(format!("{op}: {}", cap(cmd, 100)))
+        })
+        .collect();
     if !gits.is_empty() {
-        sections.push(Section { rank: 40, text: section("Git ops", &dedup(gits, 8)) });
+        sections.push(Section {
+            rank: 40,
+            text: section("Git ops", &dedup(gits, 8)),
+        });
     }
 
     // ── Project Rules (must) — paths only; full content lives in FTS index ──
-    let rules: Vec<String> = events.iter()
+    let rules: Vec<String> = events
+        .iter()
         .filter(|e| e.category == "rule")
-        .filter_map(|e| e.payload.get("path").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter_map(|e| {
+            e.payload
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     if !rules.is_empty() {
-        sections.push(Section { rank: MUST, text: section("Project Rules", &dedup(rules, 6)) });
+        sections.push(Section {
+            rank: MUST,
+            text: section("Project Rules", &dedup(rules, 6)),
+        });
     }
 
     // ── MCP Tools Used (optional) — counts ──
     let mcp = counts(events, "mcp-tool", "tool");
     if !mcp.is_empty() {
         let lines: Vec<String> = mcp.iter().map(|(k, n)| format!("{k} ×{n}")).collect();
-        sections.push(Section { rank: 20, text: section("MCP Tools Used", &lines) });
+        sections.push(Section {
+            rank: 20,
+            text: section("MCP Tools Used", &lines),
+        });
     }
 
     // ── Subagent findings (optional) ──
-    let findings: Vec<String> = events.iter().filter(|e| e.category == "subagent")
-        .filter_map(|e| e.payload.get("finding").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    let findings: Vec<String> = events
+        .iter()
+        .filter(|e| e.category == "subagent")
+        .filter_map(|e| {
+            e.payload
+                .get("finding")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     if !findings.is_empty() {
-        sections.push(Section { rank: 20, text: section("Subagent findings", &dedup(findings, 4)) });
+        sections.push(Section {
+            rank: 20,
+            text: section("Subagent findings", &dedup(findings, 4)),
+        });
     }
 
     // ── Rejected Approaches (optional) ──
     let rejected = texts(events, "rejected-approach", "text", 5);
     if !rejected.is_empty() {
-        sections.push(Section { rank: 55, text: section("Rejected Approaches", &rejected) });
+        sections.push(Section {
+            rank: 55,
+            text: section("Rejected Approaches", &rejected),
+        });
     }
 
     // ── External Refs (optional) ──
-    let refs: Vec<String> = events.iter().filter(|e| e.category == "external-ref")
-        .filter_map(|e| e.payload.get("ref").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    let refs: Vec<String> = events
+        .iter()
+        .filter(|e| e.category == "external-ref")
+        .filter_map(|e| {
+            e.payload
+                .get("ref")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     if !refs.is_empty() {
-        sections.push(Section { rank: 15, text: section("External Refs", &dedup(refs, 8)) });
+        sections.push(Section {
+            rank: 15,
+            text: section("External Refs", &dedup(refs, 8)),
+        });
     }
 
     // ── Environment (optional) ──
-    let envs: Vec<String> = events.iter().filter(|e| e.category == "environment")
-        .filter_map(|e| e.payload.get("cmd").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    let envs: Vec<String> = events
+        .iter()
+        .filter(|e| e.category == "environment")
+        .filter_map(|e| {
+            e.payload
+                .get("cmd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     if !envs.is_empty() {
-        sections.push(Section { rank: 45, text: section("Environment", &dedup(envs, 5)) });
+        sections.push(Section {
+            rank: 45,
+            text: section("Environment", &dedup(envs, 5)),
+        });
     }
 
     // ── User Role (optional) ──
     if let Some(role) = last_payload(events, "role", "text") {
-        sections.push(Section { rank: 30, text: section("User Role", &[cap(&role, 200)]) });
+        sections.push(Section {
+            rank: 30,
+            text: section("User Role", &[cap(&role, 200)]),
+        });
     }
 
     // ── Session Intent (optional, lowest) ──
     let intent = counts(events, "intent", "intent");
     if let Some((top, _)) = intent.first() {
-        sections.push(Section { rank: 10, text: section("Session Intent", &[top.clone()]) });
+        sections.push(Section {
+            rank: 10,
+            text: section("Session Intent", &[top.clone()]),
+        });
     }
 
     render(sections, budget, compact_count)
@@ -214,16 +312,29 @@ fn section(title: &str, lines: &[String]) -> String {
 
 /// Latest payload string for a category/field.
 fn last_payload(events: &[Event], category: &str, field: &str) -> Option<String> {
-    events.iter().rev()
+    events
+        .iter()
+        .rev()
         .find(|e| e.category == category)
-        .and_then(|e| e.payload.get(field).and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .and_then(|e| {
+            e.payload
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
 }
 
 /// Distinct text values for a category (latest-last, capped).
 fn texts(events: &[Event], category: &str, field: &str, max: usize) -> Vec<String> {
-    let v: Vec<String> = events.iter()
+    let v: Vec<String> = events
+        .iter()
         .filter(|e| e.category == category)
-        .filter_map(|e| e.payload.get(field).and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .filter_map(|e| {
+            e.payload
+                .get(field)
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     dedup(v, max)
 }
@@ -234,20 +345,45 @@ fn tasks(events: &[Event]) -> Vec<(String, String)> {
     let mut map: BTreeMap<String, String> = BTreeMap::new();
     for e in events.iter().filter(|e| e.category == "task") {
         let t = e.payload.get("task").and_then(|v| v.as_str()).unwrap_or("");
-        let s = e.payload.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-        if t.is_empty() { continue; }
-        if !map.contains_key(t) { order.push(t.to_string()); }
+        let s = e
+            .payload
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
+        if t.is_empty() {
+            continue;
+        }
+        if !map.contains_key(t) {
+            order.push(t.to_string());
+        }
         map.insert(t.to_string(), s.to_string());
     }
-    order.into_iter().map(|t| { let s = map[&t].clone(); (t, s) }).collect()
+    order
+        .into_iter()
+        .map(|t| {
+            let s = map[&t].clone();
+            (t, s)
+        })
+        .collect()
 }
 
 /// Edited/written file paths, deduped (most-recent order preserved).
 fn files_modified(events: &[Event]) -> Vec<String> {
-    let v: Vec<String> = events.iter()
+    let v: Vec<String> = events
+        .iter()
         .filter(|e| e.category == "file")
-        .filter(|e| matches!(e.payload.get("action").and_then(|v| v.as_str()), Some("edit") | Some("write")))
-        .filter_map(|e| e.payload.get("path").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter(|e| {
+            matches!(
+                e.payload.get("action").and_then(|v| v.as_str()),
+                Some("edit") | Some("write")
+            )
+        })
+        .filter_map(|e| {
+            e.payload
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     dedup(v, 15)
 }
@@ -259,10 +395,20 @@ fn files_modified(events: &[Event]) -> Vec<String> {
 fn errors(events: &[Event]) -> (Vec<String>, Vec<(String, String)>) {
     let is_progress = |e: &Event| -> Option<String> {
         match e.category.as_str() {
-            "file" if matches!(e.payload.get("action").and_then(|v| v.as_str()), Some("edit") | Some("write")) => {
-                e.payload.get("path").and_then(|v| v.as_str()).map(|p| format!("edited {p}"))
+            "file"
+                if matches!(
+                    e.payload.get("action").and_then(|v| v.as_str()),
+                    Some("edit") | Some("write")
+                ) =>
+            {
+                e.payload
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|p| format!("edited {p}"))
             }
-            "git" if e.payload.get("op").and_then(|v| v.as_str()) == Some("commit") => Some("git commit".to_string()),
+            "git" if e.payload.get("op").and_then(|v| v.as_str()) == Some("commit") => {
+                Some("git commit".to_string())
+            }
             _ => None,
         }
     };
@@ -270,10 +416,16 @@ fn errors(events: &[Event]) -> (Vec<String>, Vec<(String, String)>) {
     let mut unresolved = Vec::new();
     let mut pairs = Vec::new();
     for (i, e) in events.iter().enumerate() {
-        if e.category != "error" { continue; }
-        let msg = e.payload.get("message").and_then(|v| v.as_str())
+        if e.category != "error" {
+            continue;
+        }
+        let msg = e
+            .payload
+            .get("message")
+            .and_then(|v| v.as_str())
             .or_else(|| e.payload.get("cmd").and_then(|v| v.as_str()))
-            .unwrap_or("error").to_string();
+            .unwrap_or("error")
+            .to_string();
         let fix = events.iter().skip(i + 1).find_map(is_progress);
         match fix {
             Some(f) => pairs.push((msg, f)),
@@ -344,15 +496,40 @@ mod tests {
         vec![
             e("user-prompt", 1, json!({"prompt": "fix the auth bug"}), 1),
             e("rule", 1, json!({"path": "/p/CLAUDE.md"}), 2),
-            e("file", 1, json!({"action": "edit", "path": "src/auth.rs"}), 3),
-            e("task", 1, json!({"task": "write failing test", "status": "in_progress"}), 4),
-            e("decision", 2, json!({"text": "use argon2 instead of bcrypt"}), 5),
+            e(
+                "file",
+                1,
+                json!({"action": "edit", "path": "src/auth.rs"}),
+                3,
+            ),
+            e(
+                "task",
+                1,
+                json!({"task": "write failing test", "status": "in_progress"}),
+                4,
+            ),
+            e(
+                "decision",
+                2,
+                json!({"text": "use argon2 instead of bcrypt"}),
+                5,
+            ),
             e("error", 2, json!({"message": "E0433 unresolved import"}), 6),
-            e("git", 2, json!({"op": "commit", "cmd": "git commit -m wip"}), 7),
+            e(
+                "git",
+                2,
+                json!({"op": "commit", "cmd": "git commit -m wip"}),
+                7,
+            ),
             e("mcp-tool", 3, json!({"tool": "mcp__x__y"}), 8),
             e("external-ref", 3, json!({"ref": "#42"}), 9),
             e("intent", 4, json!({"intent": "debug"}), 10),
-            e("user-prompt", 1, json!({"prompt": "what was the unresolved error?"}), 11),
+            e(
+                "user-prompt",
+                1,
+                json!({"prompt": "what was the unresolved error?"}),
+                11,
+            ),
         ]
     }
 
@@ -409,9 +586,15 @@ mod tests {
         assert!(g.contains("## Unresolved Errors") || g.contains("E0433"));
         assert!(g.contains("## Project Rules"));
         // lowest-priority dropped first; a higher-ranked optional survives.
-        assert!(!g.contains("## Session Intent"), "P4 intent should drop first");
+        assert!(
+            !g.contains("## Session Intent"),
+            "P4 intent should drop first"
+        );
         assert!(!g.contains("## External Refs"));
-        assert!(g.contains("## Git ops"), "higher-rank optional should survive");
+        assert!(
+            g.contains("## Git ops"),
+            "higher-rank optional should survive"
+        );
     }
 
     #[test]

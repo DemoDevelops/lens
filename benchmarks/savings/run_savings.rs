@@ -50,8 +50,9 @@ mod tests {
     use crate::savings::SavingsRow;
 
     fn load_expected() -> Vec<SavingsRow> {
-        let raw = std::fs::read_to_string(expected_path())
-            .expect("expected/savings.json missing; run `cargo run --bin bench_savings -- --update`");
+        let raw = std::fs::read_to_string(expected_path()).expect(
+            "expected/savings.json missing; run `cargo run --bin bench_savings -- --update`",
+        );
         serde_json::from_str(&raw).expect("expected/savings.json is not valid JSON")
     }
 
@@ -69,7 +70,11 @@ mod tests {
         );
         for (a, e) in actual.iter().zip(expected.iter()) {
             assert_eq!(a.workload, e.workload, "workload label changed");
-            assert_eq!(a.mechanism, e.mechanism, "mechanism changed for {}", a.workload);
+            assert_eq!(
+                a.mechanism, e.mechanism,
+                "mechanism changed for {}",
+                a.workload
+            );
 
             // before is from committed fixtures -> must be exact.
             assert_eq!(

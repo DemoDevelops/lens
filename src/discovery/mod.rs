@@ -5,7 +5,7 @@ pub mod extract;
 pub mod graph;
 pub mod query;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -152,6 +152,46 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
     };
 
     Ok(DiscoverOutcome { graph, response })
+}
+
+/// Cheap staleness signature for the graph: every supported source file under
+/// `root` mapped to its mtime (ms since epoch). Walked with the SAME filters as
+/// [`discover`] (gitignore-respecting, supported extensions only), so comparing
+/// it to a saved copy tells us whether the persisted graph is stale. Stat-only —
+/// no file reads or parsing — so it is far cheaper than a full discover.
+pub fn source_manifest(root: &Path) -> BTreeMap<String, u64> {
+    let mut manifest = BTreeMap::new();
+    if !root.exists() {
+        return manifest;
+    }
+    let mut builder = WalkBuilder::new(root);
+    builder.standard_filters(true);
+    for entry in builder.build().flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let path = entry.path();
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => continue,
+        };
+        if extract::spec_for_extension(ext).is_none() {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let mtime = std::fs::metadata(path)
+            .ok()
+            .and_then(|md| md.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        manifest.insert(rel, mtime);
+    }
+    manifest
 }
 
 #[cfg(test)]

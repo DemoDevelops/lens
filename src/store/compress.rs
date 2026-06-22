@@ -37,6 +37,13 @@ const MIN_DICT_LEN: usize = 5;
 /// single key is `_tbl` and whose value is `{"c": [..], "r": [..]}`.
 const TABLE_KEY: &str = "_tbl";
 
+/// Marker key for the TOON-style tabular form. A one-key object whose single key
+/// is `__toon__` and whose value is `{"keys": [..], "rows": [[..], ...]}`.
+/// This is a deliberate narrow subset of the TOON (Token-Oriented Object
+/// Notation) format, not the full spec: only a uniform array of flat objects
+/// with all-scalar values, no nesting and no YAML-style indentation.
+const TOON_KEY: &str = "__toon__";
+
 /// Minimum rows for table transposition to be worthwhile (matches SmartCrusher's
 /// `min_items`): below 2 there is no repeated schema to factor out.
 const MIN_TABLE_ROWS: usize = 2;
@@ -50,7 +57,7 @@ pub fn compact_json(value: &Value) -> Value {
     // user's data on the way back, so we skip transposition for that (rare)
     // input and record `"_t": false` so `expand` doesn't rebuild it. The store
     // still holds the untouched original regardless.
-    let do_transpose = !contains_key(&pruned, TABLE_KEY);
+    let do_transpose = !contains_key(&pruned, TABLE_KEY) && !contains_key(&pruned, TOON_KEY);
     let transposed = if do_transpose {
         transpose(&pruned)
     } else {
@@ -69,8 +76,11 @@ pub fn compact_json(value: &Value) -> Value {
     // Order by frequency (desc) then lexically for stable, deterministic output.
     dict.sort_by(|a, b| counts[b].cmp(&counts[a]).then_with(|| a.cmp(b)));
 
-    let index: HashMap<&str, usize> =
-        dict.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+    let index: HashMap<&str, usize> = dict
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
     let transformed = encode(&transposed, &index);
 
     json!({ "_d": dict, "_v": transformed, "_t": do_transpose })
@@ -123,9 +133,7 @@ pub fn drop_nulls(value: &Value) -> Value {
 /// True if any object anywhere in `value` has a key equal to `key`.
 fn contains_key(value: &Value, key: &str) -> bool {
     match value {
-        Value::Object(map) => {
-            map.contains_key(key) || map.values().any(|v| contains_key(v, key))
-        }
+        Value::Object(map) => map.contains_key(key) || map.values().any(|v| contains_key(v, key)),
         Value::Array(arr) => arr.iter().any(|v| contains_key(v, key)),
         _ => false,
     }
@@ -143,14 +151,18 @@ fn contains_key(value: &Value, key: &str) -> bool {
 fn transpose(value: &Value) -> Value {
     match value {
         Value::Array(arr) => {
-            if let Some(cols) = homogeneous_object_columns(arr) {
+            // Prefer the TOON form for the strict uniform-flat-scalar shape; fall
+            // back to the columnar `_tbl` form for homogeneous objects that still
+            // carry nested values.
+            if let Some(cols) = flat_scalar_columns(arr) {
+                encode_toon(arr, &cols)
+            } else if let Some(cols) = homogeneous_object_columns(arr) {
                 let c: Vec<Value> = cols.iter().map(|k| Value::String(k.clone())).collect();
                 let rows: Vec<Value> = arr
                     .iter()
                     .map(|item| {
                         let obj = item.as_object().expect("checked all-objects");
-                        let cells: Vec<Value> =
-                            cols.iter().map(|k| transpose(&obj[k])).collect();
+                        let cells: Vec<Value> = cols.iter().map(|k| transpose(&obj[k])).collect();
                         Value::Array(cells)
                     })
                     .collect();
@@ -198,10 +210,53 @@ fn homogeneous_object_columns(arr: &[Value]) -> Option<Vec<String>> {
     cols
 }
 
+/// If `arr` is >= [`MIN_TABLE_ROWS`] objects that all share exactly the same
+/// non-empty key set AND whose every value is a scalar (string, number, bool,
+/// or null), return that key set (sorted, as `Map` iteration yields). Otherwise
+/// `None`. This is the strict shape the TOON form encodes; any nested object or
+/// array in any cell rejects it back to the `_tbl` / element-wise paths.
+fn flat_scalar_columns(arr: &[Value]) -> Option<Vec<String>> {
+    let cols = homogeneous_object_columns(arr)?;
+    let all_scalar = arr.iter().all(|item| {
+        item.as_object()
+            .is_some_and(|obj| obj.values().all(is_scalar))
+    });
+    all_scalar.then_some(cols)
+}
+
+/// A JSON scalar: anything that is not an object or array.
+fn is_scalar(value: &Value) -> bool {
+    !matches!(value, Value::Object(_) | Value::Array(_))
+}
+
+/// Encode a uniform array of flat-scalar objects as the TOON form: the keys once
+/// in `keys`, then one row of scalar values per element in `rows`. Lossless and
+/// inverted by [`as_toon`].
+fn encode_toon(arr: &[Value], cols: &[String]) -> Value {
+    let keys: Vec<Value> = cols.iter().map(|k| Value::String(k.clone())).collect();
+    let rows: Vec<Value> = arr
+        .iter()
+        .map(|item| {
+            let obj = item.as_object().expect("checked all-objects");
+            let cells: Vec<Value> = cols.iter().map(|k| obj[k].clone()).collect();
+            Value::Array(cells)
+        })
+        .collect();
+    let mut inner = Map::new();
+    inner.insert("keys".to_string(), Value::Array(keys));
+    inner.insert("rows".to_string(), Value::Array(rows));
+    let mut outer = Map::new();
+    outer.insert(TOON_KEY.to_string(), Value::Object(inner));
+    Value::Object(outer)
+}
+
 /// Exact inverse of [`transpose`]: rebuild each `{"_tbl": {"c", "r"}}` table
 /// into its array of objects, recursing into cell values. Non-table objects and
 /// arrays recurse element-wise.
 fn untranspose(value: &Value) -> Value {
+    if let Some(toon) = as_toon(value) {
+        return toon;
+    }
     if let Some(tbl) = as_table(value) {
         return tbl;
     }
@@ -238,6 +293,33 @@ fn as_table(value: &Value) -> Option<Value> {
         let mut obj = Map::new();
         for (name, cell) in col_names.iter().zip(cells) {
             obj.insert((*name).to_string(), untranspose(cell));
+        }
+        out.push(Value::Object(obj));
+    }
+    Some(Value::Array(out))
+}
+
+/// Recognize a TOON-form table and rebuild it, or `None` if `value` is not
+/// exactly a one-key `__toon__` object wrapping `{"keys": [..], "rows": [..]}`.
+/// Exact inverse of [`encode_toon`].
+fn as_toon(value: &Value) -> Option<Value> {
+    let outer = value.as_object()?;
+    if outer.len() != 1 {
+        return None;
+    }
+    let inner = outer.get(TOON_KEY)?.as_object()?;
+    let keys = inner.get("keys")?.as_array()?;
+    let rows = inner.get("rows")?.as_array()?;
+    let key_names: Vec<&str> = keys.iter().map(|k| k.as_str()).collect::<Option<_>>()?;
+    let mut out: Vec<Value> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let cells = row.as_array()?;
+        if cells.len() != key_names.len() {
+            return None;
+        }
+        let mut obj = Map::new();
+        for (name, cell) in key_names.iter().zip(cells) {
+            obj.insert((*name).to_string(), cell.clone());
         }
         out.push(Value::Object(obj));
     }
@@ -375,8 +457,8 @@ mod tests {
         let original = serde_json::to_string(&v).unwrap();
         let compact_v = compact_json(&v);
         let compact = serde_json::to_string(&compact_v).unwrap();
-        // The schema is emitted once.
-        assert!(compact.contains("\"_tbl\""), "expected a table marker");
+        // The schema is emitted once. All-scalar rows take the TOON path.
+        assert!(compact.contains("__toon__"), "expected a toon marker");
         // Even with all-unique titles (incompressible), dropping the repeated
         // schema alone clears a wide margin.
         assert!(
@@ -442,5 +524,78 @@ mod tests {
         let compact_v = compact_json(&v);
         assert_eq!(compact_v.get("_t").and_then(|t| t.as_bool()), Some(false));
         assert_eq!(expand_json(&compact_v), v);
+    }
+
+    #[test]
+    fn toon_roundtrip_preserves_value() {
+        // A uniform array of >= 20 flat objects with mixed scalar types. No
+        // null fields: `compact_json` prunes nulls first, so an all-null field
+        // would not survive to compare equal to the untouched original.
+        let items: Vec<Value> = (0..25)
+            .map(|i| {
+                json!({
+                    "id": i,
+                    "name": format!("name_{i}"),
+                    "active": i % 2 == 0,
+                    "score": (i as f64) * 1.5,
+                })
+            })
+            .collect();
+        let v = Value::Array(items);
+        let compact_v = compact_json(&v);
+        assert!(
+            serde_json::to_string(&compact_v)
+                .unwrap()
+                .contains("__toon__"),
+            "expected a toon marker"
+        );
+        assert_eq!(expand_json(&compact_v), v);
+    }
+
+    #[test]
+    fn toon_is_at_least_30_percent_smaller() {
+        let items: Vec<Value> = (0..50)
+            .map(|i| {
+                json!({
+                    "identifier": i,
+                    "display_name": format!("item number {i}"),
+                    "is_active": i % 3 == 0,
+                })
+            })
+            .collect();
+        let v = Value::Array(items);
+        let original = serde_json::to_vec(&v).unwrap();
+        let compact = serde_json::to_vec(&compact_json(&v)).unwrap();
+        assert!(
+            (compact.len() as f64) <= original.len() as f64 * 0.70,
+            "toon should be >= 30% smaller: {} vs {}",
+            compact.len(),
+            original.len()
+        );
+    }
+
+    #[test]
+    fn toon_falls_through_for_nonuniform_and_nested() {
+        // Different key sets per object: not the uniform shape, returned as-is.
+        let nonuniform = json!([
+            {"a": 1, "b": 2},
+            {"a": 3, "c": 4},
+        ]);
+        let compact_nonuniform = compact_json(&nonuniform);
+        assert!(!serde_json::to_string(&compact_nonuniform)
+            .unwrap()
+            .contains("__toon__"));
+        assert_eq!(expand_json(&compact_nonuniform), nonuniform);
+
+        // Same keys but a nested object value: not flat-scalar, no toon.
+        let nested = json!([
+            {"id": 1, "meta": {"k": "v"}},
+            {"id": 2, "meta": {"k": "w"}},
+        ]);
+        let compact_nested = compact_json(&nested);
+        assert!(!serde_json::to_string(&compact_nested)
+            .unwrap()
+            .contains("__toon__"));
+        assert_eq!(expand_json(&compact_nested), nested);
     }
 }

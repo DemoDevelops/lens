@@ -51,7 +51,11 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         },
         "uninstall" => {
             let n = uninstall(&settings)?;
-            println!("removed {n} ctxforge hook entr{} from {}", if n == 1 { "y" } else { "ies" }, settings.display());
+            println!(
+                "removed {n} ctxforge hook entr{} from {}",
+                if n == 1 { "y" } else { "ies" },
+                settings.display()
+            );
             Ok(())
         }
         "status" => {
@@ -259,9 +263,20 @@ fn print_status(s: &Status) {
     if s.installed_events.is_empty() {
         println!("  hooks installed : none (run `ctxforge session install`)");
     } else {
-        println!("  hooks installed : {} ({})", s.installed_events.len(), s.installed_events.join(", "));
+        println!(
+            "  hooks installed : {} ({})",
+            s.installed_events.len(),
+            s.installed_events.join(", ")
+        );
     }
-    println!("  context-mode    : {}", if s.conflict { "PRESENT — conflict! uninstall it" } else { "not detected" });
+    println!(
+        "  context-mode    : {}",
+        if s.conflict {
+            "PRESENT — conflict! uninstall it"
+        } else {
+            "not detected"
+        }
+    );
     println!("  event store     : {}", mark(s.store_ok));
     println!("  FTS5 index      : {}", mark(s.fts_ok));
 }
@@ -286,7 +301,9 @@ mod tests {
             assert!(hooks.contains_key(ev), "missing {ev}");
         }
         // command embeds the absolute binary path.
-        let cmd = hooks["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+        let cmd = hooks["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
         assert!(cmd.contains("/usr/bin/ctxforge"));
         assert!(cmd.contains("hook claude PostToolUse"));
 
@@ -300,9 +317,12 @@ mod tests {
     fn install_refuses_on_context_mode_conflict() {
         let dir = tempdir().unwrap();
         let settings = dir.path().join("settings.json");
-        write(&settings, &json!({
-            "enabledPlugins": { "context-mode@context-mode": true }
-        }));
+        write(
+            &settings,
+            &json!({
+                "enabledPlugins": { "context-mode@context-mode": true }
+            }),
+        );
         let err = install(&settings, "/usr/bin/ctxforge").unwrap_err();
         assert!(err.to_string().contains("Context Mode hooks detected"));
     }
@@ -320,13 +340,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         // Pre-existing unrelated hook.
-        write(&settings, &json!({
-            "hooks": {
-                "PreToolUse": [
-                    { "matcher": "Bash", "hooks": [ { "type": "command", "command": "rtk hook claude" } ] }
-                ]
-            }
-        }));
+        write(
+            &settings,
+            &json!({
+                "hooks": {
+                    "PreToolUse": [
+                        { "matcher": "Bash", "hooks": [ { "type": "command", "command": "rtk hook claude" } ] }
+                    ]
+                }
+            }),
+        );
         install(&settings, "/usr/bin/ctxforge").unwrap();
         let removed = uninstall(&settings).unwrap();
         assert_eq!(removed, 5);

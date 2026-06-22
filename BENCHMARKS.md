@@ -4,6 +4,44 @@ ctxforge is an MCP tool provider that keeps work **out** of the agent's context 
 
 _Full scale curves, mechanism classifications, the discovery-regression investigation, and methodology are in [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md)._
 
+## Feature suite: value × adoption
+
+Two questions, two planes. **Plane A** (deterministic, no model): if a feature is used, how much smaller is what comes back. **Plane B** (real agent): does Claude actually fire it when it should. A feature only pays off when both hold.
+
+### Plane A: value across codebase scale (deterministic, % bytes saved)
+
+Savings move with size, and sometimes the conclusion flips, so each feature is measured at Small / Medium / Large / Huge (1× / 10× / 50× / 200× the committed fixture). Run: `cargo run --bin bench_value`.
+
+| What it does for you | Small | Medium | Large | Huge | scale effect |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Crunch a big file/log, return the answer | 93% | 93% | 93% | 93% | flat |
+| Find where something is across the repo (vs grep) | 3% | 91% | 98% | 100% | **flips** |
+| Shrink repetitive structured data (big JSON) | 56% | 61% | 61% | 61% | flat |
+| Run a noisy command, keep a preview | 54% | 95% | 99% | 100% | grows |
+| Stop a web page / build log flooding the chat | 100% | 100% | 100% | 100% | flat |
+| Map code structure (round-trips: read each file vs 1 graph call) | 20→4 | 200→4 | 1000→4 | 4000→4 | grows |
+
+- **flat**: size-insensitive, one number is honest.
+- **flips**: the conclusion changes with size. grep is as lean as ctx_search on a small repo but floods on a big one. This is why search steering is scale-aware (below), not always-on.
+- **grows**: the saving widens with size (bounded preview / fixed graph call vs ever-growing raw output / file reads).
+- Graph is on the round-trip axis: its byte savings at scale are an O(N²) artifact of the duplicate-symbol test fixture (appendix); the round-trip win scales cleanly. Baselines are the realistic alternative (search vs grep, not vs full-file reads).
+
+### Plane B: adoption (does Claude fire it?)
+
+Real agent under normal steering, on a task that should trigger each feature; **fired** = it used the ctxforge tool instead of falling back to Read/Grep. N = 3 per feature. Run: `bash benchmarks/adoption/run_adoption.sh --runs 3`.
+
+| Feature | Fires when it should | What it did |
+| --- | ---: | --- |
+| Crunch a big file/log (sandbox) | **3/3 (100%)** | used ctx_execute every run |
+| Map code structure (graph) | **3/3 (100%)** | used graph_query / path / neighbors |
+| Find across the repo (search) | **0/3 (0%)** | fell back to grep |
+
+- Sandbox and graph are high value **and** high adoption: they work end to end.
+- Search's 0% is **correct on a small repo** (Plane A shows grep ties ctx_search there). ctx_search only wins at scale, so a scale-aware PostToolUse nudge now fires **only when a grep result floods** (>16KB, `CTXFORGE_GREP_FLOOD_BYTES`). The nudge is verified to fire; whether it lifts adoption on large-hit tasks is not yet measured.
+- Compression and wrap fire automatically (not agent choices); recovery is the **Session recovery** section below.
+
+The honest headline: ctxforge's value is real and largest at scale, adoption is solid where the tool genuinely beats the built-in (sandbox, graph), and the one gap (search) is a scale-conditioned steering problem now addressed but not yet re-measured.
+
 ## Savings
 
 Headline savings are at **realistic session scale**, not the 1× diagnostic fixtures. Each row stays segmented by the ctxforge mechanism that produced it — never a single blended percentage.

@@ -92,17 +92,21 @@ async fn full_mcp_session() {
 
     // --- ctx_retrieve: recover the full offloaded output ---
     let retrieved = call("ctx_retrieve", json!({ "ref": exec_ref })).await;
-    assert!(retrieved["content"].as_str().unwrap().contains(&"A".repeat(50000)));
+    assert!(retrieved["content"]
+        .as_str()
+        .unwrap()
+        .contains(&"A".repeat(50000)));
 
     // --- ctx_index + ctx_search ---
     let indexed = call("ctx_index", json!({ "path": "." })).await;
     assert!(indexed["files_indexed"].as_u64().unwrap() >= 1);
     let searched = call("ctx_search", json!({ "queries": ["helper"] })).await;
     let hits = &searched["results"][0]["hits"];
-    assert!(hits.as_array().unwrap().iter().any(|h| h["path"]
-        .as_str()
+    assert!(hits
+        .as_array()
         .unwrap()
-        .ends_with("lib.rs")));
+        .iter()
+        .any(|h| h["path"].as_str().unwrap().ends_with("lib.rs")));
 
     // --- ctx_discover + graph_query ---
     let discovered = call("ctx_discover", json!({ "path": "." })).await;
@@ -239,13 +243,20 @@ async fn ctx_execute_file_credits_the_file_bytes() {
         }),
     )
     .await;
-    assert_eq!(res["truncated"], json!(false), "small output, nothing offloaded");
+    assert_eq!(
+        res["truncated"],
+        json!(false),
+        "small output, nothing offloaded"
+    );
 
     // Savings must reflect the ~40 KB file that stayed out of context (≈10k tokens),
     // not the handful of bytes actually printed.
     let stats = call("ctx_stats", json!({})).await;
     let saved = stats["estimated_tokens_saved"].as_i64().unwrap();
-    assert!(saved >= 9000, "file bytes credited as savings; got {saved} tokens");
+    assert!(
+        saved >= 9000,
+        "file bytes credited as savings; got {saved} tokens"
+    );
 
     client.cancel().await.ok();
 }

@@ -40,17 +40,17 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                 .map_err(|_| anyhow::anyhow!("--op expects an op number (1-based)"))?;
             show_op(&store, &dir, n)?;
         }
-        Some(reference) if !reference.starts_with("--") => {
-            match store.get(reference)? {
-                Some(content) => println!("{content}"),
-                None => {
-                    eprintln!("unknown ref '{reference}'");
-                    std::process::exit(1);
-                }
+        Some(reference) if !reference.starts_with("--") => match store.get(reference)? {
+            Some(content) => println!("{content}"),
+            None => {
+                eprintln!("unknown ref '{reference}'");
+                std::process::exit(1);
             }
-        }
+        },
         _ => {
-            eprintln!("usage: ctxforge verify <ref> | --op <n> | --roundtrip <ref> | --all-recent <n>");
+            eprintln!(
+                "usage: ctxforge verify <ref> | --op <n> | --roundtrip <ref> | --all-recent <n>"
+            );
             std::process::exit(2);
         }
     }
@@ -152,7 +152,10 @@ fn show_op(store: &Store, dir: &std::path::Path, n: usize) -> Result<()> {
     let rec = records
         .get(n.wrapping_sub(1))
         .ok_or_else(|| anyhow::anyhow!("op #{n} not found ({} ops in log)", records.len()))?;
-    println!("op #{n}: tool={} ts={} outcome={}", rec.tool, rec.ts, rec.outcome);
+    println!(
+        "op #{n}: tool={} ts={} outcome={}",
+        rec.tool, rec.ts, rec.outcome
+    );
     println!(
         "  recorded: raw_bytes_in={} bytes_returned={} tokens_saved_est={}",
         rec.raw_bytes_in, rec.bytes_returned, rec.tokens_saved_est

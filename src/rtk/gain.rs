@@ -71,7 +71,8 @@ pub fn sync() -> Result<()> {
         .unwrap_or_default();
 
     let delta_saved: i64 = cur.summary.total_saved as i64 - prev.summary.total_saved as i64;
-    let delta_commands: i64 = cur.summary.total_commands as i64 - prev.summary.total_commands as i64;
+    let delta_commands: i64 =
+        cur.summary.total_commands as i64 - prev.summary.total_commands as i64;
 
     if delta_commands <= 0 && delta_saved <= 0 {
         // Nothing new — refresh the watermark (it's authoritative) but don't
@@ -244,7 +245,12 @@ mod tests {
 
         let exe = std::env::current_exe().expect("current test exe");
         let status = std::process::Command::new(&exe)
-            .args(["--exact", "--ignored", "--nocapture", "rtk::gain::tests::sync_child"])
+            .args([
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "rtk::gain::tests::sync_child",
+            ])
             .env("CTXFORGE_HOME", home.path()) // stub rtk resolves here
             .env("CTXFORGE_DIR", datadir.path()) // ops.log + watermark land here
             // Keep the child deterministic regardless of the outer env.
@@ -256,7 +262,10 @@ mod tests {
 
         // Belt-and-braces: re-verify the child's side effects from the parent.
         let (count, last) = rtk_shell_lines(datadir.path());
-        assert_eq!(count, 2, "exactly two rtk_shell lines after A+C (B banks nothing)");
+        assert_eq!(
+            count, 2,
+            "exactly two rtk_shell lines after A+C (B banks nothing)"
+        );
         assert_eq!(
             last.unwrap().tokens_saved_est,
             750,
@@ -283,10 +292,16 @@ mod tests {
         let (count, last) = rtk_shell_lines(&datadir);
         assert_eq!(count, 1, "A: exactly one rtk_shell line after first sync");
         let rec = last.unwrap();
-        assert_eq!(rec.tokens_saved_est, 1000, "A: Δtotal_saved == stub total_saved");
+        assert_eq!(
+            rec.tokens_saved_est, 1000,
+            "A: Δtotal_saved == stub total_saved"
+        );
         assert_eq!(rec.raw_bytes_in, 0, "A: byte planes stay clean");
         assert_eq!(rec.bytes_returned, 0, "A: byte planes stay clean");
-        assert!(datadir.join("rtk_watermark.json").exists(), "A: watermark created");
+        assert!(
+            datadir.join("rtk_watermark.json").exists(),
+            "A: watermark created"
+        );
 
         // ── B: re-sync with identical stub output appends NOTHING ───────────────
         sync().expect("second sync (no new activity)");
@@ -299,7 +314,10 @@ mod tests {
         let (count, last) = rtk_shell_lines(&datadir);
         assert_eq!(count, 2, "C: one new rtk_shell line for the increment");
         let rec = last.unwrap();
-        assert_eq!(rec.tokens_saved_est, 750, "C: tokens_saved_est == Δtotal_saved");
+        assert_eq!(
+            rec.tokens_saved_est, 750,
+            "C: tokens_saved_est == Δtotal_saved"
+        );
         assert_eq!(
             rec.input_summary.get("commands").and_then(|v| v.as_i64()),
             Some(10),

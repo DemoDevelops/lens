@@ -100,7 +100,10 @@ async fn every_tool_call_logs_one_correct_record() {
     }
 
     // The known ctx_execute op: byte/token fields are exactly right.
-    let e = records.iter().find(|r| r["tool"] == json!("ctx_execute")).unwrap();
+    let e = records
+        .iter()
+        .find(|r| r["tool"] == json!("ctx_execute"))
+        .unwrap();
     assert_eq!(e["raw_bytes_in"].as_u64().unwrap(), exec_stdout_bytes);
     assert_eq!(e["bytes_returned"].as_u64().unwrap(), exec_returned as u64);
     assert_eq!(e["store_ref"].as_str().unwrap(), exec_ref);
@@ -157,7 +160,11 @@ async fn server_stdout_is_pure_json_rpc() {
             }
             let parsed: Value = serde_json::from_str(&line)
                 .unwrap_or_else(|_| panic!("non-JSON-RPC line leaked to stdout: {line:?}"));
-            assert_eq!(parsed["jsonrpc"], json!("2.0"), "every stdout line is JSON-RPC");
+            assert_eq!(
+                parsed["jsonrpc"],
+                json!("2.0"),
+                "every stdout line is JSON-RPC"
+            );
             if parsed["id"] == json!(2) {
                 saw_tool_response = true;
                 break;
@@ -170,10 +177,16 @@ async fn server_stdout_is_pure_json_rpc() {
     let _ = stdin.shutdown().await;
     let _ = child.kill().await;
 
-    assert!(saw_tool_response, "should have received the tool-call response");
+    assert!(
+        saw_tool_response,
+        "should have received the tool-call response"
+    );
     // Instrumentation actually ran (proving it had the chance to leak) but went to files.
     assert!(data.path().join("ops.log").exists(), "ops.log was written");
-    assert!(data.path().join("explain.log").exists(), "explain.log was written");
+    assert!(
+        data.path().join("explain.log").exists(),
+        "explain.log was written"
+    );
     assert!(!ops_lines(data.path()).is_empty());
 }
 
@@ -204,18 +217,19 @@ async fn concurrent_workers_no_corruption_all_roundtrip() {
                 timeout_secs: 30,
                 stdin: None,
             };
-            let resp = sandbox::run(req, &repo_dir, &store, 8192).await.expect("no lock error");
+            let resp = sandbox::run(req, &repo_dir, &store, 8192)
+                .await
+                .expect("no lock error");
             // Record an op too, so ops.log takes concurrent appends.
             let returned = (resp.stdout.len() + resp.stderr.len()) as u64;
-            ops.start("ctx_execute", json!({ "worker": i }))
-                .finish(
-                    resp.stdout_bytes as u64,
-                    returned,
-                    resp.retrieve_ref.clone(),
-                    "ok",
-                    "",
-                    None,
-                );
+            ops.start("ctx_execute", json!({ "worker": i })).finish(
+                resp.stdout_bytes as u64,
+                returned,
+                resp.retrieve_ref.clone(),
+                "ok",
+                "",
+                None,
+            );
             (marker, resp)
         }));
     }

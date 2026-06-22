@@ -140,6 +140,18 @@ impl SessionStore {
         Ok(rows.flatten().collect())
     }
 
+    /// Session events with contradictory entity state resolved at read time.
+    ///
+    /// The log is append-only, so an entity can flip state across events (a path
+    /// touched at t1, deleted at t2). For recovery we want only the latest truth.
+    /// Events that share an entity key are collapsed to the most recent by
+    /// timestamp (ties keep insertion order, last inserted wins); older
+    /// contradictions are dropped from the view but never from the table.
+    /// Events with no entity key pass through untouched, in original order.
+    pub fn resolved_events_for_session(&self, session_id: &str) -> Result<Vec<Event>> {
+        Ok(resolve_contradictions(self.events_for_session(session_id)?))
+    }
+
     /// Count live events for a project (across sessions).
     pub fn count_events_for_project(&self, project: &str) -> Result<i64> {
         let conn = self.conn()?;
@@ -336,6 +348,47 @@ impl SessionStore {
     }
 }
 
+/// Entity key for an event, or None if the category has no natural identity.
+/// `file` events are keyed by their payload path; everything else is left
+/// untouched (no reversible identifier in the current payloads).
+fn entity_key(e: &Event) -> Option<(&str, &str)> {
+    match e.category.as_str() {
+        "file" => e
+            .payload
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|p| ("file", p)),
+        _ => None,
+    }
+}
+
+/// Drop superseded contradictions: within each entity-key group keep only the
+/// latest event by timestamp (ties keep insertion order). Keyless events and
+/// the surviving keyed events are returned in their original order.
+fn resolve_contradictions(events: Vec<Event>) -> Vec<Event> {
+    // Winning index per key: replace on ts >= so the last-inserted at an equal
+    // timestamp wins (events arrive in insertion order).
+    let mut winner: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for (i, e) in events.iter().enumerate() {
+        if let Some((cat, key)) = entity_key(e) {
+            let k = (cat.to_string(), key.to_string());
+            match winner.get(&k) {
+                Some(&w) if events[w].timestamp > e.timestamp => {}
+                _ => {
+                    winner.insert(k, i);
+                }
+            }
+        }
+    }
+    let kept: BTreeSet<usize> = winner.values().copied().collect();
+    events
+        .into_iter()
+        .enumerate()
+        .filter(|(i, e)| entity_key(e).is_none() || kept.contains(i))
+        .map(|(_, e)| e)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,11 +411,8 @@ mod tests {
     fn insert_and_read_events() {
         let dir = tempdir().unwrap();
         let s = SessionStore::open(dir.path()).unwrap();
-        s.insert_events(&[
-            ev("s1", "/p", "file", 1, 10),
-            ev("s1", "/p", "git", 2, 20),
-        ])
-        .unwrap();
+        s.insert_events(&[ev("s1", "/p", "file", 1, 10), ev("s1", "/p", "git", 2, 20)])
+            .unwrap();
         let got = s.events_for_session("s1").unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].category, "file");
@@ -437,6 +487,52 @@ mod tests {
         assert_eq!(live.total_events, 3);
         assert_eq!(live.sessions, 2);
         assert_eq!(live.last_ts, Some(40));
+    }
+
+    fn file_ev(session: &str, action: &str, path: &str, ts: i64) -> Event {
+        Event {
+            session_id: session.into(),
+            project: "/p".into(),
+            timestamp: ts,
+            category: "file".into(),
+            priority: 1,
+            payload: json!({"action": action, "path": path}),
+            source_hook: "PostToolUse".into(),
+        }
+    }
+
+    #[test]
+    fn resolved_events_keep_latest_per_path() {
+        let dir = tempdir().unwrap();
+        let s = SessionStore::open(dir.path()).unwrap();
+        s.insert_events(&[
+            // Same path contradicts itself: touched at t1, deleted at t2 > t1.
+            file_ev("s1", "write", "src/a.rs", 10),
+            file_ev("s1", "delete", "src/a.rs", 20),
+            // Unrelated path: must be unaffected.
+            file_ev("s1", "edit", "src/b.rs", 15),
+            // Keyless category: must pass through untouched.
+            ev("s1", "/p", "decision", 2, 5),
+        ])
+        .unwrap();
+
+        let got = s.resolved_events_for_session("s1").unwrap();
+        // a.rs at t1 is superseded; only the t2 "delete" survives for that path.
+        let a: Vec<&Event> = got
+            .iter()
+            .filter(|e| e.payload.get("path").and_then(|v| v.as_str()) == Some("src/a.rs"))
+            .collect();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].timestamp, 20);
+        assert_eq!(a[0].payload["action"], "delete");
+        // b.rs and the decision are still present.
+        assert!(got
+            .iter()
+            .any(|e| e.payload.get("path").and_then(|v| v.as_str()) == Some("src/b.rs")));
+        assert!(got.iter().any(|e| e.category == "decision"));
+        // Original order preserved among survivors: decision (last inserted) stays last.
+        assert_eq!(got.len(), 3);
+        assert_eq!(got.last().unwrap().category, "decision");
     }
 
     #[test]

@@ -149,7 +149,9 @@ fn mechanism(tool: &str) -> &'static str {
     match tool {
         "ctx_execute" => "sandbox",
         "ctx_index" | "ctx_search" => "index",
-        "ctx_discover" | "graph_query" | "graph_neighbors" | "graph_path" => "discovery",
+        "ctx_discover" | "graph_query" | "graph_neighbors" | "graph_path" | "graph_find" => {
+            "discovery"
+        }
         "ctx_retrieve" => "retrieve",
         "rtk_shell" => "shell",
         _ => "other",
@@ -237,7 +239,12 @@ fn store_index_graph(dir: &Path) -> (u64, i64, i64, i64) {
         ),
         Err(_) => (0, 0, 0),
     };
-    (db_size(dir, "store.db"), index_chunks, graph_nodes, graph_edges)
+    (
+        db_size(dir, "store.db"),
+        index_chunks,
+        graph_nodes,
+        graph_edges,
+    )
 }
 
 /// Aggregate `ops.log` (optionally scoped to a session) into a JSON snapshot —
@@ -363,8 +370,14 @@ fn render(dir: &Path, filters: &Filters) -> String {
     o.push('\n');
 
     o.push_str(&format!("  ops total       : {}\n", t.ops));
-    o.push_str(&format!("  raw bytes in    : {}\n", human_bytes(t.raw_bytes_in)));
-    o.push_str(&format!("  bytes returned  : {}\n", human_bytes(t.bytes_returned)));
+    o.push_str(&format!(
+        "  raw bytes in    : {}\n",
+        human_bytes(t.raw_bytes_in)
+    ));
+    o.push_str(&format!(
+        "  bytes returned  : {}\n",
+        human_bytes(t.bytes_returned)
+    ));
     o.push_str(&format!(
         "  tokens saved est: {} (~{})\n",
         t.tokens_saved_est,
@@ -375,7 +388,10 @@ fn render(dir: &Path, filters: &Filters) -> String {
         t.offloaded_ops,
         human_bytes(t.offloaded_bytes)
     ));
-    o.push_str(&format!("  errors / timeouts: {} / {}\n", t.errors, t.timeouts));
+    o.push_str(&format!(
+        "  errors / timeouts: {} / {}\n",
+        t.errors, t.timeouts
+    ));
     o.push_str(&format!("  lock wait total : {} ms\n", t.lock_wait_ms));
     o.push('\n');
 
@@ -406,7 +422,9 @@ fn render(dir: &Path, filters: &Filters) -> String {
     }
     o.push_str("  by mechanism:\n");
     for (m, (ops, saved)) in &mech {
-        o.push_str(&format!("    {m:<16} {ops:>6} ops  {saved:>11} saved~tok\n"));
+        o.push_str(&format!(
+            "    {m:<16} {ops:>6} ops  {saved:>11} saved~tok\n"
+        ));
     }
     o.push('\n');
 
@@ -416,9 +434,15 @@ fn render(dir: &Path, filters: &Filters) -> String {
     let rtk = rtk_snapshot();
     o.push_str("  RTK shell savings (rtk gain):\n");
     if rtk.get("installed").and_then(|v| v.as_bool()) == Some(true) {
-        let cmds = rtk.get("total_commands").and_then(|v| v.as_u64()).unwrap_or(0);
+        let cmds = rtk
+            .get("total_commands")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let saved = rtk.get("total_saved").and_then(|v| v.as_u64()).unwrap_or(0);
-        let pct = rtk.get("avg_savings_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let pct = rtk
+            .get("avg_savings_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         o.push_str(&format!("    commands        : {cmds}\n"));
         o.push_str(&format!(
             "    tokens saved    : {saved} (~{})\n",
@@ -432,7 +456,10 @@ fn render(dir: &Path, filters: &Filters) -> String {
 
     // Store / index / graph sizes.
     o.push_str("  store / index / graph:\n");
-    o.push_str(&format!("    store size      : {}\n", human_bytes(store_size)));
+    o.push_str(&format!(
+        "    store size      : {}\n",
+        human_bytes(store_size)
+    ));
     o.push_str(&format!("    index chunks    : {index_chunks}\n"));
     o.push_str(&format!("    graph nodes     : {graph_nodes}\n"));
     o.push_str(&format!("    graph edges     : {graph_edges}\n"));
@@ -530,9 +557,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let log = OpLog::open(dir.path());
         std::env::set_var("CTXFORGE_SESSION_ID", "s1");
-        log.start("ctx_search", json!({})).finish(1, 1, None, "ok", "", None);
+        log.start("ctx_search", json!({}))
+            .finish(1, 1, None, "ok", "", None);
         std::env::set_var("CTXFORGE_SESSION_ID", "s2");
-        log.start("ctx_search", json!({})).finish(1, 1, None, "ok", "", None);
+        log.start("ctx_search", json!({}))
+            .finish(1, 1, None, "ok", "", None);
         std::env::remove_var("CTXFORGE_SESSION_ID");
 
         let only_s1 = read_records(dir.path(), Some("s1"));
@@ -664,6 +693,9 @@ esac
         assert!(scoped["by_tool"].as_array().unwrap().is_empty());
 
         // Cutoff at the epoch ⇒ everything is at/after it ⇒ included.
-        assert_eq!(snapshot_json_since(dir.path(), None, Some(0))["ops"], json!(1));
+        assert_eq!(
+            snapshot_json_since(dir.path(), None, Some(0))["ops"],
+            json!(1)
+        );
     }
 }

@@ -20,7 +20,12 @@ fn bin() -> &'static str {
 
 /// Run `ctxforge hook claude <event>` with `payload` on stdin under a clean,
 /// explicit routing env. Returns (trimmed stdout, parsed JSON or Null).
-fn run_hook(event: &str, payload: &Value, envs: &[(&str, &str)], data_dir: &Path) -> (String, Value) {
+fn run_hook(
+    event: &str,
+    payload: &Value,
+    envs: &[(&str, &str)],
+    data_dir: &Path,
+) -> (String, Value) {
     let mut cmd = Command::new(bin());
     cmd.args(["hook", "claude", event])
         .env("CTXFORGE_DIR", data_dir)
@@ -75,8 +80,16 @@ fn off_is_a_true_noop() {
     let d = tempfile::tempdir().unwrap();
     // Explicit `off` AND unset (the default) must both be byte-identical "{}".
     for envs in [vec![("CTXFORGE_ROUTING", "off")], vec![]] {
-        let (raw_wf, _) = run_hook("PreToolUse", &webfetch_payload(d.path(), "s1"), &envs, d.path());
-        assert_eq!(raw_wf, "{}", "off must be a byte-identical no-op for WebFetch");
+        let (raw_wf, _) = run_hook(
+            "PreToolUse",
+            &webfetch_payload(d.path(), "s1"),
+            &envs,
+            d.path(),
+        );
+        assert_eq!(
+            raw_wf, "{}",
+            "off must be a byte-identical no-op for WebFetch"
+        );
         let (raw_b, _) = run_hook(
             "PreToolUse",
             &bash_payload(d.path(), "s1", "find . -type f"),
@@ -103,7 +116,10 @@ fn webfetch_denies_when_steering() {
         );
         let hso = &v["hookSpecificOutput"];
         assert_eq!(hso["hookEventName"], "PreToolUse");
-        assert_eq!(hso["permissionDecision"], "deny", "WebFetch must deny at {lvl}");
+        assert_eq!(
+            hso["permissionDecision"], "deny",
+            "WebFetch must deny at {lvl}"
+        );
         assert!(
             hso["permissionDecisionReason"]
                 .as_str()
@@ -143,9 +159,18 @@ fn wrappable_bash_rewrites_to_ctxforge_wrap_at_full() {
     let hso = &v["hookSpecificOutput"];
     assert_eq!(hso["permissionDecision"], "allow");
     let cmd = hso["updatedInput"]["command"].as_str().unwrap();
-    assert!(cmd.contains("wrap -- "), "rewrite must invoke `wrap --`: {cmd}");
-    assert!(cmd.contains("find . -type f"), "original command preserved: {cmd}");
-    assert!(cmd.contains("ctxforge"), "invokes the ctxforge binary: {cmd}");
+    assert!(
+        cmd.contains("wrap -- "),
+        "rewrite must invoke `wrap --`: {cmd}"
+    );
+    assert!(
+        cmd.contains("find . -type f"),
+        "original command preserved: {cmd}"
+    );
+    assert!(
+        cmd.contains("ctxforge"),
+        "invokes the ctxforge binary: {cmd}"
+    );
 }
 
 #[test]
@@ -190,7 +215,10 @@ fn stateful_chain_passes_through_unchanged() {
 #[test]
 fn bash_nudge_fires_once_then_passthrough_at_steer() {
     let d = tempfile::tempdir().unwrap();
-    let envs = [("CTXFORGE_ROUTING", "steer"), ("CTXFORGE_ROUTING_MCP", "up")];
+    let envs = [
+        ("CTXFORGE_ROUTING", "steer"),
+        ("CTXFORGE_ROUTING_MCP", "up"),
+    ];
     let p = bash_payload(d.path(), "s1", "find . -type f");
     let (_, v1) = run_hook("PreToolUse", &p, &envs, d.path());
     assert!(
@@ -212,9 +240,17 @@ fn bash_nudge_fires_once_then_passthrough_at_steer() {
 #[test]
 fn mcp_down_gates_redirects_not_wrap() {
     let d = tempfile::tempdir().unwrap();
-    let envs = [("CTXFORGE_ROUTING", "full"), ("CTXFORGE_ROUTING_MCP", "down")];
+    let envs = [
+        ("CTXFORGE_ROUTING", "full"),
+        ("CTXFORGE_ROUTING_MCP", "down"),
+    ];
     // WebFetch deny is an MCP redirect → suppressed to passthrough when down.
-    let (raw_wf, _) = run_hook("PreToolUse", &webfetch_payload(d.path(), "s1"), &envs, d.path());
+    let (raw_wf, _) = run_hook(
+        "PreToolUse",
+        &webfetch_payload(d.path(), "s1"),
+        &envs,
+        d.path(),
+    );
     assert_eq!(raw_wf, "{}", "server down → WebFetch deny suppressed");
     // curl→ctx_execute is an MCP redirect → suppressed to passthrough when down.
     let (raw_curl, _) = run_hook(
@@ -244,23 +280,46 @@ fn mcp_down_gates_redirects_not_wrap() {
 #[test]
 fn sessionstart_injects_routing_block_when_steering() {
     let d = tempfile::tempdir().unwrap();
-    let payload = json!({ "session_id": "s1", "cwd": d.path().to_string_lossy(), "source": "startup" });
+    let payload =
+        json!({ "session_id": "s1", "cwd": d.path().to_string_lossy(), "source": "startup" });
     let (_, v) = run_hook(
         "SessionStart",
         &payload,
         &[("CTXFORGE_ROUTING", "full"), ("CTXFORGE_ROUTING_MCP", "up")],
         d.path(),
     );
-    let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-    assert!(ctx.contains("context_window_protection"), "routing block present: {ctx}");
-    assert!(ctx.contains("ctx_execute"), "tool hierarchy names ctx_execute");
-    assert!(ctx.contains("ctx_search"), "tool hierarchy names ctx_search");
-    assert!(ctx.contains("graph_query"), "tool hierarchy names the graph");
-    assert!(ctx.contains("ToolSearch"), "deferred-tool bootstrap present");
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        ctx.contains("context_window_protection"),
+        "routing block present: {ctx}"
+    );
+    assert!(
+        ctx.contains("ctx_execute"),
+        "tool hierarchy names ctx_execute"
+    );
+    assert!(
+        ctx.contains("ctx_search"),
+        "tool hierarchy names ctx_search"
+    );
+    assert!(
+        ctx.contains("graph_query"),
+        "tool hierarchy names the graph"
+    );
+    assert!(
+        ctx.contains("ToolSearch"),
+        "deferred-tool bootstrap present"
+    );
     assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
 
     // With routing off, no block is injected.
-    let (_, voff) = run_hook("SessionStart", &payload, &[("CTXFORGE_ROUTING", "off")], d.path());
+    let (_, voff) = run_hook(
+        "SessionStart",
+        &payload,
+        &[("CTXFORGE_ROUTING", "off")],
+        d.path(),
+    );
     let ctxoff = voff["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap_or("");
@@ -310,9 +369,15 @@ fn wrap_offloads_roundtrips_and_shows_on_stats() {
         .env("CTXFORGE_DIR", d.path())
         .output()
         .expect("wrap run");
-    assert!(out.status.success(), "wrap exits 0 for a succeeding command");
+    assert!(
+        out.status.success(),
+        "wrap exits 0 for a succeeding command"
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.len() < 50000, "large output must be previewed, not inlined");
+    assert!(
+        stdout.len() < 50000,
+        "large output must be previewed, not inlined"
+    );
     let reference = parse_ref(&stdout).unwrap_or_else(|| panic!("ref in preview: {stdout}"));
 
     // `verify --roundtrip` reproduces it byte-for-byte (PASS, exit 0).
@@ -335,7 +400,10 @@ fn wrap_offloads_roundtrips_and_shows_on_stats() {
         .map(|l| serde_json::from_str::<Value>(l).unwrap())
         .find(|r| r["tool"] == "bash_wrap")
         .expect("a bash_wrap op was recorded");
-    assert!(rec["tokens_saved_est"].as_i64().unwrap() > 0, "wrap shows real savings");
+    assert!(
+        rec["tokens_saved_est"].as_i64().unwrap() > 0,
+        "wrap shows real savings"
+    );
     assert_eq!(rec["store_ref"].as_str().unwrap(), reference);
 
     // `ctxforge stats` surfaces the wrapped op on the dashboard plane.
@@ -386,7 +454,10 @@ async fn ctx_execute_file_e2e() {
     // The new tool is advertised.
     let tools = client.list_tools(Default::default()).await.unwrap();
     assert!(
-        tools.tools.iter().any(|t| t.name.as_ref() == "ctx_execute_file"),
+        tools
+            .tools
+            .iter()
+            .any(|t| t.name.as_ref() == "ctx_execute_file"),
         "ctx_execute_file must be advertised"
     );
 
@@ -434,7 +505,10 @@ async fn ctx_execute_file_e2e() {
     assert_eq!(big["truncated"], json!(true));
     let r2 = big["retrieve_ref"].as_str().unwrap().to_string();
     let recovered = call("ctx_retrieve", json!({ "ref": r2 })).await;
-    assert!(recovered["content"].as_str().unwrap().contains(&"A".repeat(50000)));
+    assert!(recovered["content"]
+        .as_str()
+        .unwrap()
+        .contains(&"A".repeat(50000)));
 
     client.cancel().await.ok();
 }

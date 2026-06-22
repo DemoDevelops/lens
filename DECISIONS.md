@@ -77,6 +77,22 @@ Discovery is structured so a new language is an isolated change in
 
 No other module changes are required.
 
+### Provenance (Graphify, MIT)
+
+The *idea* — parse a repo once into a queryable graph of symbols and
+relationships so the agent reasons over a scoped subgraph instead of reading
+many files — is from **Graphify** (MIT). It was the named lineage source for
+this layer in the build plan (`CONTEXT_FORGE_PLAN.md` §2, `CTXFORGE_ROUTING_PLAN.md`),
+studied for the *concept only* under the plan's explicit "study MIT/Apache
+projects for ideas, do not copy code" posture — via design notes on its
+cache layout and edge model, not its source tree. The implementation is
+written fresh in Rust on the `tree-sitter` crate: the per-language `LangSpec`
+queries (`extract.rs`), the `blake3(file:kind:name:line)` node IDs, the
+`calls`/`imports`/`contains` edge model, and the BFS `neighbors`/`shortest_path`
+(`graph.rs`) are all original. No Graphify source is vendored or copied.
+**Left behind:** any LLM/semantic-enrichment layer — ctxforge's graph is purely
+deterministic tree-sitter extraction.
+
 ## Compression (`compress.rs`)
 
 - Deterministic, reversible JSON compaction: drop null object fields, then

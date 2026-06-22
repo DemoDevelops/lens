@@ -38,7 +38,9 @@ pub struct FileExtract {
 
 /// Return the spec for a file extension, if supported.
 pub fn spec_for_extension(ext: &str) -> Option<LangSpec> {
-    all_specs().into_iter().find(|s| s.extensions.contains(&ext))
+    all_specs()
+        .into_iter()
+        .find(|s| s.extensions.contains(&ext))
 }
 
 /// Return the spec for a language name, if supported.

@@ -77,7 +77,8 @@ async fn run_with_args(
         .map_err(|e| format!("creating temp script: {e}"))?;
     tmp.write_all(req.code.as_bytes())
         .map_err(|e| format!("writing temp script: {e}"))?;
-    tmp.flush().map_err(|e| format!("flushing temp script: {e}"))?;
+    tmp.flush()
+        .map_err(|e| format!("flushing temp script: {e}"))?;
     let script_path = tmp.path().to_path_buf();
 
     let mut cmd = tokio::process::Command::new(runtime.program);
@@ -144,7 +145,11 @@ async fn run_with_args(
     let stderr = String::from_utf8_lossy(&stderr_bytes_full).into_owned();
 
     let stdout_bytes = stdout_full.len();
-    let exit_code = if timed_out { -1 } else { status.code().unwrap_or(-1) };
+    let exit_code = if timed_out {
+        -1
+    } else {
+        status.code().unwrap_or(-1)
+    };
 
     // Large-output handling: offload full stdout, return a preview + ref.
     let (stdout, truncated, retrieve_ref) = if stdout_bytes > max_inline {
@@ -340,7 +345,9 @@ mod tests {
             timeout_secs: 30,
             stdin: None,
         };
-        let r = run_file(&file, req, dir.path(), &store, 8192).await.unwrap();
+        let r = run_file(&file, req, dir.path(), &store, 8192)
+            .await
+            .unwrap();
         assert_eq!(r.stdout.trim(), "1234");
         // The file contents are not echoed back into the returned stdout.
         assert!(!r.stdout.contains(&"z".repeat(50)));
@@ -358,7 +365,9 @@ mod tests {
             timeout_secs: 30,
             stdin: None,
         };
-        let r = run_file(&file, req, dir.path(), &store, 8192).await.unwrap();
+        let r = run_file(&file, req, dir.path(), &store, 8192)
+            .await
+            .unwrap();
         assert_eq!(r.stdout.trim(), "4096");
     }
 
@@ -374,7 +383,9 @@ mod tests {
             timeout_secs: 30,
             stdin: None,
         };
-        let r = run_file(&file, req, dir.path(), &store, 8192).await.unwrap();
+        let r = run_file(&file, req, dir.path(), &store, 8192)
+            .await
+            .unwrap();
         assert!(r.truncated);
         let reference = r.retrieve_ref.expect("should have ref");
         let full = store.get(&reference).unwrap().unwrap();

@@ -131,8 +131,8 @@ pub fn install() -> Result<()> {
         );
     } else {
         download_and_extract(&version, &triple, &bin_dir, &managed)?;
-        let reported = run_version(&managed)
-            .with_context(|| format!("verifying {}", managed.display()))?;
+        let reported =
+            run_version(&managed).with_context(|| format!("verifying {}", managed.display()))?;
         if !reported.contains(want_digits) {
             bail!(
                 "rtk verification failed: expected version containing `{want_digits}`, got `{reported}`"
@@ -211,7 +211,9 @@ fn register_hook() -> Result<()> {
     };
 
     // 3. Idempotently patch the settings.json with the PreToolUse Bash entry.
-    let cmd = command_path.to_str().context("hook script path is not UTF-8")?;
+    let cmd = command_path
+        .to_str()
+        .context("hook script path is not UTF-8")?;
     ensure_hook_entry(&settings, cmd).with_context(|| format!("patching {}", settings.display()))
 }
 
@@ -279,13 +281,17 @@ fn ensure_hook_entry(settings_path: &Path, command: &str) -> Result<()> {
     if hook_command_present(&root, command) {
         return Ok(());
     }
-    let obj = root.as_object_mut().context("settings.json is not a JSON object")?;
+    let obj = root
+        .as_object_mut()
+        .context("settings.json is not a JSON object")?;
     let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
     let hooks_obj = hooks.as_object_mut().context("`hooks` is not an object")?;
     let pre = hooks_obj
         .entry("PreToolUse")
         .or_insert_with(|| serde_json::json!([]));
-    let arr = pre.as_array_mut().context("`hooks.PreToolUse` is not an array")?;
+    let arr = pre
+        .as_array_mut()
+        .context("`hooks.PreToolUse` is not an array")?;
     arr.push(serde_json::json!({
         "matcher": "Bash",
         "hooks": [{ "type": "command", "command": command }],
@@ -320,7 +326,8 @@ fn read_settings(path: &Path) -> Result<serde_json::Value> {
     if !path.is_file() {
         return Ok(serde_json::json!({}));
     }
-    let raw = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     if raw.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
@@ -346,17 +353,23 @@ fn entry_command_eq(entry: &serde_json::Value, command: &str) -> bool {
     entry
         .get("hooks")
         .and_then(|h| h.as_array())
-        .is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command)))
+        .is_some_and(|hs| {
+            hs.iter()
+                .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
+        })
 }
 
 fn entry_command_contains(entry: &serde_json::Value, needle: &str) -> bool {
-    entry.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
-        hs.iter().any(|h| {
-            h.get("command")
-                .and_then(|c| c.as_str())
-                .is_some_and(|c| c.contains(needle))
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .is_some_and(|hs| {
+            hs.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|c| c.contains(needle))
+            })
         })
-    })
 }
 
 /// Download `rtk-<triple>.<ext>` to a temp file via `curl`, then extract the single
@@ -535,7 +548,10 @@ mod tests {
         // Guard lands right after the shebang, before the rtk lookup.
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "#!/usr/bin/env bash");
-        assert!(lines[2] == "export PATH=\"/Users/x/.ctxforge/bin:$PATH\"", "got: {out}");
+        assert!(
+            lines[2] == "export PATH=\"/Users/x/.ctxforge/bin:$PATH\"",
+            "got: {out}"
+        );
         assert!(out.contains("command -v rtk"), "original body preserved");
         // Idempotent: re-injecting doesn't duplicate the guard.
         let twice = inject_path_guard(&out, &bin);
@@ -569,7 +585,9 @@ mod tests {
         // Idempotent: re-injecting doesn't duplicate the reassignment.
         let twice = inject_emit_path_prefix(&out, &bin);
         assert_eq!(
-            twice.matches("self-resolve rtk in the emitted command").count(),
+            twice
+                .matches("self-resolve rtk in the emitted command")
+                .count(),
             1
         );
     }

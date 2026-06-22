@@ -255,6 +255,7 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
                     t.name.as_deref().unwrap_or(""),
                     t.kind.as_deref(),
                     20,
+                    &[],
                 );
                 serde_json::to_string_pretty(&view)?
             }
@@ -301,7 +302,9 @@ fn format_user(context: &str, prompt: &str, ground_truth: &Value) -> String {
 /// Mock oracle (see `Model::Mock`).
 pub fn mock_answer(context: &str, evidence: &[String], ground_truth: &Value) -> Value {
     let lc = context.to_ascii_lowercase();
-    let derivable = evidence.iter().all(|e| lc.contains(&e.to_ascii_lowercase()));
+    let derivable = evidence
+        .iter()
+        .all(|e| lc.contains(&e.to_ascii_lowercase()));
     if derivable {
         ground_truth.clone()
     } else {
@@ -509,7 +512,8 @@ fn value_str(v: &Value) -> String {
 }
 
 fn coerce_f64(v: &Value) -> Option<f64> {
-    v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 fn exact_eq(got: Option<&Value>, expected: &Value) -> bool {
@@ -523,7 +527,9 @@ fn exact_eq(got: Option<&Value>, expected: &Value) -> bool {
             _ => false,
         };
     }
-    value_str(got).trim().eq_ignore_ascii_case(value_str(expected).trim())
+    value_str(got)
+        .trim()
+        .eq_ignore_ascii_case(value_str(expected).trim())
 }
 
 fn contains_eq(got: Option<&Value>, expected: &Value) -> bool {

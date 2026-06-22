@@ -23,9 +23,23 @@ fn edge_view(e: &Edge) -> EdgeView {
 }
 
 /// Find nodes by name substring (+ optional kind), returning each match plus its
-/// immediate (depth-1) connections as one combined subgraph.
-pub fn query(graph: &Graph, name: &str, kind: Option<&str>, limit: usize) -> GraphView {
-    let matches = graph.find_by_name(name, kind);
+/// immediate (depth-1) connections as one combined subgraph. Matches defined in a
+/// file the current session recently touched (`recent_files`) are boosted to the
+/// front so the most relevant ones survive the `limit` cut; an empty slice leaves
+/// the ordering byte-for-byte unchanged.
+pub fn query(
+    graph: &Graph,
+    name: &str,
+    kind: Option<&str>,
+    limit: usize,
+    recent_files: &[String],
+) -> GraphView {
+    let mut matches = graph.find_by_name(name, kind);
+    // Stable partition: recent-file matches first, original (id-sorted) order kept
+    // within each group. A no-op when `recent_files` is empty.
+    if !recent_files.is_empty() {
+        matches.sort_by_key(|n| !is_recent(&n.file, recent_files));
+    }
     let mut node_ids: Vec<String> = Vec::new();
     for m in matches.into_iter().take(limit) {
         node_ids.push(m.id.clone());
@@ -36,6 +50,120 @@ pub fn query(graph: &Graph, name: &str, kind: Option<&str>, limit: usize) -> Gra
         }
     }
     subgraph(graph, &node_ids)
+}
+
+/// True when a node's (repo-relative) `file` corresponds to one of the session's
+/// recently touched paths. Touched paths may be absolute or relative, so match on
+/// a path-suffix relationship (one ends with the other on a `/` boundary) rather
+/// than exact equality; a bare basename match is intentionally rejected so two
+/// unrelated `mod.rs` files don't boost each other.
+fn is_recent(node_file: &str, recent_files: &[String]) -> bool {
+    let norm = |p: &str| p.replace('\\', "/");
+    let node = norm(node_file);
+    recent_files.iter().any(|r| {
+        let r = norm(r);
+        suffix_on_boundary(&r, &node) || suffix_on_boundary(&node, &r)
+    })
+}
+
+/// True if `hay` ends with `needle` at a path-component boundary (i.e. the char
+/// before the match is `/`, or `needle` is the whole string).
+fn suffix_on_boundary(hay: &str, needle: &str) -> bool {
+    if !hay.ends_with(needle) {
+        return false;
+    }
+    let cut = hay.len() - needle.len();
+    cut == 0 || hay.as_bytes()[cut - 1] == b'/'
+}
+
+/// Lexical natural-language find: tokenize `query` into words and rank symbol
+/// names by lexical overlap (no embeddings). Per token, an exact name match beats
+/// a prefix match beats a substring match, and a symbol gets a bonus for each
+/// extra distinct query token it hits. Returns the top `limit` symbols plus their
+/// immediate connections, like [`query`]. Case-insensitive.
+pub fn find(graph: &Graph, query: &str, limit: usize) -> GraphView {
+    let tokens = tokenize(query);
+    if tokens.is_empty() {
+        return subgraph(graph, &[]);
+    }
+    // Score every node; keep only those with a hit. Sort by score desc, then id
+    // for a deterministic tie-break.
+    let mut scored: Vec<(u32, &str)> = graph
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            let s = score_name(&n.name, &tokens);
+            (s > 0).then_some((s, n.id.as_str()))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+
+    let mut node_ids: Vec<String> = Vec::new();
+    for (_, id) in scored.into_iter().take(limit) {
+        node_ids.push(id.to_string());
+        for e in graph.incident(id) {
+            let other = if e.from == id { &e.to } else { &e.from };
+            node_ids.push(other.clone());
+        }
+    }
+    subgraph(graph, &node_ids)
+}
+
+/// Split a string into lowercase alphanumeric word tokens, also breaking
+/// snake_case and camelCase so "build graph" hits `build_graph` / `buildGraph`.
+fn tokenize(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    let flush = |cur: &mut String, out: &mut Vec<String>| {
+        if !cur.is_empty() {
+            out.push(std::mem::take(cur));
+        }
+    };
+    for c in s.chars() {
+        if c.is_alphanumeric() {
+            // camelCase boundary: a lowercase/digit run followed by an uppercase.
+            if c.is_uppercase() && prev_lower {
+                flush(&mut cur, &mut out);
+            }
+            cur.extend(c.to_lowercase());
+            prev_lower = c.is_lowercase() || c.is_numeric();
+        } else {
+            flush(&mut cur, &mut out);
+            prev_lower = false;
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// Lexical score of a symbol `name` against query `tokens`: exact (3) > prefix (2)
+/// > substring (1) per token, summed over distinct hitting tokens, plus a bonus of
+/// 2 per hit beyond the first so multi-token matches outrank single-token ones.
+fn score_name(name: &str, tokens: &[String]) -> u32 {
+    let lname = name.to_ascii_lowercase();
+    let name_tokens = tokenize(name);
+    let mut total = 0u32;
+    let mut hits = 0u32;
+    for t in tokens {
+        let s = if name_tokens.iter().any(|nt| nt == t) {
+            3
+        } else if lname.starts_with(t.as_str()) {
+            2
+        } else if lname.contains(t.as_str()) {
+            1
+        } else {
+            0
+        };
+        if s > 0 {
+            total += s;
+            hits += 1;
+        }
+    }
+    if hits > 1 {
+        total += 2 * (hits - 1);
+    }
+    total
 }
 
 /// Local subgraph within `depth` hops of `node_id`.
@@ -84,15 +212,23 @@ fn resolve(graph: &Graph, token: &str) -> Option<String> {
     if graph.node(token).is_some() {
         return Some(token.to_string());
     }
-    graph.find_by_name(token, None).into_iter().find_map(|n| {
-        if n.name == token {
-            Some(n.id.clone())
-        } else {
-            None
-        }
-    })
-    // fall back to substring match
-    .or_else(|| graph.find_by_name(token, None).first().map(|n| n.id.clone()))
+    graph
+        .find_by_name(token, None)
+        .into_iter()
+        .find_map(|n| {
+            if n.name == token {
+                Some(n.id.clone())
+            } else {
+                None
+            }
+        })
+        // fall back to substring match
+        .or_else(|| {
+            graph
+                .find_by_name(token, None)
+                .first()
+                .map(|n| n.id.clone())
+        })
 }
 
 /// Build a deduplicated subgraph from a set of node ids, including edges whose
@@ -144,8 +280,54 @@ mod tests {
     #[test]
     fn query_finds_known_function() {
         let g = rust_graph();
-        let view = query(&g, "a", Some("function"), 20);
+        let view = query(&g, "a", Some("function"), 20, &[]);
         assert!(view.nodes.iter().any(|n| n.name == "a"));
+    }
+
+    #[test]
+    fn query_boosts_recently_touched_file() {
+        // Two functions named so both match the substring "handler"; each lives in
+        // a different file. With one of those files marked recently touched, its
+        // symbol must sort first so a `limit` of 1 keeps it.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn alpha_handler() {}\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "fn beta_handler() {}\n").unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        // Without proximity, id-sort order decides; assert the boost flips it.
+        let recent = vec!["/abs/path/to/b.rs".to_string()];
+        let view = query(&g, "handler", Some("function"), 1, &recent);
+        assert!(
+            view.nodes.iter().any(|n| n.name == "beta_handler"),
+            "symbol from the recently touched file must rank first"
+        );
+        assert!(
+            !view.nodes.iter().any(|n| n.name == "alpha_handler"),
+            "the non-recent symbol must be cut by the limit"
+        );
+    }
+
+    #[test]
+    fn find_ranks_by_lexical_overlap() {
+        // A natural-language query should surface the symbol whose name overlaps
+        // most, even split across snake_case words.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("lib.rs"),
+            "fn build_graph() {}\nfn parse_file() {}\nfn unrelated() {}\n",
+        )
+        .unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let view = find(&g, "build the graph please", 1);
+        assert!(
+            view.nodes.iter().any(|n| n.name == "build_graph"),
+            "lexical find must return the best-matching symbol"
+        );
+        assert!(
+            !view.nodes.iter().any(|n| n.name == "unrelated"),
+            "a non-matching symbol must not be returned"
+        );
     }
 
     #[test]

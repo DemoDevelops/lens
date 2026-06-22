@@ -4,7 +4,7 @@
   "fixtures": ["fixtures/big.log"],
   "ground_truth": { "distinct_error_types": 7, "most_frequent": "ConnectionTimeout" },
   "check": "exact_match",
-  "primary_mechanism": "sandbox",
+  "primary_mechanism": "darkroom",
   "evidence": ["ConfigMissing", "NullPointer", "ConnectionTimeout"],
   "treatment": {
     "language": "bash",

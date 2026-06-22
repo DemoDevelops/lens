@@ -44,27 +44,27 @@ struct RecoveryReport {
 
 const METHODOLOGY: &str = r#"## Methodology
 
-ctxforge is benchmarked against the metrics the **headroom** project publishes,
-but matched to where ctxforge actually sits in the loop. There are two halves,
+lens is benchmarked against the metrics the **headroom** project publishes,
+but matched to where lens actually sits in the loop. There are two halves,
 and they are not the same kind of measurement.
 
 **Savings** is directly comparable to headroom's proof table: tokens entering
-context **without** ctxforge (a realistic naive-agent path) vs **with** it.
+context **without** lens (a realistic naive-agent path) vs **with** it.
 Token estimate = bytes / 4 (the same rough convention `ctx_stats` uses); raw
-byte counts are shown alongside. Every row is segmented by the ctxforge tool
-that produced the saving (`sandbox` / `index` / `compression` / `discovery`),
-because ctxforge saves via different mechanisms than headroom — it mostly
+byte counts are shown alongside. Every row is segmented by the lens tool
+that produced the saving (`darkroom` / `index` / `compression` / `discovery`),
+because lens saves via different mechanisms than headroom — it mostly
 *prevents* data entering context, where headroom *compresses* data that does. A
 single blended percentage would hide which mechanism did the work.
 
 **Accuracy** uses a task-based method, **not** GSM8K/TruthfulQA. Those measure
 whether compressing a *prompt* preserves answer accuracy — faithful for a
-prompt-path compressor like headroom. ctxforge is an MCP tool provider that sits
-*beside* the prompt path; nothing forces a QA prompt through `ctx_execute`. So
-the faithful accuracy question is: *when the agent uses the sandbox / graph /
+prompt-path compressor like headroom. lens is an MCP tool provider that sits
+*beside* the prompt path; nothing forces a QA prompt through `lens_run`. So
+the faithful accuracy question is: *when the agent uses the darkroom / graph /
 search instead of reading raw files, does it still answer correctly?* Each task
 is run twice with the same model — **control** (raw fixtures, capped at a naive
-context budget) vs **treatment** (the ctxforge tool's compact output) — and
+context budget) vs **treatment** (the lens tool's compact output) — and
 scored against deterministic ground truth. The result we want to state honestly
 is **Δ acc ≈ 0 with a large token reduction**. A negative Δ on any mechanism is
 surfaced loudly: it means that mechanism is dropping load-bearing context.
@@ -78,38 +78,38 @@ marked pending a real-model run.
 const ISOLATION_NOTE: &str = r#"### Context Mode isolation + head-to-head
 
 These savings come from `cargo run --bin bench_savings`, a standalone Rust binary
-that calls ctxforge's library functions **directly** (index / sandbox /
+that calls lens's library functions **directly** (index / darkroom /
 compression / discovery) — it does not route through any MCP server or hook, so
 Context Mode's PreToolUse hooks cannot intercept the workload. The numbers are
-ctxforge's own.
+lens's own.
 
 **Context Mode (measured), same machine, same workloads.** CM is comparable only
 where it has an equivalent mechanism:
 
-| Workload | ctxforge mechanism | Context Mode (measured) |
+| Workload | lens mechanism | Context Mode (measured) |
 | --- | --- | --- |
-| Code search | FTS5 index → ranked snippets | `n/a` — CM `ctx_index`/`ctx_search` index into a session-global FTS5 KB; the per-workload token figure can't be isolated from session state without faking it. |
-| Log debugging | sandboxed grep, matches only | `n/a` — CM `ctx_execute` runs the same grep; equivalent by construction, no independent CM compaction to measure. |
+| Code search | FTS5 index → ranked snippets | `n/a` — CM `lens_index`/`lens_search` index into a session-global FTS5 KB; the per-workload token figure can't be isolated from session state without faking it. |
+| Log debugging | darkroom grep, matches only | `n/a` — CM `lens_run` runs the same grep; equivalent by construction, no independent CM compaction to measure. |
 | Issue triage | columnar + dictionary JSON compaction | `n/a` — CM has no structural-JSON compactor; this is the headroom/SmartCrusher archetype, not a CM mechanism. |
 | Codebase exploration | tree-sitter code graph | `n/a` — CM has no code graph. |
 
 Every CM cell is `n/a` with a stated reason rather than a fabricated number. The
-faithful head-to-head ctxforge *was* built to win is **session recovery** (below),
+faithful head-to-head lens *was* built to win is **session recovery** (below),
 which drives CM's real hook scripts.
 
 "#;
 
-/// Intro paragraph for the clean doc: what ctxforge is + the appendix link. No
+/// Intro paragraph for the clean doc: what lens is + the appendix link. No
 /// methodology essay (that lives in the appendix).
-const INTRO: &str = r#"ctxforge is an MCP tool provider that keeps work **out** of the agent's context window: it indexes, sandboxes, compresses, and graphs data so the bytes a naive agent would read never enter context. The tables below are the measured results.
+const INTRO: &str = r#"lens is an MCP tool provider that keeps work **out** of the agent's context window: it indexes, darkroomes, compresses, and graphs data so the bytes a naive agent would read never enter context. The tables below are the measured results.
 
 _Full scale curves, mechanism classifications, the discovery-regression investigation, and methodology are in [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md)._
 
 "#;
 
-/// The recovery-section intro (the bar is Context Mode, not ctxforge's own sense
+/// The recovery-section intro (the bar is Context Mode, not lens's own sense
 /// of working). Kept short in the clean doc.
-const RECOVERY_INTRO: &str = "Proves the Context Mode replacement: each scenario builds a working state, forces a compaction boundary, then asks a question only answerable if the state survived. The bar is **Context Mode**, not ctxforge's own sense of working — the swap is only safe when **ctxforge ≥ Context Mode** at comparable token cost.\n\n";
+const RECOVERY_INTRO: &str = "Proves the Context Mode replacement: each scenario builds a working state, forces a compaction boundary, then asks a question only answerable if the state survived. The bar is **Context Mode**, not lens's own sense of working — the swap is only safe when **lens ≥ Context Mode** at comparable token cost.\n\n";
 
 /// Short two-sentence honesty footer for the clean doc (§2.5).
 const HONESTY_FOOTER: &str = r#"- Context Mode has no JSON-compactor or code-graph equivalent, so three of the four savings workloads have no faithful Context Mode head-to-head (full per-cell reasoning in the appendix); the one faithful Context Mode comparison is **session recovery**, above.
@@ -122,7 +122,7 @@ const DISCOVERY_INVESTIGATION: &str = r#"## The discovery-regression investigati
 
 This is the proof the apparatus catches its own bad numbers; it is kept whole.
 
-The first real accuracy run, on `claude-haiku-4-5`, showed **discovery −33pp** (N = 3, so one task = 33pp). The generator's auto-warning fired — it flags *any* negative aggregate delta as "dropping load-bearing context". Per-task investigation showed the opposite. The one regressing task (`0008_reachable_path`, "can `handle_request` reach `connect_db`?") has a treatment context — the `graph_path` op — that returns the **correct** answer (`found:true`, full path `handle_request → fetch_user → connect_db`), *more* explicit than the raw-file control, yet Haiku still answered `reachable:false`. That is a weak-model reasoning slip on a correct context, **not** a ctxforge context-drop.
+The first real accuracy run, on `claude-haiku-4-5`, showed **discovery −33pp** (N = 3, so one task = 33pp). The generator's auto-warning fired — it flags *any* negative aggregate delta as "dropping load-bearing context". Per-task investigation showed the opposite. The one regressing task (`0008_reachable_path`, "can `handle_request` reach `connect_db`?") has a treatment context — the `lens_path` op — that returns the **correct** answer (`found:true`, full path `handle_request → fetch_user → connect_db`), *more* explicit than the raw-file control, yet Haiku still answered `reachable:false`. That is a weak-model reasoning slip on a correct context, **not** a lens context-drop.
 
 Re-running just the discovery set on `claude-sonnet-4-6` (same backend) confirmed it: discovery returns to **100% / 100% (+0pp)**, with `0008` answering `reachable:yes`. The slip disappears on the stronger model.
 
@@ -157,7 +157,7 @@ fn accuracy_real_note(groups: &[accuracy::Group], model_label: &str) -> String {
         ));
     } else {
         s.push_str(&format!(
-            ">\n> Negative delta this run on: **{}**. A negative aggregate delta can be either ctxforge scoping out load-bearing context *or* a weak-model slip on a context that was actually correct — per-task investigation distinguishes them (see the discovery-slip writeup in DECISIONS.md for a worked example). The ⚠️ above is a heuristic on the aggregate and fires before that distinction.\n",
+            ">\n> Negative delta this run on: **{}**. A negative aggregate delta can be either lens scoping out load-bearing context *or* a weak-model slip on a context that was actually correct — per-task investigation distinguishes them (see the discovery-slip writeup in DECISIONS.md for a worked example). The ⚠️ above is a heuristic on the aggregate and fires before that distinction.\n",
             negatives.join(", ")
         ));
     }
@@ -232,12 +232,12 @@ async fn main() -> anyhow::Result<()> {
 
     // --- Clean, results-first BENCHMARKS.md ---------------------------------
     let clean = format!(
-        "# ctxforge benchmarks\n\n{INTRO}## Savings\n\n{headline_md}\n## Accuracy\n\n{clean_accuracy_md}\n## Session recovery\n\n{RECOVERY_INTRO}{recovery_md}\n## Notes\n\n{HONESTY_FOOTER}"
+        "# lens benchmarks\n\n{INTRO}## Savings\n\n{headline_md}\n## Accuracy\n\n{clean_accuracy_md}\n## Session recovery\n\n{RECOVERY_INTRO}{recovery_md}\n## Notes\n\n{HONESTY_FOOTER}"
     );
 
     // --- Full audit trail BENCHMARKS_APPENDIX.md ----------------------------
     let appendix = format!(
-        "# ctxforge benchmarks — appendix\n\n_This is the full measurement trail behind [BENCHMARKS.md](BENCHMARKS.md). Nothing here is recomputed; it is the same committed data, shown in full._\n\n{METHODOLOGY}## Savings (full)\n\n{savings_full_md}\n{scale_md}\n{ISOLATION_NOTE}## Accuracy (full)\n\n{appendix_accuracy_md}\n{DISCOVERY_INVESTIGATION}"
+        "# lens benchmarks — appendix\n\n_This is the full measurement trail behind [BENCHMARKS.md](BENCHMARKS.md). Nothing here is recomputed; it is the same committed data, shown in full._\n\n{METHODOLOGY}## Savings (full)\n\n{savings_full_md}\n{scale_md}\n{ISOLATION_NOTE}## Accuracy (full)\n\n{appendix_accuracy_md}\n{DISCOVERY_INVESTIGATION}"
     );
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

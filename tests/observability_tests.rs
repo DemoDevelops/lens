@@ -12,11 +12,11 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-use ctxforge::obs::stats::{aggregate, read_records};
-use ctxforge::obs::OpLog;
-use ctxforge::sandbox;
-use ctxforge::store::Store;
-use ctxforge::tools::ExecuteRequest;
+use lens::darkroom;
+use lens::obs::stats::{aggregate, read_records};
+use lens::obs::OpLog;
+use lens::store::Store;
+use lens::tools::ExecuteRequest;
 
 /// Read and parse every ops.log record under a data dir.
 fn ops_lines(data_dir: &std::path::Path) -> Vec<Value> {
@@ -42,13 +42,13 @@ async fn every_tool_call_logs_one_correct_record() {
     .unwrap();
     std::fs::write(repo.path().join("big.txt"), "z".repeat(200_000)).unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_ctxforge");
+    let bin = env!("CARGO_BIN_EXE_lens");
     let repo_path = repo.path().to_path_buf();
     let data_path = data.path().to_path_buf();
     let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
         cmd.current_dir(&repo_path)
-            .env("CTXFORGE_DIR", &data_path)
-            .env("CTXFORGE_MAX_INLINE", "8192");
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192");
     }))
     .unwrap();
     let client = ().serve(transport).await.expect("handshake");
@@ -69,7 +69,7 @@ async fn every_tool_call_logs_one_correct_record() {
 
     // A known large-output op, then the rest of the surface.
     let exec = call(
-        "ctx_execute",
+        "lens_run",
         json!({ "language": "python", "code": "data = open('big.txt').read(); print('A' * 50000)" }),
     )
     .await;
@@ -78,12 +78,12 @@ async fn every_tool_call_logs_one_correct_record() {
     let exec_returned =
         exec["stdout"].as_str().unwrap().len() + exec["stderr"].as_str().unwrap().len();
 
-    call("ctx_retrieve", json!({ "ref": exec_ref })).await;
-    call("ctx_index", json!({ "path": "." })).await;
-    call("ctx_search", json!({ "queries": ["helper"] })).await;
-    call("ctx_discover", json!({ "path": "." })).await;
-    call("graph_query", json!({ "name": "helper" })).await;
-    call("graph_path", json!({ "from": "main", "to": "helper" })).await;
+    call("lens_recall", json!({ "ref": exec_ref })).await;
+    call("lens_index", json!({ "path": "." })).await;
+    call("lens_search", json!({ "queries": ["helper"] })).await;
+    call("lens_map", json!({ "path": "." })).await;
+    call("lens_symbol", json!({ "name": "helper" })).await;
+    call("lens_path", json!({ "from": "main", "to": "helper" })).await;
     call("ctx_stats", json!({})).await;
     client.cancel().await.ok();
 
@@ -99,10 +99,10 @@ async fn every_tool_call_logs_one_correct_record() {
         assert_eq!(r["outcome"], json!("ok"));
     }
 
-    // The known ctx_execute op: byte/token fields are exactly right.
+    // The known lens_run op: byte/token fields are exactly right.
     let e = records
         .iter()
-        .find(|r| r["tool"] == json!("ctx_execute"))
+        .find(|r| r["tool"] == json!("lens_run"))
         .unwrap();
     assert_eq!(e["raw_bytes_in"].as_u64().unwrap(), exec_stdout_bytes);
     assert_eq!(e["bytes_returned"].as_u64().unwrap(), exec_returned as u64);
@@ -120,14 +120,14 @@ async fn every_tool_call_logs_one_correct_record() {
 async fn server_stdout_is_pure_json_rpc() {
     let repo = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
-    let bin = env!("CARGO_BIN_EXE_ctxforge");
+    let bin = env!("CARGO_BIN_EXE_lens");
 
     // Explain ON so observability is maximally chatty — if anything leaked to
     // stdout instead of the log files, we'd catch it here.
     let mut child = Command::new(bin)
         .current_dir(repo.path())
-        .env("CTXFORGE_DIR", data.path())
-        .env("CTXFORGE_EXPLAIN", "1")
+        .env("LENS_DIR", data.path())
+        .env("LENS_EXPLAIN", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -142,7 +142,7 @@ async fn server_stdout_is_pure_json_rpc() {
     let msgs = [
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"purity-test","version":"0"}}}),
         json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ctx_execute","arguments":{"language":"python","code":"print('A'*50000)"}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lens_run","arguments":{"language":"python","code":"print('A'*50000)"}}}),
     ];
     for m in &msgs {
         stdin.write_all(format!("{m}\n").as_bytes()).await.unwrap();
@@ -197,7 +197,7 @@ async fn server_stdout_is_pure_json_rpc() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_workers_no_corruption_all_roundtrip() {
     let repo = tempfile::tempdir().unwrap();
-    let data = repo.path().join(".ctxforge");
+    let data = repo.path().join(".lens");
     let store = Store::open(&data).unwrap();
     let ops = OpLog::open(&data);
 
@@ -217,12 +217,12 @@ async fn concurrent_workers_no_corruption_all_roundtrip() {
                 timeout_secs: 30,
                 stdin: None,
             };
-            let resp = sandbox::run(req, &repo_dir, &store, 8192)
+            let resp = darkroom::run(req, &repo_dir, &store, 8192)
                 .await
                 .expect("no lock error");
             // Record an op too, so ops.log takes concurrent appends.
             let returned = (resp.stdout.len() + resp.stderr.len()) as u64;
-            ops.start("ctx_execute", json!({ "worker": i })).finish(
+            ops.start("lens_run", json!({ "worker": i })).finish(
                 resp.stdout_bytes as u64,
                 returned,
                 resp.retrieve_ref.clone(),
@@ -260,25 +260,25 @@ async fn concurrent_workers_no_corruption_all_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
-// §6: CTXFORGE_EXPLAIN=1 never changes a tool result payload
+// §6: LENS_EXPLAIN=1 never changes a tool result payload
 // ---------------------------------------------------------------------------
 
 async fn run_exec(data_dir: &std::path::Path, explain: bool) -> Value {
     let repo = tempfile::tempdir().unwrap();
-    let bin = env!("CARGO_BIN_EXE_ctxforge");
+    let bin = env!("CARGO_BIN_EXE_lens");
     let repo_path = repo.path().to_path_buf();
     let data_path = data_dir.to_path_buf();
     let transport = TokioChildProcess::new(Command::new(bin).configure(move |cmd| {
         cmd.current_dir(&repo_path)
-            .env("CTXFORGE_DIR", &data_path)
-            .env("CTXFORGE_MAX_INLINE", "8192");
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192");
         if explain {
-            cmd.env("CTXFORGE_EXPLAIN", "1");
+            cmd.env("LENS_EXPLAIN", "1");
         }
     }))
     .unwrap();
     let client = ().serve(transport).await.expect("handshake");
-    let mut params = CallToolRequestParams::new("ctx_execute");
+    let mut params = CallToolRequestParams::new("lens_run");
     params.arguments = json!({ "language": "python", "code": "print('A'*50000)" })
         .as_object()
         .cloned();

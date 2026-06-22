@@ -1,5 +1,5 @@
 //! `rtk gain` bridge — read RTK's *own* measured shell-command savings and (T2)
-//! reconcile them into the ctxforge op log as `rtk_shell` records.
+//! reconcile them into the lens op log as `rtk_shell` records.
 //!
 //! **T0 scaffold provides** the JSON parse ([`parse_gain`], proven against the
 //! captured sample) and a working [`read_gain`] (runs `rtk gain --format json`),
@@ -45,8 +45,8 @@ pub fn read_gain(scope: Scope) -> Result<GainSummary> {
     parse_gain(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// `ctxforge rtk sync` — diff `rtk gain` against the watermark at
-/// `$CTXFORGE_DIR/rtk_watermark.json` and append an `rtk_shell` op record whose
+/// `lens rtk sync` — diff `rtk gain` against the watermark at
+/// `$LENS_DIR/rtk_watermark.json` and append an `rtk_shell` op record whose
 /// `tokens_saved_est` is `Δtotal_saved` (RTK's own number, never re-estimated).
 ///
 /// No-op when RTK isn't installed. When there's no new activity since the last
@@ -85,8 +85,8 @@ pub fn sync() -> Result<()> {
     let pid = std::process::id();
     let rec = crate::obs::OpRecord {
         ts: crate::obs::iso8601_now(),
-        session_id: std::env::var("CTXFORGE_SESSION_ID").ok(),
-        agent_id: std::env::var("CTXFORGE_AGENT_ID").unwrap_or_else(|_| format!("pid-{pid}")),
+        session_id: std::env::var("LENS_SESSION_ID").ok(),
+        agent_id: std::env::var("LENS_AGENT_ID").unwrap_or_else(|_| format!("pid-{pid}")),
         pid,
         tool: "rtk_shell".into(),
         input_summary: serde_json::json!({
@@ -178,13 +178,13 @@ mod tests {
 
     // ── sync() offline tests (network-free; stub `rtk`) ────────────────────────
     //
-    // `sync()` reads its data dir from `crate::obs::data_dir()` (env `CTXFORGE_DIR`)
-    // and resolves the stub `rtk` from `CTXFORGE_HOME` — both PROCESS-global. The
-    // `session::hook` unit tests read `CTXFORGE_DIR` too (via `resolve_data_dir`),
+    // `sync()` reads its data dir from `crate::obs::data_dir()` (env `LENS_DIR`)
+    // and resolves the stub `rtk` from `LENS_HOME` — both PROCESS-global. The
+    // `session::hook` unit tests read `LENS_DIR` too (via `resolve_data_dir`),
     // and `cargo test` runs in parallel with no `serial_test` crate available, so
     // mutating those vars in-process would corrupt sibling tests. The project's own
-    // convention (see `tests/*.rs`) is to scope `CTXFORGE_DIR` to a CHILD process's
-    // env, never the test process. `CARGO_BIN_EXE_ctxforge` isn't injected for
+    // convention (see `tests/*.rs`) is to scope `LENS_DIR` to a CHILD process's
+    // env, never the test process. `CARGO_BIN_EXE_lens` isn't injected for
     // `--lib` unit tests, so we re-exec THIS test binary instead: the parent spawns
     // the `#[ignore]`d `sync_child` with the env scoped to the child, and the child
     // runs the real A→B→C against the stub. No env leaks into the parent process.
@@ -235,7 +235,7 @@ mod tests {
     }
 
     /// Parent: spin up tempdirs for the stub home + data dir, then re-exec this
-    /// test binary to run [`sync_child`] with `CTXFORGE_HOME`/`CTXFORGE_DIR` scoped
+    /// test binary to run [`sync_child`] with `LENS_HOME`/`LENS_DIR` scoped
     /// to the CHILD only (process isolation ⇒ no leak into sibling unit tests).
     #[cfg(unix)]
     #[test]
@@ -251,11 +251,11 @@ mod tests {
                 "--nocapture",
                 "rtk::gain::tests::sync_child",
             ])
-            .env("CTXFORGE_HOME", home.path()) // stub rtk resolves here
-            .env("CTXFORGE_DIR", datadir.path()) // ops.log + watermark land here
+            .env("LENS_HOME", home.path()) // stub rtk resolves here
+            .env("LENS_DIR", datadir.path()) // ops.log + watermark land here
             // Keep the child deterministic regardless of the outer env.
-            .env_remove("CTXFORGE_AGENT_ID")
-            .env_remove("CTXFORGE_SESSION_ID")
+            .env_remove("LENS_AGENT_ID")
+            .env_remove("LENS_SESSION_ID")
             .status()
             .expect("spawn sync_child");
         assert!(status.success(), "sync_child failed: {status}");
@@ -277,14 +277,14 @@ mod tests {
         );
     }
 
-    /// Child: the real A→B→C, run in its own process with `CTXFORGE_*` set by the
+    /// Child: the real A→B→C, run in its own process with `LENS_*` set by the
     /// parent. `#[ignore]` so the normal `cargo test` run never executes it directly.
     #[cfg(unix)]
     #[test]
     #[ignore = "spawned by sync_banks_rtk_delta_against_watermark with scoped env"]
     fn sync_child() {
-        let home = std::path::PathBuf::from(std::env::var_os("CTXFORGE_HOME").unwrap());
-        let datadir = std::path::PathBuf::from(std::env::var_os("CTXFORGE_DIR").unwrap());
+        let home = std::path::PathBuf::from(std::env::var_os("LENS_HOME").unwrap());
+        let datadir = std::path::PathBuf::from(std::env::var_os("LENS_DIR").unwrap());
 
         // ── A: first sync banks the full cumulative total as the delta ──────────
         write_stub_rtk(&home, 1000, 50);

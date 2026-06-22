@@ -1,18 +1,18 @@
-//! RTK integration — the **headroom pattern**: ctxforge ships/installs the
+//! RTK integration — the **headroom pattern**: lens ships/installs the
 //! prebuilt RTK binary (Apache-2.0, version-pinned) and surfaces RTK's *own*
 //! measured shell-command savings. RTK owns Bash command rewriting via its own
-//! Claude Code hook; ctxforge keeps its MCP / compaction / continuity lane and
+//! Claude Code hook; lens keeps its MCP / compaction / continuity lane and
 //! **defers Bash to RTK** when RTK is active so the two hooks never double-wrap.
 //!
 //! Everything here is **additive and default-off**: with no RTK binary present,
-//! every entry point is a cheap no-op and existing ctxforge behavior is unchanged.
+//! every entry point is a cheap no-op and existing lens behavior is unchanged.
 //!
-//! Layout (file ownership per `CTXFORGE_RTK_PLAN.md` §4 / `RTK_NOTES.md` §9):
+//! Layout (file ownership per `LENS_RTK_PLAN.md` §4 / `RTK_NOTES.md` §9):
 //!   * [`install`] — download + install the pinned binary, register its hook (T1).
 //!   * [`gain`]    — read `rtk gain --format json` and bridge deltas to the op log (T2).
 //!   * [`rtk_active`] — tells the PreToolUse router to pass Bash through (T4).
 //!
-//! This is reached only via the `ctxforge rtk …` subcommand (a separate process);
+//! This is reached only via the `lens rtk …` subcommand (a separate process);
 //! it never touches the MCP server's JSON-RPC stdout.
 
 pub mod gain;
@@ -55,7 +55,7 @@ pub struct GainSummary {
 }
 
 /// The `summary` block. RTK reports **tokens**, not bytes; `total_saved` is RTK's
-/// own measured savings — surfaced verbatim, never re-estimated by ctxforge.
+/// own measured savings — surfaced verbatim, never re-estimated by lens.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExportSummary {
     pub total_commands: u64,
@@ -80,16 +80,16 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// ctxforge's global home — `$CTXFORGE_HOME` if set, else `~/.ctxforge`. Mirrors
+/// lens's global home — `$LENS_HOME` if set, else `~/.lens`. Mirrors
 /// headroom's `workspace_dir()` (≙ `$HEADROOM_WORKSPACE_DIR` / `~/.headroom`).
-/// Distinct from the per-project data dir `$CTXFORGE_DIR` (`<proj>/.ctxforge`).
+/// Distinct from the per-project data dir `$LENS_DIR` (`<proj>/.lens`).
 pub fn home_root() -> Option<PathBuf> {
-    if let Some(h) = std::env::var_os("CTXFORGE_HOME") {
+    if let Some(h) = std::env::var_os("LENS_HOME") {
         if !h.is_empty() {
             return Some(PathBuf::from(h));
         }
     }
-    home_dir().map(|h| h.join(".ctxforge"))
+    home_dir().map(|h| h.join(".lens"))
 }
 
 /// The managed bin dir — `home_root()/bin` (mirrors headroom `bin_dir()`).
@@ -97,8 +97,8 @@ pub fn bin_dir() -> Option<PathBuf> {
     home_root().map(|r| r.join("bin"))
 }
 
-/// Resolve the RTK binary: the managed install (`~/.ctxforge/bin/rtk`) if present,
-/// else `rtk` on `PATH`. ctxforge is **managed-first** (its pinned binary is
+/// Resolve the RTK binary: the managed install (`~/.lens/bin/rtk`) if present,
+/// else `rtk` on `PATH`. lens is **managed-first** (its pinned binary is
 /// authoritative once installed); headroom is PATH-first — see RTK_NOTES.md §2.
 pub fn rtk_bin_path() -> Option<PathBuf> {
     if let Some(b) = bin_dir() {
@@ -131,7 +131,7 @@ pub fn rtk_available() -> bool {
 /// RTK isn't installed or the process can't be spawned. Shared by install/status
 /// (T1) and the gain bridge (T2).
 pub fn run_rtk(args: &[&str]) -> Result<std::process::Output> {
-    let bin = rtk_bin_path().context("rtk binary not found (run `ctxforge rtk install`)")?;
+    let bin = rtk_bin_path().context("rtk binary not found (run `lens rtk install`)")?;
     Command::new(&bin)
         .args(args)
         .output()
@@ -143,12 +143,12 @@ pub fn run_rtk(args: &[&str]) -> Result<std::process::Output> {
 // ---------------------------------------------------------------------------
 
 /// The Claude config dir whose `settings.json` *this user's* Claude Code actually
-/// reads — `$CLAUDE_CONFIG_DIR` if set, else `~/.claude`. This is where ctxforge
+/// reads — `$CLAUDE_CONFIG_DIR` if set, else `~/.claude`. This is where lens
 /// registers + detects the RTK hook, so the hook fires for the running Claude Code.
 ///
 /// NB: `rtk init --global` (v0.28.2) ignores `$CLAUDE_CONFIG_DIR` and always writes
 /// to `dirs::home_dir()/.claude` (see [`rtk_default_hook_script`]). So when
-/// `$CLAUDE_CONFIG_DIR` differs (e.g. this machine's `~/.claude-personal`), ctxforge
+/// `$CLAUDE_CONFIG_DIR` differs (e.g. this machine's `~/.claude-personal`), lens
 /// patches the config-dir settings itself rather than relying on `rtk init`'s patch.
 pub fn claude_config_dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("CLAUDE_CONFIG_DIR") {
@@ -159,11 +159,11 @@ pub fn claude_config_dir() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".claude"))
 }
 
-/// Path to the Claude settings file ctxforge registers/detects the RTK hook in.
-/// Honors `$CTXFORGE_CLAUDE_SETTINGS` (test seam), else [`claude_config_dir`]'s
+/// Path to the Claude settings file lens registers/detects the RTK hook in.
+/// Honors `$LENS_CLAUDE_SETTINGS` (test seam), else [`claude_config_dir`]'s
 /// `settings.json`.
 pub fn claude_settings_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("CTXFORGE_CLAUDE_SETTINGS") {
+    if let Some(p) = std::env::var_os("LENS_CLAUDE_SETTINGS") {
         if !p.is_empty() {
             return Some(PathBuf::from(p));
         }
@@ -172,7 +172,7 @@ pub fn claude_settings_path() -> Option<PathBuf> {
 }
 
 /// Where `rtk init` writes its hook script — always `dirs::home_dir()/.claude/
-/// hooks/rtk-rewrite.sh` (rtk ignores `$CLAUDE_CONFIG_DIR`). ctxforge copies this
+/// hooks/rtk-rewrite.sh` (rtk ignores `$CLAUDE_CONFIG_DIR`). lens copies this
 /// into the active config dir's `hooks/` when the two differ, so the hook is
 /// self-contained under the dir the running Claude Code reads.
 pub fn rtk_default_hook_script() -> Option<PathBuf> {
@@ -219,17 +219,17 @@ fn hook_mentions_rtk(settings: &serde_json::Value) -> bool {
     })
 }
 
-/// Should ctxforge defer Bash to RTK (RTK owns Bash rewriting)?
+/// Should lens defer Bash to RTK (RTK owns Bash rewriting)?
 ///
-/// Env override wins — deterministic for tests, mirroring `CTXFORGE_ROUTING_MCP`:
-/// `CTXFORGE_DEFER_BASH_TO_RTK` truthy ⇒ `true`, falsey ⇒ `false`. Otherwise
+/// Env override wins — deterministic for tests, mirroring `LENS_ROUTING_MCP`:
+/// `LENS_DEFER_BASH_TO_RTK` truthy ⇒ `true`, falsey ⇒ `false`. Otherwise
 /// detect: RTK binary present **and** its hook registered in Claude settings.
 ///
 /// `_data_dir` is reserved for future per-project scoping (kept symmetric with
 /// [`crate::routing::mcp_ready`]); detection is currently global because RTK
 /// installs its hook globally.
 pub fn rtk_active(_data_dir: &Path) -> bool {
-    if let Some(forced) = env_flag("CTXFORGE_DEFER_BASH_TO_RTK") {
+    if let Some(forced) = env_flag("LENS_DEFER_BASH_TO_RTK") {
         return forced;
     }
     rtk_available() && rtk_hook_registered()
@@ -247,10 +247,10 @@ fn env_flag(name: &str) -> Option<bool> {
 }
 
 // ---------------------------------------------------------------------------
-// `ctxforge rtk <command>` dispatcher
+// `lens rtk <command>` dispatcher
 // ---------------------------------------------------------------------------
 
-/// `ctxforge rtk <install|status|uninstall|sync>`. A separate process — its
+/// `lens rtk <install|status|uninstall|sync>`. A separate process — its
 /// stdout is its own response channel, never the MCP JSON-RPC stream.
 pub fn run_cli(args: &[String]) -> Result<()> {
     match args.first().map(|s| s.as_str()) {
@@ -259,7 +259,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         Some("uninstall") => install::uninstall(),
         Some("sync") => gain::sync(),
         Some(other) => {
-            eprintln!("ctxforge rtk: unknown subcommand '{other}'");
+            eprintln!("lens rtk: unknown subcommand '{other}'");
             print_usage();
             std::process::exit(2);
         }
@@ -272,22 +272,22 @@ pub fn run_cli(args: &[String]) -> Result<()> {
 
 fn print_usage() {
     println!(
-        "usage: ctxforge rtk <command>\n\
+        "usage: lens rtk <command>\n\
 \n\
-ctxforge ships and surfaces the RTK shell-command compressor (headroom pattern):\n\
-RTK owns Bash rewriting via its own hook; ctxforge installs it and reports its savings.\n\
+lens ships and surfaces the RTK shell-command compressor (headroom pattern):\n\
+RTK owns Bash rewriting via its own hook; lens installs it and reports its savings.\n\
 \n\
 commands:\n  \
 install     download + install the pinned RTK binary ({ver}) and register its Claude hook\n  \
 status      show whether RTK is installed, its version, and hook registration\n  \
 uninstall   remove RTK's Claude hook (rtk init --global --uninstall)\n  \
-sync        read `rtk gain` and append shell-savings deltas to the ctxforge op log\n",
+sync        read `rtk gain` and append shell-savings deltas to the lens op log\n",
         ver = RTK_VERSION
     );
 }
 
 /// Shared guard serializing the unit tests that mutate the process-global
-/// `CTXFORGE_HOME` env var (env is global; `cargo test` runs in parallel). Used
+/// `LENS_HOME` env var (env is global; `cargo test` runs in parallel). Used
 /// here and by `obs::stats` tests. Poison-tolerant: a panicked holder still yields
 /// the guard so one failing test doesn't cascade.
 #[cfg(test)]
@@ -310,9 +310,9 @@ mod tests {
             ]}});
             assert!(hook_mentions_rtk(&s), "should detect rtk hook: {cmd}");
         }
-        // A non-rtk PreToolUse hook (e.g. ctxforge's own) must NOT match.
+        // A non-rtk PreToolUse hook (e.g. lens's own) must NOT match.
         let other = json!({"hooks": {"PreToolUse": [
-            {"matcher": "Bash", "hooks": [{"type": "command", "command": "ctxforge hook claude PreToolUse"}]}
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "lens hook claude PreToolUse"}]}
         ]}});
         assert!(!hook_mentions_rtk(&other));
         // No hooks at all.
@@ -323,25 +323,19 @@ mod tests {
     fn rtk_active_env_override_wins() {
         let dir = std::env::temp_dir();
         // Truthy / falsey overrides short-circuit before any binary/hook detection.
-        std::env::set_var("CTXFORGE_DEFER_BASH_TO_RTK", "1");
+        std::env::set_var("LENS_DEFER_BASH_TO_RTK", "1");
         assert!(rtk_active(&dir));
-        std::env::set_var("CTXFORGE_DEFER_BASH_TO_RTK", "off");
+        std::env::set_var("LENS_DEFER_BASH_TO_RTK", "off");
         assert!(!rtk_active(&dir));
-        std::env::remove_var("CTXFORGE_DEFER_BASH_TO_RTK");
+        std::env::remove_var("LENS_DEFER_BASH_TO_RTK");
     }
 
     #[test]
-    fn home_root_honors_ctxforge_home_override() {
+    fn home_root_honors_lens_home_override() {
         let _g = env_test_lock();
-        std::env::set_var("CTXFORGE_HOME", "/tmp/ctxforge-home-test");
-        assert_eq!(
-            home_root().unwrap(),
-            PathBuf::from("/tmp/ctxforge-home-test")
-        );
-        assert_eq!(
-            bin_dir().unwrap(),
-            PathBuf::from("/tmp/ctxforge-home-test/bin")
-        );
-        std::env::remove_var("CTXFORGE_HOME");
+        std::env::set_var("LENS_HOME", "/tmp/lens-home-test");
+        assert_eq!(home_root().unwrap(), PathBuf::from("/tmp/lens-home-test"));
+        assert_eq!(bin_dir().unwrap(), PathBuf::from("/tmp/lens-home-test/bin"));
+        std::env::remove_var("LENS_HOME");
     }
 }

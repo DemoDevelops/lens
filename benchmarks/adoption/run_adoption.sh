@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Plane B: does Claude actually FIRE each ctxforge feature when it should?
+# Plane B: does Claude actually FIRE each lens feature when it should?
 # EVIDENCE tier (real agent, stochastic, small N). For each feature we pose a task
 # that SHOULD trigger that feature (without naming the tool), run it N times under
-# normal ctxforge steering, and check ops.log for whether the expected mechanism
+# normal lens steering, and check ops.log for whether the expected mechanism
 # fired. The agent also has Read/Grep/Bash available -- the question is whether it
-# reaches for the ctxforge tool or falls back to the built-ins.
+# reaches for the lens tool or falls back to the built-ins.
 #
 # This is the adoption question in the user's words. No on/off arms: "does it fire
 # when supposed to" is a firing RATE under steering, not an A/B. (The earlier
 # nudge-on/off A/B is subsumed; isolating the routing-OFF baseline needs a dedicated
 # logged-in config dir, which the shared live settings.json cannot provide.)
 #
-# Only agent-CHOSEN features are measurable here: sandbox (ctx_execute), search
-# (ctx_search/index), graph (graph_*/discovery). Compression and wrap fire
+# Only agent-CHOSEN features are measurable here: darkroom (lens_run), search
+# (lens_search/index), graph (graph_*/discovery). Compression and wrap fire
 # automatically (not an agent choice); recovery is bench_recovery.
 #
 # CONFIG: runs under your live CLAUDE_CONFIG_DIR (~/.claude-personal) so auth + trust
@@ -24,17 +24,17 @@
 #   benchmarks/adoption/run_adoption.sh --runs 3     # N runs per feature
 set -uo pipefail
 
-REPO="/Users/gene/Documents/AI Stuff/ctxforge"
-BIN="$REPO/target/release/ctxforge"
+REPO="/Users/gene/Documents/AI Stuff/lens"
+BIN="$REPO/target/release/lens"
 LIVE_CFG="$HOME/.claude-personal"
-OPSLOG="$REPO/.ctxforge/ops.log"
+OPSLOG="$REPO/.lens/ops.log"
 
-ALLOWED="Read,Grep,Glob,Bash,Write,ToolSearch,mcp__ctxforge__graph_query,mcp__ctxforge__graph_neighbors,mcp__ctxforge__graph_path,mcp__ctxforge__ctx_search,mcp__ctxforge__ctx_index,mcp__ctxforge__ctx_discover,mcp__ctxforge__ctx_execute,mcp__ctxforge__ctx_execute_file,mcp__ctxforge__ctx_retrieve"
+ALLOWED="Read,Grep,Glob,Bash,Write,ToolSearch,mcp__lens__lens_symbol,mcp__lens__lens_links,mcp__lens__lens_path,mcp__lens__lens_search,mcp__lens__lens_index,mcp__lens__lens_map,mcp__lens__lens_run,mcp__lens__lens_run_file,mcp__lens__lens_recall"
 
 # Each task: "feature|expected_mechanism|prompt". Prompts trigger the mechanism
 # without naming the tool, so a fallback to Read/Grep counts as NOT fired.
 TASKS=(
-  "sandbox|sandbox|There is a large log file at benchmarks/accuracy/fixtures/big.log. Identify the single root-cause error type and exactly how many times it occurs. Report only the error type and the count."
+  "darkroom|darkroom|There is a large log file at benchmarks/accuracy/fixtures/big.log. Identify the single root-cause error type and exactly how many times it occurs. Report only the error type and the count."
   "search|index|Across this entire repository, find every place the routing \`Level\` enum is used (constructed, matched on, or taken as a parameter type). List the file:line sites."
   "graph|discovery|Which functions call \`bump_counter\`, and following call edges does \`route\` reach \`read_graph_nudge\`? Answer both, citing file:line."
 )
@@ -58,18 +58,18 @@ TSV="$OUT/results.tsv"
 echo "results dir: $OUT"
 
 # Did the expected mechanism fire for this session? Echoes "fired tools" where
-# fired is 1/0 and tools is a comma list of ctxforge tools the agent actually used.
+# fired is 1/0 and tools is a comma list of lens tools the agent actually used.
 count_fired() {
   local uuid="$1" expected="$2"
   python3 - "$OPSLOG" "$uuid" "$expected" <<'PY'
 import json, sys
 log, sid, expected = sys.argv[1:4]
 mech = {
-    "ctx_execute": "sandbox", "ctx_execute_file": "sandbox",
-    "ctx_index": "index", "ctx_search": "index",
-    "ctx_discover": "discovery", "graph_query": "discovery",
-    "graph_neighbors": "discovery", "graph_path": "discovery",
-    "ctx_retrieve": "retrieve",
+    "lens_run": "darkroom", "lens_run_file": "darkroom",
+    "lens_index": "index", "lens_search": "index",
+    "lens_map": "discovery", "lens_symbol": "discovery",
+    "lens_links": "discovery", "lens_path": "discovery",
+    "lens_recall": "retrieve",
 }
 tools = []
 try:
@@ -101,7 +101,7 @@ When finished, write your full final answer to the file $comp, and make its very
   fi
   echo "$full_task" | \
     CLAUDE_CONFIG_DIR="$LIVE_CFG" \
-    CTXFORGE_ROUTING="full" \
+    LENS_ROUTING="full" \
     claude-pty \
       --working-dir "$REPO" \
       --session-id "$uuid" \
@@ -119,7 +119,7 @@ When finished, write your full final answer to the file $comp, and make its very
   echo "$fired $tools"
 }
 
-echo "# ctxforge Plane B: feature firing (runs=$RUNS per feature)"
+echo "# lens Plane B: feature firing (runs=$RUNS per feature)"
 echo
 printf '%-9s %-6s %-7s %s\n' feature run fired tools_used
 for line in "${TASKS[@]}"; do
@@ -135,7 +135,7 @@ for line in "${TASKS[@]}"; do
 done
 
 echo
-echo "## Firing rate per feature (fired = used the expected ctxforge mechanism)"
+echo "## Firing rate per feature (fired = used the expected lens mechanism)"
 python3 - "$TSV" <<'PY'
 import sys, collections
 rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1]) if l.strip()]

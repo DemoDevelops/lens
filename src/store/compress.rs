@@ -22,7 +22,7 @@
 //!
 //! What is deliberately NOT ported from SmartCrusher: its lossy row-sampling /
 //! anomaly-preservation path (keep ~50 of 1000 rows). That is lossy and not
-//! reversible; ctxforge keeps every row and recovers the original via the
+//! reversible; lens keeps every row and recovers the original via the
 //! store. We port only the deterministic, lossless structural mechanism.
 
 use std::collections::HashMap;
@@ -111,7 +111,7 @@ pub fn expand_json(value: &Value) -> Value {
 }
 
 /// Recursively drop `null` object fields. Exposed so the reversibility audit
-/// (`ctxforge verify`) can check decompaction against the same canonical form
+/// (`lens verify`) can check decompaction against the same canonical form
 /// `compact_json` operates on.
 pub fn drop_nulls(value: &Value) -> Value {
     match value {

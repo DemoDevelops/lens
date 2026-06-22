@@ -1,9 +1,9 @@
-//! `ctxforge warmup` — build the structural graph + FTS index for a repo up front,
+//! `lens warmup` — build the structural graph + FTS index for a repo up front,
 //! instead of waiting for the MCP server's lazy first-call build.
 //!
-//! Writes to the SAME data dir the server reads (`$CTXFORGE_DIR`, else
-//! `<cwd>/.ctxforge`), so a server that's already running picks the graph up on its
-//! next `graph_query` with no restart (the graph is a plain file it re-reads; the
+//! Writes to the SAME data dir the server reads (`$LENS_DIR`, else
+//! `<cwd>/.lens`), so a server that's already running picks the graph up on its
+//! next `lens_symbol` with no restart (the graph is a plain file it re-reads; the
 //! index is WAL SQLite both processes can share).
 //!
 //! A separate process whose stdout is its own response channel — never the MCP
@@ -20,16 +20,16 @@ use crate::index::Index;
 use crate::obs;
 use crate::store::Store;
 
-/// `ctxforge warmup [path]` — discover + index `path` (default `.`) into its data dir.
+/// `lens warmup [path]` — discover + index `path` (default `.`) into its data dir.
 pub fn run_cli(args: &[String]) -> Result<()> {
     let mut root = PathBuf::from(".");
     for arg in args {
         match arg.as_str() {
             "-h" | "--help" => {
-                println!("usage: ctxforge warmup [path]");
+                println!("usage: lens warmup [path]");
                 println!();
                 println!("Build the code graph + search index for <path> (default: cwd) into");
-                println!("its .ctxforge data dir, so graph_query / ctx_search work immediately.");
+                println!("its .lens data dir, so lens_symbol / lens_search work immediately.");
                 println!("Re-run any time to refresh after the code changes.");
                 return Ok(());
             }
@@ -122,7 +122,7 @@ fn signature(root: &Path) -> BTreeMap<String, u64> {
     crate::index::file_manifest(root)
 }
 
-/// `ctxforge watch [path]` — keep the graph + index fresh in real time as files
+/// `lens watch [path]` — keep the graph + index fresh in real time as files
 /// change, WITHOUT restarting the MCP server. A standalone process that writes to
 /// the same data dir the server reads: the server re-reads `graph.json` on its next
 /// query and shares the WAL index, so changes appear with no reconnect.
@@ -133,7 +133,7 @@ pub fn watch(root: &Path, data_dir: &Path, debounce: Duration, poll: Duration) -
     let root_buf = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let root = root_buf.as_path();
     std::fs::create_dir_all(data_dir).ok();
-    println!("ctxforge watch: {}", root.display());
+    println!("lens watch: {}", root.display());
     println!("  data dir : {}", data_dir.display());
     println!(
         "  debounce : {}s   poll : {}s",
@@ -178,7 +178,7 @@ pub fn watch(root: &Path, data_dir: &Path, debounce: Duration, poll: Duration) -
     }
 }
 
-/// CLI entry for `ctxforge watch [path] [--debounce SECS] [--poll SECS]`.
+/// CLI entry for `lens watch [path] [--debounce SECS] [--poll SECS]`.
 pub fn run_watch_cli(args: &[String]) -> Result<()> {
     let mut root = PathBuf::from(".");
     let mut debounce = Duration::from_secs(3);
@@ -187,12 +187,10 @@ pub fn run_watch_cli(args: &[String]) -> Result<()> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => {
-                println!("usage: ctxforge watch [path] [--debounce SECS] [--poll SECS]");
+                println!("usage: lens watch [path] [--debounce SECS] [--poll SECS]");
                 println!();
                 println!("Keep the code graph + search index fresh as files change, writing into");
-                println!(
-                    "the repo's .ctxforge data dir. A running MCP server picks the changes up"
-                );
+                println!("the repo's .lens data dir. A running MCP server picks the changes up");
                 println!("on its next query — no restart needed. Defaults: path '.', debounce 3s,");
                 println!("poll 1s.");
                 return Ok(());
@@ -214,12 +212,12 @@ pub fn run_watch_cli(args: &[String]) -> Result<()> {
             other => root = PathBuf::from(other),
         }
     }
-    // Write where the server reads: $CTXFORGE_DIR, else <repo>/.ctxforge.
-    let data_dir = match std::env::var_os("CTXFORGE_DIR") {
+    // Write where the server reads: $LENS_DIR, else <repo>/.lens.
+    let data_dir = match std::env::var_os("LENS_DIR") {
         Some(d) => PathBuf::from(d),
         None => std::fs::canonicalize(&root)
             .unwrap_or_else(|_| root.clone())
-            .join(".ctxforge"),
+            .join(".lens"),
     };
     watch(&root, &data_dir, debounce, poll)
 }

@@ -62,20 +62,20 @@ async fn main() -> anyhow::Result<()> {
         std::fs::read_to_string(bench_root().join("savings/workloads/issue_triage/issues.json"))?;
     let log = std::fs::read_to_string(bench_root().join("savings/workloads/log_debug/app.log"))?;
 
-    // Sandbox is scale-invariant: the matching lines and the file both grow linearly,
+    // Darkroom is scale-invariant: the matching lines and the file both grow linearly,
     // so the ratio is flat. Take the real measured number (grep with +-2 context) so it
     // agrees with bench_prove rather than re-deriving a slightly different one.
     let savings = compute_savings().await?;
-    let sandbox_pct = savings
+    let darkroom_pct = savings
         .iter()
-        .find(|r| r.mechanism == "sandbox")
+        .find(|r| r.mechanism == "darkroom")
         .map(|r| pct(r.before_bytes, r.after_bytes))
         .unwrap_or(0);
 
     // saved% for one byte-feature at a scale multiplier.
     let saved_at = |key: &str, scale: usize| -> i64 {
         match key {
-            "sandbox" => sandbox_pct, // flat
+            "darkroom" => darkroom_pct, // flat
             "search" => {
                 let (b, a) = search_vs_grep_at(scale);
                 pct(b, a)
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let features = [
-        ("Crunch a big file/log, return the answer", "sandbox"),
+        ("Crunch a big file/log, return the answer", "darkroom"),
         (
             "Find where something is across the repo (vs grep)",
             "search",
@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
         ("Stop a web page / build log flooding the chat", "redirect"),
     ];
 
-    println!("# ctxforge value across codebase scale (Plane A: deterministic, % bytes saved)\n");
+    println!("# lens value across codebase scale (Plane A: deterministic, % bytes saved)\n");
     let header: Vec<String> = TIERS.iter().map(|(n, m)| format!("{n} ({m}x)")).collect();
     println!(
         "| What it does for you | {} | scale effect |",

@@ -1,14 +1,14 @@
-//! Integration tests for the sandbox core invariant.
+//! Integration tests for the darkroom core invariant.
 
-use ctxforge::sandbox;
-use ctxforge::store::Store;
-use ctxforge::tools::ExecuteRequest;
+use lens::darkroom;
+use lens::store::Store;
+use lens::tools::ExecuteRequest;
 use tempfile::tempdir;
 
 #[tokio::test]
 async fn reads_big_file_returns_only_printed_line() {
     let repo = tempdir().unwrap();
-    let store = Store::open(&repo.path().join(".ctxforge")).unwrap();
+    let store = Store::open(&repo.path().join(".lens")).unwrap();
 
     // A large input the agent should never see.
     let big = "secret-token-".repeat(100_000);
@@ -20,7 +20,7 @@ async fn reads_big_file_returns_only_printed_line() {
         timeout_secs: 30,
         stdin: None,
     };
-    let resp = sandbox::run(req, repo.path(), &store, 8192).await.unwrap();
+    let resp = darkroom::run(req, repo.path(), &store, 8192).await.unwrap();
 
     assert_eq!(resp.stdout.trim(), big.len().to_string());
     assert!(!resp.stdout.contains("secret-token"));
@@ -30,14 +30,14 @@ async fn reads_big_file_returns_only_printed_line() {
 #[tokio::test]
 async fn large_output_offloaded_and_retrievable() {
     let repo = tempdir().unwrap();
-    let store = Store::open(&repo.path().join(".ctxforge")).unwrap();
+    let store = Store::open(&repo.path().join(".lens")).unwrap();
     let req = ExecuteRequest {
         language: "bash".into(),
         code: "yes ABCDEFGH | head -c 40000".into(),
         timeout_secs: 30,
         stdin: None,
     };
-    let resp = sandbox::run(req, repo.path(), &store, 8192).await.unwrap();
+    let resp = darkroom::run(req, repo.path(), &store, 8192).await.unwrap();
     assert!(resp.truncated);
     let reference = resp.retrieve_ref.unwrap();
     let full = store.get(&reference).unwrap().unwrap();

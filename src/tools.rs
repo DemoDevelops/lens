@@ -10,7 +10,7 @@ fn default_timeout() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// ctx_execute (sandbox)
+// lens_run (darkroom)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -55,13 +55,13 @@ pub struct ExecuteResponse {
     pub stdout_bytes: usize,
     /// True if `stdout` above is a truncated preview of a larger captured output.
     pub truncated: bool,
-    /// If truncated, the ref to fetch the full stdout via `ctx_retrieve`.
+    /// If truncated, the ref to fetch the full stdout via `lens_recall`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retrieve_ref: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
-// ctx_retrieve (reversible store)
+// lens_recall (reversible store)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -78,7 +78,7 @@ pub struct RetrieveResponse {
 }
 
 // ---------------------------------------------------------------------------
-// ctx_index / ctx_search (FTS5)
+// lens_index / lens_search (FTS5)
 // ---------------------------------------------------------------------------
 
 fn default_true() -> bool {
@@ -132,7 +132,7 @@ pub struct SearchResponse {
 }
 
 // ---------------------------------------------------------------------------
-// ctx_discover + graph_* (structural graph)
+// lens_map + graph_* (structural graph)
 // ---------------------------------------------------------------------------
 
 fn default_dot() -> String {
@@ -190,7 +190,7 @@ pub struct GraphView {
     pub edges: Vec<EdgeView>,
     /// When the subgraph is large it is dictionary-compacted into this field
     /// (nodes/edges left empty); decode with the `_d`/`_v` scheme or just call
-    /// `ctx_retrieve` on `retrieve_ref` for the plain original.
+    /// `lens_recall` on `retrieve_ref` for the plain original.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compact: Option<serde_json::Value>,
     /// True if the subgraph was compacted; full JSON is at `retrieve_ref`.
@@ -254,7 +254,7 @@ pub struct EmptyRequest {}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct StatsResponse {
-    pub sandbox_calls: i64,
+    pub darkroom_calls: i64,
     pub raw_bytes_processed: i64,
     pub bytes_returned_to_context: i64,
     pub estimated_tokens_saved: i64,

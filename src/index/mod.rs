@@ -1,4 +1,4 @@
-//! `ctx_index` / `ctx_search`: build and query an FTS5 content index.
+//! `lens_index` / `lens_search`: build and query an FTS5 content index.
 
 pub mod schema;
 
@@ -86,7 +86,7 @@ impl Index {
     }
 
     /// Remove indexed chunks for source files that no longer exist under `root`, so
-    /// deleted files stop showing up in `ctx_search`. Only code-file chunks are
+    /// deleted files stop showing up in `lens_search`. Only code-file chunks are
     /// touched — session-continuity records (`path` prefixed `session://`) are left
     /// intact. Also cleans up chunks left under a different path scheme (e.g. an old
     /// relative-root index) for files now indexed absolutely. Returns chunks removed.
@@ -130,7 +130,7 @@ impl Index {
 
     /// Insert arbitrary `(path, chunk_id, content)` records into the index,
     /// replacing any existing rows with the same `chunk_id` first (idempotent).
-    /// Used by session continuity to make detailed events `ctx_search`-able.
+    /// Used by session continuity to make detailed events `lens_search`-able.
     pub fn index_records(&self, records: &[(String, String, String)]) -> Result<usize> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;

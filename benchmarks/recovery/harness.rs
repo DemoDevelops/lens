@@ -1,7 +1,7 @@
 //! Session-recovery benchmark harness.
 //!
 //! Runs every scenario in `scenarios/*.json` through three isolated arms
-//! (no-continuity floor, Context Mode bar, ctxforge candidate), scores whether
+//! (no-continuity floor, Context Mode bar, lens candidate), scores whether
 //! the working state survived a compaction boundary, and emits the recovery
 //! table segmented by scenario set.
 //!
@@ -23,9 +23,9 @@ use recovery::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // `CTXFORGE_BENCH_BACKEND=claude-pty` bills to plan quota via interactive
+    // `LENS_BENCH_BACKEND=claude-pty` bills to plan quota via interactive
     // Claude Code; otherwise Anthropic API key > mock.
-    let backend = std::env::var("CTXFORGE_BENCH_BACKEND").unwrap_or_default();
+    let backend = std::env::var("LENS_BENCH_BACKEND").unwrap_or_default();
     let has_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
     let (model, pending, mode) = if backend == "claude-pty" {
         eprintln!("running recovery harness via claude-pty (plan quota, tools disabled)");
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let groups = aggregate(&results);
-    println!("# ctxforge session-recovery benchmark\n");
+    println!("# lens session-recovery benchmark\n");
     print!(
         "{}",
         render_recovery_markdown(&groups, &model.label(), pending)
@@ -98,10 +98,10 @@ mod tests {
     }
 
     /// Mock run over the real scenarios: exercises scenario loading, the
-    /// ctxforge recovery pipeline, the no-continuity floor, scoring, and
+    /// lens recovery pipeline, the no-continuity floor, scoring, and
     /// aggregation without API calls or the Context Mode subprocess.
     #[test]
-    fn mock_run_ctxforge_beats_floor() {
+    fn mock_run_lens_beats_floor() {
         let scenarios = load_scenarios().expect("load scenarios");
         assert!(
             scenarios.len() >= 8,
@@ -126,7 +126,7 @@ mod tests {
                 &s.ground_truth,
                 &s.check,
             );
-            assert!(cf_ok, "ctxforge failed to recover scenario {}", s.id);
+            assert!(cf_ok, "lens failed to recover scenario {}", s.id);
             assert!(
                 !nc_ok,
                 "no-continuity should fail scenario {} (floor)",
@@ -135,7 +135,7 @@ mod tests {
             results.push((s.set.clone(), cf_ok, nc_ok));
         }
 
-        // Every scenario: ctxforge survives, floor does not.
+        // Every scenario: lens survives, floor does not.
         assert!(results.iter().all(|(_, cf, _)| *cf));
         assert!(results.iter().all(|(_, _, nc)| !*nc));
 
@@ -151,14 +151,10 @@ mod tests {
             "expected file_task + error_decision groups"
         );
         for g in &groups {
+            assert!(g.lens >= g.no_continuity, "{}: lens below floor", g.set);
             assert!(
-                g.ctxforge >= g.no_continuity,
-                "{}: ctxforge below floor",
-                g.set
-            );
-            assert!(
-                (g.ctxforge - 1.0).abs() < f64::EPSILON,
-                "{}: ctxforge should recover all",
+                (g.lens - 1.0).abs() < f64::EPSILON,
+                "{}: lens should recover all",
                 g.set
             );
         }

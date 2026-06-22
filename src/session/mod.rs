@@ -2,7 +2,7 @@
 //! resume snapshot at compaction, and re-inject a Session Guide on resume.
 //!
 //! This is the active counterpart to the passive MCP tool server. It is driven
-//! by the `ctxforge hook <platform> <event>` subcommand (see [`hook`]), which
+//! by the `lens hook <platform> <event>` subcommand (see [`hook`]), which
 //! Claude Code invokes on PreToolUse / PostToolUse / UserPromptSubmit /
 //! PreCompact / SessionStart. [`install`] registers/removes those hooks.
 
@@ -71,18 +71,18 @@ pub fn now_ts() -> i64 {
         .unwrap_or(0)
 }
 
-/// Resolve the ctxforge data dir for a given project, matching the server's
-/// convention: `$CTXFORGE_DIR` if set, else `<project>/.ctxforge`.
+/// Resolve the lens data dir for a given project, matching the server's
+/// convention: `$LENS_DIR` if set, else `<project>/.lens`.
 pub fn resolve_data_dir(project: &Path) -> PathBuf {
-    match std::env::var_os("CTXFORGE_DIR") {
+    match std::env::var_os("LENS_DIR") {
         Some(d) => PathBuf::from(d),
-        None => project.join(".ctxforge"),
+        None => project.join(".lens"),
     }
 }
 
-/// Snapshot byte budget: `$CTXFORGE_SNAPSHOT_BUDGET` or 2048.
+/// Snapshot byte budget: `$LENS_SNAPSHOT_BUDGET` or 2048.
 pub fn snapshot_budget() -> usize {
-    std::env::var("CTXFORGE_SNAPSHOT_BUDGET")
+    std::env::var("LENS_SNAPSHOT_BUDGET")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(2048)

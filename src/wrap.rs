@@ -1,4 +1,4 @@
-//! `ctxforge wrap -- <command>` — run a read-only shell command transparently,
+//! `lens wrap -- <command>` — run a read-only shell command transparently,
 //! offload large stdout to the reversible store, and return a head+tail preview
 //! plus a `retrieve_ref`. Small output passes through verbatim (zero behavior
 //! change). Exactly one `ops.log` record is written per invocation.
@@ -40,7 +40,7 @@ struct WrapOutcome {
 pub fn run_cli(args: &[String]) -> Result<()> {
     let parts = command_parts(args);
     if parts.is_empty() {
-        eprintln!("ctxforge wrap: usage: ctxforge wrap -- <command> [args…]");
+        eprintln!("lens wrap: usage: lens wrap -- <command> [args…]");
         std::process::exit(2);
     }
     // The routing layer passes the original command as ONE single-quoted arg, so
@@ -51,7 +51,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     let store =
         Store::open(&dir).with_context(|| format!("opening store under {}", dir.display()))?;
     let ops = OpLog::open(&dir);
-    let max_inline = std::env::var("CTXFORGE_MAX_INLINE")
+    let max_inline = std::env::var("LENS_MAX_INLINE")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_INLINE);
@@ -115,7 +115,7 @@ fn wrap_run(command: &str, store: &Store, ops: &OpLog, max_inline: usize) -> Res
         }
     };
 
-    // Signal death (no code) is treated as -1, matching the sandbox.
+    // Signal death (no code) is treated as -1, matching the darkroom.
     let exit_code = output.status.code().unwrap_or(-1);
 
     // Lossy preview only at the boundary; the full blob is always stored.
@@ -156,7 +156,7 @@ fn make_preview(full: &str, reference: &str) -> String {
     let tail_start = ceil_char_boundary(full, full.len().saturating_sub(PREVIEW_SIDE));
     let omitted = tail_start.saturating_sub(head_end);
     format!(
-        "{}\n... [{} bytes omitted; full output: ctx_retrieve ref={}  (or: ctxforge verify {})] ...\n{}",
+        "{}\n... [{} bytes omitted; full output: lens_recall ref={}  (or: lens verify {})] ...\n{}",
         &full[..head_end],
         omitted,
         reference,

@@ -1,6 +1,6 @@
-# ctxforge benchmarks
+# lens benchmarks
 
-ctxforge is an MCP tool provider that keeps work **out** of the agent's context window: it indexes, sandboxes, compresses, and graphs data so the bytes a naive agent would read never enter context. The tables below are the measured results.
+lens is an MCP tool provider that keeps work **out** of the agent's context window: it indexes, darkroomes, compresses, and graphs data so the bytes a naive agent would read never enter context. The tables below are the measured results.
 
 _Full scale curves, mechanism classifications, the discovery-regression investigation, and methodology are in [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md)._
 
@@ -22,34 +22,34 @@ Savings move with size, and sometimes the conclusion flips, so each feature is m
 | Map code structure (round-trips: read each file vs 1 graph call) | 20→4 | 200→4 | 1000→4 | 4000→4 | grows |
 
 - **flat**: size-insensitive, one number is honest.
-- **flips**: the conclusion changes with size. grep is as lean as ctx_search on a small repo but floods on a big one. This is why search steering is scale-aware (below), not always-on.
+- **flips**: the conclusion changes with size. grep is as lean as lens_search on a small repo but floods on a big one. This is why search steering is scale-aware (below), not always-on.
 - **grows**: the saving widens with size (bounded preview / fixed graph call vs ever-growing raw output / file reads).
 - Graph is on the round-trip axis: its byte savings at scale are an O(N²) artifact of the duplicate-symbol test fixture (appendix); the round-trip win scales cleanly. Baselines are the realistic alternative (search vs grep, not vs full-file reads).
 
 ### Plane B: adoption (does Claude fire it?)
 
-Real agent under normal steering, on a task that should trigger each feature; **fired** = it used the ctxforge tool instead of falling back to Read/Grep. N = 3 per feature. Run: `bash benchmarks/adoption/run_adoption.sh --runs 3`.
+Real agent under normal steering, on a task that should trigger each feature; **fired** = it used the lens tool instead of falling back to Read/Grep. N = 3 per feature. Run: `bash benchmarks/adoption/run_adoption.sh --runs 3`.
 
 | Feature | Fires when it should | What it did |
 | --- | ---: | --- |
-| Crunch a big file/log (sandbox) | **3/3 (100%)** | used ctx_execute every run |
-| Map code structure (graph) | **3/3 (100%)** | used graph_query / path / neighbors |
+| Crunch a big file/log (darkroom) | **3/3 (100%)** | used lens_run every run |
+| Map code structure (graph) | **3/3 (100%)** | used lens_symbol / path / neighbors |
 | Find across the repo (search) | **0/3 (0%)** | fell back to grep |
 
-- Sandbox and graph are high value **and** high adoption: they work end to end.
-- Search's 0% is **correct on a small repo** (Plane A shows grep ties ctx_search there). ctx_search only wins at scale, so a scale-aware PostToolUse nudge now fires **only when a grep result floods** (>16KB, `CTXFORGE_GREP_FLOOD_BYTES`). The nudge is verified to fire; whether it lifts adoption on large-hit tasks is not yet measured.
+- Darkroom and graph are high value **and** high adoption: they work end to end.
+- Search's 0% is **correct on a small repo** (Plane A shows grep ties lens_search there). lens_search only wins at scale, so a scale-aware PostToolUse nudge now fires **only when a grep result floods** (>16KB, `LENS_GREP_FLOOD_BYTES`). The nudge is verified to fire; whether it lifts adoption on large-hit tasks is not yet measured.
 - Compression and wrap fire automatically (not agent choices); recovery is the **Session recovery** section below.
 
-The honest headline: ctxforge's value is real and largest at scale, adoption is solid where the tool genuinely beats the built-in (sandbox, graph), and the one gap (search) is a scale-conditioned steering problem now addressed but not yet re-measured.
+The honest headline: lens's value is real and largest at scale, adoption is solid where the tool genuinely beats the built-in (darkroom, graph), and the one gap (search) is a scale-conditioned steering problem now addressed but not yet re-measured.
 
 ## Savings
 
-Headline savings are at **realistic session scale**, not the 1× diagnostic fixtures. Each row stays segmented by the ctxforge mechanism that produced it — never a single blended percentage.
+Headline savings are at **realistic session scale**, not the 1× diagnostic fixtures. Each row stays segmented by the lens mechanism that produced it — never a single blended percentage.
 
 | Workload | Mechanism | Before (bytes) | After (bytes) | Savings |
 | --- | --- | ---: | ---: | ---: |
 | Code search | index | 160,230 | 9,825 | **94–99%** |
-| Log debugging | sandbox | 7,210 | 517 | **93%** |
+| Log debugging | darkroom | 7,210 | 517 | **93%** |
 | Issue triage | compression | 94,195 | 36,963 | **~61%** |
 | Codebase exploration | discovery | 2,606 | 2,094 | see note |
 
@@ -61,9 +61,9 @@ _Codebase exploration has no single honest representative number: discovery save
 
 Model: `claude-opus-4-8 (via claude-pty)`
 
-| Task set | N | Control acc | ctxforge acc | Δ acc | Control tokens | ctxforge tokens | Token Δ |
+| Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Sandbox tasks | 6 | 17% | 100% | +83pp | 1847 | 103 | -1744 |
+| Darkroom tasks | 6 | 17% | 100% | +83pp | 1847 | 103 | -1744 |
 | Discovery tasks | 3 | 67% | 100% | +33pp | 987 | 467 | -520 |
 | Search tasks | 2 | 100% | 100% | +0pp | 432 | 314 | -118 |
 
@@ -73,16 +73,16 @@ Model: `claude-opus-4-8 (via claude-pty)`
 
 ## Session recovery
 
-Proves the Context Mode replacement: each scenario builds a working state, forces a compaction boundary, then asks a question only answerable if the state survived. The bar is **Context Mode**, not ctxforge's own sense of working — the swap is only safe when **ctxforge ≥ Context Mode** at comparable token cost.
+Proves the Context Mode replacement: each scenario builds a working state, forces a compaction boundary, then asks a question only answerable if the state survived. The bar is **Context Mode**, not lens's own sense of working — the swap is only safe when **lens ≥ Context Mode** at comparable token cost.
 
 Model: `claude-opus-4-8 (via claude-pty)`. Survival = % of scenarios whose working state was recoverable from the post-compaction context.
 
-| Scenario set | N | No-continuity | Context Mode | ctxforge | Δ (ctxforge − CM) | CM tokens | ctxforge tokens |
+| Scenario set | N | No-continuity | Context Mode | lens | Δ (lens − CM) | CM tokens | lens tokens |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | File/task recovery | 4 | 0% | 75% | 100% | +25pp | 5070 | 202 |
 | Error/decision recovery | 4 | 0% | 75% | 100% | +25pp | 5136 | 302 |
 
-✅ **ctxforge ≥ Context Mode** on every scenario set above — the swap is safe on recovery fidelity.
+✅ **lens ≥ Context Mode** on every scenario set above — the swap is safe on recovery fidelity.
 
 _Samples are small (N = 4 / 4); directional confirmations, not statistically powered rates._
 

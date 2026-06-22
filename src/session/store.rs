@@ -22,7 +22,7 @@ pub struct Resume {
 
 /// Read-only summary of the lifecycle activity captured by the session hooks
 /// (built-in tool use, prompts, errors). This is the "first plane" — distinct
-/// from ctxforge MCP tool usage, which the op log measures.
+/// from lens MCP tool usage, which the op log measures.
 #[derive(Debug, Default, Clone)]
 pub struct Activity {
     pub total_events: i64,

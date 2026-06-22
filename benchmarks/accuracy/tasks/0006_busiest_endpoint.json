@@ -4,7 +4,7 @@
   "fixtures": ["fixtures/metrics.csv"],
   "ground_truth": { "endpoint": "/healthz" },
   "check": "contains",
-  "primary_mechanism": "sandbox",
+  "primary_mechanism": "darkroom",
   "evidence": ["/healthz"],
   "treatment": {
     "language": "bash",

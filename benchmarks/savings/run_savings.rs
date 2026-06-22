@@ -1,6 +1,6 @@
 //! Savings benchmark runner.
 //!
-//! Pushes each workload archetype through the real ctxforge tools and prints the
+//! Pushes each workload archetype through the real lens tools and prints the
 //! savings table (headroom-style, plus raw bytes and the naive-agent baseline),
 //! segmented by which mechanism produced the saving.
 //!
@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let update = std::env::args().any(|a| a == "--update");
 
     let rows = compute_savings().await?;
-    println!("# ctxforge savings benchmark\n");
+    println!("# lens savings benchmark\n");
     print!("{}", render_savings_markdown(&rows));
 
     if update {

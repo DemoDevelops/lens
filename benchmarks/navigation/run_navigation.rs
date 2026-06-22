@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     let update = std::env::args().any(|a| a == "--update");
 
     let rows = compute_navigation()?;
-    println!("# ctxforge navigation benchmark\n");
+    println!("# lens navigation benchmark\n");
     print!("{}", render_navigation_markdown(&rows));
 
     if update {

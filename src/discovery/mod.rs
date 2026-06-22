@@ -1,5 +1,5 @@
-//! `ctx_discover`: walk a repo, parse supported files with tree-sitter, and
-//! build a deterministic structural graph written to `.ctxforge/graph.json`.
+//! `lens_map`: walk a repo, parse supported files with tree-sitter, and
+//! build a deterministic structural graph written to `.lens/graph.json`.
 
 pub mod extract;
 pub mod graph;

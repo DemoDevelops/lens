@@ -1,9 +1,9 @@
-//! `ctxforge session <install|uninstall|status>` — register/remove the
+//! `lens session <install|uninstall|status>` — register/remove the
 //! lifecycle hooks in Claude Code's `settings.json`.
 //!
 //! Install is atomic (refuses to run alongside Context Mode's hooks, which would
 //! double-fire on the same lifecycle events) and reversible (uninstall removes
-//! only ctxforge's entries, leaving any other hooks untouched).
+//! only lens's entries, leaving any other hooks untouched).
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use super::store::SessionStore;
 use crate::index::Index;
 
-/// The five lifecycle events ctxforge registers, with their settings matcher.
+/// The five lifecycle events lens registers, with their settings matcher.
 /// Empty matcher = fire for all tools / always.
 const EVENTS: [&str; 5] = [
     "PreToolUse",
@@ -23,36 +23,38 @@ const EVENTS: [&str; 5] = [
     "SessionStart",
 ];
 
-/// Substring identifying a ctxforge-owned hook command.
+/// Substring identifying a lens-owned hook command.
 const MARKER: &str = "hook claude";
-const SELF_MARKER: &str = "ctxforge";
+const SELF_MARKER: &str = "lens";
 
 /// CLI entry: `args` is everything after `session`.
 pub fn run_cli(args: &[String]) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
     let settings = settings_path()?;
     let bin = std::env::current_exe()
-        .context("resolving ctxforge binary path")?
+        .context("resolving lens binary path")?
         .to_string_lossy()
         .to_string();
 
     match sub {
-        "install" => match install(&settings, &bin) {
-            Ok(()) => {
-                println!("ctxforge session hooks installed at {}", settings.display());
-                println!("  binary: {bin}");
-                println!("Next: uninstall Context Mode + RTK, then verify with `ctxforge session status`.");
-                Ok(())
+        "install" => {
+            match install(&settings, &bin) {
+                Ok(()) => {
+                    println!("lens session hooks installed at {}", settings.display());
+                    println!("  binary: {bin}");
+                    println!("Next: uninstall Context Mode + RTK, then verify with `lens session status`.");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
             }
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        },
+        }
         "uninstall" => {
             let n = uninstall(&settings)?;
             println!(
-                "removed {n} ctxforge hook entr{} from {}",
+                "removed {n} lens hook entr{} from {}",
                 if n == 1 { "y" } else { "ies" },
                 settings.display()
             );
@@ -71,7 +73,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
 }
 
 fn settings_path() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("CTXFORGE_SETTINGS") {
+    if let Some(p) = std::env::var_os("LENS_SETTINGS") {
         return Ok(PathBuf::from(p));
     }
     let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME not set"))?;
@@ -114,8 +116,8 @@ pub fn install(settings: &Path, bin: &str) -> Result<()> {
         root["hooks"] = json!({});
     }
 
-    // Remove any stale ctxforge entries first (idempotent install).
-    strip_ctxforge(&mut root);
+    // Remove any stale lens entries first (idempotent install).
+    strip_lens(&mut root);
 
     for event in EVENTS {
         let cmd = format!("\"{bin}\" hook claude {event}");
@@ -136,17 +138,17 @@ pub fn install(settings: &Path, bin: &str) -> Result<()> {
     save(settings, &root)
 }
 
-/// Remove only ctxforge's hook entries. Returns how many groups were removed.
+/// Remove only lens's hook entries. Returns how many groups were removed.
 pub fn uninstall(settings: &Path) -> Result<usize> {
     let mut root = load(settings)?;
-    let removed = strip_ctxforge(&mut root);
+    let removed = strip_lens(&mut root);
     save(settings, &root)?;
     Ok(removed)
 }
 
-/// Remove every ctxforge-owned hook group from `root`, pruning empty arrays.
+/// Remove every lens-owned hook group from `root`, pruning empty arrays.
 /// Returns the number of groups removed.
-fn strip_ctxforge(root: &mut Value) -> usize {
+fn strip_lens(root: &mut Value) -> usize {
     let mut removed = 0;
     let hooks = match root.get_mut("hooks").and_then(|h| h.as_object_mut()) {
         Some(h) => h,
@@ -156,7 +158,7 @@ fn strip_ctxforge(root: &mut Value) -> usize {
     for (event, groups) in hooks.iter_mut() {
         if let Some(arr) = groups.as_array_mut() {
             let before = arr.len();
-            arr.retain(|g| !group_is_ctxforge(g));
+            arr.retain(|g| !group_is_lens(g));
             removed += before - arr.len();
             if arr.is_empty() {
                 empty_events.push(event.clone());
@@ -169,15 +171,15 @@ fn strip_ctxforge(root: &mut Value) -> usize {
     removed
 }
 
-fn group_is_ctxforge(group: &Value) -> bool {
+fn group_is_lens(group: &Value) -> bool {
     group
         .get("hooks")
         .and_then(|h| h.as_array())
-        .map(|hs| hs.iter().any(|h| command_is_ctxforge(h)))
+        .map(|hs| hs.iter().any(|h| command_is_lens(h)))
         .unwrap_or(false)
 }
 
-fn command_is_ctxforge(hook: &Value) -> bool {
+fn command_is_lens(hook: &Value) -> bool {
     hook.get("command")
         .and_then(|c| c.as_str())
         .map(|c| c.contains(SELF_MARKER) && c.contains(MARKER))
@@ -236,7 +238,7 @@ pub fn status(settings: &Path) -> Status {
     if let Some(hooks) = root.get("hooks").and_then(|h| h.as_object()) {
         for (event, groups) in hooks {
             if let Some(arr) = groups.as_array() {
-                if arr.iter().any(group_is_ctxforge) {
+                if arr.iter().any(group_is_lens) {
                     installed_events.push(event.clone());
                 }
             }
@@ -259,9 +261,9 @@ pub fn status(settings: &Path) -> Status {
 
 fn print_status(s: &Status) {
     let mark = |b: bool| if b { "ok" } else { "FAIL" };
-    println!("ctxforge session status");
+    println!("lens session status");
     if s.installed_events.is_empty() {
-        println!("  hooks installed : none (run `ctxforge session install`)");
+        println!("  hooks installed : none (run `lens session install`)");
     } else {
         println!(
             "  hooks installed : {} ({})",
@@ -294,7 +296,7 @@ mod tests {
     fn install_adds_five_hooks_and_is_idempotent() {
         let dir = tempdir().unwrap();
         let settings = dir.path().join("settings.json");
-        install(&settings, "/usr/bin/ctxforge").unwrap();
+        install(&settings, "/usr/bin/lens").unwrap();
         let root = load(&settings).unwrap();
         let hooks = root["hooks"].as_object().unwrap();
         for ev in EVENTS {
@@ -304,11 +306,11 @@ mod tests {
         let cmd = hooks["PostToolUse"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        assert!(cmd.contains("/usr/bin/ctxforge"));
+        assert!(cmd.contains("/usr/bin/lens"));
         assert!(cmd.contains("hook claude PostToolUse"));
 
         // Re-install: still exactly one group per event.
-        install(&settings, "/usr/bin/ctxforge").unwrap();
+        install(&settings, "/usr/bin/lens").unwrap();
         let root2 = load(&settings).unwrap();
         assert_eq!(root2["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
     }
@@ -323,7 +325,7 @@ mod tests {
                 "enabledPlugins": { "context-mode@context-mode": true }
             }),
         );
-        let err = install(&settings, "/usr/bin/ctxforge").unwrap_err();
+        let err = install(&settings, "/usr/bin/lens").unwrap_err();
         assert!(err.to_string().contains("Context Mode hooks detected"));
     }
 
@@ -332,11 +334,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         write(&settings, &json!({ "enabledPlugins": { "other@x": true } }));
-        assert!(install(&settings, "/usr/bin/ctxforge").is_ok());
+        assert!(install(&settings, "/usr/bin/lens").is_ok());
     }
 
     #[test]
-    fn uninstall_removes_only_ctxforge_leaving_others() {
+    fn uninstall_removes_only_lens_leaving_others() {
         let dir = tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         // Pre-existing unrelated hook.
@@ -350,7 +352,7 @@ mod tests {
                 }
             }),
         );
-        install(&settings, "/usr/bin/ctxforge").unwrap();
+        install(&settings, "/usr/bin/lens").unwrap();
         let removed = uninstall(&settings).unwrap();
         assert_eq!(removed, 5);
         let root = load(&settings).unwrap();
@@ -358,7 +360,7 @@ mod tests {
         let pre = root["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre.len(), 1);
         assert_eq!(pre[0]["hooks"][0]["command"], "rtk hook claude");
-        // ctxforge-only events were pruned.
+        // lens-only events were pruned.
         assert!(root["hooks"].get("PreCompact").is_none());
     }
 
@@ -366,7 +368,7 @@ mod tests {
     fn status_reports_installed_and_conflict() {
         let dir = tempdir().unwrap();
         let settings = dir.path().join("settings.json");
-        install(&settings, "/usr/bin/ctxforge").unwrap();
+        install(&settings, "/usr/bin/lens").unwrap();
         let s = status(&settings);
         assert_eq!(s.installed_events.len(), 5);
         assert!(!s.conflict);

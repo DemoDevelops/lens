@@ -1,17 +1,17 @@
 //! PreToolUse routing policy — pass through, deny, rewrite, or nudge a tool call.
 //!
-//! Gated by `CTXFORGE_ROUTING` (off|steer|wrap|full); default `off` is a true
+//! Gated by `LENS_ROUTING` (off|steer|wrap|full); default `off` is a true
 //! no-op (PreToolUse returns `{}`). Three concerns layer on top of `off`:
 //!
 //!   * **steer** — deny `WebFetch`; redirect curl/wget/build/inline-HTTP `Bash`
-//!     commands into `ctx_execute`; inject the tool-selection guide into every
+//!     commands into `lens_run`; inject the tool-selection guide into every
 //!     sub-agent (`Agent`/`Task`) prompt; emit once-per-session non-blocking nudges
-//!     toward ctxforge tools for `Bash` / `Grep` / `Read` (structurally-bounded
-//!     commands are skipped); and a periodic nudge for external (non-ctxforge) MCP
+//!     toward lens tools for `Bash` / `Grep` / `Read` (structurally-bounded
+//!     commands are skipped); and a periodic nudge for external (non-lens) MCP
 //!     tools. Also injects the guide at `SessionStart`. (All ports of context-mode's
 //!     `hooks/core/routing.mjs`.)
 //!   * **wrap** — transparently rewrite a read-only, high-output `Bash` command
-//!     into `ctxforge wrap -- <cmd>` so its output is offloaded losslessly.
+//!     into `lens wrap -- <cmd>` so its output is offloaded losslessly.
 //!   * **full** — both of the above.
 //!
 //! Safety rails: MCP-redirect decisions (WebFetch deny, curl/build rewrites) are
@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::{json, Value};
 
-/// Active routing level, parsed from `CTXFORGE_ROUTING`.
+/// Active routing level, parsed from `LENS_ROUTING`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     /// True no-op: PreToolUse returns `{}`, SessionStart unchanged.
@@ -51,9 +51,9 @@ impl Level {
         }
     }
 
-    /// Read the level from `CTXFORGE_ROUTING` (unset => `off`).
+    /// Read the level from `LENS_ROUTING` (unset => `off`).
     pub fn from_env() -> Level {
-        Level::parse(&std::env::var("CTXFORGE_ROUTING").unwrap_or_default())
+        Level::parse(&std::env::var("LENS_ROUTING").unwrap_or_default())
     }
 
     /// Whether this level steers: WebFetch deny, Bash/Grep/Read nudges, and the
@@ -62,7 +62,7 @@ impl Level {
         matches!(self, Level::Steer | Level::Full)
     }
 
-    /// Whether this level rewrites read-only Bash commands into `ctxforge wrap`.
+    /// Whether this level rewrites read-only Bash commands into `lens wrap`.
     pub(crate) fn wraps(self) -> bool {
         matches!(self, Level::Wrap | Level::Full)
     }
@@ -141,63 +141,63 @@ pub struct RouteCtx<'a> {
     pub level: Level,
     /// Whether the MCP server is currently reachable (the master safety gate).
     pub mcp_ready: bool,
-    /// Absolute path to the `ctxforge` binary (for the wrap rewrite).
+    /// Absolute path to the `lens` binary (for the wrap rewrite).
     pub bin: &'a str,
-    /// ctxforge data dir (holds throttle markers + `server.pid`).
+    /// lens data dir (holds throttle markers + `server.pid`).
     pub data_dir: &'a Path,
     /// Current session id (scopes one-shot nudge throttling).
     pub session_id: &'a str,
     /// True when RTK owns Bash (see [`crate::rtk::rtk_active`]); makes [`route`]
-    /// pass Bash through so RTK's hook and ctxforge's never double-wrap.
+    /// pass Bash through so RTK's hook and lens's never double-wrap.
     pub rtk_active: bool,
 }
 
 // ── Reason / nudge prose (original wording) ────────────────────────────────
 
 /// Shown when a WebFetch is denied under steering.
-pub const WEBFETCH_REASON: &str = "ctxforge routing: fetch+process web content in the sandbox instead — use ctx_execute (python) to fetch the URL and print only what you need; the full response stays out of context and is recoverable via ctx_retrieve.";
+pub const WEBFETCH_REASON: &str = "lens routing: fetch+process web content in the darkroom instead — use lens_run (python) to fetch the URL and print only what you need; the full response stays out of context and is recoverable via lens_recall.";
 
 /// Shown when a read-only Bash command is wrapped under `wrap`/`full`.
-pub const WRAP_REASON: &str = "ctxforge: wrapped a read-only command to offload large output losslessly (recover full output via ctx_retrieve).";
+pub const WRAP_REASON: &str = "lens: wrapped a read-only command to offload large output losslessly (recover full output via lens_recall).";
 
-/// Shown when a network fetch (curl/wget/inline HTTP) is redirected into ctx_execute.
-pub const NET_REDIRECT_REASON: &str = "ctxforge routing: redirected a network fetch into the ctx_execute sandbox (the raw response stays out of context).";
+/// Shown when a network fetch (curl/wget/inline HTTP) is redirected into lens_run.
+pub const NET_REDIRECT_REASON: &str = "lens routing: redirected a network fetch into the lens_run darkroom (the raw response stays out of context).";
 
-/// Shown when a build command (gradle/mvn/sbt) is redirected into ctx_execute.
-pub const BUILD_REDIRECT_REASON: &str = "ctxforge routing: redirected a build command into the ctx_execute sandbox (the verbose log stays out of context).";
+/// Shown when a build command (gradle/mvn/sbt) is redirected into lens_run.
+pub const BUILD_REDIRECT_REASON: &str = "lens routing: redirected a build command into the lens_run darkroom (the verbose log stays out of context).";
 
 /// Shown when the tool-selection guide is injected into a sub-agent prompt.
-pub const AGENT_INJECT_REASON: &str = "ctxforge routing: injected the tool-selection guide into the sub-agent prompt so it reaches for ctxforge tools.";
+pub const AGENT_INJECT_REASON: &str = "lens routing: injected the tool-selection guide into the sub-agent prompt so it reaches for lens tools.";
 
 // Per-tool `<context_guidance>` injected on PreToolUse (prose adapted from
-// context-mode's routing-block factory functions; tool names mapped to ctxforge).
+// context-mode's routing-block factory functions; tool names mapped to lens).
 // Re-injected periodically (see `throttle_periodic`), not once per session.
 
 /// Contextual guidance when a read-only/high-output Bash command is observed.
-pub const BASH_NUDGE: &str = "<context_guidance>\n  <tip>\n    When you intend to PROCESS the output (filter, count, parse, aggregate), use ctx_execute(language: \"shell\", code: \"...\") — the raw output stays in the sandbox and only what you print enters your conversation. Bash stays the right surface when you intend to OBSERVE a short fixed output or when you are mutating state (git, mkdir, rm, mv, navigation).\n  </tip>\n</context_guidance>";
+pub const BASH_NUDGE: &str = "<context_guidance>\n  <tip>\n    When you intend to PROCESS the output (filter, count, parse, aggregate), use lens_run(language: \"shell\", code: \"...\") — the raw output stays in the darkroom and only what you print enters your conversation. Bash stays the right surface when you intend to OBSERVE a short fixed output or when you are mutating state (git, mkdir, rm, mv, navigation).\n  </tip>\n</context_guidance>";
 
 /// Contextual guidance steering Grep toward indexed search / the graph.
-pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Grep results may be larger than you expect. When you intend to count, filter, or aggregate matches (not just spot-check one), run the search through ctx_execute(language: \"shell\", code: \"...\") — the raw match list stays in the sandbox and only your derived answer enters your conversation. For \"where is X\" or \"who calls X\", prefer ctx_search (after ctx_index) or graph_query over scanning files.\n  </tip>\n</context_guidance>";
+pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Grep results may be larger than you expect. When you intend to count, filter, or aggregate matches (not just spot-check one), run the search through lens_run(language: \"shell\", code: \"...\") — the raw match list stays in the darkroom and only your derived answer enters your conversation. For \"where is X\" or \"who calls X\", prefer lens_search (after lens_index) or lens_symbol over scanning files.\n  </tip>\n</context_guidance>";
 
-/// Contextual guidance steering analysis-reads into the sandbox, and
+/// Contextual guidance steering analysis-reads into the darkroom, and
 /// navigational code-reads toward the graph.
-pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from one file? Use ctx_execute_file(path, language, code) — the bytes stay in the sandbox and only what your code prints enters your conversation.\n    Reading code to see how it connects — who calls this, what it calls, where a symbol is defined, how A reaches B? Don't read file after file; query the graph with graph_query / graph_neighbors / graph_path (run ctx_discover once if it's empty).\n  </tip>\n</context_guidance>";
+pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from one file? Use lens_run_file(path, language, code) — the bytes stay in the darkroom and only what your code prints enters your conversation.\n    Reading code to see how it connects — who calls this, what it calls, where a symbol is defined, how A reaches B? Don't read file after file; query the graph with lens_symbol / lens_links / lens_path (run lens_map once if it's empty).\n  </tip>\n</context_guidance>";
 
 /// Contextual guidance emitted AFTER a Grep whose result set floods context. A
-/// result this large is exactly where ctx_search (ranked top-K, flat with corpus
+/// result this large is exactly where lens_search (ranked top-K, flat with corpus
 /// size) beats grep (every matching line). PostToolUse, not before, so it fires only
 /// when the grep actually flooded — below the threshold grep is as lean and we stay
 /// quiet.
-pub const SEARCH_NUDGE: &str = "<context_guidance>\n  <tip>\n    That grep returned a large match set — more than ctx_search would. For a result set this size, ctx_search (after ctx_index) returns the ranked top hits and keeps the rest out of your context; re-run the search through ctx_search if you need more than the matches already shown.\n  </tip>\n</context_guidance>";
+pub const SEARCH_NUDGE: &str = "<context_guidance>\n  <tip>\n    That grep returned a large match set — more than lens_search would. For a result set this size, lens_search (after lens_index) returns the ranked top hits and keeps the rest out of your context; re-run the search through lens_search if you need more than the matches already shown.\n  </tip>\n</context_guidance>";
 
-/// Periodic guidance for external (non-ctxforge) MCP tools whose payloads flood
+/// Periodic guidance for external (non-lens) MCP tools whose payloads flood
 /// context (port of context-mode's `createExternalMcpGuidance`, tools mapped to
-/// ctxforge's).
-pub const EXTERNAL_MCP_NUDGE: &str = "<context_guidance>\n  <tip>\n    External MCP tools commonly return large payloads (channel history, file content, search results) that enter your conversation in full. When you intend to filter, count, or aggregate that data, pipe it through ctx_execute(language, code) — the raw payload stays in the sandbox and only the derived answer enters your conversation. For content you'll query later, ctx_index it then ctx_search(queries).\n  </tip>\n</context_guidance>";
+/// lens's).
+pub const EXTERNAL_MCP_NUDGE: &str = "<context_guidance>\n  <tip>\n    External MCP tools commonly return large payloads (channel history, file content, search results) that enter your conversation in full. When you intend to filter, count, or aggregate that data, pipe it through lens_run(language, code) — the raw payload stays in the darkroom and only the derived answer enters your conversation. For content you'll query later, lens_index it then lens_search(queries).\n  </tip>\n</context_guidance>";
 
 /// Port of context-mode's `mcpRedirect` (core/routing.mjs #230): a decision that
 /// redirects the agent to an MCP-backed tool (deny WebFetch, rewrite curl/build into
-/// `ctx_execute`) is only safe to emit when the server is reachable — otherwise the
+/// `lens_run`) is only safe to emit when the server is reachable — otherwise the
 /// agent is told to use a tool that isn't there and stalls. So gate ONLY these on
 /// `mcp_ready`; nudges and sub-agent injection are NOT gated (they fire regardless,
 /// matching context-mode, which never wraps `guidanceOnce`/Agent in `mcpRedirect`).
@@ -248,7 +248,7 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
         // the graph replaces). See [`read_decision`].
         "Read" => read_decision(tool_input, ctx),
         // Sub-agents never receive the SessionStart guide, so without this they
-        // default to Read/Grep/Bash and never touch the ctxforge tools. Inject the
+        // default to Read/Grep/Bash and never touch the lens tools. Inject the
         // guide into the sub-agent's prompt (every call — each is a fresh context).
         "Agent" | "Task" => {
             if ctx.level.steers() {
@@ -257,8 +257,8 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 Decision::Passthrough
             }
         }
-        // External (non-ctxforge) MCP tools return large payloads (channel history,
-        // file content, search results). Periodically nudge toward ctx_execute — a
+        // External (non-lens) MCP tools return large payloads (channel history,
+        // file content, search results). Periodically nudge toward lens_run — a
         // single one-shot nudge gets lost in long MCP-heavy sessions (port of
         // context-mode's #529/#567 periodic external-MCP guidance).
         other if ctx.level.steers() && is_external_mcp_tool(other) => {
@@ -273,7 +273,7 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
 }
 
 /// PostToolUse routing: a Grep whose result floods context gets a one-shot nudge
-/// toward ctx_search. This is the scale-aware search steer — ctx_search only beats
+/// toward lens_search. This is the scale-aware search steer — lens_search only beats
 /// grep once the match set is large (measured crossover: ~parity at fixture scale,
 /// ~91% leaner than grep at 10x). So unlike the PreToolUse Grep nudge (which fires
 /// before the result size is known), this fires only when the grep actually flooded.
@@ -293,7 +293,7 @@ pub fn post_route(tool: &str, tool_response: &str, ctx: &RouteCtx) -> Decision {
     }
 }
 
-/// Inject the ctxforge tool-selection guide into a sub-agent's prompt. Port of
+/// Inject the lens tool-selection guide into a sub-agent's prompt. Port of
 /// context-mode's PreToolUse `Agent` branch (`hooks/core/routing.mjs`). No
 /// throttle: each sub-agent is a fresh context that needs its own copy, including
 /// the block's ToolSearch bootstrap so the deferred ctx_* tools are loadable
@@ -334,25 +334,25 @@ fn agent_inject(tool_input: &Value, ctx: &RouteCtx) -> Decision {
 const READ_GRAPH_THRESHOLD_DEFAULT: u64 = 3;
 const READ_GRAPH_PERIOD: u64 = 3;
 
-/// The escalation threshold, overridable via `CTXFORGE_READ_GRAPH_THRESHOLD` so
+/// The escalation threshold, overridable via `LENS_READ_GRAPH_THRESHOLD` so
 /// an A/B can disable the graph escalation (set it very high) without a recompile.
 /// Falls back to [`READ_GRAPH_THRESHOLD_DEFAULT`] when unset or unparseable.
 fn read_graph_threshold() -> u64 {
-    std::env::var("CTXFORGE_READ_GRAPH_THRESHOLD")
+    std::env::var("LENS_READ_GRAPH_THRESHOLD")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(READ_GRAPH_THRESHOLD_DEFAULT)
 }
 
 /// Grep result-size (bytes) above which the result is a "flood" worth steering to
-/// ctx_search, overridable via `CTXFORGE_GREP_FLOOD_BYTES` (so an A/B can disable it
-/// by setting it very high). Default 16384: comfortably above ctx_search's flat
+/// lens_search, overridable via `LENS_GREP_FLOOD_BYTES` (so an A/B can disable it
+/// by setting it very high). Default 16384: comfortably above lens_search's flat
 /// ranked-top-K payload, so we only nudge once grep is the heavier option. Below this,
 /// grep is as lean and the nudge stays silent. (Measured crossover: grep ~parity at
-/// fixture scale, ~91% heavier than ctx_search at 10x.)
+/// fixture scale, ~91% heavier than lens_search at 10x.)
 const GREP_FLOOD_BYTES_DEFAULT: usize = 16384;
 fn grep_flood_bytes() -> usize {
-    std::env::var("CTXFORGE_GREP_FLOOD_BYTES")
+    std::env::var("LENS_GREP_FLOOD_BYTES")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(GREP_FLOOD_BYTES_DEFAULT)
@@ -392,7 +392,7 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
 /// the agent sees how much reading it has already done.
 fn read_graph_nudge(n: u64) -> String {
     format!(
-        "<context_guidance>\n  <tip>\n    You've read {n} code files this session. If you're tracing how the code fits together — who calls a function, what it calls, where a symbol is defined, how one part reaches another — stop reading file by file and query the graph instead: graph_query to locate a symbol, graph_neighbors for its callers/callees, graph_path for how A reaches B. One query replaces many reads and keeps their bytes out of your context. (Run ctx_discover once if the graph is empty.)\n  </tip>\n</context_guidance>"
+        "<context_guidance>\n  <tip>\n    You've read {n} code files this session. If you're tracing how the code fits together — who calls a function, what it calls, where a symbol is defined, how one part reaches another — stop reading file by file and query the graph instead: lens_symbol to locate a symbol, lens_links for its callers/callees, lens_path for how A reaches B. One query replaces many reads and keeps their bytes out of your context. (Run lens_map once if the graph is empty.)\n  </tip>\n</context_guidance>"
     )
 }
 
@@ -415,10 +415,10 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if is_stateful(cmd) {
         return Decision::Passthrough;
     }
-    // Network/build/inline-HTTP → hard redirect into ctx_execute (port of
+    // Network/build/inline-HTTP → hard redirect into lens_run (port of
     // context-mode's Bash redirects). Steering only; under wrap-only these fall
     // through to the generic output-wrap below. Gated on `mcp_ready` via
-    // `mcp_redirect` (these point at ctx_execute); when the server is down the
+    // `mcp_redirect` (these point at lens_run); when the server is down the
     // command passes through untouched rather than redirecting into a dead tool.
     if ctx.level.steers() {
         if let Some(d) = bash_redirect(cmd) {
@@ -452,8 +452,8 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
 
 /// Port of context-mode's curl/wget/build/inline-HTTP Bash redirects
 /// (`hooks/core/routing.mjs`): replace a context-flooding network or build command
-/// with an `echo` that tells the model to run it through `ctx_execute` instead, so
-/// the raw output stays in the sandbox. `None` for commands that don't match.
+/// with an `echo` that tells the model to run it through `lens_run` instead, so
+/// the raw output stays in the darkroom. `None` for commands that don't match.
 fn bash_redirect(cmd: &str) -> Option<Decision> {
     // Per-segment: a curl/wget that would dump the body to stdout, or a build tool.
     for seg in segments(cmd) {
@@ -499,20 +499,20 @@ fn has_inline_http(cmd: &str) -> bool {
         || cmd.contains("http.request(")
 }
 
-/// Replace the command with guidance to fetch via `ctx_execute` in the sandbox.
+/// Replace the command with guidance to fetch via `lens_run` in the darkroom.
 fn net_redirect() -> Decision {
-    let msg = "ctxforge routing: network fetch redirected. Call ctx_execute(language, code) to fetch the URL, derive your answer in code, and print only the result — the raw response body stays in the sandbox instead of entering your conversation. Full network access; retry the same call on a transient DNS error (EAI_AGAIN, ETIMEDOUT).";
+    let msg = "lens routing: network fetch redirected. Call lens_run(language, code) to fetch the URL, derive your answer in code, and print only the result — the raw response body stays in the darkroom instead of entering your conversation. Full network access; retry the same call on a transient DNS error (EAI_AGAIN, ETIMEDOUT).";
     Decision::Modify {
         reason: NET_REDIRECT_REASON.to_string(),
         updated_input: json!({ "command": format!("echo {}", q(msg)) }),
     }
 }
 
-/// Replace a build command with guidance to run it through `ctx_execute`, keeping
+/// Replace a build command with guidance to run it through `lens_run`, keeping
 /// only the tail of the (verbose) log.
 fn build_redirect(cmd: &str) -> Decision {
     let msg = format!(
-        "ctxforge routing: build command redirected. Run it in the sandbox so the verbose log stays out of context: ctx_execute(language: shell, code: \"{cmd} 2>&1 | tail -30\"). Swap tail for a grep over error/warning/FAIL lines to narrow further — only what you print returns."
+        "lens routing: build command redirected. Run it in the darkroom so the verbose log stays out of context: lens_run(language: shell, code: \"{cmd} 2>&1 | tail -30\"). Swap tail for a grep over error/warning/FAIL lines to narrow further — only what you print returns."
     );
     Decision::Modify {
         reason: BUILD_REDIRECT_REASON.to_string(),
@@ -808,15 +808,15 @@ pub(crate) fn is_structurally_bounded(command: &str) -> bool {
     }
 }
 
-/// Port of context-mode's `isExternalMcpTool` (#529): a non-ctxforge MCP tool, whose
-/// large payloads we nudge (periodically) toward `ctx_execute`. Claude's wire shape is
-/// `mcp__<server>__<tool>`; ctxforge's own server is excluded (its tools have dedicated
+/// Port of context-mode's `isExternalMcpTool` (#529): a non-lens MCP tool, whose
+/// large payloads we nudge (periodically) toward `lens_run`. Claude's wire shape is
+/// `mcp__<server>__<tool>`; lens's own server is excluded (its tools have dedicated
 /// handling / are the redirect target).
 fn is_external_mcp_tool(tool: &str) -> bool {
     match tool.strip_prefix("mcp__") {
         Some(rest) => {
             let server = rest.split("__").next().unwrap_or("");
-            !server.is_empty() && !server.contains("ctxforge")
+            !server.is_empty() && !server.contains("lens")
         }
         None => false,
     }
@@ -902,20 +902,20 @@ fn sanitize(s: &str) -> String {
 
 /// Is the MCP server reachable right now?
 ///
-/// `CTXFORGE_ROUTING_MCP` forces the answer when set (`up`/`1`/`on`/`true` =>
+/// `LENS_ROUTING_MCP` forces the answer when set (`up`/`1`/`on`/`true` =>
 /// reachable; `down`/`0`/`off`/`false` => not). Otherwise the server's
 /// heartbeat file `<data_dir>/server.pid` is consulted: it counts as reachable
-/// only while its mtime is within the TTL (`CTXFORGE_MCP_TTL` seconds, default
+/// only while its mtime is within the TTL (`LENS_MCP_TTL` seconds, default
 /// 90 — three heartbeat intervals). Missing, stale, or unreadable => not ready.
 pub fn mcp_ready(data_dir: &Path) -> bool {
-    if let Ok(v) = std::env::var("CTXFORGE_ROUTING_MCP") {
+    if let Ok(v) = std::env::var("LENS_ROUTING_MCP") {
         match v.trim().to_ascii_lowercase().as_str() {
             "up" | "1" | "on" | "true" => return true,
             "down" | "0" | "off" | "false" => return false,
             _ => {} // fall through to the heartbeat check
         }
     }
-    let ttl = std::env::var("CTXFORGE_MCP_TTL")
+    let ttl = std::env::var("LENS_MCP_TTL")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(90);
@@ -930,38 +930,38 @@ pub fn mcp_ready(data_dir: &Path) -> bool {
 }
 
 /// The authoritative tool-selection directive injected at `SessionStart` while
-/// steering is active. Replaces the old soft "prefer ctxforge tools" nudge with
+/// steering is active. Replaces the old soft "prefer lens tools" nudge with
 /// context-mode's `<context_window_protection>` pattern (prose adapted from
-/// `context-mode` `hooks/routing-block.mjs`, tool names mapped to ctxforge): the
+/// `context-mode` `hooks/routing-block.mjs`, tool names mapped to lens): the
 /// *why*, a hierarchy that puts the code graph first, a nuanced when-NOT-to-use,
-/// and a deferred-tool ToolSearch bootstrap — the ctxforge MCP tools are often
+/// and a deferred-tool ToolSearch bootstrap — the lens MCP tools are often
 /// deferred in-harness, so a willing model can't call them without loading first
 /// (a likely reason the tools sat unused). `_level` is unused (the block is
 /// level-agnostic; the caller already gates injection on `level.steers()`).
 pub fn session_block(_level: Level) -> String {
     r##"<context_window_protection>
   <priority_instructions>
-    Every byte a tool returns enters your conversation memory and costs reasoning capacity for the rest of the session. The ctxforge tools let you do the work in a sandbox and surface only the derived answer — the raw bytes stay out. Think-in-Code: program the analysis, do not compute it by reading raw data into your conversation.
+    Every byte a tool returns enters your conversation memory and costs reasoning capacity for the rest of the session. The lens tools let you do the work in a darkroom and surface only the derived answer — the raw bytes stay out. Think-in-Code: program the analysis, do not compute it by reading raw data into your conversation.
   </priority_instructions>
   <deferred_tool_bootstrap>
-    The ctxforge tools may be DEFERRED in your harness — their schemas are not loaded yet, so calling them directly fails ("tool not found" / InputValidationError). Load them ONCE before your first ctx_*/graph_* call:
-    ToolSearch(query: "select:ctx_execute,ctx_execute_file,ctx_search,ctx_index,ctx_discover,graph_query,graph_neighbors,graph_path,ctx_retrieve")
+    The lens tools may be DEFERRED in your harness — their schemas are not loaded yet, so calling them directly fails ("tool not found" / InputValidationError). Load them ONCE before your first ctx_*/graph_* call:
+    ToolSearch(query: "select:lens_run,lens_run_file,lens_search,lens_index,lens_map,lens_symbol,lens_links,lens_path,lens_recall")
     After that they are callable. If any ctx_*/graph_* call fails as not-found, ToolSearch it and retry — do NOT fall back to Bash/Read/Grep just because the schema was not loaded yet.
   </deferred_tool_bootstrap>
   <tool_selection_hierarchy>
-    1. STRUCTURE: ctx_discover (once per repo), then graph_query / graph_neighbors / graph_path.
-       - Who-calls-what, imports, how A reaches B, where a symbol lives: query a scoped subgraph instead of reading many files. Expand any compacted node with ctx_retrieve.
-    2. SEARCH: ctx_index, then ctx_search(queries: ["q1", "q2", ...]).
+    1. STRUCTURE: lens_map (once per repo), then lens_symbol / lens_links / lens_path.
+       - Who-calls-what, imports, how A reaches B, where a symbol lives: query a scoped subgraph instead of reading many files. Expand any compacted node with lens_recall.
+    2. SEARCH: lens_index, then lens_search(queries: ["q1", "q2", ...]).
        - "Where is X mentioned" across code and notes. Batch related questions in one array; ranked snippets return, not whole files.
-    3. PROCESSING: ctx_execute(language, code) | ctx_execute_file(path, language, code).
-       - Derive answers FROM data: filter, count, aggregate, parse, transform. Only what you print() enters your conversation; the raw bytes stay in the sandbox.
-    4. RECOVER: ctx_retrieve(ref) — pull back the full version of an offloaded result only when you actually need it.
+    3. PROCESSING: lens_run(language, code) | lens_run_file(path, language, code).
+       - Derive answers FROM data: filter, count, aggregate, parse, transform. Only what you print() enters your conversation; the raw bytes stay in the darkroom.
+    4. RECOVER: lens_recall(ref) — pull back the full version of an offloaded result only when you actually need it.
   </tool_selection_hierarchy>
   <when_not_to_use>
-    - You intend to PROCESS the output (filter, count, parse, aggregate) → use ctx_execute. Bash stays correct when you intend to OBSERVE a short fixed output (git status on a clean tree, whoami, pwd) or when you are mutating state (git, mkdir, rm, mv, navigation).
-    - You want to analyze, summarize, or extract from a file → use ctx_execute_file. Read stays correct when you intend to Edit the file (Edit needs the exact bytes in your conversation to match against).
-    - You want to find where something is, or who calls it → use ctx_search or graph_query, not repeated Read/Grep over many files.
-    - WebFetch is denied — fetch and reduce a URL with ctx_execute (python): fetch in the sandbox and print only what you need; the full response stays out of context and is recoverable via ctx_retrieve.
+    - You intend to PROCESS the output (filter, count, parse, aggregate) → use lens_run. Bash stays correct when you intend to OBSERVE a short fixed output (git status on a clean tree, whoami, pwd) or when you are mutating state (git, mkdir, rm, mv, navigation).
+    - You want to analyze, summarize, or extract from a file → use lens_run_file. Read stays correct when you intend to Edit the file (Edit needs the exact bytes in your conversation to match against).
+    - You want to find where something is, or who calls it → use lens_search or lens_symbol, not repeated Read/Grep over many files.
+    - WebFetch is denied — fetch and reduce a URL with lens_run (python): fetch in the darkroom and print only what you need; the full response stays out of context and is recoverable via lens_recall.
   </when_not_to_use>
   <session_continuity>
     Skills, roles, and directives set during this session remain active until the user revokes them. Do not drop these behavioral directives as context grows.
@@ -1068,7 +1068,7 @@ mod tests {
         assert_eq!(q("abc"), "'abc'");
         assert_eq!(q("a b"), "'a b'");
         assert_eq!(q("it's"), "'it'\\''s'");
-        assert_eq!(q("/p ath/ctxforge"), "'/p ath/ctxforge'");
+        assert_eq!(q("/p ath/lens"), "'/p ath/lens'");
     }
 
     // ── is_stateful ────────────────────────────────────────────────────────
@@ -1217,7 +1217,7 @@ mod tests {
         RouteCtx {
             level,
             mcp_ready,
-            bin: "/path with space/ctxforge",
+            bin: "/path with space/lens",
             data_dir: dir,
             session_id: "sess-1",
             rtk_active: false,
@@ -1260,7 +1260,7 @@ mod tests {
                 &ctx
             ),
             Decision::Passthrough,
-            "curl→ctx_execute redirect suppressed when server down"
+            "curl→lens_run redirect suppressed when server down"
         );
         // Non-redirect decisions → still fire (not gated on mcp_ready):
         assert!(
@@ -1268,7 +1268,7 @@ mod tests {
                 route("Bash", &json!({"command": "find ."}), &ctx),
                 Decision::Modify { .. }
             ),
-            "wrap rewrite uses the ctxforge CLI, not the MCP — fires regardless"
+            "wrap rewrite uses the lens CLI, not the MCP — fires regardless"
         );
         assert_eq!(
             route("Grep", &json!({"pattern": "x"}), &ctx),
@@ -1318,7 +1318,7 @@ mod tests {
                 let got = updated_input["command"].as_str().unwrap();
                 let expected = format!(
                     "{} wrap -- {}",
-                    q("/path with space/ctxforge"),
+                    q("/path with space/lens"),
                     q("find . -name '*.rs'")
                 );
                 assert_eq!(got, expected);
@@ -1355,7 +1355,7 @@ mod tests {
         let active = RouteCtx {
             level: Level::Full,
             mcp_ready: true,
-            bin: "/path with space/ctxforge",
+            bin: "/path with space/lens",
             data_dir: d.path(),
             session_id: "sess-1",
             rtk_active: true,
@@ -1469,9 +1469,7 @@ mod tests {
         // 3rd (threshold): graph-specific escalation naming all three graph tools.
         match route("Read", &code, &ctx) {
             Decision::Context(c) => assert!(
-                c.contains("graph_query")
-                    && c.contains("graph_neighbors")
-                    && c.contains("graph_path"),
+                c.contains("lens_symbol") && c.contains("lens_links") && c.contains("lens_path"),
                 "escalation names the graph tools: {c}"
             ),
             other => panic!("expected graph nudge, got {other:?}"),
@@ -1499,8 +1497,8 @@ mod tests {
 
     #[test]
     fn read_nudge_offers_the_graph() {
-        assert!(READ_NUDGE.contains("graph_query"));
-        assert!(READ_NUDGE.contains("ctx_execute_file"));
+        assert!(READ_NUDGE.contains("lens_symbol"));
+        assert!(READ_NUDGE.contains("lens_run_file"));
     }
 
     // ── post_route(): scale-aware search nudge ──────────────────────────────
@@ -1558,7 +1556,7 @@ mod tests {
         let d = tempdir().unwrap();
         let ctx = rc(Level::Full, true, d.path());
         let ti = json!({});
-        // First call to a non-ctxforge MCP tool nudges; throttled after.
+        // First call to a non-lens MCP tool nudges; throttled after.
         assert_eq!(
             route("mcp__slack__search", &ti, &ctx),
             Decision::Context(EXTERNAL_MCP_NUDGE.to_string())
@@ -1567,9 +1565,9 @@ mod tests {
             route("mcp__slack__search", &ti, &ctx),
             Decision::Passthrough
         );
-        // ctxforge's own MCP tools are NOT treated as external.
+        // lens's own MCP tools are NOT treated as external.
         assert_eq!(
-            route("mcp__ctxforge__ctx_execute", &ti, &ctx),
+            route("mcp__lens__lens_run", &ti, &ctx),
             Decision::Passthrough
         );
         // not steering → no nudge.
@@ -1584,7 +1582,7 @@ mod tests {
     fn external_mcp_detection() {
         assert!(is_external_mcp_tool("mcp__slack__post"));
         assert!(is_external_mcp_tool("mcp__github__list"));
-        assert!(!is_external_mcp_tool("mcp__ctxforge__ctx_search"));
+        assert!(!is_external_mcp_tool("mcp__lens__lens_search"));
         assert!(!is_external_mcp_tool("Bash"));
         assert!(!is_external_mcp_tool("mcp__"));
     }
@@ -1667,7 +1665,7 @@ mod tests {
     // ── route(): Bash network / build / inline-HTTP redirects ──────────────
 
     #[test]
-    fn bash_curl_to_stdout_redirected_to_ctx_execute() {
+    fn bash_curl_to_stdout_redirected_to_lens_run() {
         let d = tempdir().unwrap();
         let ti = json!({"command": "curl https://api.example.com/data | jq ."});
         match route("Bash", &ti, &rc(Level::Full, true, d.path())) {
@@ -1678,7 +1676,7 @@ mod tests {
                 assert_eq!(reason, NET_REDIRECT_REASON);
                 let c = updated_input["command"].as_str().unwrap();
                 assert!(c.starts_with("echo "), "command neutered to an echo: {c}");
-                assert!(c.contains("ctx_execute"), "guidance points to ctx_execute");
+                assert!(c.contains("lens_run"), "guidance points to lens_run");
             }
             other => panic!("expected Modify, got {other:?}"),
         }
@@ -1698,7 +1696,7 @@ mod tests {
     }
 
     #[test]
-    fn bash_build_tool_redirected_to_ctx_execute() {
+    fn bash_build_tool_redirected_to_lens_run() {
         let d = tempdir().unwrap();
         let ti = json!({"command": "./gradlew test"});
         match route("Bash", &ti, &rc(Level::Full, true, d.path())) {
@@ -1709,7 +1707,7 @@ mod tests {
                 assert_eq!(reason, BUILD_REDIRECT_REASON);
                 let c = updated_input["command"].as_str().unwrap();
                 assert!(c.starts_with("echo "));
-                assert!(c.contains("ctx_execute") && c.contains("tail -30"));
+                assert!(c.contains("lens_run") && c.contains("tail -30"));
             }
             other => panic!("expected Modify, got {other:?}"),
         }
@@ -1760,33 +1758,33 @@ mod tests {
     }
 
     // ── mcp_ready ──────────────────────────────────────────────────────────
-    // NOTE: these touch CTXFORGE_ROUTING_MCP / CTXFORGE_MCP_TTL, so they are
+    // NOTE: these touch LENS_ROUTING_MCP / LENS_MCP_TTL, so they are
     // grouped into one serialized test to avoid env races with other tests.
 
     #[test]
     fn mcp_ready_env_override_and_heartbeat() {
         let d = tempdir().unwrap();
         // No pidfile, no override → not ready.
-        std::env::remove_var("CTXFORGE_ROUTING_MCP");
-        std::env::remove_var("CTXFORGE_MCP_TTL");
+        std::env::remove_var("LENS_ROUTING_MCP");
+        std::env::remove_var("LENS_MCP_TTL");
         assert!(!mcp_ready(d.path()));
 
         // Override up/down wins regardless of pidfile.
-        std::env::set_var("CTXFORGE_ROUTING_MCP", "up");
+        std::env::set_var("LENS_ROUTING_MCP", "up");
         assert!(mcp_ready(d.path()));
-        std::env::set_var("CTXFORGE_ROUTING_MCP", "off");
+        std::env::set_var("LENS_ROUTING_MCP", "off");
         assert!(!mcp_ready(d.path()));
-        std::env::remove_var("CTXFORGE_ROUTING_MCP");
+        std::env::remove_var("LENS_ROUTING_MCP");
 
         // Fresh pidfile within TTL → ready.
         std::fs::write(d.path().join("server.pid"), "123").unwrap();
         assert!(mcp_ready(d.path()));
 
         // TTL of 0 makes any nonzero age stale (sleep a moment to be safe).
-        std::env::set_var("CTXFORGE_MCP_TTL", "0");
+        std::env::set_var("LENS_MCP_TTL", "0");
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(!mcp_ready(d.path()));
-        std::env::remove_var("CTXFORGE_MCP_TTL");
+        std::env::remove_var("LENS_MCP_TTL");
     }
 
     // ── session_block ──────────────────────────────────────────────────────
@@ -1797,15 +1795,15 @@ mod tests {
         assert!(b.starts_with("<context_window_protection>"));
         assert!(b.contains("</context_window_protection>"));
         for needle in [
-            "ctx_execute",
-            "ctx_index",
-            "ctx_search",
-            "ctx_execute_file",
-            "ctx_discover",
-            "graph_query",
-            "graph_neighbors",
-            "graph_path",
-            "ctx_retrieve",
+            "lens_run",
+            "lens_index",
+            "lens_search",
+            "lens_run_file",
+            "lens_map",
+            "lens_symbol",
+            "lens_links",
+            "lens_path",
+            "lens_recall",
             "tool_selection_hierarchy",
             "WebFetch is denied",
             // the highest-impact additions over the old soft nudge:

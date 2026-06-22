@@ -1,5 +1,5 @@
 //! MCP server wiring: the `Forge` handler holds shared state and exposes every
-//! ctxforge tool. Tool bodies delegate to the feature modules.
+//! lens tool. Tool bodies delegate to the feature modules.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
+use crate::darkroom;
 use crate::discovery::{self, graph::Graph, query as gquery};
 use crate::index::Index;
 use crate::obs::{self, OpLog};
-use crate::sandbox;
 use crate::store::Store;
 use crate::tools::*;
 
@@ -19,11 +19,11 @@ const DEFAULT_MAX_INLINE: usize = 8 * 1024;
 
 #[derive(Clone)]
 pub struct Forge {
-    /// Working dir the sandbox and walkers operate in (the repo root).
+    /// Working dir the darkroom and walkers operate in (the repo root).
     repo_dir: PathBuf,
-    /// Persistent state dir (`.ctxforge/` or `$CTXFORGE_DIR`).
+    /// Persistent state dir (`.lens/` or `$LENS_DIR`).
     data_dir: PathBuf,
-    /// Inline output threshold for `ctx_execute`.
+    /// Inline output threshold for `lens_run`.
     max_inline: usize,
     store: Store,
     index: Index,
@@ -35,11 +35,11 @@ impl Forge {
     /// Build the handler, resolving paths from the environment.
     pub fn new() -> anyhow::Result<Self> {
         let repo_dir = std::env::current_dir()?;
-        let data_dir = match std::env::var_os("CTXFORGE_DIR") {
+        let data_dir = match std::env::var_os("LENS_DIR") {
             Some(d) => PathBuf::from(d),
-            None => repo_dir.join(".ctxforge"),
+            None => repo_dir.join(".lens"),
         };
-        let max_inline = std::env::var("CTXFORGE_MAX_INLINE")
+        let max_inline = std::env::var("LENS_MAX_INLINE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(DEFAULT_MAX_INLINE);
@@ -68,21 +68,21 @@ impl Forge {
 
 #[tool_router]
 impl Forge {
-    /// Run code in a sandboxed subprocess and capture only its stdout/stderr.
+    /// Run code in a darkroom subprocess and capture only its stdout/stderr.
     /// The raw data the script reads never enters context. Large output is
     /// offloaded to the reversible store and replaced with a preview + ref.
     #[tool(
-        description = "Run code (python|javascript|typescript|bash|ruby|go) in a sandbox; only the script's stdout/stderr returns to context, not the data it processed. Large output is offloaded and retrievable via ctx_retrieve."
+        description = "Run code (python|javascript|typescript|bash|ruby|go) in a darkroom; only the script's stdout/stderr returns to context, not the data it processed. Large output is offloaded and retrievable via lens_recall."
     )]
-    async fn ctx_execute(
+    async fn lens_run(
         &self,
         Parameters(req): Parameters<ExecuteRequest>,
     ) -> Result<Json<ExecuteResponse>, ErrorData> {
         let op = self.ops.start(
-            "ctx_execute",
+            "lens_run",
             serde_json::json!({ "language": req.language, "code_bytes": req.code.len() }),
         );
-        match sandbox::run(req, &self.repo_dir, &self.store, self.max_inline).await {
+        match darkroom::run(req, &self.repo_dir, &self.store, self.max_inline).await {
             Ok(resp) => {
                 let raw_in = resp.stdout_bytes as u64;
                 let returned = (resp.stdout.len() + resp.stderr.len()) as u64;
@@ -131,18 +131,18 @@ impl Forge {
         }
     }
 
-    /// Analyze a file in the sandbox: the code receives the file path as its
+    /// Analyze a file in the darkroom: the code receives the file path as its
     /// first CLI argument and only its printed output returns to context. Large
     /// output is offloaded to the reversible store and replaced with a preview + ref.
     #[tool(
-        description = "Analyze a file in the sandbox: your `code` receives the file path as its first CLI argument (python sys.argv[1] / node process.argv[2] / bash $1); only what it prints returns to context, not the file contents. Large output is offloaded and retrievable via ctx_retrieve."
+        description = "Analyze a file in the darkroom: your `code` receives the file path as its first CLI argument (python sys.argv[1] / node process.argv[2] / bash $1); only what it prints returns to context, not the file contents. Large output is offloaded and retrievable via lens_recall."
     )]
-    async fn ctx_execute_file(
+    async fn lens_run_file(
         &self,
         Parameters(req): Parameters<ExecuteFileRequest>,
     ) -> Result<Json<ExecuteResponse>, ErrorData> {
         let op = self.ops.start(
-            "ctx_execute_file",
+            "lens_run_file",
             serde_json::json!({ "language": req.language, "path": req.path, "code_bytes": req.code.len() }),
         );
         let p = self.resolve_unescaped(&req.path);
@@ -157,11 +157,11 @@ impl Forge {
             timeout_secs: req.timeout_secs,
             stdin: None,
         };
-        match sandbox::run_file(&p, exec, &self.repo_dir, &self.store, self.max_inline).await {
+        match darkroom::run_file(&p, exec, &self.repo_dir, &self.store, self.max_inline).await {
             Ok(resp) => {
                 let raw_in = resp.stdout_bytes as u64 + file_size;
                 // Mirror the credit into the persistent counter ctx_stats reads
-                // (the sandbox already counted stdout; add the file bytes).
+                // (the darkroom already counted stdout; add the file bytes).
                 if file_size > 0 {
                     let _ = self
                         .store
@@ -217,13 +217,13 @@ impl Forge {
     #[tool(
         description = "Retrieve the full content for a retrieve_ref returned by another tool (reverses any truncation/compression)."
     )]
-    async fn ctx_retrieve(
+    async fn lens_recall(
         &self,
         Parameters(req): Parameters<RetrieveRequest>,
     ) -> Result<Json<RetrieveResponse>, ErrorData> {
         let op = self
             .ops
-            .start("ctx_retrieve", serde_json::json!({ "ref": req.reference }));
+            .start("lens_recall", serde_json::json!({ "ref": req.reference }));
         match self.store.get(&req.reference) {
             Ok(Some(content)) => {
                 // Retrieve is the inverse of offloading (expansion), so it saves
@@ -265,14 +265,14 @@ impl Forge {
 
     /// Index files into the FTS5 search index.
     #[tool(
-        description = "Index a file or directory (respecting .gitignore) into an FTS5 index for fast snippet search via ctx_search."
+        description = "Index a file or directory (respecting .gitignore) into an FTS5 index for fast snippet search via lens_search."
     )]
-    async fn ctx_index(
+    async fn lens_index(
         &self,
         Parameters(req): Parameters<IndexRequest>,
     ) -> Result<Json<IndexResponse>, ErrorData> {
         let op = self.ops.start(
-            "ctx_index",
+            "lens_index",
             serde_json::json!({ "path": req.path, "recursive": req.recursive }),
         );
         let root = self.resolve_unescaped(&req.path);
@@ -282,7 +282,7 @@ impl Forge {
                     let _ = self.store.set_stat("index_chunks", total);
                 }
                 // A full-repo index refreshes the staleness manifest so a later
-                // ctx_search (ensure_index) serves from cache instead of reindexing.
+                // lens_search (ensure_index) serves from cache instead of reindexing.
                 // Subpath/single-file indexes don't represent the whole repo, so they
                 // leave the manifest alone (ensure_index will refresh as needed).
                 if self.same_repo_root(&root) {
@@ -311,12 +311,12 @@ impl Forge {
     #[tool(
         description = "Search the FTS5 index with one or more queries (BM25-ranked); returns top snippets with path and score per query."
     )]
-    async fn ctx_search(
+    async fn lens_search(
         &self,
         Parameters(req): Parameters<SearchRequest>,
     ) -> Result<Json<SearchResponse>, ErrorData> {
         let op = self.ops.start(
-            "ctx_search",
+            "lens_search",
             serde_json::json!({ "queries": req.queries.len(), "limit_per_query": req.limit_per_query }),
         );
         if let Err(e) = self.ensure_index() {
@@ -341,14 +341,14 @@ impl Forge {
 
     /// Build the structural code graph for the repo.
     #[tool(
-        description = "Parse the repo with tree-sitter into a graph of symbols (functions, types, modules) and relationships (calls, imports, contains). Run once, then use graph_query/graph_neighbors/graph_path."
+        description = "Parse the repo with tree-sitter into a graph of symbols (functions, types, modules) and relationships (calls, imports, contains). Run once, then use lens_symbol/lens_links/lens_path."
     )]
-    async fn ctx_discover(
+    async fn lens_map(
         &self,
         Parameters(req): Parameters<DiscoverRequest>,
     ) -> Result<Json<DiscoverResponse>, ErrorData> {
         let op = self.ops.start(
-            "ctx_discover",
+            "lens_map",
             serde_json::json!({ "path": req.path, "languages": req.languages }),
         );
         let root = self.discover_root(&req.path);
@@ -368,14 +368,14 @@ impl Forge {
 
     /// Find symbols by name and return their immediate connections.
     #[tool(
-        description = "Find graph symbols by name substring (+ optional kind) and return them with immediate connections. Large results are compacted with a ctx_retrieve ref."
+        description = "Find graph symbols by name substring (+ optional kind) and return them with immediate connections. Large results are compacted with a lens_recall ref."
     )]
-    async fn graph_query(
+    async fn lens_symbol(
         &self,
         Parameters(req): Parameters<GraphQueryRequest>,
     ) -> Result<Json<GraphView>, ErrorData> {
         let op = self.ops.start(
-            "graph_query",
+            "lens_symbol",
             serde_json::json!({ "name": req.name, "kind": req.kind, "limit": req.limit }),
         );
         let graph = match self.load_graph() {
@@ -399,12 +399,12 @@ impl Forge {
     #[tool(
         description = "Find symbols by natural-language query, ranked lexically (no embeddings): tokenizes the query and scores symbol names by word overlap (exact > prefix > substring, with a bonus for multi-word hits). Returns the best matches with their immediate connections. Use when you know what a symbol does but not its exact name."
     )]
-    async fn graph_find(
+    async fn lens_find(
         &self,
         Parameters(req): Parameters<GraphFindRequest>,
     ) -> Result<Json<GraphView>, ErrorData> {
         let op = self.ops.start(
-            "graph_find",
+            "lens_find",
             serde_json::json!({ "query": req.query, "limit": req.limit }),
         );
         let graph = match self.load_graph() {
@@ -423,14 +423,14 @@ impl Forge {
 
     /// Return the local subgraph around a node.
     #[tool(
-        description = "Return the local subgraph within `depth` hops of a node id (from graph_query results)."
+        description = "Return the local subgraph within `depth` hops of a node id (from lens_symbol results)."
     )]
-    async fn graph_neighbors(
+    async fn lens_links(
         &self,
         Parameters(req): Parameters<GraphNeighborsRequest>,
     ) -> Result<Json<GraphView>, ErrorData> {
         let op = self.ops.start(
-            "graph_neighbors",
+            "lens_links",
             serde_json::json!({ "node_id": req.node_id, "depth": req.depth }),
         );
         let graph = match self.load_graph() {
@@ -451,12 +451,12 @@ impl Forge {
     #[tool(
         description = "Find the shortest path between two symbols (by node id or name) via BFS over graph edges."
     )]
-    async fn graph_path(
+    async fn lens_path(
         &self,
         Parameters(req): Parameters<GraphPathRequest>,
     ) -> Result<Json<PathResponse>, ErrorData> {
         let op = self.ops.start(
-            "graph_path",
+            "lens_path",
             serde_json::json!({ "from": req.from, "to": req.to }),
         );
         let graph = match self.load_graph() {
@@ -476,7 +476,7 @@ impl Forge {
 
     /// Report token-savings counters and index/graph sizes.
     #[tool(
-        description = "Report sandbox usage, estimated tokens saved, and index/graph sizes for this repo's ctxforge state."
+        description = "Report darkroom usage, estimated tokens saved, and index/graph sizes for this repo's lens state."
     )]
     async fn ctx_stats(
         &self,
@@ -489,7 +489,7 @@ impl Forge {
         let returned = read("bytes_returned_to_context");
         let saved = ((raw - returned).max(0)) / 4;
         let resp = StatsResponse {
-            sandbox_calls: read("sandbox_calls"),
+            darkroom_calls: read("darkroom_calls"),
             raw_bytes_processed: raw,
             bytes_returned_to_context: returned,
             estimated_tokens_saved: saved,
@@ -518,25 +518,25 @@ impl ServerHandler for Forge {
             .enable_tools()
             .build();
         // Imperative tool-selection guidance (adapted from context-mode's CLAUDE.md
-        // prose; tool names mapped to ctxforge). The MCP `instructions` ship on every
+        // prose; tool names mapped to lens). The MCP `instructions` ship on every
         // session handshake regardless of routing, so this is the always-on layer.
         info.instructions = Some(
             "Raw tool output floods your context window and costs reasoning capacity for \
-             the rest of the session. Keep raw data in the ctxforge sandbox and surface \
+             the rest of the session. Keep raw data in the lens darkroom and surface \
              only the derived answer.\n\
              THINK IN CODE: to analyze, count, filter, search, parse, or transform data, \
-             write a script via ctx_execute(language, code) and print only the answer — do \
+             write a script via lens_run(language, code) and print only the answer — do \
              NOT read raw data into context. One script replaces many tool calls.\n\
              TOOL SELECTION: (1) code structure (who-calls-what, imports, how A reaches B, \
-             where a symbol lives) → ctx_discover once, then graph_query / graph_neighbors / \
-             graph_path on a scoped subgraph instead of reading many files. (2) where is X \
-             mentioned → ctx_index then ctx_search(queries). (3) derive an answer FROM data \
-             or a file → ctx_execute / ctx_execute_file. (4) recover an offloaded result → \
-             ctx_retrieve. (5) savings → ctx_stats.\n\
-             RULES: DO NOT use Read to analyze a file — use ctx_execute_file (Read is correct \
+             where a symbol lives) → lens_map once, then lens_symbol / lens_links / \
+             lens_path on a scoped subgraph instead of reading many files. (2) where is X \
+             mentioned → lens_index then lens_search(queries). (3) derive an answer FROM data \
+             or a file → lens_run / lens_run_file. (4) recover an offloaded result → \
+             lens_recall. (5) savings → ctx_stats.\n\
+             RULES: DO NOT use Read to analyze a file — use lens_run_file (Read is correct \
              only when you will Edit it). DO NOT use Grep/Bash to count, filter, or aggregate \
-             — use ctx_search, graph_query, or ctx_execute. DO NOT use WebFetch — fetch and \
-             reduce the URL with ctx_execute. If a ctx_*/graph_* tool is reported not-found, \
+             — use lens_search, lens_symbol, or lens_run. DO NOT use WebFetch — fetch and \
+             reduce the URL with lens_run. If a ctx_*/graph_* tool is reported not-found, \
              it is deferred: load it with ToolSearch and retry — do not fall back to raw \
              tools. Bash/Read stay correct for short fixed output or mutating state \
              (git, mkdir, rm, mv, navigation)."
@@ -592,16 +592,16 @@ impl Forge {
     /// Resolve a model-supplied path, tolerant of the *shell-escaped* form the
     /// model often hands back for paths with spaces (e.g.
     /// `/Users/me/AI\ Stuff/repo`): strip the common `\<space>` escape, then
-    /// resolve. Shared by `ctx_discover` and `ctx_index` so the two never diverge
-    /// in how they accept a path — that divergence is what let escaped `ctx_index`
-    /// calls silently index zero files while `ctx_discover` succeeded.
+    /// resolve. Shared by `lens_map` and `lens_index` so the two never diverge
+    /// in how they accept a path — that divergence is what let escaped `lens_index`
+    /// calls silently index zero files while `lens_map` succeeded.
     fn resolve_unescaped(&self, p: &str) -> PathBuf {
         self.resolve(&p.replace("\\ ", " "))
     }
 
-    /// Resolve the root for `ctx_discover`. The model's path is un-escaped by
+    /// Resolve the root for `lens_map`. The model's path is un-escaped by
     /// [`Self::resolve_unescaped`]; if it still doesn't exist, fall back to
-    /// `repo_dir` (the repo root is what `ctx_discover` almost always means).
+    /// `repo_dir` (the repo root is what `lens_map` almost always means).
     fn discover_root(&self, p: &str) -> PathBuf {
         let candidate = self.resolve_unescaped(p);
         if candidate.exists() {
@@ -639,14 +639,14 @@ impl Forge {
     }
 
     /// Load the structural graph, building it on first use if discovery hasn't run
-    /// yet (so graph queries work on any repo without an explicit ctx_discover).
+    /// yet (so graph queries work on any repo without an explicit lens_map).
     fn load_graph(&self) -> Result<Graph, ErrorData> {
         self.ensure_graph()?;
         Graph::load(&self.graph_file()).map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
 
     /// Paths the user recently touched this session, newest first (bounded), used
-    /// to bias `graph_query` ranking toward what they're working on. Sourced from
+    /// to bias `lens_symbol` ranking toward what they're working on. Sourced from
     /// the session hooks' "file"-category events (Edit/Write/Read), whose payload
     /// carries the touched path. Best-effort: any error (no session db yet, schema
     /// drift) yields an empty list, leaving ranking unchanged.
@@ -684,7 +684,7 @@ impl Forge {
     }
 
     /// Persist a freshly-built graph and its node/edge stats, then finalize `op`
-    /// with a summary. Shared by `ctx_discover` (explicit, `root` may be a subpath)
+    /// with a summary. Shared by `lens_map` (explicit, `root` may be a subpath)
     /// and `ensure_graph` (lazy, `root` == repo root); `auto` only adjusts the note.
     fn finish_discovery(
         &self,
@@ -696,7 +696,7 @@ impl Forge {
         // Never persist an empty graph. A 0-file discover (a wrong/escaped path, a
         // `languages` filter that matches nothing, or a sourceless repo) would
         // otherwise overwrite a good graph.json with `{"nodes":[],"edges":[]}` and
-        // silently break every later graph_query. Keep the existing graph instead.
+        // silently break every later lens_symbol. Keep the existing graph instead.
         if outcome.response.files_parsed == 0 {
             let note =
                 "discover parsed 0 files — kept the existing graph (check the path/languages)"
@@ -714,7 +714,7 @@ impl Forge {
                 if !existing.nodes.is_empty() && outcome.response.nodes < existing.nodes.len() {
                     let note = format!(
                         "refused: discovering a subpath would shrink the graph {}→{} nodes; \
-                         run ctx_discover with no path to rebuild the full repo",
+                         run lens_map with no path to rebuild the full repo",
                         existing.nodes.len(),
                         outcome.response.nodes
                     );
@@ -760,7 +760,7 @@ impl Forge {
     /// whole-repo graph when it is missing, empty (a poisoned prior build), or
     /// **stale** — i.e. any source file was added, edited, or removed since the last
     /// build. Staleness is a cheap mtime-manifest comparison, so the graph keeps
-    /// itself fresh as the user adds/removes files, with no explicit `ctx_discover`
+    /// itself fresh as the user adds/removes files, with no explicit `lens_map`
     /// and no server restart. Works for every project (it is in the query path).
     fn ensure_graph(&self) -> Result<(), ErrorData> {
         let current = discovery::source_manifest(&self.repo_dir);
@@ -773,7 +773,7 @@ impl Forge {
         }
         let op = self
             .ops
-            .start("ctx_discover", serde_json::json!({ "auto": true }));
+            .start("lens_map", serde_json::json!({ "auto": true }));
         let outcome = match discovery::discover(&self.repo_dir, None) {
             Ok(o) => o,
             Err(e) => {
@@ -801,11 +801,11 @@ impl Forge {
         }
         let op = self
             .ops
-            .start("ctx_index", serde_json::json!({ "auto": true }));
+            .start("lens_index", serde_json::json!({ "auto": true }));
         match self.index.index_path(&self.repo_dir, true) {
             Ok(resp) => {
                 // Drop chunks for files deleted since the last build (keeps
-                // ctx_search from returning ghosts). Safe here: always the repo root.
+                // lens_search from returning ghosts). Safe here: always the repo root.
                 let _ = self.index.prune_missing(&self.repo_dir);
                 if let Ok(total) = self.index.chunk_count() {
                     let _ = self.store.set_stat("index_chunks", total);
@@ -828,7 +828,7 @@ impl Forge {
     }
 
     /// If a subgraph serializes larger than the inline limit, store the full
-    /// (plain) JSON for `ctx_retrieve` and return a dictionary-compacted form
+    /// (plain) JSON for `lens_recall` and return a dictionary-compacted form
     /// instead of the raw node/edge lists.
     fn maybe_compact(&self, view: GraphView) -> GraphView {
         let original = serde_json::json!({ "nodes": view.nodes, "edges": view.edges });
@@ -910,7 +910,7 @@ mod tests {
 
     fn forge(max_inline: usize) -> (Forge, tempfile::TempDir) {
         let dir = tempdir().unwrap();
-        let data = dir.path().join(".ctxforge");
+        let data = dir.path().join(".lens");
         let f = Forge::with_paths(dir.path().to_path_buf(), data, max_inline).unwrap();
         (f, dir)
     }
@@ -923,7 +923,7 @@ mod tests {
             "fn helper() -> i32 { 1 }\nfn main() { let _ = helper(); }\n",
         )
         .unwrap();
-        let data = dir.path().join(".ctxforge");
+        let data = dir.path().join(".lens");
         let f = Forge::with_paths(dir.path().to_path_buf(), data, 8192).unwrap();
         (f, dir)
     }
@@ -933,7 +933,7 @@ mod tests {
         let (f, dir) = forge_with_source();
         // Good graph via the explicit tool (default path ".").
         let good = f
-            .ctx_discover(Parameters(DiscoverRequest {
+            .lens_map(Parameters(DiscoverRequest {
                 path: ".".into(),
                 languages: None,
             }))
@@ -946,7 +946,7 @@ mod tests {
         // (rebuilding the same graph) rather than walking nothing and clobbering it.
         let escaped = format!("{}\\ nonexistent", dir.path().display());
         let _ = f
-            .ctx_discover(Parameters(DiscoverRequest {
+            .lens_map(Parameters(DiscoverRequest {
                 path: escaped,
                 languages: None,
             }))
@@ -959,7 +959,7 @@ mod tests {
     async fn zero_file_discover_errors_and_keeps_graph() {
         let (f, _dir) = forge_with_source();
         let good = f
-            .ctx_discover(Parameters(DiscoverRequest {
+            .lens_map(Parameters(DiscoverRequest {
                 path: ".".into(),
                 languages: None,
             }))
@@ -971,7 +971,7 @@ mod tests {
         // An unsupported `languages` filter matches nothing → 0 files parsed. That
         // must error and leave the existing graph untouched (never persist empty).
         let res = f
-            .ctx_discover(Parameters(DiscoverRequest {
+            .lens_map(Parameters(DiscoverRequest {
                 path: ".".into(),
                 languages: Some(vec!["swift".into()]),
             }))
@@ -992,9 +992,9 @@ mod tests {
         std::fs::write(f.graph_file(), r#"{"nodes":[],"edges":[]}"#).unwrap();
         assert!(Graph::load(&f.graph_file()).unwrap().nodes.is_empty());
 
-        // graph_query triggers ensure_graph, which must rebuild because nodes == 0.
+        // lens_symbol triggers ensure_graph, which must rebuild because nodes == 0.
         let _ = f
-            .graph_query(Parameters(GraphQueryRequest {
+            .lens_symbol(Parameters(GraphQueryRequest {
                 name: "helper".into(),
                 kind: None,
                 limit: 20,
@@ -1010,10 +1010,10 @@ mod tests {
     #[tokio::test]
     async fn graph_refreshes_when_a_file_is_added() {
         // Every-project freshness: after a full build, adding a source file must make
-        // the next graph_query auto-rebuild (manifest goes stale) — no explicit
-        // ctx_discover, no restart.
+        // the next lens_symbol auto-rebuild (manifest goes stale) — no explicit
+        // lens_map, no restart.
         let (f, dir) = forge_with_source();
-        f.ctx_discover(Parameters(DiscoverRequest {
+        f.lens_map(Parameters(DiscoverRequest {
             path: ".".into(),
             languages: None,
         }))
@@ -1027,7 +1027,7 @@ mod tests {
         )
         .unwrap();
         let view = f
-            .graph_query(Parameters(GraphQueryRequest {
+            .lens_symbol(Parameters(GraphQueryRequest {
                 name: "brand_new_symbol".into(),
                 kind: None,
                 limit: 20,
@@ -1053,7 +1053,7 @@ mod tests {
         std::fs::write(dir.path().join("sub/only.rs"), "fn lonely() {}\n").unwrap();
         std::fs::write(dir.path().join("more.rs"), "fn a(){}\nfn b(){}\nfn c(){}\n").unwrap();
 
-        f.ctx_discover(Parameters(DiscoverRequest {
+        f.lens_map(Parameters(DiscoverRequest {
             path: ".".into(),
             languages: None,
         }))
@@ -1062,7 +1062,7 @@ mod tests {
         let full = Graph::load(&f.graph_file()).unwrap().nodes.len();
 
         let res = f
-            .ctx_discover(Parameters(DiscoverRequest {
+            .lens_map(Parameters(DiscoverRequest {
                 path: "sub".into(),
                 languages: None,
             }))
@@ -1080,10 +1080,10 @@ mod tests {
 
     #[tokio::test]
     async fn index_refreshes_when_a_file_is_added() {
-        // Index freshness via ctx_search → ensure_index: a newly added file becomes
-        // searchable on the next search, no explicit ctx_index.
+        // Index freshness via lens_search → ensure_index: a newly added file becomes
+        // searchable on the next search, no explicit lens_index.
         let (f, dir) = forge_with_source();
-        f.ctx_search(Parameters(SearchRequest {
+        f.lens_search(Parameters(SearchRequest {
             queries: vec!["helper".into()],
             limit_per_query: 5,
         }))
@@ -1096,7 +1096,7 @@ mod tests {
         )
         .unwrap();
         let r = f
-            .ctx_search(Parameters(SearchRequest {
+            .lens_search(Parameters(SearchRequest {
                 queries: vec!["qwerty_unique_term".into()],
                 limit_per_query: 5,
             }))
@@ -1113,14 +1113,14 @@ mod tests {
 
     #[tokio::test]
     async fn index_prunes_deleted_files() {
-        // A deleted file must stop appearing in ctx_search after the next search
-        // (ensure_index reindexes + prunes). Driven via ctx_search so the index uses
+        // A deleted file must stop appearing in lens_search after the next search
+        // (ensure_index reindexes + prunes). Driven via lens_search so the index uses
         // the clean repo_dir path scheme throughout.
         let (f, dir) = forge_with_source();
         std::fs::write(dir.path().join("gone.rs"), "fn vanishing_term() {}\n").unwrap();
 
         let pre = f
-            .ctx_search(Parameters(SearchRequest {
+            .lens_search(Parameters(SearchRequest {
                 queries: vec!["vanishing_term".into()],
                 limit_per_query: 5,
             }))
@@ -1136,7 +1136,7 @@ mod tests {
 
         std::fs::remove_file(dir.path().join("gone.rs")).unwrap();
         let post = f
-            .ctx_search(Parameters(SearchRequest {
+            .lens_search(Parameters(SearchRequest {
                 queries: vec!["vanishing_term".into()],
                 limit_per_query: 5,
             }))
@@ -1154,17 +1154,17 @@ mod tests {
     #[tokio::test]
     async fn escaped_path_index_unescapes_and_indexes() {
         // The meridian case: a repo whose path contains a space, where the model
-        // hands ctx_index a shell-escaped absolute path (`AI\ Stuff`). Index must
+        // hands lens_index a shell-escaped absolute path (`AI\ Stuff`). Index must
         // un-escape it and actually index the files — not report 0, not error.
         let base = tempdir().unwrap();
         let spaced = base.path().join("AI Stuff");
         std::fs::create_dir_all(&spaced).unwrap();
         std::fs::write(spaced.join("lib.rs"), "fn helper() -> i32 { 1 }\n").unwrap();
-        let f = Forge::with_paths(spaced.clone(), base.path().join(".ctxforge"), 8192).unwrap();
+        let f = Forge::with_paths(spaced.clone(), base.path().join(".lens"), 8192).unwrap();
 
         let escaped = spaced.display().to_string().replace(' ', "\\ ");
         let resp = f
-            .ctx_index(Parameters(IndexRequest {
+            .lens_index(Parameters(IndexRequest {
                 path: escaped,
                 recursive: true,
             }))
@@ -1181,17 +1181,17 @@ mod tests {
     #[tokio::test]
     async fn escaped_path_execute_file_unescapes() {
         // Same root cause as discover/index: a shell-escaped path to a real file in
-        // a spaced dir must resolve so the sandbox script actually reads the file.
+        // a spaced dir must resolve so the darkroom script actually reads the file.
         let base = tempdir().unwrap();
         let spaced = base.path().join("AI Stuff");
         std::fs::create_dir_all(&spaced).unwrap();
         let file = spaced.join("data.txt");
         std::fs::write(&file, "hello\n").unwrap();
-        let f = Forge::with_paths(spaced.clone(), base.path().join(".ctxforge"), 8192).unwrap();
+        let f = Forge::with_paths(spaced.clone(), base.path().join(".lens"), 8192).unwrap();
 
         let escaped = file.display().to_string().replace(' ', "\\ ");
         let resp = f
-            .ctx_execute_file(Parameters(crate::tools::ExecuteFileRequest {
+            .lens_run_file(Parameters(crate::tools::ExecuteFileRequest {
                 path: escaped,
                 language: "bash".into(),
                 code: "wc -c < \"$1\"".into(),

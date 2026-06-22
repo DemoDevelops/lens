@@ -49,7 +49,7 @@ pub struct Edge {
     pub kind: String,
 }
 
-/// The whole structural graph. Serializes to `.ctxforge/graph.json`.
+/// The whole structural graph. Serializes to `.lens/graph.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Graph {
     pub nodes: Vec<Node>,

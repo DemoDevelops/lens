@@ -2,6 +2,7 @@
 
 pub mod schema;
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -18,6 +19,14 @@ impl Index {
     /// Index a file or directory, respecting `.gitignore`. Re-indexing a path
     /// replaces its existing chunks (idempotent).
     pub fn index_path(&self, root: &Path, recursive: bool) -> Result<IndexResponse> {
+        // A non-existent root (commonly a shell-escaped path that survived as a
+        // literal, e.g. `AI\ Stuff`) makes the walk silently yield zero files. Fail
+        // loudly instead of reporting a successful index of nothing (mirrors
+        // discovery::discover).
+        if !root.exists() {
+            anyhow::bail!("index root does not exist: {}", root.display());
+        }
+
         let mut files_indexed = 0usize;
         let mut chunks_added = 0usize;
 
@@ -74,6 +83,49 @@ impl Index {
             files_indexed,
             chunks: chunks_added,
         })
+    }
+
+    /// Remove indexed chunks for source files that no longer exist under `root`, so
+    /// deleted files stop showing up in `ctx_search`. Only code-file chunks are
+    /// touched — session-continuity records (`path` prefixed `session://`) are left
+    /// intact. Also cleans up chunks left under a different path scheme (e.g. an old
+    /// relative-root index) for files now indexed absolutely. Returns chunks removed.
+    ///
+    /// Call ONLY with the repo root: a subpath `root` would wrongly prune everything
+    /// outside it.
+    pub fn prune_missing(&self, root: &Path) -> Result<usize> {
+        // Current file path strings, exactly as `index_path` would store them.
+        let mut current: HashSet<String> = HashSet::new();
+        if root.exists() {
+            let mut builder = WalkBuilder::new(root);
+            builder.standard_filters(true);
+            for entry in builder.build().flatten() {
+                if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    current.insert(entry.into_path().to_string_lossy().to_string());
+                }
+            }
+        }
+        let mut conn = self.conn()?;
+        let existing: Vec<String> = {
+            let mut stmt =
+                conn.prepare("SELECT DISTINCT path FROM chunks WHERE path NOT LIKE 'session://%'")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.flatten().collect()
+        };
+        let stale: Vec<String> = existing
+            .into_iter()
+            .filter(|p| !current.contains(p))
+            .collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        let tx = conn.transaction()?;
+        let mut removed = 0usize;
+        for path in &stale {
+            removed += tx.execute("DELETE FROM chunks WHERE path = ?1", [path])?;
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     /// Insert arbitrary `(path, chunk_id, content)` records into the index,
@@ -176,10 +228,7 @@ fn chunk_by_lines(content: &str, window: usize) -> Vec<String> {
     if lines.is_empty() {
         return vec![];
     }
-    lines
-        .chunks(window)
-        .map(|w| w.join("\n"))
-        .collect()
+    lines.chunks(window).map(|w| w.join("\n")).collect()
 }
 
 /// Turn an arbitrary query into a safe FTS5 MATCH expression: each whitespace
@@ -204,6 +253,38 @@ fn sanitize_query(query: &str) -> String {
 /// Open an index at the given data dir.
 pub fn open(data_dir: &Path) -> Result<Index> {
     Index::open(data_dir).context("opening index")
+}
+
+/// Cheap staleness signature for the FTS index: every file under `root` mapped to
+/// its mtime (ms since epoch), walked the same gitignore-respecting way
+/// [`Index::index_path`] walks. Comparing it to a saved copy tells us whether the
+/// index is stale. Stat-only, so far cheaper than a reindex.
+pub fn file_manifest(root: &Path) -> BTreeMap<String, u64> {
+    let mut manifest = BTreeMap::new();
+    if !root.exists() {
+        return manifest;
+    }
+    let mut builder = WalkBuilder::new(root);
+    builder.standard_filters(true);
+    for entry in builder.build().flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let mtime = std::fs::metadata(path)
+            .ok()
+            .and_then(|md| md.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        manifest.insert(rel, mtime);
+    }
+    manifest
 }
 
 #[cfg(test)]
@@ -296,5 +377,18 @@ mod tests {
         idx.index_path(src.path(), true).unwrap();
         let second = idx.chunk_count().unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn index_nonexistent_root_errors() {
+        // A path that doesn't exist (e.g. a shell-escaped `AI\ Stuff` that survived
+        // as a literal) must error, not silently index zero files.
+        let data = tempdir().unwrap();
+        let idx = Index::open(data.path()).unwrap();
+        let missing = data.path().join("AItestslash\\ Stuff/src");
+        let res = idx.index_path(&missing, true);
+        assert!(res.is_err(), "nonexistent root must error");
+        let err = res.err().unwrap();
+        assert!(err.to_string().contains("does not exist"), "got: {err}");
     }
 }

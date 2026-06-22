@@ -15,14 +15,14 @@
 //! so a future re-run after new data regenerates both files with no hand-editing.
 
 #[allow(dead_code)]
-#[path = "../common/savings.rs"]
-mod savings;
-#[allow(dead_code)]
 #[path = "../common/accuracy.rs"]
 mod accuracy;
 #[allow(dead_code)]
 #[path = "../common/recovery.rs"]
 mod recovery;
+#[allow(dead_code)]
+#[path = "../common/savings.rs"]
+mod savings;
 
 use std::path::PathBuf;
 
@@ -175,10 +175,7 @@ async fn main() -> anyhow::Result<()> {
 
     // --- Accuracy (read committed results; prefer real, else mock) ----------
     let results_dir = savings::bench_root().join("accuracy/results");
-    let acc_path = first_existing(&[
-        results_dir.join("real.json"),
-        results_dir.join("mock.json"),
-    ]);
+    let acc_path = first_existing(&[results_dir.join("real.json"), results_dir.join("mock.json")]);
     // (clean accuracy section, full appendix accuracy section)
     let (clean_accuracy_md, appendix_accuracy_md) = match acc_path {
         Some(p) => {

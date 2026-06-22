@@ -21,6 +21,18 @@ name = "bench_scale_curve"
 path = "benchmarks/savings/scale_curve.rs"
 
 [[bin]]
+name = "bench_navigation"
+path = "benchmarks/navigation/run_navigation.rs"
+
+[[bin]]
+name = "bench_prove"
+path = "benchmarks/prove/run_prove.rs"
+
+[[bin]]
+name = "bench_value"
+path = "benchmarks/value/run_value.rs"
+
+[[bin]]
 name = "bench_accuracy"
 path = "benchmarks/accuracy/harness.rs"
 
@@ -31,6 +43,10 @@ path = "benchmarks/recovery/harness.rs"
 [[bin]]
 name = "bench_report"
 path = "benchmarks/report/generate_report.rs"
+
+[[bin]]
+name = "bench_changes"
+path = "benchmarks/changes/run_changes.rs"
 
 [dependencies]
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }

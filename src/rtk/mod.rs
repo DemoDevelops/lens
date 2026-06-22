@@ -334,7 +334,10 @@ mod tests {
     fn home_root_honors_ctxforge_home_override() {
         let _g = env_test_lock();
         std::env::set_var("CTXFORGE_HOME", "/tmp/ctxforge-home-test");
-        assert_eq!(home_root().unwrap(), PathBuf::from("/tmp/ctxforge-home-test"));
+        assert_eq!(
+            home_root().unwrap(),
+            PathBuf::from("/tmp/ctxforge-home-test")
+        );
         assert_eq!(
             bin_dir().unwrap(),
             PathBuf::from("/tmp/ctxforge-home-test/bin")

@@ -36,7 +36,7 @@ fn graph_query_and_path_on_discovered_repo() {
 
     let graph = discovery::discover(dir.path(), None).unwrap().graph;
 
-    let view = query::query(&graph, "a", Some("function"), 10);
+    let view = query::query(&graph, "a", Some("function"), 10, &[]);
     assert!(view.nodes.iter().any(|n| n.name == "a"));
 
     let connected = query::path(&graph, "a", "c");

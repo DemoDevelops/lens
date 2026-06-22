@@ -47,7 +47,10 @@ async fn main() -> anyhow::Result<()> {
         if !only.is_empty() {
             tasks.retain(|t| t.primary_mechanism.contains(&only) || t.id.contains(&only));
             filtered = true;
-            eprintln!("filter CTXFORGE_BENCH_ONLY={only} -> {} task(s)", tasks.len());
+            eprintln!(
+                "filter CTXFORGE_BENCH_ONLY={only} -> {} task(s)",
+                tasks.len()
+            );
         }
     }
     let mut results: Vec<TaskResult> = Vec::new();
@@ -80,7 +83,11 @@ async fn main() -> anyhow::Result<()> {
                     merged.extend(results.iter().cloned());
                     merged.sort_by(|a, b| a.id.cmp(&b.id));
                     results = merged;
-                    eprintln!("merged into existing {} ({} tasks total)", model.label(), results.len());
+                    eprintln!(
+                        "merged into existing {} ({} tasks total)",
+                        model.label(),
+                        results.len()
+                    );
                 } else {
                     eprintln!(
                         "WARNING: existing real.json model `{prev_model}` != `{}`; not merging, writing fresh subset",
@@ -93,7 +100,10 @@ async fn main() -> anyhow::Result<()> {
 
     let groups = aggregate(&results);
     println!("# ctxforge accuracy benchmark\n");
-    print!("{}", render_accuracy_markdown(&groups, &model.label(), pending));
+    print!(
+        "{}",
+        render_accuracy_markdown(&groups, &model.label(), pending)
+    );
 
     let payload = serde_json::json!({
         "mode": mode,
@@ -169,14 +179,26 @@ mod tests {
             Some(0.0)
         ));
         // missing key fails
-        assert!(!score(&json!({}), &json!({"port": 8080}), "numeric_tolerance", None));
+        assert!(!score(
+            &json!({}),
+            &json!({"port": 8080}),
+            "numeric_tolerance",
+            None
+        ));
     }
 
     #[test]
     fn mock_oracle_presence() {
         let gt = json!({"count": 12});
         // evidence present -> ground truth
-        assert_eq!(mock_answer("...ConnectionTimeout...", &["ConnectionTimeout".into()], &gt), gt);
+        assert_eq!(
+            mock_answer(
+                "...ConnectionTimeout...",
+                &["ConnectionTimeout".into()],
+                &gt
+            ),
+            gt
+        );
         // evidence absent -> UNKNOWN
         assert_eq!(
             mock_answer("nothing here", &["ConnectionTimeout".into()], &gt),
@@ -189,7 +211,11 @@ mod tests {
     #[tokio::test]
     async fn mock_run_end_to_end() {
         let tasks = load_tasks().expect("load tasks");
-        assert!(tasks.len() >= 10, "expected >= 10 tasks, got {}", tasks.len());
+        assert!(
+            tasks.len() >= 10,
+            "expected >= 10 tasks, got {}",
+            tasks.len()
+        );
 
         let mut results = Vec::new();
         for task in &tasks {

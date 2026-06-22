@@ -46,7 +46,9 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             }
             other => {
                 eprintln!("ctxforge dashboard: unknown flag '{other}'");
-                eprintln!("usage: ctxforge dashboard [--port <n>] [--host <addr>] [--session <id>]");
+                eprintln!(
+                    "usage: ctxforge dashboard [--port <n>] [--host <addr>] [--session <id>]"
+                );
                 std::process::exit(2);
             }
         }
@@ -96,10 +98,16 @@ fn route(target: &str, dir: &Path, session: Option<&str>) -> (u16, &'static str,
         "/" | "/index.html" => (200, "text/html; charset=utf-8", INDEX_HTML.to_string()),
         "/api/stats" => {
             let since = query_param(query, "since").and_then(|v| v.parse::<i64>().ok());
+            // scope=global reads the machine-global mirror under home_root(), totaling
+            // every repo and launch profile; cross-repo, so it drops the session filter.
+            let (d, sess) = match (query_param(query, "scope"), crate::rtk::home_root()) {
+                (Some("global"), Some(home)) => (home, None),
+                _ => (dir.to_path_buf(), session),
+            };
             (
                 200,
                 "application/json",
-                snapshot_json_since(dir, session, since).to_string(),
+                snapshot_json_since(&d, sess, since).to_string(),
             )
         }
         _ => (404, "text/plain; charset=utf-8", "not found".to_string()),
@@ -176,111 +184,200 @@ const INDEX_HTML: &str = r##"<!doctype html>
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
-    font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-  header{display:flex;align-items:center;gap:14px;padding:14px 20px;
-    border-bottom:1px solid var(--line)}
-  header h1{font-size:15px;margin:0;letter-spacing:.5px;font-weight:600}
-  .live{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);
-    box-shadow:0 0 8px var(--accent);animation:pulse 1.6s infinite}
+    font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{display:flex;align-items:baseline;gap:9px;padding:5px 10px;
+    border-bottom:1px solid var(--line);flex-wrap:wrap}
+  header h1{font-size:13px;margin:0;letter-spacing:.5px;font-weight:600}
+  .live{display:flex;align-items:center;gap:5px;color:var(--dim);font-size:10px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 6px var(--accent);animation:pulse 1.6s infinite}
   .dot.stale{background:var(--bad);box-shadow:none;animation:none}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
   .grow{flex:1}
-  .saved-top{color:var(--accent);font-weight:600}
-  main{padding:20px;display:grid;gap:16px;max-width:1100px;margin:0 auto}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-  .card .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
-  .card .v{font-size:22px;margin-top:4px;font-weight:600}
-  .card .sub{color:var(--dim);font-size:11px;margin-top:2px}
-  .row2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-  @media(max-width:760px){.row2{grid-template-columns:1fr}}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
-  .panel h2{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px;margin:0 0 10px}
-  canvas{width:100%;height:90px;display:block}
-  .rate{color:var(--accent);font-size:13px;margin-top:6px}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{text-align:right;padding:5px 8px;border-bottom:1px solid var(--line)}
+  select#win,input#winAt{background:var(--panel);color:var(--ink);border:1px solid var(--line);
+    border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 4px}
+  button#scope{background:var(--panel);color:var(--dim);border:1px solid var(--line);
+    border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 6px;cursor:pointer}
+  button#scope.on{color:var(--accent);border-color:var(--accent)}
+  .cost{cursor:pointer;display:flex;align-items:baseline;gap:6px;user-select:none}
+  .cost .dollars{color:var(--accent);font-weight:700;font-size:15px;letter-spacing:.3px}
+  .cost .basis{color:var(--dim);font-size:10px;border-bottom:1px dotted var(--line)}
+  .cost:hover .basis{color:var(--ink)}
+  .saved-top{color:var(--dim);font-size:10px}
+  main{padding:7px 10px;display:grid;gap:7px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:6px 9px}
+  .panel h2{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin:0 0 4px}
+  .seclabel{color:var(--dim);font-size:9px;letter-spacing:.3px;margin:2px 0 -3px}
+  .strip{display:flex;flex-wrap:wrap;gap:3px 20px;align-items:baseline}
+  .strip .st i{color:var(--dim);font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.4px;margin-right:4px}
+  .strip .st b{font-size:14px;font-weight:600}
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .ch{display:flex;flex-direction:column}
+  .ch>span{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;display:flex;justify-content:space-between}
+  .ch>span b{color:var(--accent);font-size:11px}
+  .ch canvas{width:100%;height:28px;display:block;margin-top:2px}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+  @media(max-width:560px){.row2{grid-template-columns:1fr}}
+  table{width:100%;border-collapse:collapse;font-size:10px}
+  th,td{text-align:right;padding:2px 6px;border-bottom:1px solid var(--line)}
   th:first-child,td:first-child{text-align:left}
-  th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
-  .bar{display:inline-block;height:8px;background:var(--accent);border-radius:2px;vertical-align:middle}
-  footer{color:var(--dim);font-size:12px;padding:0 20px 24px;text-align:center}
-  .mech span{display:inline-block;margin-right:14px;color:var(--dim)}
+  th{color:var(--dim);font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.4px}
+  tbody tr:last-child td{border-bottom:none}
+  tr.z td{opacity:.5}
+  .bar{display:inline-block;height:6px;background:var(--accent);border-radius:2px;vertical-align:middle}
+  .mech{display:flex;flex-wrap:wrap;gap:2px 13px}
+  .mech span{color:var(--dim)}
   .mech b{color:var(--ink)}
-  .seclabel{color:var(--dim);font-size:11px;letter-spacing:.4px;margin:6px 0 -2px}
-  #byCat .catrow{display:flex;align-items:center;gap:8px;padding:3px 0}
-  #byCat .catname{width:130px;color:var(--dim)}
-  #byCat .catn{color:var(--ink)}
+  .dim2{color:var(--dim)}
+  .actline{display:flex;flex-wrap:wrap;gap:3px 20px;align-items:baseline}
+  .actline i{color:var(--dim);font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.4px;margin-right:4px}
+  .actline b{font-size:13px;font-weight:600}
+  .actrow{display:flex;align-items:center;gap:10px;margin-top:3px}
+  .actrow canvas{flex:1;height:22px;display:block}
+  .actrow .rate{color:var(--warn);font-size:10px;white-space:nowrap}
+  .cats{display:flex;flex-wrap:wrap;gap:2px 13px;margin-top:5px;font-size:10px}
+  .cats span{color:var(--dim)}
+  .cats b{color:var(--warn)}
+  footer{color:var(--dim);font-size:9px;padding:3px 10px 8px;text-align:center}
 </style>
 </head>
 <body>
 <header>
   <h1>ctxforge</h1>
   <div class="live"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
+  <select id="win" title="time window — how far back to scope savings + activity"></select>
+  <input id="winAt" type="text" placeholder="2pm" size="6" title="custom start time, e.g. 2pm or 14:30 — Enter to apply">
+  <button id="scope" title="toggle global view: total tokens across every repo and launch profile">this repo</button>
   <div class="grow"></div>
+  <div class="cost" id="cost" title="estimated $ saved — click to switch model rate"><span class="dollars" id="dollars">$—</span><span class="basis" id="basis">@ —</span></div>
   <div class="saved-top" id="savedTop">— saved</div>
 </header>
 <main>
-  <div class="seclabel">ctxforge MCP tool savings &mdash; ctx_execute / ctx_search / graph_* &middot; <b>live sessions only</b> (since you opened this page)</div>
-  <div class="cards" id="cards"></div>
+  <div class="panel strip" id="strip"></div>
+  <div class="panel charts">
+    <div class="ch"><span>tokens saved / min <b id="savedRate">—</b></span><canvas id="savedChart"></canvas></div>
+    <div class="ch"><span>bytes returned / min <b id="bytesRate">—</b></span><canvas id="bytesChart"></canvas></div>
+  </div>
+  <div class="seclabel">by tool + tool adoption &middot; saved &asymp; input tokens avoided &middot; dim = no calls in window</div>
+  <div class="panel">
+    <table id="tools"><thead><tr>
+      <th>tool</th><th>ops</th><th>raw</th><th>ret</th><th>saved~tok</th><th>save%</th><th>off</th><th>err</th><th>to</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
   <div class="row2">
-    <div class="panel">
-      <h2>tokens saved / min</h2>
-      <canvas id="savedChart"></canvas>
-      <div class="rate" id="savedRate">—</div>
-    </div>
-    <div class="panel">
-      <h2>bytes returned / min</h2>
-      <canvas id="bytesChart"></canvas>
-      <div class="rate" id="bytesRate">—</div>
-    </div>
+    <div class="panel"><h2>by mechanism</h2><div class="mech" id="byMech"></div></div>
+    <div class="panel"><h2>RTK shell savings</h2><div class="mech" id="rtkCards"></div></div>
   </div>
+  <div class="seclabel">session activity &middot; built-in tools (Read / Edit / Bash) via hooks &middot; not token savings</div>
   <div class="panel">
-    <h2>by tool</h2>
-    <table id="byTool"><thead><tr>
-      <th>tool</th><th>ops</th><th>raw</th><th>returned</th><th>saved~tok</th><th>offloaded</th>
-    </tr></thead><tbody></tbody></table>
-  </div>
-  <div class="panel">
-    <h2>by mechanism</h2>
-    <div class="mech" id="byMech"></div>
-  </div>
-  <div class="seclabel">tool adoption &mdash; which ctxforge tools are actually firing &middot; <b>live since you opened this page</b> &middot; counts, not savings (graph_* / ctx_search save by avoiding reads, not by offloading bytes)</div>
-  <div class="panel">
-    <h2>tool adoption</h2>
-    <table id="adoption"><thead><tr>
-      <th>tool</th><th>calls</th><th>offloaded</th><th>err</th><th>timeout</th>
-    </tr></thead><tbody></tbody></table>
-  </div>
-  <div class="seclabel">RTK shell savings &mdash; RTK's own measured savings on shell commands via <code>rtk gain</code> &middot; <b>live since you opened this page</b></div>
-  <div class="panel">
-    <h2>RTK shell savings</h2>
-    <div class="cards" id="rtkCards"></div>
-  </div>
-  <div class="seclabel">session activity &mdash; built-in tools (Read / Edit / Bash &hellip;) captured by hooks &middot; <b>live sessions only</b> &middot; not token savings</div>
-  <div class="panel">
-    <h2>activity</h2>
-    <div class="cards" id="actCards"></div>
-    <canvas id="actChart" style="margin-top:10px"></canvas>
-    <div class="rate" id="actRate" style="color:var(--warn)">&mdash;</div>
-    <div id="byCat" style="margin-top:10px"></div>
+    <div class="actline" id="actLine"></div>
+    <div class="actrow"><canvas id="actChart"></canvas><span class="rate" id="actRate">—</span></div>
+    <div class="cats" id="byCat"></div>
   </div>
 </main>
 <footer id="footer">—</footer>
 <script>
-const hist=[];           // {t, saved, bytes}
-// Canonical ctxforge MCP tools, for the adoption table (shown even at 0 calls).
-const ADOPTION_TOOLS=['ctx_execute','ctx_execute_file','ctx_search','ctx_index','ctx_discover','ctx_retrieve','graph_query','graph_neighbors','graph_path'];
+const hist=[];
+// Canonical ctxforge MCP tools, shown in the merged tool table even at 0 calls.
+const ADOPTION_TOOLS=['ctx_execute','ctx_execute_file','ctx_search','ctx_index','ctx_discover','ctx_retrieve','graph_query','graph_neighbors','graph_path','graph_find'];
 const savedSeries=[], bytesSeries=[];
-const histAct=[], actSeries=[];   // {t, ev} for session-activity rate
+const histAct=[], actSeries=[];
 const MAXPTS=60;
-// "Live since the page loaded": every poll scopes savings + activity to sessions
-// active at/after this instant, so previous sessions never show. Refresh to reset.
-const SINCE=Math.floor(Date.now()/1000);
-const SINCE_LABEL=new Date(SINCE*1000).toLocaleTimeString();
-// RTK plane baseline: `rtk gain` is cumulative/all-time, so snapshot its counters
-// on the first poll and render deltas — "live since you opened this page".
 let rtkBase=null;
+let scope='repo';
+
+// Time window: the backend /api/stats?since= cutoff scopes ops + session activity.
+// "live" = since the page opened (default). Concrete clock times ("since 2:00 PM") and
+// relative presets are built into the dropdown; a text field accepts arbitrary times.
+// RTK savings can't honor an arbitrary cutoff (rtk gain is a cumulative counter), so
+// that one plane stays "since you opened the page" regardless of the selector.
+const PAGELOAD=Math.floor(Date.now()/1000);
+let activeSince=0, winMode='all', atLabel='';
+const winSel=document.getElementById('win'), winAt=document.getElementById('winAt');
+function addOpt(label,val){const o=document.createElement('option');o.textContent=label;o.value=val;winSel.appendChild(o);}
+(function buildWinOptions(){
+  addOpt('live','live'); addOpt('last 15m','15m'); addOpt('last 1h','1h'); addOpt('last 3h','3h'); addOpt('today','today');
+  // Concrete top-of-hour marks so "since 2pm" is a one-click pick, no fiddly time spinner.
+  const h0=new Date().getHours();
+  for(let h=h0; h>=Math.max(0,h0-7); h--){
+    const d=new Date(); d.setHours(h,0,0,0);
+    if(d.getTime()>Date.now()) continue;
+    addOpt('since '+d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}), 'at:'+Math.floor(d.getTime()/1000));
+  }
+  addOpt('all time','all'); addOpt('custom…','custom');
+})();
+winSel.value='all';
+function presetSince(m){
+  const now=Math.floor(Date.now()/1000);
+  if(m==='all') return 0;
+  if(m==='today'){const d=new Date();d.setHours(0,0,0,0);return Math.floor(d.getTime()/1000);}
+  if(m==='3h') return now-10800;
+  if(m==='1h') return now-3600;
+  if(m==='15m') return now-900;
+  return PAGELOAD; // live
+}
+// Lenient: "2pm" -> 14:00, "2:30pm" -> 14:30, "14:00"/"14" -> 14:00, "11am" -> 11:00.
+function parseTime(s){
+  s=(s||'').trim().toLowerCase(); if(!s) return null;
+  const m=s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/); if(!m) return null;
+  let h=+m[1]; const min=m[2]?+m[2]:0, ap=m[3];
+  if(ap==='pm'&&h<12) h+=12; if(ap==='am'&&h===12) h=0;
+  if(h>23||min>59) return null;
+  const d=new Date(); d.setHours(h,min,0,0);
+  let u=Math.floor(d.getTime()/1000); const now=Math.floor(Date.now()/1000);
+  if(u>now) u-=86400; return u; // a future time means "earlier today" already passed -> yesterday
+}
+function winLabel(){
+  const at=new Date(activeSince*1000).toLocaleTimeString();
+  if(winMode==='all') return 'all time';
+  if(winMode==='live') return 'live · since '+at;
+  if(winMode==='today') return 'today · since '+at;
+  if(winMode==='3h') return 'last 3h · since '+at;
+  if(winMode==='1h') return 'last 1h · since '+at;
+  if(winMode==='15m') return 'last 15m · since '+at;
+  if(winMode==='at') return atLabel;
+  return 'since '+at; // custom text
+}
+function resetSeries(){hist.length=0;savedSeries.length=0;bytesSeries.length=0;histAct.length=0;actSeries.length=0;}
+function applyWin(){resetSeries();tick();}
+winSel.addEventListener('change',function(){
+  const v=this.value;
+  winAt.style.display = v==='custom'?'':'none';
+  if(v==='custom'){ winMode='custom'; const u=parseTime(winAt.value); if(u!=null){activeSince=u;applyWin();} winAt.focus(); return; }
+  if(v.indexOf('at:')===0){ winMode='at'; atLabel=this.options[this.selectedIndex].text; activeSince=parseInt(v.slice(3),10); }
+  else { winMode=v; activeSince=presetSince(v); }
+  applyWin();
+});
+function commitCustom(){ if(winMode!=='custom') return; const u=parseTime(winAt.value); if(u!=null){activeSince=u;applyWin();} else { winAt.style.borderColor='var(--bad)'; setTimeout(function(){winAt.style.borderColor='';},800); } }
+winAt.addEventListener('change',commitCustom);
+winAt.addEventListener('keydown',function(e){if(e.key==='Enter')commitCustom();});
+winAt.style.display='none';
+const scopeBtn=document.getElementById('scope');
+scopeBtn.addEventListener('click',function(){
+  scope = scope==='repo' ? 'global' : 'repo';
+  this.textContent = scope==='global' ? 'all repos' : 'this repo';
+  this.classList.toggle('on', scope==='global');
+  resetSeries(); tick();
+});
+
+// Cost estimate: "tokens saved" are context INPUT tokens you avoided sending, so price
+// them at the input rate. Click the basis to cycle model; remembered in localStorage.
+const RATES=[{m:'Opus 4.8',r:5},{m:'Sonnet 4.6',r:3},{m:'Haiku 4.5',r:1}];
+let rateIdx=0;
+try{const s=localStorage.getItem('ctxforge_rate_model');const i=RATES.findIndex(x=>x.m===s);if(i>=0)rateIdx=i;}catch(e){}
+let savedTotal=0;
+function money(v){return '$'+(v>=1?v.toFixed(2):v>=0.01?v.toFixed(3):v.toFixed(4));}
+function renderCost(){
+  const x=RATES[rateIdx];
+  document.getElementById('dollars').textContent=money(savedTotal*x.r/1e6)+' saved';
+  document.getElementById('basis').textContent='@ $'+x.r+'/M · '+x.m+' in ▾';
+}
+document.getElementById('cost').addEventListener('click',function(){
+  rateIdx=(rateIdx+1)%RATES.length;
+  try{localStorage.setItem('ctxforge_rate_model',RATES[rateIdx].m);}catch(e){}
+  renderCost();
+});
+renderCost();
 
 function humanBytes(n){
   const u=['B','KB','MB','GB','TB']; let v=n,i=0;
@@ -299,7 +396,7 @@ function spark(id,series,color){
   const x=c.getContext('2d'); x.scale(dpr,dpr); x.clearRect(0,0,w,h);
   if(series.length<2) return;
   const max=Math.max(1,...series), n=series.length;
-  const px=i=>i/(n-1)*w, py=v=>h-4-(v/max)*(h-8);
+  const px=i=>i/(n-1)*w, py=v=>h-3-(v/max)*(h-6);
   x.beginPath();
   series.forEach((v,i)=>{const X=px(i),Y=py(v); i?x.lineTo(X,Y):x.moveTo(X,Y);});
   x.lineTo(w,h); x.lineTo(0,h); x.closePath();
@@ -308,25 +405,19 @@ function spark(id,series,color){
   series.forEach((v,i)=>{const X=px(i),Y=py(v); i?x.lineTo(X,Y):x.moveTo(X,Y);});
   x.strokeStyle=color; x.lineWidth=1.5; x.stroke();
 }
-function card(k,v,sub){
-  return `<div class="card"><div class="k">${k}</div><div class="v">${v}</div>`+
-    (sub?`<div class="sub">${sub}</div>`:'')+`</div>`;
-}
+function stat(k,v){return `<span class="st"><i>${k}</i><b>${v}</b></span>`;}
 function setStale(){
   document.getElementById('dot').classList.add('stale');
   document.getElementById('status').textContent='disconnected — retrying';
 }
 async function tick(){
   let d;
-  try{ d=await (await fetch('/api/stats?since='+SINCE,{cache:'no-store'})).json(); }
+  try{ d=await (await fetch('/api/stats?since='+activeSince+(scope==='global'?'&scope=global':''),{cache:'no-store'})).json(); }
   catch(e){ setStale(); return; }
   document.getElementById('dot').classList.remove('stale');
-  document.getElementById('status').textContent='live · since '+SINCE_LABEL+(d.session?(' · session '+d.session):'')+' · '+(d.activity&&d.activity.sessions||0)+' live session(s)';
-  document.getElementById('savedTop').textContent=humanCount(d.tokens_saved_est)+' tokens saved';
+  document.getElementById('status').textContent=(scope==='global'?'GLOBAL · ':'')+winLabel()+(d.session?(' · '+d.session):'')+' · '+(d.activity&&d.activity.sessions||0)+' session(s)';
 
   const now=Date.now()/1000;
-  // MCP plane (cards + this rate chart) reads MCP-only savings; RTK shell savings
-  // have their own plane below, so a `rtk sync` doesn't spike this as MCP savings.
   const savedMcp=(d.tokens_saved_mcp!==undefined?d.tokens_saved_mcp:d.tokens_saved_est);
   hist.push({t:now,saved:savedMcp,bytes:d.bytes_returned});
   if(hist.length>1){
@@ -336,51 +427,54 @@ async function tick(){
     if(savedSeries.length>MAXPTS) savedSeries.shift();
     if(bytesSeries.length>MAXPTS) bytesSeries.shift();
   }
-  // windowed averages over the whole history
   const first=hist[0], last=hist[hist.length-1], span=Math.max(0.001,last.t-first.t);
   const savedPerMin=(last.saved-first.saved)/span*60;
   const bytesPerMin=(last.bytes-first.bytes)/span*60;
 
-  document.getElementById('cards').innerHTML=
-    card('ops total',d.ops.toLocaleString(),`${d.errors} err · ${d.timeouts} timeout`)+
-    card('raw bytes in',humanBytes(d.raw_bytes_in))+
-    card('bytes returned',humanBytes(d.bytes_returned))+
-    card('tokens saved',humanCount(savedMcp),'~'+savedMcp.toLocaleString()+' · MCP tools only')+
-    card('offloaded',d.offloaded_ops+' ops',humanBytes(d.offloaded_bytes)+' to store')+
-    card('lock wait',d.lock_wait_ms+' ms');
+  // Stat strip — the old six cards, now one compact line.
+  const overallPct=d.raw_bytes_in>0?Math.round((d.raw_bytes_in-d.bytes_returned)/d.raw_bytes_in*100):0;
+  const fired=ADOPTION_TOOLS.filter(n=>d.by_tool.some(t=>t.tool===n&&t.ops>0)).length;
+  document.getElementById('strip').innerHTML=
+    stat('ops',d.ops.toLocaleString()+' ('+d.errors+'e·'+d.timeouts+'t)')+
+    stat('raw in',humanBytes(d.raw_bytes_in))+
+    stat('returned',humanBytes(d.bytes_returned))+
+    stat('saved',humanCount(savedMcp)+' tok')+
+    stat('save%',overallPct+'%')+
+    stat('ctx fired',fired+'/'+ADOPTION_TOOLS.length)+
+    stat('offloaded',d.offloaded_ops+' ('+humanBytes(d.offloaded_bytes)+')')+
+    stat('lock',d.lock_wait_ms+' ms');
 
   spark('savedChart',savedSeries,'#4cc4b0');
   spark('bytesChart',bytesSeries,'#4cc4b0');
   document.getElementById('savedRate').textContent=humanCount(Math.round(savedPerMin))+' tok/min';
   document.getElementById('bytesRate').textContent=humanBytes(Math.round(bytesPerMin))+'/min';
 
-  const maxRaw=Math.max(1,...d.by_tool.map(t=>t.raw));
-  document.querySelector('#byTool tbody').innerHTML=d.by_tool.map(t=>{
-    const w=Math.round(t.raw/maxRaw*60);
-    const off=(t.offloaded_ops||0)?((t.offloaded_ops)+' · '+humanBytes(t.offloaded_bytes||0)):'—';
-    return `<tr><td>${t.tool}</td><td>${t.ops.toLocaleString()}</td>`+
-      `<td><span class="bar" style="width:${w}px"></span> ${humanBytes(t.raw)}</td>`+
-      `<td>${humanBytes(t.returned)}</td><td>${t.saved.toLocaleString()}</td><td>${off}</td></tr>`;
-  }).join('')||'<tr><td colspan="6" style="color:var(--dim)">no ops yet</td></tr>';
-
-  document.getElementById('byMech').innerHTML=d.by_mechanism.map(m=>
-    `<span>${m.mechanism} <b>${m.ops}</b> ops · <b>${humanCount(m.saved)}</b> tok</span>`
-  ).join('')||'<span style="color:var(--dim)">—</span>';
-
-  // Tool adoption: the canonical ctxforge tools and whether they're firing at all.
-  // Listed explicitly so dormant tools (e.g. graph_neighbors) show as 0, not absent —
-  // "is this tool even being used" is the real question for non-offloading tools.
+  // Merged tool table = by-tool (savings) + tool adoption (firing/err/timeout) in one.
+  // Canonical tools always listed (dim if 0 calls) so a dormant tool is visible, not absent.
   const tmap={}; d.by_tool.forEach(t=>tmap[t.tool]=t);
-  document.querySelector('#adoption tbody').innerHTML=ADOPTION_TOOLS.map(name=>{
+  const extra=d.by_tool.map(t=>t.tool).filter(n=>!ADOPTION_TOOLS.includes(n));
+  const rows=ADOPTION_TOOLS.concat(extra);
+  const maxRaw=Math.max(1,...d.by_tool.map(t=>t.raw));
+  document.querySelector('#tools tbody').innerHTML=rows.map(name=>{
     const t=tmap[name];
-    const calls=t?t.ops:0, off=t?(t.offloaded_ops||0):0, err=t?t.errors:0, to=t?t.timeouts:0;
-    const dim=calls?'':' style="color:var(--dim)"';
-    return `<tr${dim}><td>${name}</td><td>${calls.toLocaleString()}</td>`+
-      `<td>${off||'—'}</td><td>${err||'—'}</td><td>${to||'—'}</td></tr>`;
+    const ops=t?t.ops:0, raw=t?t.raw:0, ret=t?t.returned:0, saved=t?t.saved:0;
+    const offc=t?(t.offloaded_ops||0):0, offb=t?(t.offloaded_bytes||0):0;
+    const err=t?t.errors:0, to=t?t.timeouts:0;
+    const w=Math.round(raw/maxRaw*48);
+    const pct=raw>0?Math.round((raw-ret)/raw*100):null;
+    const offtxt=offc?(offc+'·'+humanBytes(offb)):'—';
+    return `<tr${ops?'':' class="z"'}><td>${name}</td><td>${ops.toLocaleString()}</td>`+
+      `<td>${t?('<span class="bar" style="width:'+w+'px"></span> '+humanBytes(raw)):'—'}</td>`+
+      `<td>${t?humanBytes(ret):'—'}</td><td>${saved?saved.toLocaleString():'—'}</td>`+
+      `<td>${pct==null?'—':pct+'%'}</td>`+
+      `<td>${offtxt}</td><td>${err||'—'}</td><td>${to||'—'}</td></tr>`;
   }).join('');
 
-  // RTK shell savings — RTK's own numbers from `rtk gain`, shown live since you
-  // opened this page (baseline captured on the first poll; rtk gain is cumulative).
+  document.getElementById('byMech').innerHTML=d.by_mechanism.map(m=>
+    `<span>${m.mechanism} <b>${m.ops}</b>op · <b>${humanCount(m.saved)}</b>tok</span>`
+  ).join('')||'<span class="dim2">—</span>';
+
+  // RTK shell savings — delta from a first-poll baseline (rtk gain is cumulative).
   const r=d.rtk||{installed:false};
   if(r.installed){
     if(!rtkBase) rtkBase={commands:r.total_commands||0,saved:r.total_saved||0,input:r.total_input||0};
@@ -389,17 +483,19 @@ async function tick(){
     const dInput=Math.max(0,(r.total_input||0)-rtkBase.input);
     const pct=dInput>0?(dSaved/dInput*100):0;
     document.getElementById('rtkCards').innerHTML=
-      card('commands',dCmd.toLocaleString(),'since you opened this page')+
-      card('tokens saved',humanCount(dSaved),'~'+dSaved.toLocaleString()+' · this session')+
-      card('avg savings',pct.toFixed(1)+'%',dCmd?('over '+dCmd.toLocaleString()+' cmds'):'no rtk commands yet');
-    // Top-line total reflects BOTH planes: MCP tool savings + RTK shell savings
-    // (this session). Without this it showed MCP-only (often 0) while RTK saved 1000s.
-    document.getElementById('savedTop').textContent=humanCount((d.tokens_saved_mcp||0)+dSaved)+' tokens saved';
+      `<span>cmds <b>${dCmd.toLocaleString()}</b></span>`+
+      `<span>saved <b>${humanCount(dSaved)}</b>tok</span>`+
+      `<span>avg <b>${pct.toFixed(1)}%</b></span>`+
+      `<span class="dim2">since opened</span>`;
+    document.getElementById('savedTop').textContent=humanCount((d.tokens_saved_mcp||0)+dSaved)+' tok';
+    savedTotal=(d.tokens_saved_mcp||0)+dSaved; renderCost();
   } else {
-    document.getElementById('rtkCards').innerHTML=card('RTK not installed','—','run ctxforge rtk install');
+    document.getElementById('rtkCards').innerHTML='<span class="dim2">not installed — run ctxforge rtk install</span>';
+    document.getElementById('savedTop').textContent=humanCount(savedMcp)+' tok';
+    savedTotal=savedMcp; renderCost();
   }
 
-  // session activity (built-in tools, via hooks) — the "first plane"
+  // session activity (built-in tools via hooks)
   const a=d.activity||{total_events:0,sessions:0,by_category:[],last_ts:null};
   histAct.push({t:now,ev:a.total_events});
   if(histAct.length>1){
@@ -409,22 +505,19 @@ async function tick(){
   }
   const af=histAct[0], al=histAct[histAct.length-1], asp=Math.max(0.001,al.t-af.t);
   const evPerMin=(al.ev-af.ev)/asp*60;
-  document.getElementById('actCards').innerHTML=
-    card('events total',(a.total_events||0).toLocaleString(),(a.sessions||0)+' session(s)')+
-    card('last activity',a.last_ts?new Date(a.last_ts*1000).toLocaleTimeString():'—');
+  document.getElementById('actLine').innerHTML=
+    `<span class="st"><i>events</i><b>${(a.total_events||0).toLocaleString()}</b></span>`+
+    `<span class="st"><i>sessions</i><b>${a.sessions||0}</b></span>`+
+    `<span class="st"><i>last</i><b>${a.last_ts?new Date(a.last_ts*1000).toLocaleTimeString():'—'}</b></span>`;
   spark('actChart',actSeries,'#e0a458');
-  document.getElementById('actRate').textContent=Math.round(evPerMin)+' events/min';
-  const maxCat=Math.max(1,...a.by_category.map(c=>c.count));
-  document.getElementById('byCat').innerHTML=a.by_category.map(c=>{
-    const w=Math.round(c.count/maxCat*120);
-    return `<div class="catrow"><span class="catname">${c.category}</span>`+
-      `<span class="bar" style="width:${w}px;background:var(--warn)"></span>`+
-      `<span class="catn">${c.count}</span></div>`;
-  }).join('')||'<span style="color:var(--dim)">no activity captured yet</span>';
+  document.getElementById('actRate').textContent=Math.round(evPerMin)+' ev/min';
+  document.getElementById('byCat').innerHTML=a.by_category.map(c=>
+    `<span>${c.category} <b>${c.count}</b></span>`
+  ).join('')||'<span class="dim2">no activity captured yet</span>';
 
   document.getElementById('footer').textContent=
-    `store ${humanBytes(d.store_size)} · index chunks ${d.index_chunks} · `+
-    `graph ${d.graph_nodes} nodes / ${d.graph_edges} edges · updated ${d.ts}`;
+    `store ${humanBytes(d.store_size)} · index ${d.index_chunks} · `+
+    `graph ${d.graph_nodes}n/${d.graph_edges}e · updated ${d.ts}`;
 }
 tick(); setInterval(tick,1000);
 </script>
@@ -474,7 +567,10 @@ mod tests {
         // The RTK plane (third plane) is always present; its `installed` flag is a
         // bool whose value depends on machine state, so assert structure only.
         assert!(v["rtk"].is_object(), "snapshot must carry an rtk object");
-        assert!(v["rtk"]["installed"].is_boolean(), "rtk.installed is a bool");
+        assert!(
+            v["rtk"]["installed"].is_boolean(),
+            "rtk.installed is a bool"
+        );
 
         let (s2, ct2, body2) = route("/", dir.path(), None);
         assert_eq!(s2, 200);
@@ -509,7 +605,8 @@ mod tests {
         });
 
         let mut c = TcpStream::connect(addr).unwrap();
-        c.write_all(b"GET /api/stats HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        c.write_all(b"GET /api/stats HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
         let mut resp = String::new();
         c.read_to_string(&mut resp).unwrap();
         server.join().unwrap();

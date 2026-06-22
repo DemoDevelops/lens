@@ -103,10 +103,14 @@ Neither pure strategy fits ctxforge's surface. Recommendation:
     (`cd`, `export`, `source`, alias, function defs, `&&`-chains containing them)
     — wrapping them in a subshell would break Claude Code's persistent-shell cwd
     /env state. This is the key hazard RTK sidesteps by proxying a curated set.
-- **Read → steer (nudge), never block. (Phase 3 — deprioritized.)** Most Reads
-  are read-to-edit (legit, must stay native). Read-to-analyze is the only case
-  worth nudging toward `ctx_execute_file`, so this lands late, after the Bash/
-  WebFetch wins prove out.
+- **Read → steer (nudge), never block.** Most Reads are read-to-edit (legit,
+  must stay native). Read-to-analyze nudges toward `ctx_execute_file`. **Plus
+  graph escalation (shipped 2026-06-20):** code-reads also escalate toward the
+  graph — the first code read names `graph_query`/`graph_neighbors`/`graph_path`
+  among its options, and after 3 cumulative reads of graph-indexed files
+  (`spec_for_extension`: rs/py/js/ts/go/swift) a graph-specific nudge fires,
+  repeating every 3rd read. Targets the "reading file after file to trace
+  structure" pattern the graph replaces. Not in the original plan; see note below.
 - **Grep → steer (nudge)** toward `ctx_execute` running ripgrep in-sandbox for
   large result sets.
 - **WebFetch → `deny` + steer** to `ctx_execute` (fetch+process in sandbox).
@@ -122,9 +126,17 @@ can't be transparently wrapped — adapted to ctxforge's actual tools.
 
 - **`ctx_execute_file(path, language, code)`** — thin wrapper over the sandbox
   that injects the file path; makes the Read nudge land on a real, ergonomic tool.
-  Built but **only matters once Read steering is on (Phase 3)**.
+  Now live (Read steering is on).
 - **`ctx_batch_execute`** — run N labeled commands, auto-index, return a summary.
   **Deferred** until `ops.log` data shows multi-command round-trips dominate.
+
+> **Finding (2026-06-20):** `ops.log` showed the graph getting ~zero agent use
+> (`graph_query` 2/86, both warmup; `graph_neighbors`/`graph_path` 0) while
+> `ctx_execute_file` absorbed the navigational reads. Cause: the Read nudge only
+> pointed at `ctx_execute_file`, never the graph — the just-in-time signal at the
+> exact moment of a code read steered every "understand this code" read into
+> single-file analysis. Fix: the graph escalation above. Lesson: a tool needs a
+> nudge at its decision point, not just a mention in the SessionStart block.
 
 ### 2b. Lossless + observable by construction
 

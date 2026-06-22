@@ -129,7 +129,10 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
     // install: the stub is already at CTXFORGE_HOME/bin/rtk, so install takes the
     // idempotent path (verifies --version, registers the hook) WITHOUT a download.
     let (ok, out, err) = run(&["rtk", "install"], &base);
-    assert!(ok, "rtk install (idempotent, stub) must succeed: {out}{err}");
+    assert!(
+        ok,
+        "rtk install (idempotent, stub) must succeed: {out}{err}"
+    );
 
     // install patches the config-dir settings.json itself (rtk init can't target
     // $CLAUDE_CONFIG_DIR): the PreToolUse entry now references rtk-rewrite.sh.
@@ -176,7 +179,10 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
     // ctxforge stats: surfaces the RTK shell-savings plane + the synced op.
     let (ok, out, _) = run(&["stats"], &with_data);
     assert!(ok);
-    assert!(out.contains("rtk_shell"), "stats lists the rtk_shell op:\n{out}");
+    assert!(
+        out.contains("rtk_shell"),
+        "stats lists the rtk_shell op:\n{out}"
+    );
     assert!(
         out.contains("RTK shell savings"),
         "stats renders the RTK plane:\n{out}"
@@ -192,7 +198,11 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
     std::env::set_var("CTXFORGE_HOME", home_s);
     let snap = ctxforge::obs::stats::snapshot_json(data.path(), None);
     std::env::remove_var("CTXFORGE_HOME");
-    assert_eq!(snap["rtk"]["installed"], json!(true), "rtk block installed:true");
+    assert_eq!(
+        snap["rtk"]["installed"],
+        json!(true),
+        "rtk block installed:true"
+    );
     assert_eq!(
         snap["rtk"]["total_saved"].as_i64().unwrap(),
         STUB_TOTAL_SAVED,
@@ -304,7 +314,9 @@ fn rtk_absent_is_a_noop() {
     let (ok, out, err) = run(&["rtk", "status"], &envs);
     assert!(ok, "status must not error when RTK is absent");
     assert!(
-        format!("{out}{err}").to_lowercase().contains("not installed"),
+        format!("{out}{err}")
+            .to_lowercase()
+            .contains("not installed"),
         "status says not installed: {out}{err}"
     );
 }

@@ -48,7 +48,8 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     let command = parts.join(" ");
 
     let dir = crate::obs::data_dir();
-    let store = Store::open(&dir).with_context(|| format!("opening store under {}", dir.display()))?;
+    let store =
+        Store::open(&dir).with_context(|| format!("opening store under {}", dir.display()))?;
     let ops = OpLog::open(&dir);
     let max_inline = std::env::var("CTXFORGE_MAX_INLINE")
         .ok()
@@ -122,9 +123,7 @@ fn wrap_run(command: &str, store: &Store, ops: &OpLog, max_inline: usize) -> Res
     let raw_len = full.len();
 
     let (printed, store_ref, note) = if raw_len > max_inline {
-        let r = store
-            .put(&full)
-            .with_context(|| "storing wrapped stdout")?;
+        let r = store.put(&full).with_context(|| "storing wrapped stdout")?;
         let preview = make_preview(&full, &r);
         let note = format!("offloaded {raw_len} bytes");
         (preview, Some(r), note)
@@ -223,17 +222,18 @@ mod tests {
     fn large_output_is_offloaded_and_retrievable() {
         let (dir, store, ops) = fixtures();
         // Portable bash stdout generator: 50000 'A's, no python dependency.
-        let out = wrap_run(
-            r#"head -c 50000 /dev/zero | tr '\0' A"#,
-            &store,
-            &ops,
-            8192,
-        )
-        .unwrap();
+        let out = wrap_run(r#"head -c 50000 /dev/zero | tr '\0' A"#, &store, &ops, 8192).unwrap();
 
         // Confirm it actually offloaded.
-        assert!(out.raw_len > 8192, "raw_len={} should exceed threshold", out.raw_len);
-        let reference = out.store_ref.clone().expect("large output should have a ref");
+        assert!(
+            out.raw_len > 8192,
+            "raw_len={} should exceed threshold",
+            out.raw_len
+        );
+        let reference = out
+            .store_ref
+            .clone()
+            .expect("large output should have a ref");
 
         // The full body is stored and recoverable, and the preview is smaller.
         let full = store.get(&reference).unwrap().unwrap();

@@ -1,0 +1,123 @@
+[
+  {
+    "id": "nav_define_connect_db",
+    "qtype": "define",
+    "prompt": "Which file defines `connect_db`?",
+    "naive_bytes": 473,
+    "graph_bytes": 558,
+    "naive_round_trips": 2,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "grep the symbol, then open the defining file to read it"
+  },
+  {
+    "id": "nav_define_rotate_keys",
+    "qtype": "define",
+    "prompt": "Which file defines `rotate_keys`?",
+    "naive_bytes": 259,
+    "graph_bytes": 327,
+    "naive_round_trips": 2,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "grep the symbol, then open the defining file to read it"
+  },
+  {
+    "id": "nav_define_authenticate",
+    "qtype": "define",
+    "prompt": "Which file defines `authenticate`?",
+    "naive_bytes": 322,
+    "graph_bytes": 755,
+    "naive_round_trips": 2,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "grep the symbol, then open the defining file to read it"
+  },
+  {
+    "id": "nav_define_connection",
+    "qtype": "define",
+    "prompt": "Which file defines `Connection`?",
+    "naive_bytes": 492,
+    "graph_bytes": 312,
+    "naive_round_trips": 2,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "grep the symbol, then open the defining file to read it"
+  },
+  {
+    "id": "nav_callers_connect_db",
+    "qtype": "callers",
+    "prompt": "Which functions call `connect_db`?",
+    "naive_bytes": 473,
+    "graph_bytes": 558,
+    "naive_round_trips": 2,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "grep the symbol, then read each matched file to tell real calls from mentions"
+  },
+  {
+    "id": "nav_callers_fetch_user",
+    "qtype": "callers",
+    "prompt": "Which functions call `fetch_user`?",
+    "naive_bytes": 775,
+    "graph_bytes": 991,
+    "naive_round_trips": 3,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "grep the symbol, then read each matched file to tell real calls from mentions"
+  },
+  {
+    "id": "nav_callers_authenticate",
+    "qtype": "callers",
+    "prompt": "Which functions call `authenticate`?",
+    "naive_bytes": 552,
+    "graph_bytes": 755,
+    "naive_round_trips": 3,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "grep the symbol, then read each matched file to tell real calls from mentions"
+  },
+  {
+    "id": "nav_path_handle_to_connect",
+    "qtype": "path",
+    "prompt": "Following calls, can `handle_request` reach `connect_db`?",
+    "naive_bytes": 1207,
+    "graph_bytes": 352,
+    "naive_round_trips": 5,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "read the source subtree to trace call edges by hand"
+  },
+  {
+    "id": "nav_path_main_to_connect",
+    "qtype": "path",
+    "prompt": "Following calls, can `main` reach `connect_db`?",
+    "naive_bytes": 1207,
+    "graph_bytes": 455,
+    "naive_round_trips": 5,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "read the source subtree to trace call edges by hand"
+  },
+  {
+    "id": "nav_path_handle_to_rotate",
+    "qtype": "path",
+    "prompt": "Following calls, can `handle_request` reach `rotate_keys`?",
+    "naive_bytes": 1207,
+    "graph_bytes": 25,
+    "naive_round_trips": 5,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "read the source subtree to trace call edges by hand"
+  },
+  {
+    "id": "nav_path_connect_to_rotate",
+    "qtype": "path",
+    "prompt": "Following calls, can `connect_db` reach `rotate_keys`?",
+    "naive_bytes": 1207,
+    "graph_bytes": 25,
+    "naive_round_trips": 5,
+    "graph_round_trips": 1,
+    "correct": true,
+    "baseline": "read the source subtree to trace call edges by hand"
+  }
+]

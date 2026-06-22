@@ -1,7 +1,8 @@
 //! MCP server wiring: the `Forge` handler holds shared state and exposes every
 //! ctxforge tool. Tool bodies delegate to the feature modules.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
@@ -113,7 +114,14 @@ impl Forge {
                         resp.stderr.len()
                     )
                 });
-                op.finish(raw_in, returned, resp.retrieve_ref.clone(), outcome, note, explain);
+                op.finish(
+                    raw_in,
+                    returned,
+                    resp.retrieve_ref.clone(),
+                    outcome,
+                    note,
+                    explain,
+                );
                 Ok(Json(resp))
             }
             Err(e) => {
@@ -137,7 +145,7 @@ impl Forge {
             "ctx_execute_file",
             serde_json::json!({ "language": req.language, "path": req.path, "code_bytes": req.code.len() }),
         );
-        let p = self.resolve(&req.path);
+        let p = self.resolve_unescaped(&req.path);
         // The file's bytes never enter context (the whole point of this tool over
         // Read), so they count as processed-but-saved: raw_in = file size + the
         // script's stdout. Without this a file analysis that prints a small answer
@@ -155,7 +163,9 @@ impl Forge {
                 // Mirror the credit into the persistent counter ctx_stats reads
                 // (the sandbox already counted stdout; add the file bytes).
                 if file_size > 0 {
-                    let _ = self.store.bump_stat("raw_bytes_processed", file_size as i64);
+                    let _ = self
+                        .store
+                        .bump_stat("raw_bytes_processed", file_size as i64);
                 }
                 let returned = (resp.stdout.len() + resp.stderr.len()) as u64;
                 let outcome = if resp.timed_out { "timed_out" } else { "ok" };
@@ -186,7 +196,14 @@ impl Forge {
                         resp.stderr.len()
                     )
                 });
-                op.finish(raw_in, returned, resp.retrieve_ref.clone(), outcome, note, explain);
+                op.finish(
+                    raw_in,
+                    returned,
+                    resp.retrieve_ref.clone(),
+                    outcome,
+                    note,
+                    explain,
+                );
                 Ok(Json(resp))
             }
             Err(e) => {
@@ -226,7 +243,14 @@ impl Forge {
                 Ok(Json(RetrieveResponse { content }))
             }
             Ok(None) => {
-                op.finish(0, 0, Some(req.reference.clone()), "error", "unknown ref", None);
+                op.finish(
+                    0,
+                    0,
+                    Some(req.reference.clone()),
+                    "error",
+                    "unknown ref",
+                    None,
+                );
                 Err(ErrorData::invalid_params(
                     format!("unknown ref '{}'", req.reference),
                     None,
@@ -251,14 +275,27 @@ impl Forge {
             "ctx_index",
             serde_json::json!({ "path": req.path, "recursive": req.recursive }),
         );
-        let root = self.resolve(&req.path);
+        let root = self.resolve_unescaped(&req.path);
         match self.index.index_path(&root, req.recursive) {
             Ok(resp) => {
                 if let Ok(total) = self.index.chunk_count() {
                     let _ = self.store.set_stat("index_chunks", total);
                 }
+                // A full-repo index refreshes the staleness manifest so a later
+                // ctx_search (ensure_index) serves from cache instead of reindexing.
+                // Subpath/single-file indexes don't represent the whole repo, so they
+                // leave the manifest alone (ensure_index will refresh as needed).
+                if self.same_repo_root(&root) {
+                    write_manifest(
+                        &self.index_manifest_file(),
+                        &crate::index::file_manifest(&self.repo_dir),
+                    );
+                }
                 let returned = obs::json_len(&resp);
-                let note = format!("indexed {} files, {} chunks", resp.files_indexed, resp.chunks);
+                let note = format!(
+                    "indexed {} files, {} chunks",
+                    resp.files_indexed, resp.chunks
+                );
                 let explain = self.ops.explain(|| note.clone());
                 op.finish(returned, returned, None, "ok", note, explain);
                 Ok(Json(resp))
@@ -325,7 +362,7 @@ impl Forge {
         };
         // The graph is persisted to graph.json, not returned to context; only the
         // summary counts come back. Shared with the lazy `ensure_graph` path.
-        let resp = self.finish_discovery(op, outcome, false)?;
+        let resp = self.finish_discovery(op, outcome, false, &root)?;
         Ok(Json(resp))
     }
 
@@ -348,7 +385,36 @@ impl Forge {
                 return Err(e);
             }
         };
-        let view = gquery::query(&graph, &req.name, req.kind.as_deref(), req.limit);
+        // Session-proximity boost: symbols defined in files the user recently
+        // touched sort first. Best-effort — an empty list leaves ranking unchanged.
+        let recent = self.recent_touched_files();
+        let view = gquery::query(&graph, &req.name, req.kind.as_deref(), req.limit, &recent);
+        let raw_payload = view_payload_len(&view);
+        let compacted = self.maybe_compact(view);
+        self.record_graph_op(op, raw_payload, &compacted);
+        Ok(Json(compacted))
+    }
+
+    /// Find symbols by natural-language meaning, ranked lexically (no embeddings).
+    #[tool(
+        description = "Find symbols by natural-language query, ranked lexically (no embeddings): tokenizes the query and scores symbol names by word overlap (exact > prefix > substring, with a bonus for multi-word hits). Returns the best matches with their immediate connections. Use when you know what a symbol does but not its exact name."
+    )]
+    async fn graph_find(
+        &self,
+        Parameters(req): Parameters<GraphFindRequest>,
+    ) -> Result<Json<GraphView>, ErrorData> {
+        let op = self.ops.start(
+            "graph_find",
+            serde_json::json!({ "query": req.query, "limit": req.limit }),
+        );
+        let graph = match self.load_graph() {
+            Ok(g) => g,
+            Err(e) => {
+                op.finish(0, 0, None, "error", "graph build failed", None);
+                return Err(e);
+            }
+        };
+        let view = gquery::find(&graph, &req.query, req.limit);
         let raw_payload = view_payload_len(&view);
         let compacted = self.maybe_compact(view);
         self.record_graph_op(op, raw_payload, &compacted);
@@ -432,7 +498,14 @@ impl Forge {
             graph_edges: read("graph_edges"),
         };
         let returned_bytes = obs::json_len(&resp);
-        op.finish(returned_bytes, returned_bytes, None, "ok", "counters read", None);
+        op.finish(
+            returned_bytes,
+            returned_bytes,
+            None,
+            "ok",
+            "counters read",
+            None,
+        );
         Ok(Json(resp))
     }
 }
@@ -441,7 +514,9 @@ impl Forge {
 impl ServerHandler for Forge {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         let mut info = rmcp::model::ServerInfo::default();
-        info.capabilities = rmcp::model::ServerCapabilities::builder().enable_tools().build();
+        info.capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .build();
         // Imperative tool-selection guidance (adapted from context-mode's CLAUDE.md
         // prose; tool names mapped to ctxforge). The MCP `instructions` ship on every
         // session handshake regardless of routing, so this is the always-on layer.
@@ -514,14 +589,21 @@ impl Forge {
         }
     }
 
-    /// Resolve the root for `ctx_discover`, tolerant of a model-supplied path.
-    /// The model often hands back a *shell-escaped* absolute path (e.g.
-    /// `/Users/me/AI\ Stuff/repo`); that backslash is literal here, so the dir
-    /// doesn't exist and the walk silently finds nothing. Strip the common
-    /// `\<space>` escape, resolve it, and if it still doesn't exist fall back to
+    /// Resolve a model-supplied path, tolerant of the *shell-escaped* form the
+    /// model often hands back for paths with spaces (e.g.
+    /// `/Users/me/AI\ Stuff/repo`): strip the common `\<space>` escape, then
+    /// resolve. Shared by `ctx_discover` and `ctx_index` so the two never diverge
+    /// in how they accept a path — that divergence is what let escaped `ctx_index`
+    /// calls silently index zero files while `ctx_discover` succeeded.
+    fn resolve_unescaped(&self, p: &str) -> PathBuf {
+        self.resolve(&p.replace("\\ ", " "))
+    }
+
+    /// Resolve the root for `ctx_discover`. The model's path is un-escaped by
+    /// [`Self::resolve_unescaped`]; if it still doesn't exist, fall back to
     /// `repo_dir` (the repo root is what `ctx_discover` almost always means).
     fn discover_root(&self, p: &str) -> PathBuf {
-        let candidate = self.resolve(&p.replace("\\ ", " "));
+        let candidate = self.resolve_unescaped(p);
         if candidate.exists() {
             candidate
         } else {
@@ -534,22 +616,82 @@ impl Forge {
         self.data_dir.join("graph.json")
     }
 
+    /// Staleness manifest for the graph (mtimes of supported source files).
+    fn graph_manifest_file(&self) -> PathBuf {
+        self.data_dir.join("graph.manifest.json")
+    }
+
+    /// Staleness manifest for the FTS index (mtimes of all indexed files).
+    fn index_manifest_file(&self) -> PathBuf {
+        self.data_dir.join("index.manifest.json")
+    }
+
+    /// True when `root` resolves to the repo root — i.e. a full-repo build whose
+    /// graph is authoritative for the whole project (vs a narrower subpath build).
+    fn same_repo_root(&self, root: &Path) -> bool {
+        match (
+            std::fs::canonicalize(root).ok(),
+            std::fs::canonicalize(&self.repo_dir).ok(),
+        ) {
+            (Some(a), Some(b)) => a == b,
+            _ => root == self.repo_dir.as_path(),
+        }
+    }
+
     /// Load the structural graph, building it on first use if discovery hasn't run
     /// yet (so graph queries work on any repo without an explicit ctx_discover).
     fn load_graph(&self) -> Result<Graph, ErrorData> {
         self.ensure_graph()?;
-        Graph::load(&self.graph_file())
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+        Graph::load(&self.graph_file()).map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
+
+    /// Paths the user recently touched this session, newest first (bounded), used
+    /// to bias `graph_query` ranking toward what they're working on. Sourced from
+    /// the session hooks' "file"-category events (Edit/Write/Read), whose payload
+    /// carries the touched path. Best-effort: any error (no session db yet, schema
+    /// drift) yields an empty list, leaving ranking unchanged.
+    fn recent_touched_files(&self) -> Vec<String> {
+        const MAX_RECENT: usize = 20;
+        let db = self.data_dir.join("session.db");
+        if !db.exists() {
+            return Vec::new();
+        }
+        let read = || -> rusqlite::Result<Vec<String>> {
+            let conn = rusqlite::Connection::open(&db)?;
+            obs::configure_conn(&conn)?;
+            let mut stmt = conn.prepare(
+                "SELECT payload FROM session_events
+                 WHERE category = 'file' ORDER BY id DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([(MAX_RECENT * 4) as i64], |r| r.get::<_, String>(0))?;
+            let mut seen: Vec<String> = Vec::new();
+            for payload in rows.flatten() {
+                let path = serde_json::from_str::<serde_json::Value>(&payload)
+                    .ok()
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from));
+                if let Some(p) = path {
+                    if !seen.contains(&p) {
+                        seen.push(p);
+                        if seen.len() >= MAX_RECENT {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(seen)
+        };
+        read().unwrap_or_default()
     }
 
     /// Persist a freshly-built graph and its node/edge stats, then finalize `op`
-    /// with a summary. Shared by `ctx_discover` (explicit) and `ensure_graph`
-    /// (lazy); `auto` only adjusts the op note.
+    /// with a summary. Shared by `ctx_discover` (explicit, `root` may be a subpath)
+    /// and `ensure_graph` (lazy, `root` == repo root); `auto` only adjusts the note.
     fn finish_discovery(
         &self,
         op: obs::OpHandle,
         outcome: discovery::DiscoverOutcome,
         auto: bool,
+        root: &Path,
     ) -> Result<DiscoverResponse, ErrorData> {
         // Never persist an empty graph. A 0-file discover (a wrong/escaped path, a
         // `languages` filter that matches nothing, or a sourceless repo) would
@@ -563,9 +705,37 @@ impl Forge {
             op.finish(0, 0, None, "error", note.clone(), explain);
             return Err(ErrorData::internal_error(note, None));
         }
+        // Shrink guard: a narrower-scope discover (a subpath, not the repo root)
+        // must never clobber a comprehensive graph with a smaller partial one — that
+        // is what made the graph "bounce" across runs. A full-repo rebuild is
+        // authoritative (deletions legitimately shrink it) and always proceeds.
+        if !self.same_repo_root(root) {
+            if let Ok(existing) = Graph::load(&self.graph_file()) {
+                if !existing.nodes.is_empty() && outcome.response.nodes < existing.nodes.len() {
+                    let note = format!(
+                        "refused: discovering a subpath would shrink the graph {}→{} nodes; \
+                         run ctx_discover with no path to rebuild the full repo",
+                        existing.nodes.len(),
+                        outcome.response.nodes
+                    );
+                    let explain = self.ops.explain(|| note.clone());
+                    op.finish(0, 0, None, "error", note.clone(), explain);
+                    return Err(ErrorData::internal_error(note, None));
+                }
+            }
+        }
         if let Err(e) = outcome.graph.save(&self.graph_file()) {
             op.finish(0, 0, None, "error", e.to_string(), None);
             return Err(ErrorData::internal_error(e.to_string(), None));
+        }
+        // A full-repo build refreshes the staleness manifest so `ensure_graph` can
+        // serve from cache until the next file change. Subpath builds don't represent
+        // the whole repo, so they must not touch the manifest.
+        if self.same_repo_root(root) {
+            write_manifest(
+                &self.graph_manifest_file(),
+                &discovery::source_manifest(&self.repo_dir),
+            );
         }
         let _ = self
             .store
@@ -586,16 +756,19 @@ impl Forge {
         Ok(outcome.response)
     }
 
-    /// Build the structural graph on first use if `graph.json` is missing, so graph
-    /// queries work on any repo without an explicit `ctx_discover`. A present graph
-    /// short-circuits; otherwise this walks the whole repo once and persists it.
+    /// Ensure `graph.json` is present AND current before a query. Rebuilds the
+    /// whole-repo graph when it is missing, empty (a poisoned prior build), or
+    /// **stale** — i.e. any source file was added, edited, or removed since the last
+    /// build. Staleness is a cheap mtime-manifest comparison, so the graph keeps
+    /// itself fresh as the user adds/removes files, with no explicit `ctx_discover`
+    /// and no server restart. Works for every project (it is in the query path).
     fn ensure_graph(&self) -> Result<(), ErrorData> {
-        // A present graph short-circuits — UNLESS it's empty (0 nodes). An empty
-        // graph.json means a prior discover wrote a poisoned graph (e.g. an escaped
-        // path); rebuild it from repo_dir so the state self-heals.
+        let current = discovery::source_manifest(&self.repo_dir);
         if let Ok(g) = Graph::load(&self.graph_file()) {
             if !g.nodes.is_empty() {
-                return Ok(());
+                if read_manifest(&self.graph_manifest_file()).as_ref() == Some(&current) {
+                    return Ok(()); // present and up to date
+                }
             }
         }
         let op = self
@@ -608,16 +781,22 @@ impl Forge {
                 return Err(ErrorData::internal_error(e.to_string(), None));
             }
         };
-        self.finish_discovery(op, outcome, true)?;
+        self.finish_discovery(op, outcome, true, &self.repo_dir)?;
         Ok(())
     }
 
-    /// Build the FTS index on first use if the code hasn't been indexed yet, so
-    /// `ctx_search` works on any repo without an explicit `ctx_index`. Gated on the
-    /// `index_chunks` stat — written only by code indexing, never by session-
-    /// continuity records — so session events don't mask an unindexed codebase.
+    /// Ensure the FTS index is present AND current before a search. Reindexes the
+    /// repo when it has never been indexed (gated on the `index_chunks` stat, which
+    /// only code indexing writes — never session records) or when **stale**: any
+    /// file added/edited/removed since the last build, via a cheap mtime manifest.
+    /// Reindex is additive and idempotent per path — it refreshes changed files and
+    /// adds new ones, but does NOT prune chunks for deleted files (a known
+    /// limitation: those linger until a from-scratch reindex).
     fn ensure_index(&self) -> Result<(), ErrorData> {
-        if self.store.get_stat("index_chunks").unwrap_or(0) > 0 {
+        let current = crate::index::file_manifest(&self.repo_dir);
+        if self.store.get_stat("index_chunks").unwrap_or(0) > 0
+            && read_manifest(&self.index_manifest_file()).as_ref() == Some(&current)
+        {
             return Ok(());
         }
         let op = self
@@ -625,9 +804,13 @@ impl Forge {
             .start("ctx_index", serde_json::json!({ "auto": true }));
         match self.index.index_path(&self.repo_dir, true) {
             Ok(resp) => {
+                // Drop chunks for files deleted since the last build (keeps
+                // ctx_search from returning ghosts). Safe here: always the repo root.
+                let _ = self.index.prune_missing(&self.repo_dir);
                 if let Ok(total) = self.index.chunk_count() {
                     let _ = self.store.set_stat("index_chunks", total);
                 }
+                write_manifest(&self.index_manifest_file(), &current);
                 let returned = obs::json_len(&resp);
                 let note = format!(
                     "auto-indexed {} files, {} chunks",
@@ -701,6 +884,21 @@ fn view_payload_len(view: &GraphView) -> u64 {
     serde_json::json!({ "nodes": view.nodes, "edges": view.edges })
         .to_string()
         .len() as u64
+}
+
+/// Load a saved staleness manifest, or `None` if absent/unreadable (which forces
+/// a rebuild — the safe default).
+fn read_manifest(path: &Path) -> Option<BTreeMap<String, u64>> {
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// Persist a staleness manifest (best effort: a write failure just means the next
+/// query rebuilds, which is harmless).
+fn write_manifest(path: &Path, manifest: &BTreeMap<String, u64>) {
+    if let Ok(json) = serde_json::to_string(manifest) {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 #[cfg(test)]
@@ -780,7 +978,10 @@ mod tests {
             .await;
         assert!(res.is_err(), "0-file discover should error, not succeed");
         let after = Graph::load(&f.graph_file()).unwrap().nodes.len();
-        assert_eq!(after, before, "graph must be preserved on a 0-file discover");
+        assert_eq!(
+            after, before,
+            "graph must be preserved on a 0-file discover"
+        );
     }
 
     #[tokio::test]
@@ -804,6 +1005,203 @@ mod tests {
             !Graph::load(&f.graph_file()).unwrap().nodes.is_empty(),
             "an empty graph.json must self-heal on the next graph query"
         );
+    }
+
+    #[tokio::test]
+    async fn graph_refreshes_when_a_file_is_added() {
+        // Every-project freshness: after a full build, adding a source file must make
+        // the next graph_query auto-rebuild (manifest goes stale) — no explicit
+        // ctx_discover, no restart.
+        let (f, dir) = forge_with_source();
+        f.ctx_discover(Parameters(DiscoverRequest {
+            path: ".".into(),
+            languages: None,
+        }))
+        .await
+        .unwrap();
+        let before = Graph::load(&f.graph_file()).unwrap().nodes.len();
+
+        std::fs::write(
+            dir.path().join("extra.rs"),
+            "fn brand_new_symbol() -> i32 { 7 }\n",
+        )
+        .unwrap();
+        let view = f
+            .graph_query(Parameters(GraphQueryRequest {
+                name: "brand_new_symbol".into(),
+                kind: None,
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            view.0.nodes.iter().any(|n| n.name == "brand_new_symbol"),
+            "added symbol must appear after auto-refresh"
+        );
+        assert!(
+            Graph::load(&f.graph_file()).unwrap().nodes.len() > before,
+            "graph should grow after a file is added"
+        );
+    }
+
+    #[tokio::test]
+    async fn subpath_discover_refused_when_it_would_shrink() {
+        // The shrink guard: a narrower subpath discover must not clobber a bigger
+        // full-repo graph (the "bouncing" bug). Full-repo builds are unaffected.
+        let (f, dir) = forge_with_source();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/only.rs"), "fn lonely() {}\n").unwrap();
+        std::fs::write(dir.path().join("more.rs"), "fn a(){}\nfn b(){}\nfn c(){}\n").unwrap();
+
+        f.ctx_discover(Parameters(DiscoverRequest {
+            path: ".".into(),
+            languages: None,
+        }))
+        .await
+        .unwrap();
+        let full = Graph::load(&f.graph_file()).unwrap().nodes.len();
+
+        let res = f
+            .ctx_discover(Parameters(DiscoverRequest {
+                path: "sub".into(),
+                languages: None,
+            }))
+            .await;
+        assert!(
+            res.is_err(),
+            "subpath discover that shrinks must be refused"
+        );
+        assert_eq!(
+            Graph::load(&f.graph_file()).unwrap().nodes.len(),
+            full,
+            "graph must be preserved when a shrink is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_refreshes_when_a_file_is_added() {
+        // Index freshness via ctx_search → ensure_index: a newly added file becomes
+        // searchable on the next search, no explicit ctx_index.
+        let (f, dir) = forge_with_source();
+        f.ctx_search(Parameters(SearchRequest {
+            queries: vec!["helper".into()],
+            limit_per_query: 5,
+        }))
+        .await
+        .unwrap();
+
+        std::fs::write(
+            dir.path().join("notes.md"),
+            "# Topic\nqwerty_unique_term appears here\n",
+        )
+        .unwrap();
+        let r = f
+            .ctx_search(Parameters(SearchRequest {
+                queries: vec!["qwerty_unique_term".into()],
+                limit_per_query: 5,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            r.0.results[0]
+                .hits
+                .iter()
+                .any(|h| h.path.contains("notes.md")),
+            "new file must be searchable after auto-reindex"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_prunes_deleted_files() {
+        // A deleted file must stop appearing in ctx_search after the next search
+        // (ensure_index reindexes + prunes). Driven via ctx_search so the index uses
+        // the clean repo_dir path scheme throughout.
+        let (f, dir) = forge_with_source();
+        std::fs::write(dir.path().join("gone.rs"), "fn vanishing_term() {}\n").unwrap();
+
+        let pre = f
+            .ctx_search(Parameters(SearchRequest {
+                queries: vec!["vanishing_term".into()],
+                limit_per_query: 5,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            pre.0.results[0]
+                .hits
+                .iter()
+                .any(|h| h.path.contains("gone.rs")),
+            "term should be searchable before deletion"
+        );
+
+        std::fs::remove_file(dir.path().join("gone.rs")).unwrap();
+        let post = f
+            .ctx_search(Parameters(SearchRequest {
+                queries: vec!["vanishing_term".into()],
+                limit_per_query: 5,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !post.0.results[0]
+                .hits
+                .iter()
+                .any(|h| h.path.contains("gone.rs")),
+            "deleted file must be pruned from the index"
+        );
+    }
+
+    #[tokio::test]
+    async fn escaped_path_index_unescapes_and_indexes() {
+        // The meridian case: a repo whose path contains a space, where the model
+        // hands ctx_index a shell-escaped absolute path (`AI\ Stuff`). Index must
+        // un-escape it and actually index the files — not report 0, not error.
+        let base = tempdir().unwrap();
+        let spaced = base.path().join("AI Stuff");
+        std::fs::create_dir_all(&spaced).unwrap();
+        std::fs::write(spaced.join("lib.rs"), "fn helper() -> i32 { 1 }\n").unwrap();
+        let f = Forge::with_paths(spaced.clone(), base.path().join(".ctxforge"), 8192).unwrap();
+
+        let escaped = spaced.display().to_string().replace(' ', "\\ ");
+        let resp = f
+            .ctx_index(Parameters(IndexRequest {
+                path: escaped,
+                recursive: true,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            resp.0.files_indexed >= 1,
+            "escaped path must un-escape and index files, got {}",
+            resp.0.files_indexed
+        );
+        assert!(resp.0.chunks >= 1);
+    }
+
+    #[tokio::test]
+    async fn escaped_path_execute_file_unescapes() {
+        // Same root cause as discover/index: a shell-escaped path to a real file in
+        // a spaced dir must resolve so the sandbox script actually reads the file.
+        let base = tempdir().unwrap();
+        let spaced = base.path().join("AI Stuff");
+        std::fs::create_dir_all(&spaced).unwrap();
+        let file = spaced.join("data.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let f = Forge::with_paths(spaced.clone(), base.path().join(".ctxforge"), 8192).unwrap();
+
+        let escaped = file.display().to_string().replace(' ', "\\ ");
+        let resp = f
+            .ctx_execute_file(Parameters(crate::tools::ExecuteFileRequest {
+                path: escaped,
+                language: "bash".into(),
+                code: "wc -c < \"$1\"".into(),
+                timeout_secs: 30,
+            }))
+            .await
+            .unwrap();
+        // 6 bytes ("hello\n"): proves the script read the real file via the
+        // un-escaped path (a broken path would leave stdout empty).
+        assert_eq!(resp.0.stdout.trim(), "6", "stdout: {:?}", resp.0.stdout);
     }
 
     #[test]

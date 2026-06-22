@@ -80,6 +80,10 @@ pub struct OpLog {
     explain_path: PathBuf,
     max_bytes: u64,
     explain_enabled: bool,
+    /// Machine-global mirror of `ops.log` under `home_root()`, so the dashboard can
+    /// total savings across every repo and launch profile. `None` when this data dir
+    /// already is the global home (no self-mirror).
+    global_path: Option<PathBuf>,
 }
 
 impl OpLog {
@@ -92,11 +96,19 @@ impl OpLog {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_OPS_LOG_MAX);
+        let path = dir.join("ops.log");
+        let global_path = global_ops_path(&path);
+        if let Some(g) = &global_path {
+            if let Some(parent) = g.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
         OpLog {
-            path: dir.join("ops.log"),
+            path,
             explain_path: dir.join("explain.log"),
             max_bytes,
             explain_enabled: explain_env(),
+            global_path,
         }
     }
 
@@ -152,16 +164,10 @@ impl OpLog {
             }
         };
         line.push('\n');
-        self.rotate_if_needed(line.len() as u64);
-        // One write of the whole line keeps parallel-process appends from
-        // interleaving into corrupt lines (O_APPEND positions at EOF atomically).
-        match OpenOptions::new().create(true).append(true).open(&self.path) {
-            Ok(mut f) => {
-                if let Err(e) = f.write_all(line.as_bytes()) {
-                    tracing::warn!("ops.log write failed: {e}");
-                }
-            }
-            Err(e) => tracing::warn!("ops.log open failed: {e}"),
+        write_line(&self.path, self.max_bytes, &line);
+        // Mirror into the machine-global log too (best-effort; never breaks a call).
+        if let Some(g) = &self.global_path {
+            write_line(g, self.max_bytes, &line);
         }
     }
 
@@ -201,18 +207,49 @@ impl OpLog {
             Err(e) => tracing::warn!("explain.log open failed: {e}"),
         }
     }
+}
 
-    /// Rotate `ops.log` to `ops.log.1` if appending `next_len` bytes would push
-    /// it past the cap. Best-effort under concurrency: `rename` is atomic, so the
-    /// worst case is a slightly-over-cap file or a redundant rotation, never a
-    /// corrupt one.
-    fn rotate_if_needed(&self, next_len: u64) {
-        if let Ok(meta) = std::fs::metadata(&self.path) {
-            if meta.len() + next_len > self.max_bytes {
-                let _ = std::fs::rename(&self.path, rotated_path(&self.path));
+/// Append one line to `path`, rotating first if needed. Best-effort: a failed write
+/// is logged, never propagated, so observability cannot break a tool call. One write
+/// of the whole line keeps parallel-process appends from interleaving into corrupt
+/// lines (O_APPEND positions at EOF atomically).
+fn write_line(path: &Path, max_bytes: u64, line: &str) {
+    rotate_if_needed_at(path, max_bytes, line.len() as u64);
+    match OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                tracing::warn!("ops.log write failed: {e}");
             }
         }
+        Err(e) => tracing::warn!("ops.log open failed: {e}"),
     }
+}
+
+/// Rotate `path` to `path.1` if appending `next_len` bytes would push it past the
+/// cap. Best-effort under concurrency: `rename` is atomic, so the worst case is a
+/// slightly-over-cap file or a redundant rotation, never a corrupt one.
+fn rotate_if_needed_at(path: &Path, max_bytes: u64, next_len: u64) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() + next_len > max_bytes {
+            let _ = std::fs::rename(path, rotated_path(path));
+        }
+    }
+}
+
+/// The machine-global `ops.log` mirror for a per-repo `local` log: `home_root()`
+/// joined with `ops.log`, unless that equals `local` (the data dir already is home).
+/// In test builds the mirror is suppressed unless `CTXFORGE_HOME` is set, so unit
+/// tests never append to the developer's real `~/.ctxforge/ops.log`.
+fn global_ops_path(local: &Path) -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        if std::env::var_os("CTXFORGE_HOME").is_none() {
+            return None;
+        }
+    }
+    crate::rtk::home_root()
+        .map(|h| h.join("ops.log"))
+        .filter(|g| g != local)
 }
 
 /// `ops.log` -> `ops.log.1` (append a suffix; `with_extension` would mangle it).
@@ -256,8 +293,9 @@ impl OpHandle {
         explain: Option<String>,
     ) {
         let duration_ms = self.start.elapsed().as_millis() as u64;
-        let lock_wait_ms =
-            LOCK_WAIT_MS.load(Ordering::Relaxed).saturating_sub(self.lock_wait_base);
+        let lock_wait_ms = LOCK_WAIT_MS
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.lock_wait_base);
         let tokens_saved_est = ((raw_bytes_in as i64 - bytes_returned as i64).max(0)) / 4;
         let pid = std::process::id();
         let rec = OpRecord {
@@ -390,8 +428,11 @@ mod tests {
     fn append_writes_one_parseable_line_per_op() {
         let dir = tempdir().unwrap();
         let log = OpLog::open(dir.path());
-        log.start("ctx_execute", json!({"language": "python", "code_bytes": 10}))
-            .finish(8000, 100, Some("abc".into()), "ok", "stored", None);
+        log.start(
+            "ctx_execute",
+            json!({"language": "python", "code_bytes": 10}),
+        )
+        .finish(8000, 100, Some("abc".into()), "ok", "stored", None);
         let raw = std::fs::read_to_string(dir.path().join("ops.log")).unwrap();
         let lines: Vec<&str> = raw.lines().collect();
         assert_eq!(lines.len(), 1);
@@ -450,5 +491,24 @@ mod tests {
             .finish(48000, 100, Some("r".into()), "ok", "", trail);
         let explain = std::fs::read_to_string(dir.path().join("explain.log")).unwrap();
         assert!(explain.contains("decision: offloaded 47KB"));
+    }
+
+    #[test]
+    fn append_mirrors_into_global_home() {
+        // home_root() is env-driven and process-global; serialize with other mutators.
+        let _g = crate::rtk::env_test_lock();
+        let home = tempdir().unwrap();
+        std::env::set_var("CTXFORGE_HOME", home.path());
+        let data = tempdir().unwrap();
+        OpLog::open(data.path())
+            .start("ctx_execute", json!({}))
+            .finish(8000, 100, Some("r".into()), "ok", "", None);
+        std::env::remove_var("CTXFORGE_HOME");
+        // The per-repo log carries the record...
+        let local = std::fs::read_to_string(data.path().join("ops.log")).unwrap();
+        assert!(local.contains("ctx_execute"));
+        // ...and so does the machine-global mirror under home_root().
+        let global = std::fs::read_to_string(home.path().join("ops.log")).unwrap();
+        assert!(global.contains("ctx_execute"));
     }
 }

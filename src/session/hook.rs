@@ -166,6 +166,22 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             let raws = extract::extract_tool_events(&tool, &ti, &resp);
             let events = attribute(raws, &session_id, &project_str, ts, "PostToolUse");
             store.insert_events(&events)?;
+            // Scale-aware search steer: a Grep whose result floods context gets a
+            // one-shot nudge toward ctx_search (ctx_search only beats grep at scale).
+            // Capture above runs regardless of routing level; the nudge is steer-only.
+            let level = routing::Level::from_env();
+            if level.steers() {
+                let rc = routing::RouteCtx {
+                    level,
+                    mcp_ready: false,
+                    bin: "",
+                    data_dir: &data_dir,
+                    session_id: &session_id,
+                    rtk_active: false,
+                };
+                let decision = routing::post_route(&tool, &resp, &rc);
+                return Ok(routing::to_post_hook_json(&decision).to_string());
+            }
             Ok("{}".to_string())
         }
         "UserPromptSubmit" => {
@@ -183,7 +199,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             Ok("{}".to_string())
         }
         "PreCompact" => {
-            let events = store.events_for_session(&session_id)?;
+            let events = store.resolved_events_for_session(&session_id)?;
             if !events.is_empty() {
                 let compacts = store.compact_count(&session_id)? + 1;
                 let snap = snapshot::build_snapshot(&events, super::snapshot_budget(), compacts);
@@ -194,7 +210,15 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
         }
         "SessionStart" => {
             let source = input.source.clone().unwrap_or_else(|| "startup".into());
-            let ctx = session_start(&store, &data_dir, &session_id, &project, &project_str, ts, &source)?;
+            let ctx = session_start(
+                &store,
+                &data_dir,
+                &session_id,
+                &project,
+                &project_str,
+                ts,
+                &source,
+            )?;
             // Prepend the routing tool-selection guide whenever steering is active.
             // NOT gated on mcp_ready (unlike PreToolUse): at SessionStart the MCP
             // server is registered in the same config as this hook and is still
@@ -249,23 +273,33 @@ fn session_start(
                     store.mark_resume_consumed(session_id, project_str)?;
                 }
             }
-            let events = store.events_for_session(session_id)?;
+            let events = store.resolved_events_for_session(session_id)?;
             index_events(data_dir, session_id, &events);
             let guide = if let Some(r) = store.get_resume(session_id, project_str)? {
                 r.snapshot
             } else if !events.is_empty() {
-                snapshot::build_snapshot(&events, super::snapshot_budget(), store.compact_count(session_id)?)
+                snapshot::build_snapshot(
+                    &events,
+                    super::snapshot_budget(),
+                    store.compact_count(session_id)?,
+                )
             } else {
                 String::new()
             };
             Ok(guide)
         }
         "resume" => {
-            let events = store.events_for_session(session_id)?;
+            let events = store.resolved_events_for_session(session_id)?;
             if !events.is_empty() {
                 index_events(data_dir, session_id, &events);
-                Ok(snapshot::build_snapshot(&events, super::snapshot_budget(), store.compact_count(session_id)?))
-            } else if let Some(snap) = store.claim_latest_unconsumed_resume(project_str, session_id)? {
+                Ok(snapshot::build_snapshot(
+                    &events,
+                    super::snapshot_budget(),
+                    store.compact_count(session_id)?,
+                ))
+            } else if let Some(snap) =
+                store.claim_latest_unconsumed_resume(project_str, session_id)?
+            {
                 Ok(snap)
             } else {
                 Ok(String::new())
@@ -414,7 +448,9 @@ mod tests {
         let (out, store, _) = run("PostToolUse", input);
         assert_eq!(out, "{}");
         let evs = store.events_for_session("sess1").unwrap();
-        assert!(evs.iter().any(|e| e.category == "file" && e.payload["path"] == "src/x.rs"));
+        assert!(evs
+            .iter()
+            .any(|e| e.category == "file" && e.payload["path"] == "src/x.rs"));
     }
 
     #[test]
@@ -479,7 +515,10 @@ mod tests {
 
         let (out, store, _) = run("PreCompact", input_for(dir.path()));
         assert_eq!(out, "{}");
-        let r = store.get_resume("sess1", &dir.path().to_string_lossy()).unwrap().unwrap();
+        let r = store
+            .get_resume("sess1", &dir.path().to_string_lossy())
+            .unwrap()
+            .unwrap();
         assert!(r.snapshot.contains("## Files Modified"));
         assert!(r.snapshot.contains("cache.rs"));
     }
@@ -498,7 +537,9 @@ mod tests {
         ss.source = Some("compact".into());
         let out = handle("SessionStart", &ss).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
         assert!(ctx.contains("Session Guide"));
         assert!(ctx.contains("cache.rs"));
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
@@ -518,7 +559,12 @@ mod tests {
         handle("SessionStart", &ss).unwrap();
 
         let store = SessionStore::open(&super::super::resolve_data_dir(dir.path())).unwrap();
-        assert_eq!(store.count_events_for_project(&dir.path().to_string_lossy()).unwrap(), 0);
+        assert_eq!(
+            store
+                .count_events_for_project(&dir.path().to_string_lossy())
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -543,12 +589,17 @@ mod tests {
         }
 
         let v: Value = serde_json::from_str(&out).unwrap();
-        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
         assert!(
             ctx.contains("<context_window_protection>"),
             "guide must inject even when the MCP server isn't reachable yet"
         );
-        assert!(ctx.contains("ToolSearch"), "carries the deferred-tool bootstrap");
+        assert!(
+            ctx.contains("ToolSearch"),
+            "carries the deferred-tool bootstrap"
+        );
     }
 
     #[test]

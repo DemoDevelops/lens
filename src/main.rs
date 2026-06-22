@@ -35,6 +35,7 @@ fn main() -> Result<()> {
         Some("wrap") => return ctxforge::wrap::run_cli(&args[2..]),
         Some("rtk") => return ctxforge::rtk::run_cli(&args[2..]),
         Some("warmup") => return ctxforge::warmup::run_cli(&args[2..]),
+        Some("watch") => return ctxforge::warmup::run_watch_cli(&args[2..]),
         _ => {}
     }
     // `--explain` is an alias for CTXFORGE_EXPLAIN=1 (opt-in per-op trace).

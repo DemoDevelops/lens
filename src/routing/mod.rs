@@ -120,6 +120,21 @@ pub fn to_hook_json(d: &Decision) -> Value {
     }
 }
 
+/// Render a PostToolUse nudge. [`to_hook_json`] hardcodes `PreToolUse`, so the
+/// PostToolUse arm ([`post_route`]) needs its own renderer. Only `Context` carries a
+/// payload; anything else is an empty (no-op) object.
+pub fn to_post_hook_json(d: &Decision) -> Value {
+    match d {
+        Decision::Context(ctx) => json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": ctx,
+            }
+        }),
+        _ => json!({}),
+    }
+}
+
 /// Everything [`route`] needs that isn't the tool call itself.
 pub struct RouteCtx<'a> {
     /// Active routing level.
@@ -164,8 +179,16 @@ pub const BASH_NUDGE: &str = "<context_guidance>\n  <tip>\n    When you intend t
 /// Contextual guidance steering Grep toward indexed search / the graph.
 pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Grep results may be larger than you expect. When you intend to count, filter, or aggregate matches (not just spot-check one), run the search through ctx_execute(language: \"shell\", code: \"...\") — the raw match list stays in the sandbox and only your derived answer enters your conversation. For \"where is X\" or \"who calls X\", prefer ctx_search (after ctx_index) or graph_query over scanning files.\n  </tip>\n</context_guidance>";
 
-/// Contextual guidance steering analysis-reads into the sandbox.
-pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from the file? Use ctx_execute_file(path, language, code) — the bytes stay in the sandbox and only what your code prints enters your conversation.\n  </tip>\n</context_guidance>";
+/// Contextual guidance steering analysis-reads into the sandbox, and
+/// navigational code-reads toward the graph.
+pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from one file? Use ctx_execute_file(path, language, code) — the bytes stay in the sandbox and only what your code prints enters your conversation.\n    Reading code to see how it connects — who calls this, what it calls, where a symbol is defined, how A reaches B? Don't read file after file; query the graph with graph_query / graph_neighbors / graph_path (run ctx_discover once if it's empty).\n  </tip>\n</context_guidance>";
+
+/// Contextual guidance emitted AFTER a Grep whose result set floods context. A
+/// result this large is exactly where ctx_search (ranked top-K, flat with corpus
+/// size) beats grep (every matching line). PostToolUse, not before, so it fires only
+/// when the grep actually flooded — below the threshold grep is as lean and we stay
+/// quiet.
+pub const SEARCH_NUDGE: &str = "<context_guidance>\n  <tip>\n    That grep returned a large match set — more than ctx_search would. For a result set this size, ctx_search (after ctx_index) returns the ranked top hits and keeps the rest out of your context; re-run the search through ctx_search if you need more than the matches already shown.\n  </tip>\n</context_guidance>";
 
 /// Periodic guidance for external (non-ctxforge) MCP tools whose payloads flood
 /// context (port of context-mode's `createExternalMcpGuidance`, tools mapped to
@@ -219,15 +242,11 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 Decision::Passthrough
             }
         }
-        // Read nudge fires whenever steering (context-mode nudges Read regardless of
-        // an aggressiveness tier), once per session so it never becomes noise.
-        "Read" => {
-            if ctx.level.steers() && guidance_once(ctx, "read") {
-                Decision::Context(READ_NUDGE.to_string())
-            } else {
-                Decision::Passthrough
-            }
-        }
+        // Read nudges whenever steering. A general analysis tip fires once per
+        // session; on top of that, code-file reads escalate toward the graph as
+        // they pile up (the "reading file after file to trace structure" pattern
+        // the graph replaces). See [`read_decision`].
+        "Read" => read_decision(tool_input, ctx),
         // Sub-agents never receive the SessionStart guide, so without this they
         // default to Read/Grep/Bash and never touch the ctxforge tools. Inject the
         // guide into the sub-agent's prompt (every call — each is a fresh context).
@@ -253,6 +272,27 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
     }
 }
 
+/// PostToolUse routing: a Grep whose result floods context gets a one-shot nudge
+/// toward ctx_search. This is the scale-aware search steer — ctx_search only beats
+/// grep once the match set is large (measured crossover: ~parity at fixture scale,
+/// ~91% leaner than grep at 10x). So unlike the PreToolUse Grep nudge (which fires
+/// before the result size is known), this fires only when the grep actually flooded.
+/// Steering-only; not gated on `mcp_ready` (a nudge, like the graph escalation).
+/// `tool_response` is the serialized Grep result. One-shot per session.
+pub fn post_route(tool: &str, tool_response: &str, ctx: &RouteCtx) -> Decision {
+    if !ctx.level.steers() {
+        return Decision::Passthrough;
+    }
+    if tool == "Grep"
+        && tool_response.len() > grep_flood_bytes()
+        && guidance_once(ctx, "grep-flood")
+    {
+        Decision::Context(SEARCH_NUDGE.to_string())
+    } else {
+        Decision::Passthrough
+    }
+}
+
 /// Inject the ctxforge tool-selection guide into a sub-agent's prompt. Port of
 /// context-mode's PreToolUse `Agent` branch (`hooks/core/routing.mjs`). No
 /// throttle: each sub-agent is a fresh context that needs its own copy, including
@@ -261,7 +301,14 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
 fn agent_inject(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     // The Agent tool carries the sub-agent instructions under one of these keys
     // (Claude uses `prompt`; the rest mirror context-mode's field list).
-    const FIELDS: &[&str] = &["prompt", "request", "objective", "question", "query", "task"];
+    const FIELDS: &[&str] = &[
+        "prompt",
+        "request",
+        "objective",
+        "question",
+        "query",
+        "task",
+    ];
     let field = match FIELDS
         .iter()
         .copied()
@@ -277,6 +324,84 @@ fn agent_inject(tool_input: &Value, ctx: &RouteCtx) -> Decision {
         reason: AGENT_INJECT_REASON.to_string(),
         updated_input: updated,
     }
+}
+
+/// After this many code-file reads in a session, the Read nudge escalates from
+/// the general tip to a graph-specific one — the point where "reading file after
+/// file to trace structure" is clearly underway and the graph wins. Past it, the
+/// graph nudge repeats every [`READ_GRAPH_PERIOD`]-th code read so it keeps
+/// landing without firing on every single read.
+const READ_GRAPH_THRESHOLD_DEFAULT: u64 = 3;
+const READ_GRAPH_PERIOD: u64 = 3;
+
+/// The escalation threshold, overridable via `CTXFORGE_READ_GRAPH_THRESHOLD` so
+/// an A/B can disable the graph escalation (set it very high) without a recompile.
+/// Falls back to [`READ_GRAPH_THRESHOLD_DEFAULT`] when unset or unparseable.
+fn read_graph_threshold() -> u64 {
+    std::env::var("CTXFORGE_READ_GRAPH_THRESHOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(READ_GRAPH_THRESHOLD_DEFAULT)
+}
+
+/// Grep result-size (bytes) above which the result is a "flood" worth steering to
+/// ctx_search, overridable via `CTXFORGE_GREP_FLOOD_BYTES` (so an A/B can disable it
+/// by setting it very high). Default 16384: comfortably above ctx_search's flat
+/// ranked-top-K payload, so we only nudge once grep is the heavier option. Below this,
+/// grep is as lean and the nudge stays silent. (Measured crossover: grep ~parity at
+/// fixture scale, ~91% heavier than ctx_search at 10x.)
+const GREP_FLOOD_BYTES_DEFAULT: usize = 16384;
+fn grep_flood_bytes() -> usize {
+    std::env::var("CTXFORGE_GREP_FLOOD_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(GREP_FLOOD_BYTES_DEFAULT)
+}
+
+/// Read routing: a general analysis tip once per session, plus escalation of
+/// code-file reads toward the graph. Only files the graph indexes
+/// ([`crate::discovery::extract::spec_for_extension`]) count toward escalation —
+/// reading a doc/config/data file shouldn't push the agent at the graph. Once the
+/// session's code-read count crosses [`READ_GRAPH_THRESHOLD`] the graph-specific
+/// nudge fires, then again every [`READ_GRAPH_PERIOD`]-th read after.
+fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
+    if !ctx.level.steers() {
+        return Decision::Passthrough;
+    }
+    let is_code = tool_input["file_path"]
+        .as_str()
+        .and_then(file_extension)
+        .map(|ext| crate::discovery::extract::spec_for_extension(&ext).is_some())
+        .unwrap_or(false);
+    if is_code {
+        let n = bump_counter(ctx, "read-code");
+        let threshold = read_graph_threshold();
+        if n >= threshold && (n - threshold).is_multiple_of(READ_GRAPH_PERIOD) {
+            return Decision::Context(read_graph_nudge(n));
+        }
+    }
+    if guidance_once(ctx, "read") {
+        Decision::Context(READ_NUDGE.to_string())
+    } else {
+        Decision::Passthrough
+    }
+}
+
+/// The escalation nudge: names the three graph tools and frames them as the
+/// replacement for reading file-by-file. `n` is the running code-read count, so
+/// the agent sees how much reading it has already done.
+fn read_graph_nudge(n: u64) -> String {
+    format!(
+        "<context_guidance>\n  <tip>\n    You've read {n} code files this session. If you're tracing how the code fits together — who calls a function, what it calls, where a symbol is defined, how one part reaches another — stop reading file by file and query the graph instead: graph_query to locate a symbol, graph_neighbors for its callers/callees, graph_path for how A reaches B. One query replaces many reads and keeps their bytes out of your context. (Run ctx_discover once if the graph is empty.)\n  </tip>\n</context_guidance>"
+    )
+}
+
+/// Lowercased file extension of a path, if any (`src/Foo.RS` → `rs`).
+fn file_extension(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
 }
 
 /// Bash-specific routing: wrap or nudge read-only high-output commands, but
@@ -461,8 +586,8 @@ fn is_stateful(cmd: &str) -> bool {
         return true;
     }
     const STATEFUL: &[&str] = &[
-        "cd", "export", "source", ".", "alias", "unalias", "set", "unset",
-        "pushd", "popd", "eval", "trap",
+        "cd", "export", "source", ".", "alias", "unalias", "set", "unset", "pushd", "popd", "eval",
+        "trap",
     ];
     for seg in segments(cmd) {
         let tok = first_token(&seg);
@@ -539,9 +664,8 @@ fn basename(token: &str) -> &str {
 
 /// Programs that are read-only regardless of their arguments.
 const PLAIN_ALLOW: &[&str] = &[
-    "find", "cat", "ls", "tree", "rg", "grep", "egrep", "fgrep", "tail", "head",
-    "wc", "sort", "uniq", "nl", "curl", "wget", "gradle", "gradlew", "mvn",
-    "sbt", "pytest", "jest", "vitest",
+    "find", "cat", "ls", "tree", "rg", "grep", "egrep", "fgrep", "tail", "head", "wc", "sort",
+    "uniq", "nl", "curl", "wget", "gradle", "gradlew", "mvn", "sbt", "pytest", "jest", "vitest",
 ];
 
 /// For tools that mix read-only and mutating subcommands, the subcommand
@@ -549,14 +673,25 @@ const PLAIN_ALLOW: &[&str] = &[
 fn subcommand_ok(prog: &str, sub: &str) -> Option<bool> {
     let set: &[&str] = match prog {
         "git" => &[
-            "log", "diff", "show", "status", "blame", "shortlog", "reflog",
-            "whatchanged", "ls-files", "ls-tree", "rev-parse", "describe", "grep",
+            "log",
+            "diff",
+            "show",
+            "status",
+            "blame",
+            "shortlog",
+            "reflog",
+            "whatchanged",
+            "ls-files",
+            "ls-tree",
+            "rev-parse",
+            "describe",
+            "grep",
         ],
         "cargo" => &["test", "build", "check", "clippy", "bench", "tree", "doc"],
         "go" => &["test", "build", "vet", "list"],
-        "npm" | "yarn" | "pnpm" => {
-            &["test", "run", "build", "ci", "audit", "outdated", "list", "ls"]
-        }
+        "npm" | "yarn" | "pnpm" => &[
+            "test", "run", "build", "ci", "audit", "outdated", "list", "ls",
+        ],
         _ => return None,
     };
     Some(set.contains(&sub))
@@ -630,15 +765,16 @@ fn bounded_patterns() -> &'static Vec<Regex> {
 /// True when `cmd` is a single-dash flag bundle token (e.g. `-rvf`) containing `ch`.
 /// Mirrors context-mode's `-[a-zA-Z]*<ch>[a-zA-Z]*` lookahead carve-out.
 fn flag_bundle_has(cmd: &str, ch: char) -> bool {
-    cmd.split_whitespace().any(|tok| match tok.strip_prefix('-') {
-        Some(rest) => {
-            !rest.starts_with('-')
-                && !rest.is_empty()
-                && rest.chars().all(|c| c.is_ascii_alphabetic())
-                && rest.contains(ch)
-        }
-        None => false,
-    })
+    cmd.split_whitespace()
+        .any(|tok| match tok.strip_prefix('-') {
+            Some(rest) => {
+                !rest.starts_with('-')
+                    && !rest.is_empty()
+                    && rest.chars().all(|c| c.is_ascii_alphabetic())
+                    && rest.contains(ch)
+            }
+            None => false,
+        })
 }
 
 /// Port of context-mode's `isStructurallyBounded` (#463): is this command's output
@@ -706,16 +842,16 @@ fn is_wrappable(cmd: &str) -> bool {
 /// External-MCP nudge cadence: fire on the 1st, then every `EXTERNAL_MCP_PERIOD`-th
 /// matching call. context-mode's default (`EXTERNAL_MCP_NUDGE_DEFAULT`) is 10 — keeps
 /// the guidance fresh across an MCP-heavy run (50+ calls) without flooding context.
-/// Bash/Grep/Read use [`guidance_once`] (one shot) instead; only external MCP repeats.
+/// Bash/Grep use [`guidance_once`] (one shot); Read mixes a one-shot general tip
+/// with a periodic graph escalation (see [`read_decision`]); external MCP repeats.
 pub const EXTERNAL_MCP_PERIOD: u64 = 10;
 
-/// Fire a periodic nudge per `(session, key)`: returns `true` on calls 1,
-/// `period+1`, `2·period+1`, … Backed by a per-`(session,key)` counter file under
-/// `<data_dir>/throttle`; any IO error suppresses the nudge (returns `false`)
-/// rather than spamming. Best-effort under concurrency (the read-increment-write
-/// isn't atomic across parallel hook processes, but a missed/extra reminder is
-/// harmless). Port of context-mode's `guidancePeriodic`.
-fn throttle_periodic(ctx: &RouteCtx, key: &str, period: u64) -> bool {
+/// Increment the per-`(session, key)` counter file under `<data_dir>/throttle`
+/// and return its new value (first call returns 1). Returns 0 on any IO error,
+/// which callers treat as "suppress". Best-effort under concurrency: the
+/// read-increment-write isn't atomic across parallel hook processes, but a
+/// missed/extra reminder is harmless.
+fn bump_counter(ctx: &RouteCtx, key: &str) -> u64 {
     let dir = ctx.data_dir.join("throttle");
     let _ = std::fs::create_dir_all(&dir); // best effort
     let marker = dir.join(format!("{}.{}.count", sanitize(ctx.session_id), key));
@@ -725,9 +861,19 @@ fn throttle_periodic(ctx: &RouteCtx, key: &str, period: u64) -> bool {
         .unwrap_or(0);
     let next = prev.saturating_add(1);
     if std::fs::write(&marker, next.to_string()).is_err() {
-        return false;
+        return 0;
     }
-    period <= 1 || next % period == 1
+    next
+}
+
+/// Fire a periodic nudge per `(session, key)`: returns `true` on calls 1,
+/// `period+1`, `2·period+1`, … Backed by [`bump_counter`]; any IO error
+/// suppresses the nudge. Port of context-mode's `guidancePeriodic`.
+fn throttle_periodic(ctx: &RouteCtx, key: &str, period: u64) -> bool {
+    match bump_counter(ctx, key) {
+        0 => false,
+        next => period <= 1 || next % period == 1,
+    }
 }
 
 /// Fire a nudge at most ONCE per `(session, key)` — port of context-mode's
@@ -990,10 +1136,26 @@ mod tests {
     #[test]
     fn bounded_commands_are_recognized() {
         for c in [
-            "pwd", "whoami", "git status", "git status --short", "git rev-parse HEAD",
-            "git branch", "git diff --stat", "git log -5", "git stash list",
-            "node --version", "python3 --version", "cargo -V", "ls", "ls -la",
-            "cd /tmp", "echo hi", "mkdir -p a/b", "mv a b", "cp a b", "rm a",
+            "pwd",
+            "whoami",
+            "git status",
+            "git status --short",
+            "git rev-parse HEAD",
+            "git branch",
+            "git diff --stat",
+            "git log -5",
+            "git stash list",
+            "node --version",
+            "python3 --version",
+            "cargo -V",
+            "ls",
+            "ls -la",
+            "cd /tmp",
+            "echo hi",
+            "mkdir -p a/b",
+            "mv a b",
+            "cp a b",
+            "rm a",
         ] {
             assert!(is_structurally_bounded(c), "{c:?} should be bounded");
         }
@@ -1002,10 +1164,21 @@ mod tests {
     #[test]
     fn unbounded_commands_are_rejected() {
         for c in [
-            "find .", "cat file.txt", "grep -r foo", "git log", "git diff",
-            "ls -R", "ls --recursive", "cp -rv a b", "rm -v x", "mv --verbose a b",
-            "git status | xargs cat", "cat huge && echo done", "echo $(cat f)",
-            "", "rg pattern",
+            "find .",
+            "cat file.txt",
+            "grep -r foo",
+            "git log",
+            "git diff",
+            "ls -R",
+            "ls --recursive",
+            "cp -rv a b",
+            "rm -v x",
+            "mv --verbose a b",
+            "git status | xargs cat",
+            "cat huge && echo done",
+            "echo $(cat f)",
+            "",
+            "rg pattern",
         ] {
             assert!(!is_structurally_bounded(c), "{c:?} should NOT be bounded");
         }
@@ -1018,14 +1191,22 @@ mod tests {
         // they must passthrough (no wrap, no nudge) under wrap/full.
         for cmd in ["git status", "ls -la"] {
             assert_eq!(
-                route("Bash", &json!({"command": cmd}), &rc(Level::Full, true, d.path())),
+                route(
+                    "Bash",
+                    &json!({"command": cmd}),
+                    &rc(Level::Full, true, d.path())
+                ),
                 Decision::Passthrough,
                 "{cmd:?} is bounded → not wrapped"
             );
         }
         // `git log` (unbounded) is still wrapped.
         assert!(matches!(
-            route("Bash", &json!({"command": "git log"}), &rc(Level::Wrap, true, d.path())),
+            route(
+                "Bash",
+                &json!({"command": "git log"}),
+                &rc(Level::Wrap, true, d.path())
+            ),
             Decision::Modify { .. }
         ));
     }
@@ -1073,7 +1254,11 @@ mod tests {
             "WebFetch deny is an MCP redirect — suppressed when server down"
         );
         assert_eq!(
-            route("Bash", &json!({"command": "curl https://api.example.com/data"}), &ctx),
+            route(
+                "Bash",
+                &json!({"command": "curl https://api.example.com/data"}),
+                &ctx
+            ),
             Decision::Passthrough,
             "curl→ctx_execute redirect suppressed when server down"
         );
@@ -1202,7 +1387,11 @@ mod tests {
             Decision::Passthrough
         );
         assert_eq!(
-            route("Bash", &json!({"command": ""}), &rc(Level::Full, true, d.path())),
+            route(
+                "Bash",
+                &json!({"command": ""}),
+                &rc(Level::Full, true, d.path())
+            ),
             Decision::Passthrough
         );
     }
@@ -1241,10 +1430,11 @@ mod tests {
     }
 
     #[test]
-    fn read_nudges_once_when_steering() {
+    fn read_general_tip_fires_once_when_steering() {
         let d = tempdir().unwrap();
-        let ti = json!({"file_path": "big.rs"});
-        // Read nudges whenever steering (not gated to full anymore), once per session.
+        // A non-code file gets the general analysis tip, once per session (no
+        // graph escalation: it isn't in the graph).
+        let ti = json!({"file_path": "README.md"});
         let ctx = rc(Level::Steer, true, d.path());
         assert_eq!(
             route("Read", &ti, &ctx),
@@ -1254,7 +1444,7 @@ mod tests {
         assert_eq!(
             route("Read", &ti, &ctx),
             Decision::Passthrough,
-            "and only once per session"
+            "general tip is one-shot per session"
         );
         // wrap-only does not steer → no Read nudge.
         let d2 = tempdir().unwrap();
@@ -1262,6 +1452,105 @@ mod tests {
             route("Read", &ti, &rc(Level::Wrap, true, d2.path())),
             Decision::Passthrough
         );
+    }
+
+    #[test]
+    fn read_code_files_escalate_to_the_graph() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Steer, true, d.path());
+        let code = json!({"file_path": "src/server.rs"});
+        // 1st code read: the general tip (which now names the graph among its options).
+        assert_eq!(
+            route("Read", &code, &ctx),
+            Decision::Context(READ_NUDGE.to_string())
+        );
+        // 2nd: throttled (general tip spent, threshold not yet reached).
+        assert_eq!(route("Read", &code, &ctx), Decision::Passthrough);
+        // 3rd (threshold): graph-specific escalation naming all three graph tools.
+        match route("Read", &code, &ctx) {
+            Decision::Context(c) => assert!(
+                c.contains("graph_query")
+                    && c.contains("graph_neighbors")
+                    && c.contains("graph_path"),
+                "escalation names the graph tools: {c}"
+            ),
+            other => panic!("expected graph nudge, got {other:?}"),
+        }
+        // 4th, 5th quiet; 6th fires again (every READ_GRAPH_PERIOD-th read).
+        assert_eq!(route("Read", &code, &ctx), Decision::Passthrough);
+        assert_eq!(route("Read", &code, &ctx), Decision::Passthrough);
+        assert!(matches!(route("Read", &code, &ctx), Decision::Context(_)));
+    }
+
+    #[test]
+    fn read_non_code_files_never_escalate_to_graph() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Steer, true, d.path());
+        let doc = json!({"file_path": "DECISIONS.md"});
+        // general tip once, then silence — files not in the graph never escalate.
+        assert_eq!(
+            route("Read", &doc, &ctx),
+            Decision::Context(READ_NUDGE.to_string())
+        );
+        for _ in 0..6 {
+            assert_eq!(route("Read", &doc, &ctx), Decision::Passthrough);
+        }
+    }
+
+    #[test]
+    fn read_nudge_offers_the_graph() {
+        assert!(READ_NUDGE.contains("graph_query"));
+        assert!(READ_NUDGE.contains("ctx_execute_file"));
+    }
+
+    // ── post_route(): scale-aware search nudge ──────────────────────────────
+
+    #[test]
+    fn post_route_nudges_flooding_grep_once_when_steering() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let big = "x".repeat(grep_flood_bytes() + 1);
+        assert_eq!(
+            post_route("Grep", &big, &ctx),
+            Decision::Context(SEARCH_NUDGE.to_string())
+        );
+        // one-shot per session
+        assert_eq!(post_route("Grep", &big, &ctx), Decision::Passthrough);
+    }
+
+    #[test]
+    fn post_route_quiet_on_small_grep_other_tools_and_non_steering() {
+        let big = "x".repeat(grep_flood_bytes() + 1);
+        // small grep result -> below the flood threshold -> quiet
+        let d = tempdir().unwrap();
+        assert_eq!(
+            post_route(
+                "Grep",
+                "x".repeat(100).as_str(),
+                &rc(Level::Full, true, d.path())
+            ),
+            Decision::Passthrough
+        );
+        // a big result from another tool is not a grep flood
+        let d2 = tempdir().unwrap();
+        assert_eq!(
+            post_route("Read", &big, &rc(Level::Full, true, d2.path())),
+            Decision::Passthrough
+        );
+        // wrap-only / off do not steer
+        let d3 = tempdir().unwrap();
+        assert_eq!(
+            post_route("Grep", &big, &rc(Level::Wrap, true, d3.path())),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn to_post_hook_json_tags_posttooluse() {
+        let v = to_post_hook_json(&Decision::Context("hi".into()));
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "hi");
+        assert_eq!(to_post_hook_json(&Decision::Passthrough), json!({}));
     }
 
     #[test]
@@ -1274,7 +1563,10 @@ mod tests {
             route("mcp__slack__search", &ti, &ctx),
             Decision::Context(EXTERNAL_MCP_NUDGE.to_string())
         );
-        assert_eq!(route("mcp__slack__search", &ti, &ctx), Decision::Passthrough);
+        assert_eq!(
+            route("mcp__slack__search", &ti, &ctx),
+            Decision::Passthrough
+        );
         // ctxforge's own MCP tools are NOT treated as external.
         assert_eq!(
             route("mcp__ctxforge__ctx_execute", &ti, &ctx),
@@ -1301,7 +1593,11 @@ mod tests {
     fn unknown_tool_passthrough() {
         let d = tempdir().unwrap();
         assert_eq!(
-            route("Edit", &json!({"file_path": "x"}), &rc(Level::Full, true, d.path())),
+            route(
+                "Edit",
+                &json!({"file_path": "x"}),
+                &rc(Level::Full, true, d.path())
+            ),
             Decision::Passthrough
         );
     }
@@ -1313,12 +1609,21 @@ mod tests {
         let d = tempdir().unwrap();
         let ti = json!({"prompt": "map the auth subsystem", "subagent_type": "Explore"});
         match route("Agent", &ti, &rc(Level::Full, true, d.path())) {
-            Decision::Modify { reason, updated_input } => {
+            Decision::Modify {
+                reason,
+                updated_input,
+            } => {
                 assert_eq!(reason, AGENT_INJECT_REASON);
                 let p = updated_input["prompt"].as_str().unwrap();
-                assert!(p.starts_with("map the auth subsystem"), "original prompt preserved");
+                assert!(
+                    p.starts_with("map the auth subsystem"),
+                    "original prompt preserved"
+                );
                 assert!(p.contains("<context_window_protection>"), "guide appended");
-                assert!(p.contains("ToolSearch"), "carries the deferred-tool bootstrap");
+                assert!(
+                    p.contains("ToolSearch"),
+                    "carries the deferred-tool bootstrap"
+                );
                 // sibling fields are untouched
                 assert_eq!(updated_input["subagent_type"], json!("Explore"));
             }
@@ -1326,7 +1631,11 @@ mod tests {
         }
         // `Task` is treated identically.
         assert!(matches!(
-            route("Task", &json!({"prompt": "x"}), &rc(Level::Steer, true, d.path())),
+            route(
+                "Task",
+                &json!({"prompt": "x"}),
+                &rc(Level::Steer, true, d.path())
+            ),
             Decision::Modify { .. }
         ));
     }
@@ -1346,7 +1655,11 @@ mod tests {
         );
         // no recognized prompt field → leave the call alone
         assert_eq!(
-            route("Agent", &json!({"foo": "bar"}), &rc(Level::Full, true, d.path())),
+            route(
+                "Agent",
+                &json!({"foo": "bar"}),
+                &rc(Level::Full, true, d.path())
+            ),
             Decision::Passthrough
         );
     }
@@ -1358,7 +1671,10 @@ mod tests {
         let d = tempdir().unwrap();
         let ti = json!({"command": "curl https://api.example.com/data | jq ."});
         match route("Bash", &ti, &rc(Level::Full, true, d.path())) {
-            Decision::Modify { reason, updated_input } => {
+            Decision::Modify {
+                reason,
+                updated_input,
+            } => {
                 assert_eq!(reason, NET_REDIRECT_REASON);
                 let c = updated_input["command"].as_str().unwrap();
                 assert!(c.starts_with("echo "), "command neutered to an echo: {c}");
@@ -1386,7 +1702,10 @@ mod tests {
         let d = tempdir().unwrap();
         let ti = json!({"command": "./gradlew test"});
         match route("Bash", &ti, &rc(Level::Full, true, d.path())) {
-            Decision::Modify { reason, updated_input } => {
+            Decision::Modify {
+                reason,
+                updated_input,
+            } => {
                 assert_eq!(reason, BUILD_REDIRECT_REASON);
                 let c = updated_input["command"].as_str().unwrap();
                 assert!(c.starts_with("echo "));
@@ -1490,9 +1809,9 @@ mod tests {
             "tool_selection_hierarchy",
             "WebFetch is denied",
             // the highest-impact additions over the old soft nudge:
-            "ToolSearch",            // deferred-tool bootstrap
-            "Think-in-Code",         // authoritative framing
-            "when_not_to_use",       // nuanced credibility
+            "ToolSearch",      // deferred-tool bootstrap
+            "Think-in-Code",   // authoritative framing
+            "when_not_to_use", // nuanced credibility
         ] {
             assert!(b.contains(needle), "session_block missing {needle:?}");
         }

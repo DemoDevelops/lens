@@ -51,7 +51,10 @@ async fn main() -> anyhow::Result<()> {
 
     let groups = aggregate(&results);
     println!("# ctxforge session-recovery benchmark\n");
-    print!("{}", render_recovery_markdown(&groups, &model.label(), pending));
+    print!(
+        "{}",
+        render_recovery_markdown(&groups, &model.label(), pending)
+    );
 
     let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/recovery/results");
     std::fs::create_dir_all(&out_dir)?;
@@ -75,13 +78,23 @@ mod tests {
     #[test]
     fn survival_oracle_presence() {
         let gt = json!({"file": "src/auth.rs"});
-        assert_eq!(mock_answer("## Files Modified\n- src/auth.rs", &["src/auth.rs".into()], &gt), gt);
+        assert_eq!(
+            mock_answer(
+                "## Files Modified\n- src/auth.rs",
+                &["src/auth.rs".into()],
+                &gt
+            ),
+            gt
+        );
         assert_eq!(
             mock_answer("nothing useful", &["src/auth.rs".into()], &gt),
             json!({"file": "UNKNOWN"})
         );
         // empty context (no-continuity floor) never survives.
-        assert_eq!(mock_answer("", &["x".into()], &gt), json!({"file": "UNKNOWN"}));
+        assert_eq!(
+            mock_answer("", &["x".into()], &gt),
+            json!({"file": "UNKNOWN"})
+        );
     }
 
     /// Mock run over the real scenarios: exercises scenario loading, the
@@ -90,7 +103,11 @@ mod tests {
     #[test]
     fn mock_run_ctxforge_beats_floor() {
         let scenarios = load_scenarios().expect("load scenarios");
-        assert!(scenarios.len() >= 8, "expected >= 8 scenarios, got {}", scenarios.len());
+        assert!(
+            scenarios.len() >= 8,
+            "expected >= 8 scenarios, got {}",
+            scenarios.len()
+        );
 
         let model = Model::Mock;
         let mut results = Vec::new();
@@ -99,10 +116,22 @@ mod tests {
             // hermetic (Context Mode requires bun + the plugin).
             let cf = recover(s, Arm::Ctxforge).unwrap().unwrap();
             let nc = recover(s, Arm::NoContinuity).unwrap().unwrap();
-            let cf_ok = score(&mock_answer(&cf, &s.evidence, &s.ground_truth), &s.ground_truth, &s.check);
-            let nc_ok = score(&mock_answer(&nc, &s.evidence, &s.ground_truth), &s.ground_truth, &s.check);
+            let cf_ok = score(
+                &mock_answer(&cf, &s.evidence, &s.ground_truth),
+                &s.ground_truth,
+                &s.check,
+            );
+            let nc_ok = score(
+                &mock_answer(&nc, &s.evidence, &s.ground_truth),
+                &s.ground_truth,
+                &s.check,
+            );
             assert!(cf_ok, "ctxforge failed to recover scenario {}", s.id);
-            assert!(!nc_ok, "no-continuity should fail scenario {} (floor)", s.id);
+            assert!(
+                !nc_ok,
+                "no-continuity should fail scenario {} (floor)",
+                s.id
+            );
             results.push((s.set.clone(), cf_ok, nc_ok));
         }
 
@@ -111,12 +140,27 @@ mod tests {
         assert!(results.iter().all(|(_, _, nc)| !*nc));
 
         // Full aggregation path works through run_scenario too (CM may be n/a).
-        let full: Vec<_> = scenarios.iter().map(|s| run_scenario(s, &model).unwrap()).collect();
+        let full: Vec<_> = scenarios
+            .iter()
+            .map(|s| run_scenario(s, &model).unwrap())
+            .collect();
         let groups = aggregate(&full);
-        assert_eq!(groups.len(), 2, "expected file_task + error_decision groups");
+        assert_eq!(
+            groups.len(),
+            2,
+            "expected file_task + error_decision groups"
+        );
         for g in &groups {
-            assert!(g.ctxforge >= g.no_continuity, "{}: ctxforge below floor", g.set);
-            assert!((g.ctxforge - 1.0).abs() < f64::EPSILON, "{}: ctxforge should recover all", g.set);
+            assert!(
+                g.ctxforge >= g.no_continuity,
+                "{}: ctxforge below floor",
+                g.set
+            );
+            assert!(
+                (g.ctxforge - 1.0).abs() < f64::EPSILON,
+                "{}: ctxforge should recover all",
+                g.set
+            );
         }
     }
 }

@@ -77,8 +77,8 @@ pub fn load_scenarios() -> anyhow::Result<Vec<Scenario>> {
     let mut out = Vec::new();
     for p in paths {
         let raw = std::fs::read_to_string(&p)?;
-        let s: Scenario =
-            serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("parsing {}: {e}", p.display()))?;
+        let s: Scenario = serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("parsing {}: {e}", p.display()))?;
         out.push(s);
     }
     Ok(out)
@@ -158,8 +158,7 @@ pub fn context_mode_hooks_dir() -> Option<PathBuf> {
         }
     }
     let home = std::env::var_os("HOME")?;
-    let base = PathBuf::from(home)
-        .join(".claude/plugins/cache/context-mode/context-mode");
+    let base = PathBuf::from(home).join(".claude/plugins/cache/context-mode/context-mode");
     let mut versions: Vec<PathBuf> = std::fs::read_dir(&base)
         .ok()?
         .flatten()
@@ -344,7 +343,10 @@ fn answer(model: &Model, ctx: &str, scenario: &Scenario) -> Value {
 /// in the recovered context.
 pub fn mock_answer(ctx: &str, evidence: &[String], ground_truth: &Value) -> Value {
     let lc = ctx.to_ascii_lowercase();
-    let derivable = !evidence.is_empty() && evidence.iter().all(|e| lc.contains(&e.to_ascii_lowercase()));
+    let derivable = !evidence.is_empty()
+        && evidence
+            .iter()
+            .all(|e| lc.contains(&e.to_ascii_lowercase()));
     if derivable {
         ground_truth.clone()
     } else {
@@ -361,7 +363,10 @@ pub fn mock_answer(ctx: &str, evidence: &[String], ground_truth: &Value) -> Valu
 const SYSTEM_PROMPT: &str = "You are resuming a software session after the conversation was compacted. Answer strictly from the provided Session Guide / context. If the context does not contain the answer, respond with the value \"UNKNOWN\" for that key. Respond with a single minified JSON object and nothing else.";
 
 fn format_user(ctx: &str, followup: &str, gt: &Value) -> String {
-    let keys: Vec<String> = gt.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    let keys: Vec<String> = gt
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
     format!(
         "Recovered context after compaction:\n{ctx}\n\nFollow-up question: {followup}\n\nRespond with ONLY a JSON object with exactly these keys: {keys:?}."
     )
@@ -400,8 +405,11 @@ fn call_anthropic(model: &str, system: &str, user: &str) -> Result<String, Strin
         .ok_or("no stdin")?
         .write_all(body.as_bytes())
         .map_err(|e| format!("writing body: {e}"))?;
-    let out = child.wait_with_output().map_err(|e| format!("waiting on curl: {e}"))?;
-    let resp: Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("parsing response: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("waiting on curl: {e}"))?;
+    let resp: Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parsing response: {e}"))?;
     if let Some(err) = resp.get("error") {
         return Err(format!("api error: {err}"));
     }
@@ -512,8 +520,12 @@ fn value_str(v: &Value) -> String {
 }
 
 fn exact_eq(got: Option<&Value>, expected: &Value) -> bool {
-    got.map(|g| value_str(g).trim().eq_ignore_ascii_case(value_str(expected).trim()))
-        .unwrap_or(false)
+    got.map(|g| {
+        value_str(g)
+            .trim()
+            .eq_ignore_ascii_case(value_str(expected).trim())
+    })
+    .unwrap_or(false)
 }
 
 fn contains_eq(got: Option<&Value>, expected: &Value) -> bool {
@@ -574,7 +586,11 @@ pub fn aggregate(results: &[ScenarioResult]) -> Vec<Group> {
             set: set.to_string(),
             n,
             no_continuity: nc_s as f64 / n as f64,
-            context_mode: if cm_a > 0 { Some(cm_s as f64 / cm_a as f64) } else { None },
+            context_mode: if cm_a > 0 {
+                Some(cm_s as f64 / cm_a as f64)
+            } else {
+                None
+            },
             ctxforge: cf_s as f64 / n as f64,
             cm_available: cm_a,
             cm_tokens: cm_tok,
@@ -610,7 +626,11 @@ pub fn render_recovery_markdown(groups: &[Group], model_label: &str, pending: bo
             }
             None => "n/a".to_string(),
         };
-        let cm_tok = if g.cm_available > 0 { g.cm_tokens.to_string() } else { "n/a".into() };
+        let cm_tok = if g.cm_available > 0 {
+            g.cm_tokens.to_string()
+        } else {
+            "n/a".into()
+        };
         s.push_str(&format!(
             "| {} | {} | {:.0}% | {} | {:.0}% | {} | {} | {} |\n",
             label(&g.set),

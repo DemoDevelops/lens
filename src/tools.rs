@@ -212,6 +212,15 @@ pub struct GraphQueryRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GraphFindRequest {
+    /// Natural-language description of the symbol you're looking for.
+    pub query: String,
+    /// Max matching symbols to return (default 20).
+    #[serde(default = "default_graph_limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GraphNeighborsRequest {
     /// Node id to expand around.
     pub node_id: String,

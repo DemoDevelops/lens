@@ -106,7 +106,9 @@ pub fn render_savings_markdown(rows: &[SavingsRow]) -> String {
     }
 
     s.push_str("\n### Raw bytes and naive-agent baseline (no /4 to trust)\n\n");
-    s.push_str("| Workload | Before (bytes) | After (bytes) | Without ctxforge, the agent… | Detail |\n");
+    s.push_str(
+        "| Workload | Before (bytes) | After (bytes) | Without ctxforge, the agent… | Detail |\n",
+    );
     s.push_str("| --- | ---: | ---: | --- | --- |\n");
     for r in rows {
         s.push_str(&format!(
@@ -223,6 +225,50 @@ pub fn code_search_at(scale: usize) -> (usize, usize) {
     (before, after)
 }
 
+/// ctx_search vs grep at a given scale: (grep-line bytes, ctx_search snippet bytes).
+/// The HONEST search baseline: grep "before" is every matching LINE (file:line:text),
+/// the realistic find alternative, not full-file reads. ctx_search returns the top-5
+/// ranked snippets per query (flat with scale); grep grows with the corpus, so this
+/// finds the hit-count where ctx_search overtakes grep.
+pub fn search_vs_grep_at(scale: usize) -> (usize, usize) {
+    let src = bench_root().join("savings/workloads/code_search");
+    let tmp = tempfile::tempdir().unwrap();
+    replicate_tree(&src, tmp.path(), scale);
+
+    let queries: Vec<String> = ["Logger", "retry", "config", "connect", "validate", "cache"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap();
+    index.index_path(tmp.path(), true).unwrap();
+    let after = serde_json::to_string(&index.search(&queries, 5).unwrap())
+        .unwrap()
+        .len();
+
+    let lq: Vec<String> = queries.iter().map(|q| q.to_ascii_lowercase()).collect();
+    let mut before = 0usize;
+    for entry in walkdir::WalkDir::new(tmp.path()).into_iter().flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+            let rel = entry
+                .path()
+                .strip_prefix(tmp.path())
+                .unwrap_or(entry.path())
+                .to_string_lossy();
+            for (i, line) in content.lines().enumerate() {
+                let l = line.to_ascii_lowercase();
+                if lq.iter().any(|q| l.contains(q)) {
+                    before += format!("{}:{}:{}\n", rel, i + 1, line).len();
+                }
+            }
+        }
+    }
+    (before, after)
+}
+
 /// Codebase-exploration (discovery) before/after at a given scale.
 ///
 /// Mirrors the production `Forge::maybe_compact`: a subgraph that would
@@ -250,13 +296,15 @@ pub fn codebase_explore_at(scale: usize) -> (usize, usize) {
 
     let outcome = discovery::discover(tmp.path(), None).unwrap();
     let summary = serde_json::to_string(&outcome.response).unwrap();
-    let view = gquery::query(&outcome.graph, "handle", None, 20);
+    let view = gquery::query(&outcome.graph, "handle", None, 20, &[]);
 
     const MAX_INLINE: usize = 8192;
     let raw = serde_json::json!({ "nodes": view.nodes, "edges": view.edges });
     let view_bytes = raw.to_string().len();
     let view_after = if view_bytes > MAX_INLINE {
-        serde_json::to_string(&compress::compact_json(&raw)).unwrap().len()
+        serde_json::to_string(&compress::compact_json(&raw))
+            .unwrap()
+            .len()
     } else {
         view_bytes
     };
@@ -295,7 +343,9 @@ pub fn issue_triage_at(scale: usize) -> (usize, usize) {
     }
     let value = serde_json::Value::Array(all);
     let before = serde_json::to_string(&value).unwrap().len();
-    let after = serde_json::to_string(&compress::compact_json(&value)).unwrap().len();
+    let after = serde_json::to_string(&compress::compact_json(&value))
+        .unwrap()
+        .len();
     (before, after)
 }
 
@@ -359,8 +409,12 @@ pub fn render_scale_curve_markdown(rows: &[ScaleRow]) -> String {
 /// live-recomputed `SavingsRow` / `ScaleRow` numbers already shown in full in
 /// the appendix.
 pub fn render_headline_savings_markdown(rows: &[SavingsRow], scale: &[ScaleRow]) -> String {
-    let find_scale =
-        |wl: &str, s: usize| scale.iter().find(|r| r.workload == wl && r.scale == s).unwrap();
+    let find_scale = |wl: &str, s: usize| {
+        scale
+            .iter()
+            .find(|r| r.workload == wl && r.scale == s)
+            .unwrap()
+    };
     let find_row = |mech: &str| rows.iter().find(|r| r.mechanism == mech).unwrap();
 
     // Code search (index): realistic session = 10×/50× (94–99%); anchor bytes at 10×.
@@ -563,7 +617,7 @@ async fn codebase_explore() -> anyhow::Result<SavingsRow> {
     let outcome = discovery::discover(&dir, None)?;
     let summary = serde_json::to_string(&outcome.response)?;
     // Representative scoped query an agent would run after discovery.
-    let view = gquery::query(&outcome.graph, "handle", None, 20);
+    let view = gquery::query(&outcome.graph, "handle", None, 20, &[]);
     let view_json = serde_json::to_string(&view)?;
     let after = summary.len() + view_json.len();
 

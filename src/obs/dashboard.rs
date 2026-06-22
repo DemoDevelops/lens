@@ -197,25 +197,40 @@ const INDEX_HTML: &str = r##"<!doctype html>
   button#scope{background:var(--panel);color:var(--dim);border:1px solid var(--line);
     border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 6px;cursor:pointer}
   button#scope.on{color:var(--accent);border-color:var(--accent)}
+  button#view{background:var(--panel);color:var(--dim);border:1px solid var(--line);
+    border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 6px;cursor:pointer}
+  body.full button#view{color:var(--accent);border-color:var(--accent)}
+  #fullcharts{display:none}
+  body.full #fullcharts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin-top:3px}
+  .bigpanel h2{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin:0 0 7px}
+  .bigpanel canvas{width:100%;max-width:100%;height:120px;display:block}
+  .hbars{display:flex;flex-direction:column;gap:5px}
+  .hbar{display:grid;grid-template-columns:88px 1fr 60px;align-items:center;gap:8px;font-size:10px}
+  .hbar .lbl{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hbar .track{background:var(--bg);border-radius:3px;height:11px;overflow:hidden;display:flex}
+  .hbar .fill{height:100%;background:var(--accent)}
+  .hbar .fill.dim{background:var(--line)}
+  .hbar .val{text-align:right;color:var(--ink)}
+  .hbar.z{opacity:.35}
   .cost{cursor:pointer;display:flex;align-items:baseline;gap:6px;user-select:none}
   .cost .dollars{color:var(--accent);font-weight:700;font-size:15px;letter-spacing:.3px}
   .cost .basis{color:var(--dim);font-size:10px;border-bottom:1px dotted var(--line)}
   .cost:hover .basis{color:var(--ink)}
   .saved-top{color:var(--dim);font-size:10px}
-  main{padding:7px 10px;display:grid;gap:7px}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:6px 9px}
+  main{padding:9px 12px;display:grid;gap:10px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 11px;min-width:0;overflow-x:auto}
   .panel h2{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin:0 0 4px}
   .seclabel{color:var(--dim);font-size:9px;letter-spacing:.3px;margin:2px 0 -3px}
-  .strip{display:flex;flex-wrap:wrap;gap:3px 20px;align-items:baseline}
+  .strip{display:flex;flex-wrap:wrap;gap:6px 22px;align-items:baseline}
   .strip .st i{color:var(--dim);font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.4px;margin-right:4px}
   .strip .st b{font-size:14px;font-weight:600}
-  .charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-  .ch{display:flex;flex-direction:column}
+  .charts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+  .ch{display:flex;flex-direction:column;min-width:0}
   .ch>span{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;display:flex;justify-content:space-between}
   .ch>span b{color:var(--accent);font-size:11px}
-  .ch canvas{width:100%;height:28px;display:block;margin-top:2px}
-  .row2{display:grid;grid-template-columns:1fr 1fr;gap:7px}
-  @media(max-width:560px){.row2{grid-template-columns:1fr}}
+  .ch canvas{width:100%;max-width:100%;height:28px;display:block;margin-top:2px}
+  .row2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px}
+  @media(max-width:760px){.charts,.row2,body.full #fullcharts{grid-template-columns:1fr}}
   table{width:100%;border-collapse:collapse;font-size:10px}
   th,td{text-align:right;padding:2px 6px;border-bottom:1px solid var(--line)}
   th:first-child,td:first-child{text-align:left}
@@ -246,6 +261,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
   <select id="win" title="time window — how far back to scope savings + activity"></select>
   <input id="winAt" type="text" placeholder="2pm" size="6" title="custom start time, e.g. 2pm or 14:30 — Enter to apply">
   <button id="scope" title="toggle global view: total tokens across every repo and launch profile">this repo</button>
+  <button id="view" title="toggle mini view for a narrow pane (cmux); full view uses the whole window">mini</button>
   <div class="grow"></div>
   <div class="cost" id="cost" title="estimated $ saved — click to switch model rate"><span class="dollars" id="dollars">$—</span><span class="basis" id="basis">@ —</span></div>
   <div class="saved-top" id="savedTop">— saved</div>
@@ -272,6 +288,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <div class="actrow"><canvas id="actChart"></canvas><span class="rate" id="actRate">—</span></div>
     <div class="cats" id="byCat"></div>
   </div>
+  <section id="fullcharts">
+    <div class="panel bigpanel"><h2>tokens saved (cumulative)</h2><canvas id="cumChart"></canvas></div>
+    <div class="panel bigpanel"><h2>saved tokens by tool</h2><div class="hbars" id="savedByTool"></div></div>
+    <div class="panel bigpanel"><h2>tool usage (ops)</h2><div class="hbars" id="opsByTool"></div></div>
+    <div class="panel bigpanel"><h2>compression per tool &middot; returned (filled) + saved (dim)</h2><div class="hbars" id="compByTool"></div></div>
+  </section>
 </main>
 <footer id="footer">—</footer>
 <script>
@@ -404,6 +426,14 @@ function spark(id,series,color){
   x.strokeStyle=color; x.lineWidth=1.5; x.stroke();
 }
 function stat(k,v){return `<span class="st"><i>${k}</i><b>${v}</b></span>`;}
+function hbar(label,frac,val,zero){
+  const w=Math.max(0,Math.min(100,Math.round(frac*100)));
+  return `<div class="hbar${zero?' z':''}"><span class="lbl">${label}</span><span class="track"><span class="fill" style="width:${w}%"></span></span><span class="val">${val}</span></div>`;
+}
+function compbar(label,raw,ret,maxraw){
+  const retW=ret/maxraw*100, savW=Math.max(0,(raw-ret)/maxraw*100), pct=raw>0?Math.round((raw-ret)/raw*100):0;
+  return `<div class="hbar"><span class="lbl">${label}</span><span class="track"><span class="fill" style="width:${retW}%"></span><span class="fill dim" style="width:${savW}%"></span></span><span class="val">${pct}%</span></div>`;
+}
 function setStale(){
   document.getElementById('dot').classList.add('stale');
   document.getElementById('status').textContent='disconnected — retrying';
@@ -433,12 +463,12 @@ async function tick(){
   const overallPct=d.raw_bytes_in>0?Math.round((d.raw_bytes_in-d.bytes_returned)/d.raw_bytes_in*100):0;
   const fired=ADOPTION_TOOLS.filter(n=>d.by_tool.some(t=>t.tool===n&&t.ops>0)).length;
   document.getElementById('strip').innerHTML=
-    stat('ops',d.ops.toLocaleString()+' ('+d.errors+'e·'+d.timeouts+'t)')+
+    stat('ops',d.ops.toLocaleString()+' ('+d.errors+' err, '+d.timeouts+' timeout)')+
     stat('raw in',humanBytes(d.raw_bytes_in))+
     stat('returned',humanBytes(d.bytes_returned))+
     stat('saved',humanCount(savedMcp)+' tok')+
     stat('save%',overallPct+'%')+
-    stat('ctx fired',fired+'/'+ADOPTION_TOOLS.length)+
+    stat('tools used',fired+'/'+ADOPTION_TOOLS.length)+
     stat('offloaded',d.offloaded_ops+' ('+humanBytes(d.offloaded_bytes)+')')+
     stat('lock',d.lock_wait_ms+' ms');
 
@@ -516,7 +546,26 @@ async function tick(){
   document.getElementById('footer').textContent=
     `store ${humanBytes(d.store_size)} · index ${d.index_chunks} · `+
     `graph ${d.graph_nodes}n/${d.graph_edges}e · updated ${d.ts}`;
+
+  // Expansive full-view charts (computed always; CSS shows them only in full mode).
+  spark('cumChart', hist.map(p=>p.saved), '#4cc4b0');
+  const tt=d.by_tool;
+  const bySaved=tt.filter(t=>t.saved>0).sort((a,b)=>b.saved-a.saved).slice(0,12);
+  const maxSaved=Math.max(1,...bySaved.map(t=>t.saved));
+  document.getElementById('savedByTool').innerHTML=bySaved.map(t=>hbar(t.tool,t.saved/maxSaved,humanCount(t.saved),false)).join('')||'<span class="dim2">no savings yet</span>';
+  const byOps=tt.filter(t=>t.ops>0).sort((a,b)=>b.ops-a.ops).slice(0,12);
+  const maxOps=Math.max(1,...byOps.map(t=>t.ops));
+  document.getElementById('opsByTool').innerHTML=byOps.map(t=>hbar(t.tool,t.ops/maxOps,t.ops.toLocaleString(),false)).join('')||'<span class="dim2">no calls yet</span>';
+  const comp=tt.filter(t=>t.raw>0).sort((a,b)=>b.raw-a.raw).slice(0,12);
+  const maxCompRaw=Math.max(1,...comp.map(t=>t.raw));
+  document.getElementById('compByTool').innerHTML=comp.map(t=>compbar(t.tool,t.raw,t.returned,maxCompRaw)).join('')||'<span class="dim2">no offloading tool calls yet</span>';
 }
+let view='mini';
+const viewBtn=document.getElementById('view');
+function applyView(){document.body.classList.toggle('full',view==='full');viewBtn.textContent=view==='full'?'mini':'full';}
+try{const v=localStorage.getItem('lens_view');if(v==='full')view='full';}catch(e){}
+applyView();
+viewBtn.addEventListener('click',function(){view=view==='full'?'mini':'full';try{localStorage.setItem('lens_view',view);}catch(e){}applyView();tick();});
 tick(); setInterval(tick,1000);
 </script>
 </body>

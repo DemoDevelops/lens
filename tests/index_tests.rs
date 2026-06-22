@@ -1,6 +1,6 @@
 //! Integration tests for FTS5 index + search.
 
-use ctxforge::index::Index;
+use lens::index::Index;
 use std::fs;
 use tempfile::tempdir;
 

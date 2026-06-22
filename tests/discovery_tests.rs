@@ -1,6 +1,6 @@
 //! Integration tests for discovery + graph traversal across languages.
 
-use ctxforge::discovery::{self, query};
+use lens::discovery::{self, query};
 use std::fs;
 use tempfile::tempdir;
 
@@ -26,7 +26,7 @@ fn multi_language_discovery() {
 }
 
 #[test]
-fn graph_query_and_path_on_discovered_repo() {
+fn lens_symbol_and_path_on_discovered_repo() {
     let dir = tempdir().unwrap();
     fs::write(
         dir.path().join("chain.rs"),

@@ -1,6 +1,6 @@
 //! Integration tests for the reversible store and JSON compaction.
 
-use ctxforge::store::{compress, Store};
+use lens::store::{compress, Store};
 use serde_json::json;
 use tempfile::tempdir;
 

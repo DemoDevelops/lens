@@ -1,15 +1,15 @@
-//! Observability: a side channel that makes a live ctxforge run watchable.
+//! Observability: a side channel that makes a live lens run watchable.
 //!
 //! Three pieces, all **additive** — no tool result payload changes, and nothing
 //! here ever writes to the MCP server's stdout (that is JSON-RPC only):
-//!   * an always-on, append-only operation log (`.ctxforge/ops.log`, JSONL) —
+//!   * an always-on, append-only operation log (`.lens/ops.log`, JSONL) —
 //!     one summary record per tool invocation (see [`OpRecord`]);
-//!   * an opt-in per-op decision trace (`.ctxforge/explain.log`, `CTXFORGE_EXPLAIN=1`);
+//!   * an opt-in per-op decision trace (`.lens/explain.log`, `LENS_EXPLAIN=1`);
 //!   * concurrency plumbing shared by every SQLite store ([`configure_conn`]):
 //!     WAL mode + a busy handler that both retries and accounts for time spent
 //!     waiting on a locked DB, surfaced as `lock_wait_ms`.
 //!
-//! The `ctxforge stats` / `ctxforge verify` CLI subcommands ([`stats`], [`verify`])
+//! The `lens stats` / `lens verify` CLI subcommands ([`stats`], [`verify`])
 //! read these files back; they are separate processes whose stdout is their own.
 
 pub mod dashboard;
@@ -87,12 +87,12 @@ pub struct OpLog {
 }
 
 impl OpLog {
-    /// Open the op log under `dir`. Honors `CTXFORGE_OPS_LOG_MAX` (rotation cap)
-    /// and `CTXFORGE_EXPLAIN` (verbose trace). Never fails: logging must not be
+    /// Open the op log under `dir`. Honors `LENS_OPS_LOG_MAX` (rotation cap)
+    /// and `LENS_EXPLAIN` (verbose trace). Never fails: logging must not be
     /// able to break a tool call.
     pub fn open(dir: &Path) -> Self {
         let _ = std::fs::create_dir_all(dir);
-        let max_bytes = std::env::var("CTXFORGE_OPS_LOG_MAX")
+        let max_bytes = std::env::var("LENS_OPS_LOG_MAX")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_OPS_LOG_MAX);
@@ -112,7 +112,7 @@ impl OpLog {
         }
     }
 
-    /// True if `CTXFORGE_EXPLAIN` requested the verbose per-op trace.
+    /// True if `LENS_EXPLAIN` requested the verbose per-op trace.
     pub fn explain_enabled(&self) -> bool {
         self.explain_enabled
     }
@@ -238,12 +238,12 @@ fn rotate_if_needed_at(path: &Path, max_bytes: u64, next_len: u64) {
 
 /// The machine-global `ops.log` mirror for a per-repo `local` log: `home_root()`
 /// joined with `ops.log`, unless that equals `local` (the data dir already is home).
-/// In test builds the mirror is suppressed unless `CTXFORGE_HOME` is set, so unit
-/// tests never append to the developer's real `~/.ctxforge/ops.log`.
+/// In test builds the mirror is suppressed unless `LENS_HOME` is set, so unit
+/// tests never append to the developer's real `~/.lens/ops.log`.
 fn global_ops_path(local: &Path) -> Option<PathBuf> {
     #[cfg(test)]
     {
-        if std::env::var_os("CTXFORGE_HOME").is_none() {
+        if std::env::var_os("LENS_HOME").is_none() {
             return None;
         }
     }
@@ -261,7 +261,7 @@ fn rotated_path(path: &Path) -> PathBuf {
 
 fn explain_env() -> bool {
     matches!(
-        std::env::var("CTXFORGE_EXPLAIN").ok().as_deref(),
+        std::env::var("LENS_EXPLAIN").ok().as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
 }
@@ -305,8 +305,8 @@ impl OpHandle {
             session_id: self
                 .log
                 .current_session()
-                .or_else(|| std::env::var("CTXFORGE_SESSION_ID").ok()),
-            agent_id: std::env::var("CTXFORGE_AGENT_ID").unwrap_or_else(|_| format!("pid-{pid}")),
+                .or_else(|| std::env::var("LENS_SESSION_ID").ok()),
+            agent_id: std::env::var("LENS_AGENT_ID").unwrap_or_else(|_| format!("pid-{pid}")),
             pid,
             tool: self.tool.to_string(),
             input_summary: self.input_summary,
@@ -327,10 +327,10 @@ impl OpHandle {
 }
 
 // ---------------------------------------------------------------------------
-// SQLite concurrency plumbing (shared by every ctxforge DB)
+// SQLite concurrency plumbing (shared by every lens DB)
 // ---------------------------------------------------------------------------
 
-/// Configure a freshly-opened ctxforge SQLite connection for safe concurrent
+/// Configure a freshly-opened lens SQLite connection for safe concurrent
 /// use: WAL journaling (concurrent readers don't block the single writer) plus a
 /// busy handler that retries on contention instead of erroring with "database is
 /// locked", while accumulating waited time into [`LOCK_WAIT_MS`].
@@ -362,14 +362,14 @@ pub fn json_len<T: Serialize>(v: &T) -> u64 {
     serde_json::to_vec(v).map(|b| b.len() as u64).unwrap_or(0)
 }
 
-/// Resolve the data dir the way the server does: `$CTXFORGE_DIR`, else
-/// `<cwd>/.ctxforge`. Used by the read-only CLI subcommands.
+/// Resolve the data dir the way the server does: `$LENS_DIR`, else
+/// `<cwd>/.lens`. Used by the read-only CLI subcommands.
 pub fn data_dir() -> PathBuf {
-    match std::env::var_os("CTXFORGE_DIR") {
+    match std::env::var_os("LENS_DIR") {
         Some(d) => PathBuf::from(d),
         None => std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
-            .join(".ctxforge"),
+            .join(".lens"),
     }
 }
 
@@ -428,16 +428,13 @@ mod tests {
     fn append_writes_one_parseable_line_per_op() {
         let dir = tempdir().unwrap();
         let log = OpLog::open(dir.path());
-        log.start(
-            "ctx_execute",
-            json!({"language": "python", "code_bytes": 10}),
-        )
-        .finish(8000, 100, Some("abc".into()), "ok", "stored", None);
+        log.start("lens_run", json!({"language": "python", "code_bytes": 10}))
+            .finish(8000, 100, Some("abc".into()), "ok", "stored", None);
         let raw = std::fs::read_to_string(dir.path().join("ops.log")).unwrap();
         let lines: Vec<&str> = raw.lines().collect();
         assert_eq!(lines.len(), 1);
         let rec: OpRecord = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(rec.tool, "ctx_execute");
+        assert_eq!(rec.tool, "lens_run");
         assert_eq!(rec.raw_bytes_in, 8000);
         assert_eq!(rec.bytes_returned, 100);
         assert_eq!(rec.tokens_saved_est, (8000 - 100) / 4);
@@ -451,7 +448,7 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("current_session"), "abc-123\n").unwrap();
         let log = OpLog::open(dir.path());
-        log.start("ctx_execute", json!({}))
+        log.start("lens_run", json!({}))
             .finish(10, 5, None, "ok", "", None);
         let raw = std::fs::read_to_string(dir.path().join("ops.log")).unwrap();
         let rec: OpRecord = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
@@ -461,11 +458,11 @@ mod tests {
     #[test]
     fn rotation_at_cap_moves_to_dot_one() {
         let dir = tempdir().unwrap();
-        std::env::set_var("CTXFORGE_OPS_LOG_MAX", "400");
+        std::env::set_var("LENS_OPS_LOG_MAX", "400");
         let log = OpLog::open(dir.path());
-        std::env::remove_var("CTXFORGE_OPS_LOG_MAX");
+        std::env::remove_var("LENS_OPS_LOG_MAX");
         for _ in 0..50 {
-            log.start("ctx_search", json!({"queries": 1}))
+            log.start("lens_search", json!({"queries": 1}))
                 .finish(10, 10, None, "ok", "", None);
         }
         let main = dir.path().join("ops.log");
@@ -479,15 +476,15 @@ mod tests {
         let dir = tempdir().unwrap();
         // Off by default.
         let log = OpLog::open(dir.path());
-        log.start("ctx_execute", json!({}))
+        log.start("lens_run", json!({}))
             .finish(0, 0, None, "ok", "", Some("trail".into()));
         assert!(!dir.path().join("explain.log").exists());
 
-        std::env::set_var("CTXFORGE_EXPLAIN", "1");
+        std::env::set_var("LENS_EXPLAIN", "1");
         let log = OpLog::open(dir.path());
-        std::env::remove_var("CTXFORGE_EXPLAIN");
+        std::env::remove_var("LENS_EXPLAIN");
         let trail = log.explain(|| "decision: offloaded 47KB".to_string());
-        log.start("ctx_execute", json!({}))
+        log.start("lens_run", json!({}))
             .finish(48000, 100, Some("r".into()), "ok", "", trail);
         let explain = std::fs::read_to_string(dir.path().join("explain.log")).unwrap();
         assert!(explain.contains("decision: offloaded 47KB"));
@@ -498,17 +495,17 @@ mod tests {
         // home_root() is env-driven and process-global; serialize with other mutators.
         let _g = crate::rtk::env_test_lock();
         let home = tempdir().unwrap();
-        std::env::set_var("CTXFORGE_HOME", home.path());
+        std::env::set_var("LENS_HOME", home.path());
         let data = tempdir().unwrap();
         OpLog::open(data.path())
-            .start("ctx_execute", json!({}))
+            .start("lens_run", json!({}))
             .finish(8000, 100, Some("r".into()), "ok", "", None);
-        std::env::remove_var("CTXFORGE_HOME");
+        std::env::remove_var("LENS_HOME");
         // The per-repo log carries the record...
         let local = std::fs::read_to_string(data.path().join("ops.log")).unwrap();
-        assert!(local.contains("ctx_execute"));
+        assert!(local.contains("lens_run"));
         // ...and so does the machine-global mirror under home_root().
         let global = std::fs::read_to_string(home.path().join("ops.log")).unwrap();
-        assert!(global.contains("ctx_execute"));
+        assert!(global.contains("lens_run"));
     }
 }

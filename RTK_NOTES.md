@@ -1,6 +1,6 @@
 # RTK_NOTES — T0 recon (verified on-machine, 2026-06-15)
 
-Captured facts for the ctxforge ⇄ RTK integration (see `CTXFORGE_RTK_PLAN.md`).
+Captured facts for the lens ⇄ RTK integration (see `LENS_RTK_PLAN.md`).
 Everything below was read from the **actual** RTK `v0.28.2` source / binary and
 the headroom source — not guessed. Sub-agents: re-read the cited source before
 implementing; this file is the frozen interface contract for wave 2.
@@ -20,7 +20,7 @@ implementing; this file is the frozen interface contract for wave 2.
   - Darwin: `arm64`→`aarch64-apple-darwin`, else `x86_64-apple-darwin`
   - Linux: `aarch64`→`aarch64-unknown-linux-gnu`, else `x86_64-unknown-linux-musl`
   - Windows: `x86_64-pc-windows-msvc`
-  - Override env: headroom uses `HEADROOM_RTK_TARGET`; ctxforge mirror → `CTXFORGE_RTK_TARGET`.
+  - Override env: headroom uses `HEADROOM_RTK_TARGET`; lens mirror → `LENS_RTK_TARGET`.
 - **Archive layout (verified):** `tar tzf` shows a **single top-level `rtk`**. So
   `tar xzf <archive> -C <bindir>` lands `<bindir>/rtk` directly. `chmod +x` it.
 - **Verify after extract:** run `<bindir>/rtk --version` → must print `rtk 0.28.2`.
@@ -33,24 +33,24 @@ implementing; this file is the frozen interface contract for wave 2.
 Mirrors headroom `paths.py`: `workspace_dir()` = `$HEADROOM_WORKSPACE_DIR` or
 `~/.headroom`; `bin_dir()` = `workspace_dir()/bin`; `RTK_BIN_PATH` = `bin_dir()/rtk`.
 
-ctxforge mapping (implemented in `rtk/mod.rs`):
-- `home_root()` = `$CTXFORGE_HOME` if set, else `~/.ctxforge`  (≙ `$HEADROOM_WORKSPACE_DIR`)
-- `bin_dir()`   = `home_root()/bin`  → binary at `~/.ctxforge/bin/rtk`
+lens mapping (implemented in `rtk/mod.rs`):
+- `home_root()` = `$LENS_HOME` if set, else `~/.lens`  (≙ `$HEADROOM_WORKSPACE_DIR`)
+- `bin_dir()`   = `home_root()/bin`  → binary at `~/.lens/bin/rtk`
 - `rtk_bin_path()` = `bin_dir()/rtk` if it exists, **else** `which rtk` (PATH scan)
 
 > **Deviation from headroom (intentional):** headroom's `get_rtk_path()` checks
-> `which rtk` **first**, managed dir second. ctxforge is **managed-first** so the
+> `which rtk` **first**, managed dir second. lens is **managed-first** so the
 > pinned v0.28.2 binary is authoritative once installed (the "ship + own" posture),
 > falling back to PATH only when not yet installed.
 
-> `~/.ctxforge/bin/rtk` is the **global home** — distinct from the per-project data
-> dir `$CTXFORGE_DIR` (`<proj>/.ctxforge`, holds ops.log/session.db). NB: `~/.rtk/bin`
+> `~/.lens/bin/rtk` is the **global home** — distinct from the per-project data
+> dir `$LENS_DIR` (`<proj>/.lens`, holds ops.log/session.db). NB: `~/.rtk/bin`
 > is RTK's *own* `rtk init` shim, a separate artifact — **not** where we ship the binary.
 
 ## 3. `rtk --version` (verified on this machine)
 
 ```
-$ ~/.ctxforge/bin/rtk --version
+$ ~/.lens/bin/rtk --version
 rtk 0.28.2
 ```
 
@@ -109,11 +109,11 @@ Type notes that bit us if wrong:
 - With no period flag, `daily`/`weekly`/`monthly` keys are **absent** →
   `#[serde(default, skip_serializing_if = "Option::is_none")]`, typed `Option<Value>`.
 
-`ctxforge`'s `GainSummary` (frozen in `src/rtk/mod.rs`) deserializes both samples;
+`lens`'s `GainSummary` (frozen in `src/rtk/mod.rs`) deserializes both samples;
 `src/rtk/gain.rs::tests::gain_summary_deserializes_captured_sample` proves it.
 
 **Honest mapping for the `rtk_shell` OpRecord (T2):** `tokens_saved_est = Δtotal_saved`
-(RTK's own number — do **NOT** re-apply ctxforge's `/4` byte estimate). Stash
+(RTK's own number — do **NOT** re-apply lens's `/4` byte estimate). Stash
 `total_input`/`total_output` (token counts) in `input_summary`/`note`. `raw_bytes_in`
 /`bytes_returned` stay 0 (RTK measures tokens, not bytes) so the byte planes aren't polluted.
 
@@ -126,22 +126,22 @@ Type notes that bit us if wrong:
 `-g/--global` (patch `~/.claude/...`), `--show`, `--claude-md` (legacy), `--hook-only`
 (hook, no RTK.md), `--auto-patch` (patch settings.json non-interactively), `--no-patch`,
 `--uninstall` (remove all RTK artifacts — **requires `--global`**).
-- **Register:** ctxforge does **not** rely on `rtk init` to patch settings, because
+- **Register:** lens does **not** rely on `rtk init` to patch settings, because
   `rtk init --global` ignores `$CLAUDE_CONFIG_DIR` and only ever writes `~/.claude`
   (`resolve_claude_dir = dirs::home_dir()/.claude`). A Claude Code launched with
   `CLAUDE_CONFIG_DIR=~/.claude-personal` (this machine) would never see that hook.
   So install runs `rtk init --global --hook-only --no-patch` (generates ONLY the
   hook script at `~/.claude/hooks/rtk-rewrite.sh` — no settings patch, no RTK.md, no
-  CLAUDE.md edit), then **ctxforge patches the settings.json of the active config
+  CLAUDE.md edit), then **lens patches the settings.json of the active config
   dir itself** (`$CLAUDE_CONFIG_DIR` else `~/.claude`), copying the script into that
   dir's `hooks/` so the hook is self-contained where the running Claude Code reads.
-- **Unregister:** ctxforge removes its own PreToolUse `rtk-rewrite.sh` entry from
+- **Unregister:** lens removes its own PreToolUse `rtk-rewrite.sh` entry from
   that settings.json + the copied script (it does NOT run `rtk init --uninstall`,
   which would also delete a pre-existing user `RTK.md`).
 
 **`rtk gain`** (`Commands::Gain`): `-p/--project` (scope to cwd), `--format <text|json|csv>`,
 plus `--graph/--history/--quota/--daily/--weekly/--monthly/--all/--failures`.
-- ctxforge calls: `rtk gain --format json` (global) / `rtk gain --format json --project`.
+- lens calls: `rtk gain --format json` (global) / `rtk gain --format json --project`.
 
 ## 6. Hook registration + detection (`rtk` `src/init.rs` @ v0.28.2)
 
@@ -155,20 +155,20 @@ plus `--graph/--history/--quota/--daily/--weekly/--monthly/--all/--failures`.
 
 Idempotency = `hook_already_present`; uninstall greps `command.contains("rtk-rewrite.sh")`.
 
-**ctxforge detection (`rtk_hook_registered` in `rtk/mod.rs`):** read the active
-config dir's `settings.json` (`claude_settings_path` = `$CTXFORGE_CLAUDE_SETTINGS`
+**lens detection (`rtk_hook_registered` in `rtk/mod.rs`):** read the active
+config dir's `settings.json` (`claude_settings_path` = `$LENS_CLAUDE_SETTINGS`
 test seam, else `claude_config_dir()/settings.json` = `$CLAUDE_CONFIG_DIR` else
 `~/.claude`), scan `hooks.PreToolUse[].hooks[].command` for any string containing
 **`"rtk"`**. This catches v0.28.2's `rtk-rewrite.sh` **and** older `rtk hook` markers.
-Registration + detection share `claude_config_dir()`, so the hook ctxforge writes is
+Registration + detection share `claude_config_dir()`, so the hook lens writes is
 exactly the one it reads (and the one the running Claude Code fires).
 
 **Live-machine state at T0:** `rtk` was NOT on PATH (binary absent), but
 `~/.claude/settings.json` already had a stale `"command": "rtk hook claude"` PreToolUse
-entry (leftover from a prior RTK install). `~/.ctxforge/` already existed (held `session.db`).
-T0 installed the binary to `~/.ctxforge/bin/rtk`.
+entry (leftover from a prior RTK install). `~/.lens/` already existed (held `session.db`).
+T0 installed the binary to `~/.lens/bin/rtk`.
 
-## 7. Coexistence rule — RTK owns Bash, ctxforge defers (T4)
+## 7. Coexistence rule — RTK owns Bash, lens defers (T4)
 
 `route()` must stay **pure** (the existing routing unit tests construct `RouteCtx`
 directly and must keep passing **regardless of machine RTK state** — and the done-when
@@ -183,21 +183,21 @@ Therefore:
   `rtk_active: rtk::rtk_active(&data_dir)`. (hook.rs is touched by **no other wave-2 task**,
   so this stays parallel-safe.)
 - `rtk::rtk_active(_data_dir)` = **env override wins** (deterministic, mirrors
-  `CTXFORGE_ROUTING_MCP`): `CTXFORGE_DEFER_BASH_TO_RTK` truthy ⇒ true, falsey ⇒ false;
+  `LENS_ROUTING_MCP`): `LENS_DEFER_BASH_TO_RTK` truthy ⇒ true, falsey ⇒ false;
   unset ⇒ `rtk_available() && rtk_hook_registered()`.
-- **T5 must** add `.env("CTXFORGE_DEFER_BASH_TO_RTK", "0")` to the existing
+- **T5 must** add `.env("LENS_DEFER_BASH_TO_RTK", "0")` to the existing
   `tests/routing_tests.rs::run_hook` harness so those Bash-wrapping integration tests stay
   green after rtk is installed on the machine.
 
 ## 8. Tests are network-free via a **stub `rtk`** (T2/T3/T5)
 
-No test downloads. Point resolution at a stub by setting `CTXFORGE_HOME=<tempdir>` and
+No test downloads. Point resolution at a stub by setting `LENS_HOME=<tempdir>` and
 writing an executable `<tempdir>/bin/rtk` that answers:
 - `--version` → `rtk 0.28.2`
 - `gain --format json` → canned `GainSummary` JSON (e.g. the §4 sample, or a small one)
 
 Then `rtk_bin_path()` resolves the stub (managed-first), `read_gain()` parses its output,
-and `rtk_active` is forced via `CTXFORGE_DEFER_BASH_TO_RTK`. The real download path (T1) is
+and `rtk_active` is forced via `LENS_DEFER_BASH_TO_RTK`. The real download path (T1) is
 verified **on-machine only** (already done in T0).
 
 ## 9. Interface frozen by T0 (everyone compiles against this; do not re-touch `mod.rs`)
@@ -213,7 +213,7 @@ verified **on-machine only** (already done in T0).
 - `pub fn claude_settings_path() -> Option<PathBuf>` / `pub fn rtk_hook_registered() -> bool`
 - `pub fn rtk_active(_data_dir: &Path) -> bool`  (env override, else available && hook)
 - `pub fn run_rtk(args: &[&str]) -> Result<std::process::Output>`  (shared CLI runner)
-- `pub fn run_cli(args: &[String]) -> Result<()>`  (`ctxforge rtk install|status|uninstall|sync`)
+- `pub fn run_cli(args: &[String]) -> Result<()>`  (`lens rtk install|status|uninstall|sync`)
 
 `src/rtk/install.rs` — **T1 owns**: `pub fn install()/status()/uninstall() -> Result<()>`
 (T0 stubs that `bail!`).
@@ -222,7 +222,7 @@ verified **on-machine only** (already done in T0).
 `pub fn parse_gain(&str) -> Result<GainSummary>` (T0, real + tested),
 `pub fn read_gain(Scope) -> Result<GainSummary>` (T0 implements: runs `rtk gain` + parses —
 so T3 can test against a stub), `pub fn sync() -> Result<()>` (T0 stubs `bail!`; **T2 implements**:
-watermark at `$CTXFORGE_DIR/rtk_watermark.json` + `rtk_shell` OpRecord with
+watermark at `$LENS_DIR/rtk_watermark.json` + `rtk_shell` OpRecord with
 `tokens_saved_est = Δtotal_saved`).
 
 `src/lib.rs` (+`pub mod rtk;`), `src/main.rs` (+`Some("rtk") => rtk::run_cli`).

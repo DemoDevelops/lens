@@ -1,5 +1,5 @@
-//! End-to-end session continuity: drive the real `ctxforge hook …` and
-//! `ctxforge session …` subcommands over stdin/stdout, exercising the actual
+//! End-to-end session continuity: drive the real `lens hook …` and
+//! `lens session …` subcommands over stdin/stdout, exercising the actual
 //! Claude Code hook contract (not just the library internals).
 
 use std::io::Write;
@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
-/// Run `ctxforge <args…>` with `stdin_json` on stdin and `CTXFORGE_DIR` set to
+/// Run `lens <args…>` with `stdin_json` on stdin and `LENS_DIR` set to
 /// `data`. Returns (stdout, exit_ok).
 fn run(
     args: &[&str],
@@ -15,17 +15,17 @@ fn run(
     stdin_json: &Value,
     extra_env: &[(&str, &str)],
 ) -> (String, bool) {
-    let bin = env!("CARGO_BIN_EXE_ctxforge");
+    let bin = env!("CARGO_BIN_EXE_lens");
     let mut cmd = Command::new(bin);
     cmd.args(args)
-        .env("CTXFORGE_DIR", data)
+        .env("LENS_DIR", data)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let mut child = cmd.spawn().expect("spawn ctxforge");
+    let mut child = cmd.spawn().expect("spawn lens");
     child
         .stdin
         .take()
@@ -120,7 +120,7 @@ fn session_install_conflict_and_uninstall() {
         &["session", "install"],
         data.path(),
         &json!({}),
-        &[("CTXFORGE_SETTINGS", &settings_str)],
+        &[("LENS_SETTINGS", &settings_str)],
     );
     assert!(ok, "install should succeed: {out}");
     let root: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
@@ -146,22 +146,22 @@ fn session_install_conflict_and_uninstall() {
         &["session", "install"],
         data.path(),
         &json!({}),
-        &[("CTXFORGE_SETTINGS", &conflict.to_string_lossy())],
+        &[("LENS_SETTINGS", &conflict.to_string_lossy())],
     );
     assert!(!ok, "install must refuse on conflict");
     let _ = out;
 
-    // Uninstall cleanly removes ctxforge entries.
+    // Uninstall cleanly removes lens entries.
     let (_out, ok) = run(
         &["session", "uninstall"],
         data.path(),
         &json!({}),
-        &[("CTXFORGE_SETTINGS", &settings_str)],
+        &[("LENS_SETTINGS", &settings_str)],
     );
     assert!(ok);
     let root: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     let hooks = root["hooks"].as_object().cloned().unwrap_or_default();
-    assert!(hooks.is_empty(), "all ctxforge hooks should be removed");
+    assert!(hooks.is_empty(), "all lens hooks should be removed");
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! `ctxforge verify` — the reversibility audit, runnable on real session data.
+//! `lens verify` — the reversibility audit, runnable on real session data.
 //!
 //! The store already guarantees losslessness; this lets you *see* it hold:
 //!
@@ -48,9 +48,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             }
         },
         _ => {
-            eprintln!(
-                "usage: ctxforge verify <ref> | --op <n> | --roundtrip <ref> | --all-recent <n>"
-            );
+            eprintln!("usage: lens verify <ref> | --op <n> | --roundtrip <ref> | --all-recent <n>");
             std::process::exit(2);
         }
     }

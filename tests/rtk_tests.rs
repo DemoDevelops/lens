@@ -1,13 +1,13 @@
-//! End-to-end tests for the ctxforge⇄RTK integration (plan §4 T5), driving the
+//! End-to-end tests for the lens⇄RTK integration (plan §4 T5), driving the
 //! REAL compiled binary the way Claude Code / a user would — but **network-free**:
-//! a stub `rtk` (a tiny shell script on the managed `CTXFORGE_HOME/bin` path)
+//! a stub `rtk` (a tiny shell script on the managed `LENS_HOME/bin` path)
 //! stands in for the downloaded binary and answers `--version` / `gain --format
 //! json` / `init` with canned output. The real download path is verified
 //! on-machine only (T1), never here.
 //!
 //! Covered: `rtk install`/`status` (idempotent, against the stub) → `rtk sync`
 //! (one `rtk_shell` op whose `tokens_saved_est` == Δ`total_saved`; idempotent on
-//! no-op) → `ctxforge stats` & the `/api/stats` aggregate both surface the RTK
+//! no-op) → `lens stats` & the `/api/stats` aggregate both surface the RTK
 //! shell-savings plane → routing defers Bash to RTK when active (and is unchanged
 //! when not). All additive: with no RTK present everything is a no-op.
 
@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ctxforge")
+    env!("CARGO_BIN_EXE_lens")
 }
 
 /// `total_saved` the stub reports for `rtk gain --format json`.
@@ -29,7 +29,7 @@ const STUB_TOTAL_SAVED: i64 = 123_456;
 const STUB_COMMANDS: i64 = 42;
 
 /// Write an executable stub `rtk` at `<home>/bin/rtk` that emulates the subset of
-/// the RTK CLI ctxforge shells out to. `total_saved` lets a test grow RTK's
+/// the RTK CLI lens shells out to. `total_saved` lets a test grow RTK's
 /// cumulative figure between syncs.
 fn write_stub_rtk(home: &Path, total_saved: i64, commands: i64) {
     let bindir = home.join("bin");
@@ -48,14 +48,14 @@ esac\n"
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Run `ctxforge <args…>` with `envs` applied, return (success, stdout, stderr).
+/// Run `lens <args…>` with `envs` applied, return (success, stdout, stderr).
 fn run(args: &[&str], envs: &[(&str, &str)]) -> (bool, String, String) {
     let mut cmd = Command::new(bin());
     cmd.args(args);
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    let out = cmd.output().expect("spawn ctxforge");
+    let out = cmd.output().expect("spawn lens");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).to_string(),
@@ -63,14 +63,14 @@ fn run(args: &[&str], envs: &[(&str, &str)]) -> (bool, String, String) {
     )
 }
 
-/// Run `ctxforge hook claude PreToolUse` with `payload` on stdin; return trimmed stdout.
+/// Run `lens hook claude PreToolUse` with `payload` on stdin; return trimmed stdout.
 fn run_pretooluse(payload: &Value, envs: &[(&str, &str)], data_dir: &Path) -> String {
     let mut cmd = Command::new(bin());
     cmd.args(["hook", "claude", "PreToolUse"])
-        .env("CTXFORGE_DIR", data_dir)
-        .env_remove("CTXFORGE_ROUTING")
-        .env_remove("CTXFORGE_ROUTING_MCP")
-        .env_remove("CTXFORGE_DEFER_BASH_TO_RTK")
+        .env("LENS_DIR", data_dir)
+        .env_remove("LENS_ROUTING")
+        .env_remove("LENS_ROUTING_MCP")
+        .env_remove("LENS_DEFER_BASH_TO_RTK")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -112,21 +112,21 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
     let data_s = data.path().to_str().unwrap();
     let settings_s = settings.to_str().unwrap();
     // HOME scopes rtk's default hook-script dir into the tempdir, so registration is
-    // hermetic: the stub's `init` writes no script and ctxforge registers the entry
-    // by path. CTXFORGE_CLAUDE_SETTINGS is the settings file ctxforge patches itself.
+    // hermetic: the stub's `init` writes no script and lens registers the entry
+    // by path. LENS_CLAUDE_SETTINGS is the settings file lens patches itself.
     let base = [
         ("HOME", home_s),
-        ("CTXFORGE_HOME", home_s),
-        ("CTXFORGE_CLAUDE_SETTINGS", settings_s),
+        ("LENS_HOME", home_s),
+        ("LENS_CLAUDE_SETTINGS", settings_s),
     ];
     let with_data = [
         ("HOME", home_s),
-        ("CTXFORGE_HOME", home_s),
-        ("CTXFORGE_CLAUDE_SETTINGS", settings_s),
-        ("CTXFORGE_DIR", data_s),
+        ("LENS_HOME", home_s),
+        ("LENS_CLAUDE_SETTINGS", settings_s),
+        ("LENS_DIR", data_s),
     ];
 
-    // install: the stub is already at CTXFORGE_HOME/bin/rtk, so install takes the
+    // install: the stub is already at LENS_HOME/bin/rtk, so install takes the
     // idempotent path (verifies --version, registers the hook) WITHOUT a download.
     let (ok, out, err) = run(&["rtk", "install"], &base);
     assert!(
@@ -176,7 +176,7 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
         "idempotent: no new savings recorded when total_saved is unchanged"
     );
 
-    // ctxforge stats: surfaces the RTK shell-savings plane + the synced op.
+    // lens stats: surfaces the RTK shell-savings plane + the synced op.
     let (ok, out, _) = run(&["stats"], &with_data);
     assert!(ok);
     assert!(
@@ -194,10 +194,10 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
 
     // /api/stats aggregate (what the dashboard serves) carries the rtk block sourced
     // from `rtk gain`, plus rtk_shell under by_tool and "shell" under by_mechanism.
-    // CTXFORGE_HOME is needed in-process here for the rtk block; set tightly.
-    std::env::set_var("CTXFORGE_HOME", home_s);
-    let snap = ctxforge::obs::stats::snapshot_json(data.path(), None);
-    std::env::remove_var("CTXFORGE_HOME");
+    // LENS_HOME is needed in-process here for the rtk block; set tightly.
+    std::env::set_var("LENS_HOME", home_s);
+    let snap = lens::obs::stats::snapshot_json(data.path(), None);
+    std::env::remove_var("LENS_HOME");
     assert_eq!(
         snap["rtk"]["installed"],
         json!(true),
@@ -206,7 +206,7 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
     assert_eq!(
         snap["rtk"]["total_saved"].as_i64().unwrap(),
         STUB_TOTAL_SAVED,
-        "rtk block shows RTK's own total_saved (not a ctxforge re-estimate)"
+        "rtk block shows RTK's own total_saved (not a lens re-estimate)"
     );
     assert!(
         snap["by_tool"]
@@ -225,7 +225,7 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
         "by_mechanism buckets rtk_shell under 'shell'"
     );
 
-    // uninstall: removes ctxforge's hook entry from the config-dir settings.json.
+    // uninstall: removes lens's hook entry from the config-dir settings.json.
     let (ok, _, _) = run(&["rtk", "uninstall"], &base);
     assert!(ok, "rtk uninstall must succeed");
     let after = std::fs::read_to_string(&settings).unwrap_or_default();
@@ -236,7 +236,7 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
 }
 
 // ---------------------------------------------------------------------------
-// Routing coexistence: RTK owns Bash when active; ctxforge unchanged when not.
+// Routing coexistence: RTK owns Bash when active; lens unchanged when not.
 // (Child-process only — no in-process env mutation, so race-free.)
 // ---------------------------------------------------------------------------
 
@@ -254,14 +254,14 @@ fn routing_defers_bash_to_rtk_only_when_active() {
 
     // RTK active (forced via env): Bash passes through (RTK owns it), WebFetch still denies.
     let active = [
-        ("CTXFORGE_ROUTING", "full"),
-        ("CTXFORGE_ROUTING_MCP", "up"),
-        ("CTXFORGE_DEFER_BASH_TO_RTK", "1"),
+        ("LENS_ROUTING", "full"),
+        ("LENS_ROUTING_MCP", "up"),
+        ("LENS_DEFER_BASH_TO_RTK", "1"),
     ];
     assert_eq!(
         run_pretooluse(&bash, &active, d.path()),
         "{}",
-        "RTK active ⇒ ctxforge defers Bash (passthrough)"
+        "RTK active ⇒ lens defers Bash (passthrough)"
     );
     let wf: Value = serde_json::from_str(&run_pretooluse(&webfetch, &active, d.path())).unwrap();
     assert_eq!(
@@ -269,11 +269,11 @@ fn routing_defers_bash_to_rtk_only_when_active() {
         "WebFetch still denies when RTK active (only Bash defers)"
     );
 
-    // RTK inactive: prior behavior — wrappable Bash is rewritten to `ctxforge wrap`.
+    // RTK inactive: prior behavior — wrappable Bash is rewritten to `lens wrap`.
     let inactive = [
-        ("CTXFORGE_ROUTING", "full"),
-        ("CTXFORGE_ROUTING_MCP", "up"),
-        ("CTXFORGE_DEFER_BASH_TO_RTK", "0"),
+        ("LENS_ROUTING", "full"),
+        ("LENS_ROUTING_MCP", "up"),
+        ("LENS_DEFER_BASH_TO_RTK", "0"),
     ];
     let b: Value = serde_json::from_str(&run_pretooluse(&bash, &inactive, d.path())).unwrap();
     assert_eq!(b["hookSpecificOutput"]["permissionDecision"], "allow");
@@ -295,8 +295,8 @@ fn rtk_absent_is_a_noop() {
     let home = tempfile::tempdir().unwrap(); // empty: no bin/rtk
     let data = tempfile::tempdir().unwrap();
     let envs = [
-        ("CTXFORGE_HOME", home.path().to_str().unwrap()),
-        ("CTXFORGE_DIR", data.path().to_str().unwrap()),
+        ("LENS_HOME", home.path().to_str().unwrap()),
+        ("LENS_DIR", data.path().to_str().unwrap()),
         // Minimal PATH (sh available, no rtk) so "absent" is hermetic regardless of
         // whatever rtk the host happens to have on PATH.
         ("PATH", "/usr/bin:/bin"),

@@ -1,9 +1,9 @@
-//! `ctxforge rtk install | status | uninstall` — manage the prebuilt RTK binary
+//! `lens rtk install | status | uninstall` — manage the prebuilt RTK binary
 //! and its Claude Code hook (the **headroom pattern**; see `RTK_NOTES.md` §1/§5/§6).
 //!
 //! [`install`] detects the platform target triple, downloads the pinned release
 //! `rtk-<triple>.<ext>` with `curl`, extracts it (`tar`/`unzip`) into
-//! `~/.ctxforge/bin/rtk`, `chmod +x`'s it, verifies `rtk --version`, then registers
+//! `~/.lens/bin/rtk`, `chmod +x`'s it, verifies `rtk --version`, then registers
 //! the Claude hook by shelling out to `rtk init --global --hook-only --auto-patch`
 //! (headroom registers via `rtk init --global --auto-patch`; we add `--hook-only`
 //! so only the PreToolUse hook is written, not RTK.md / a CLAUDE.md edit). [`uninstall`]
@@ -15,7 +15,7 @@
 //! (an isolated `$HOME`), never in CI; see the module's offline `target_triple`/
 //! `download_url` unit tests.
 //!
-//! This is reached only through the `ctxforge rtk …` subcommand — a separate
+//! This is reached only through the `lens rtk …` subcommand — a separate
 //! process whose stdout is its own response channel, never the MCP JSON-RPC stream.
 
 use std::path::Path;
@@ -29,13 +29,13 @@ use super::gain::{self, Scope};
 /// headroom `installer.py::GITHUB_RELEASE_URL`).
 const GITHUB_RELEASE_URL: &str = "https://github.com/rtk-ai/rtk/releases/download";
 
-/// The release target triple to install — `$CTXFORGE_RTK_TARGET` if set, else
+/// The release target triple to install — `$LENS_RTK_TARGET` if set, else
 /// detected from the build's `OS`/`ARCH` (mirrors headroom
 /// `_detect_runtime_target_triple`; override env is `HEADROOM_RTK_TARGET` there).
 ///
 /// Returns `Err` only for an unsupported platform.
 fn target_triple() -> Result<String> {
-    if let Some(t) = std::env::var_os("CTXFORGE_RTK_TARGET") {
+    if let Some(t) = std::env::var_os("LENS_RTK_TARGET") {
         let t = t.to_string_lossy();
         let t = t.trim();
         if !t.is_empty() {
@@ -70,10 +70,10 @@ fn download_url(version: &str, triple: &str) -> String {
     )
 }
 
-/// The version to install — `$CTXFORGE_RTK_VERSION` if set, else the pinned
+/// The version to install — `$LENS_RTK_VERSION` if set, else the pinned
 /// [`super::RTK_VERSION`] (`v0.28.2`).
 fn version() -> String {
-    std::env::var("CTXFORGE_RTK_VERSION")
+    std::env::var("LENS_RTK_VERSION")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
@@ -115,7 +115,7 @@ pub fn install() -> Result<()> {
     let triple = target_triple()?;
     let want_digits = version_digits(&version);
 
-    let bin_dir = super::bin_dir().context("cannot determine ctxforge home (is $HOME set?)")?;
+    let bin_dir = super::bin_dir().context("cannot determine lens home (is $HOME set?)")?;
     let managed = bin_dir.join(super::RTK_EXE);
 
     // --- Idempotency: skip download if the managed binary already matches. ---
@@ -156,14 +156,14 @@ pub fn install() -> Result<()> {
 /// Register the RTK PreToolUse hook in the active Claude config dir's settings.json.
 ///
 /// `rtk init --global` ignores `$CLAUDE_CONFIG_DIR` (it always writes `~/.claude`),
-/// so ctxforge owns the settings patch: generate the hook SCRIPT via `rtk init
+/// so lens owns the settings patch: generate the hook SCRIPT via `rtk init
 /// --hook-only --no-patch`, then patch [`claude_settings_path`] ourselves — copying
 /// the script into that dir's `hooks/` when it differs from rtk's default `~/.claude`,
 /// so the hook is self-contained under the dir the running Claude Code actually reads.
-/// `--hook-only` writes only the script (no RTK.md / CLAUDE.md edits); ctxforge owns
+/// `--hook-only` writes only the script (no RTK.md / CLAUDE.md edits); lens owns
 /// the model-facing guidance.
 fn register_hook() -> Result<()> {
-    // 1. Generate the hook script (no settings patch — ctxforge owns that).
+    // 1. Generate the hook script (no settings patch — lens owns that).
     match super::run_rtk(&["init", "--global", "--hook-only", "--no-patch"]) {
         Ok(out) if out.status.success() => {}
         Ok(out) => eprintln!(
@@ -179,17 +179,17 @@ fn register_hook() -> Result<()> {
     let canonical =
         super::rtk_default_hook_script().context("cannot resolve rtk hook script path")?;
 
-    // 2. Write a ctxforge-MANAGED hook script (distinct from rtk's canonical
+    // 2. Write a lens-MANAGED hook script (distinct from rtk's canonical
     //    `rtk-rewrite.sh`) with a PATH guard injected, so the hook can locate `rtk`
     //    no matter how the shell that launched Claude Code was initialized. Hooks run
     //    OUTSIDE the user's interactive shell, so relying on the user's PATH (`.zshrc`
-    //    edits, etc.) is unreliable — ctxforge must make `rtk` discoverable itself, so
+    //    edits, etc.) is unreliable — lens must make `rtk` discoverable itself, so
     //    a clean install works in any repo/launcher without host PATH tweaks.
-    let target_script = settings_dir.join("hooks").join("ctxforge-rtk-rewrite.sh");
+    let target_script = settings_dir.join("hooks").join("lens-rtk-rewrite.sh");
     let command_path = if canonical.is_file() {
         let body = std::fs::read_to_string(&canonical)
             .with_context(|| format!("reading {}", canonical.display()))?;
-        let bin = super::bin_dir().context("cannot resolve ctxforge bin dir")?;
+        let bin = super::bin_dir().context("cannot resolve lens bin dir")?;
         let patched = inject_path_guard(&body, &bin);
         let patched = inject_emit_path_prefix(&patched, &bin);
         if let Some(parent) = target_script.parent() {
@@ -220,13 +220,13 @@ fn register_hook() -> Result<()> {
 /// Prepend a PATH guard to rtk's hook script so it can find `rtk` regardless of how
 /// the shell launching Claude Code was initialized — hooks run outside the user's
 /// interactive shell, so `.zshrc`/PATH additions don't reach them. Inserts
-/// `export PATH="<ctxforge bin>:$PATH"` right after the shebang. Idempotent.
+/// `export PATH="<lens bin>:$PATH"` right after the shebang. Idempotent.
 fn inject_path_guard(script: &str, bin_dir: &Path) -> String {
     let guard = format!("export PATH=\"{}:$PATH\"", bin_dir.display());
     if script.contains(&guard) {
         return script.to_string();
     }
-    let note = "# ctxforge: put the managed rtk on PATH (hooks run outside your interactive shell)";
+    let note = "# lens: put the managed rtk on PATH (hooks run outside your interactive shell)";
     if script.starts_with("#!") {
         if let Some(nl) = script.find('\n') {
             let (head, rest) = script.split_at(nl + 1);
@@ -247,7 +247,7 @@ fn inject_path_guard(script: &str, bin_dir: &Path) -> String {
 /// it only touches commands rtk actually rewrote (the no-rewrite paths exit
 /// earlier). Idempotent via a marker comment.
 fn inject_emit_path_prefix(script: &str, bin_dir: &Path) -> String {
-    let marker = "# ctxforge: self-resolve rtk in the emitted command (tool shell lacks this PATH)";
+    let marker = "# lens: self-resolve rtk in the emitted command (tool shell lacks this PATH)";
     if script.contains(marker) {
         return script.to_string();
     }
@@ -462,7 +462,7 @@ pub fn status() -> Result<()> {
             }
         }
         None => {
-            println!("rtk binary: not installed (run `ctxforge rtk install`)");
+            println!("rtk binary: not installed (run `lens rtk install`)");
         }
     }
 
@@ -475,7 +475,7 @@ pub fn status() -> Result<()> {
         }
     );
 
-    // The managed hook (`ctxforge-rtk-rewrite.sh`) self-resolves `rtk` via an
+    // The managed hook (`lens-rtk-rewrite.sh`) self-resolves `rtk` via an
     // injected PATH guard, so live rewriting depends on the managed binary existing
     // (not on `rtk` being on the *caller's* PATH) plus `jq` (the hook shells out to
     // it). Report against those.
@@ -486,7 +486,7 @@ pub fn status() -> Result<()> {
     } else {
         let mut needs = Vec::new();
         if !rtk_ok {
-            needs.push("install rtk (`ctxforge rtk install`)".to_string());
+            needs.push("install rtk (`lens rtk install`)".to_string());
         }
         if !jq {
             needs.push("install jq".to_string());
@@ -509,11 +509,11 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
-/// Remove ctxforge's RTK hook from the active Claude config dir's settings.json and
-/// drop the script copy ctxforge placed there. Scoped to ctxforge's own changes: it
+/// Remove lens's RTK hook from the active Claude config dir's settings.json and
+/// drop the script copy lens placed there. Scoped to lens's own changes: it
 /// does **not** run `rtk init --uninstall` (that would also delete a pre-existing
 /// `RTK.md` and rtk's own `~/.claude` artifacts). Best-effort; returns `Ok` even when
-/// nothing is present. The binary at `~/.ctxforge/bin/rtk` is left in place.
+/// nothing is present. The binary at `~/.lens/bin/rtk` is left in place.
 pub fn uninstall() -> Result<()> {
     let settings = super::claude_settings_path().context("cannot resolve Claude settings path")?;
     match remove_hook_entry(&settings, "rtk-rewrite.sh") {
@@ -524,10 +524,10 @@ pub fn uninstall() -> Result<()> {
         ),
         Err(e) => eprintln!("warning: could not edit {}: {e:#}", settings.display()),
     }
-    // Remove ctxforge's managed hook script; leave rtk's own
+    // Remove lens's managed hook script; leave rtk's own
     // ~/.claude/hooks/rtk-rewrite.sh (rtk's artifact) untouched.
     if let Some(dir) = settings.parent() {
-        let managed = dir.join("hooks").join("ctxforge-rtk-rewrite.sh");
+        let managed = dir.join("hooks").join("lens-rtk-rewrite.sh");
         if managed.is_file() {
             let _ = std::fs::remove_file(&managed);
         }
@@ -542,14 +542,14 @@ mod tests {
 
     #[test]
     fn path_guard_injected_after_shebang_and_idempotent() {
-        let bin = PathBuf::from("/Users/x/.ctxforge/bin");
+        let bin = PathBuf::from("/Users/x/.lens/bin");
         let script = "#!/usr/bin/env bash\nif ! command -v rtk; then exit 0; fi\n";
         let out = inject_path_guard(script, &bin);
         // Guard lands right after the shebang, before the rtk lookup.
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "#!/usr/bin/env bash");
         assert!(
-            lines[2] == "export PATH=\"/Users/x/.ctxforge/bin:$PATH\"",
+            lines[2] == "export PATH=\"/Users/x/.lens/bin:$PATH\"",
             "got: {out}"
         );
         assert!(out.contains("command -v rtk"), "original body preserved");
@@ -558,12 +558,12 @@ mod tests {
         assert_eq!(twice.matches("export PATH=").count(), 1);
         // No shebang → guard prepended at the top.
         let no_sh = inject_path_guard("rtk rewrite \"$1\"\n", &bin);
-        assert!(no_sh.contains("export PATH=\"/Users/x/.ctxforge/bin:$PATH\""));
+        assert!(no_sh.contains("export PATH=\"/Users/x/.lens/bin:$PATH\""));
     }
 
     #[test]
     fn emit_path_prefix_wraps_rewritten_before_emission_and_is_idempotent() {
-        let bin = PathBuf::from("/Users/x/.ctxforge/bin");
+        let bin = PathBuf::from("/Users/x/.lens/bin");
         // A minimal stand-in for rtk's canonical hook tail.
         let script = "#!/usr/bin/env bash\n\
              REWRITTEN=$(rtk rewrite \"$CMD\" 2>/dev/null) || exit 0\n\
@@ -574,7 +574,7 @@ mod tests {
         // The reassignment carries the managed bin and re-quotes for the tool shell.
         assert!(
             out.contains(
-                "REWRITTEN=\"export PATH=\\\"/Users/x/.ctxforge/bin:\\$PATH\\\"; $REWRITTEN\""
+                "REWRITTEN=\"export PATH=\\\"/Users/x/.lens/bin:\\$PATH\\\"; $REWRITTEN\""
             ),
             "got: {out}"
         );
@@ -621,9 +621,9 @@ mod tests {
 
     #[test]
     fn target_triple_env_override_wins() {
-        std::env::set_var("CTXFORGE_RTK_TARGET", "x86_64-unknown-linux-musl");
+        std::env::set_var("LENS_RTK_TARGET", "x86_64-unknown-linux-musl");
         assert_eq!(target_triple().unwrap(), "x86_64-unknown-linux-musl");
-        std::env::remove_var("CTXFORGE_RTK_TARGET");
+        std::env::remove_var("LENS_RTK_TARGET");
         // Unset → a non-empty triple for the current platform (no panic).
         assert!(!target_triple().unwrap().is_empty());
     }

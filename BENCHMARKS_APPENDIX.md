@@ -1,30 +1,30 @@
-# ctxforge benchmarks — appendix
+# lens benchmarks — appendix
 
 _This is the full measurement trail behind [BENCHMARKS.md](BENCHMARKS.md). Nothing here is recomputed; it is the same committed data, shown in full._
 
 ## Methodology
 
-ctxforge is benchmarked against the metrics the **headroom** project publishes,
-but matched to where ctxforge actually sits in the loop. There are two halves,
+lens is benchmarked against the metrics the **headroom** project publishes,
+but matched to where lens actually sits in the loop. There are two halves,
 and they are not the same kind of measurement.
 
 **Savings** is directly comparable to headroom's proof table: tokens entering
-context **without** ctxforge (a realistic naive-agent path) vs **with** it.
+context **without** lens (a realistic naive-agent path) vs **with** it.
 Token estimate = bytes / 4 (the same rough convention `ctx_stats` uses); raw
-byte counts are shown alongside. Every row is segmented by the ctxforge tool
-that produced the saving (`sandbox` / `index` / `compression` / `discovery`),
-because ctxforge saves via different mechanisms than headroom — it mostly
+byte counts are shown alongside. Every row is segmented by the lens tool
+that produced the saving (`darkroom` / `index` / `compression` / `discovery`),
+because lens saves via different mechanisms than headroom — it mostly
 *prevents* data entering context, where headroom *compresses* data that does. A
 single blended percentage would hide which mechanism did the work.
 
 **Accuracy** uses a task-based method, **not** GSM8K/TruthfulQA. Those measure
 whether compressing a *prompt* preserves answer accuracy — faithful for a
-prompt-path compressor like headroom. ctxforge is an MCP tool provider that sits
-*beside* the prompt path; nothing forces a QA prompt through `ctx_execute`. So
-the faithful accuracy question is: *when the agent uses the sandbox / graph /
+prompt-path compressor like headroom. lens is an MCP tool provider that sits
+*beside* the prompt path; nothing forces a QA prompt through `lens_run`. So
+the faithful accuracy question is: *when the agent uses the darkroom / graph /
 search instead of reading raw files, does it still answer correctly?* Each task
 is run twice with the same model — **control** (raw fixtures, capped at a naive
-context budget) vs **treatment** (the ctxforge tool's compact output) — and
+context budget) vs **treatment** (the lens tool's compact output) — and
 scored against deterministic ground truth. The result we want to state honestly
 is **Δ acc ≈ 0 with a large token reduction**. A negative Δ on any mechanism is
 surfaced loudly: it means that mechanism is dropping load-bearing context.
@@ -40,18 +40,18 @@ marked pending a real-model run.
 | Workload | Before | After | Savings | Mechanism |
 | --- | ---: | ---: | ---: | --- |
 | Code search (results across files) | 3,978 | 2,656 | 33% | index |
-| Log debugging (buried root cause) | 1,802 | 129 | 93% | sandbox |
+| Log debugging (buried root cause) | 1,802 | 129 | 93% | darkroom |
 | Issue triage (structured payload) | 2,225 | 971 | 56% | compression |
 | Codebase exploration (subtree) | 651 | 523 | 20% | discovery |
 
 ### Raw bytes and naive-agent baseline (no /4 to trust)
 
-| Workload | Before (bytes) | After (bytes) | Without ctxforge, the agent… | Detail |
+| Workload | Before (bytes) | After (bytes) | Without lens, the agent… | Detail |
 | --- | ---: | ---: | --- | --- |
 | Code search (results across files) | 15,915 | 10,627 | Agent greps for the terms, then opens every matched file in full to read context. | 6 queries, 30 hits returned, 12 matched files read by the naive path |
 | Log debugging (buried root cause) | 7,210 | 517 | Agent loads the entire log into context to locate the one FATAL line. | grep over 7210 bytes -> 517 bytes of matching lines (+context) |
-| Issue triage (structured payload) | 8,902 | 3,885 | Agent loads the full structured triage payload (minified) into context. | reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via ctx_retrieve (raw file 8903 bytes) |
-| Codebase exploration (subtree) | 2,606 | 2,094 | Agent reads every source file in the subtree to map its structure. | discover summary (30 nodes, 40 edges) + one scoped graph_query |
+| Issue triage (structured payload) | 8,902 | 3,885 | Agent loads the full structured triage payload (minified) into context. | reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file 8903 bytes) |
+| Codebase exploration (subtree) | 2,606 | 2,094 | Agent reads every source file in the subtree to map its structure. | discover summary (30 nodes, 40 edges) + one scoped lens_symbol |
 
 ### Scale curve (real path at 1× / 10× / 50× the committed fixture)
 
@@ -77,32 +77,32 @@ The §0.1 diagnostic: savings that *rise* with size mean the fixture was too sma
 ### Context Mode isolation + head-to-head
 
 These savings come from `cargo run --bin bench_savings`, a standalone Rust binary
-that calls ctxforge's library functions **directly** (index / sandbox /
+that calls lens's library functions **directly** (index / darkroom /
 compression / discovery) — it does not route through any MCP server or hook, so
 Context Mode's PreToolUse hooks cannot intercept the workload. The numbers are
-ctxforge's own.
+lens's own.
 
 **Context Mode (measured), same machine, same workloads.** CM is comparable only
 where it has an equivalent mechanism:
 
-| Workload | ctxforge mechanism | Context Mode (measured) |
+| Workload | lens mechanism | Context Mode (measured) |
 | --- | --- | --- |
-| Code search | FTS5 index → ranked snippets | `n/a` — CM `ctx_index`/`ctx_search` index into a session-global FTS5 KB; the per-workload token figure can't be isolated from session state without faking it. |
-| Log debugging | sandboxed grep, matches only | `n/a` — CM `ctx_execute` runs the same grep; equivalent by construction, no independent CM compaction to measure. |
+| Code search | FTS5 index → ranked snippets | `n/a` — CM `lens_index`/`lens_search` index into a session-global FTS5 KB; the per-workload token figure can't be isolated from session state without faking it. |
+| Log debugging | darkroom grep, matches only | `n/a` — CM `lens_run` runs the same grep; equivalent by construction, no independent CM compaction to measure. |
 | Issue triage | columnar + dictionary JSON compaction | `n/a` — CM has no structural-JSON compactor; this is the headroom/SmartCrusher archetype, not a CM mechanism. |
 | Codebase exploration | tree-sitter code graph | `n/a` — CM has no code graph. |
 
 Every CM cell is `n/a` with a stated reason rather than a fabricated number. The
-faithful head-to-head ctxforge *was* built to win is **session recovery** (below),
+faithful head-to-head lens *was* built to win is **session recovery** (below),
 which drives CM's real hook scripts.
 
 ## Accuracy (full)
 
 Model: `claude-opus-4-8 (via claude-pty)`
 
-| Task set | N | Control acc | ctxforge acc | Δ acc | Control tokens | ctxforge tokens | Token Δ |
+| Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Sandbox tasks | 6 | 17% | 100% | +83pp | 1847 | 103 | -1744 |
+| Darkroom tasks | 6 | 17% | 100% | +83pp | 1847 | 103 | -1744 |
 | Discovery tasks | 3 | 67% | 100% | +33pp | 987 | 467 | -520 |
 | Search tasks | 2 | 100% | 100% | +0pp | 432 | 314 | -118 |
 
@@ -114,7 +114,7 @@ Model: `claude-opus-4-8 (via claude-pty)`
 
 This is the proof the apparatus catches its own bad numbers; it is kept whole.
 
-The first real accuracy run, on `claude-haiku-4-5`, showed **discovery −33pp** (N = 3, so one task = 33pp). The generator's auto-warning fired — it flags *any* negative aggregate delta as "dropping load-bearing context". Per-task investigation showed the opposite. The one regressing task (`0008_reachable_path`, "can `handle_request` reach `connect_db`?") has a treatment context — the `graph_path` op — that returns the **correct** answer (`found:true`, full path `handle_request → fetch_user → connect_db`), *more* explicit than the raw-file control, yet Haiku still answered `reachable:false`. That is a weak-model reasoning slip on a correct context, **not** a ctxforge context-drop.
+The first real accuracy run, on `claude-haiku-4-5`, showed **discovery −33pp** (N = 3, so one task = 33pp). The generator's auto-warning fired — it flags *any* negative aggregate delta as "dropping load-bearing context". Per-task investigation showed the opposite. The one regressing task (`0008_reachable_path`, "can `handle_request` reach `connect_db`?") has a treatment context — the `lens_path` op — that returns the **correct** answer (`found:true`, full path `handle_request → fetch_user → connect_db`), *more* explicit than the raw-file control, yet Haiku still answered `reachable:false`. That is a weak-model reasoning slip on a correct context, **not** a lens context-drop.
 
 Re-running just the discovery set on `claude-sonnet-4-6` (same backend) confirmed it: discovery returns to **100% / 100% (+0pp)**, with `0008` answering `reachable:yes`. The slip disappears on the stronger model.
 

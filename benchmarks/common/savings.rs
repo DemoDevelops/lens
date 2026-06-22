@@ -1,18 +1,18 @@
 //! Shared savings-benchmark logic, `#[path]`-included by `run_savings.rs` and
 //! `generate_report.rs`. Computes, for each workload archetype, the bytes that
-//! would enter context **without** ctxforge (a realistic naive-agent path) vs
-//! the bytes that actually enter **with** ctxforge, segmented by which tool did
+//! would enter context **without** lens (a realistic naive-agent path) vs
+//! the bytes that actually enter **with** lens, segmented by which tool did
 //! the saving. Deterministic: same committed fixtures -> same numbers.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use ctxforge::discovery::{self, query as gquery};
-use ctxforge::index::Index;
-use ctxforge::sandbox;
-use ctxforge::store::{compress, Store};
-use ctxforge::tools::ExecuteRequest;
+use lens::darkroom;
+use lens::discovery::{self, query as gquery};
+use lens::index::Index;
+use lens::store::{compress, Store};
+use lens::tools::ExecuteRequest;
 
 /// Token estimate convention: bytes / 4. Same rough approximation `ctx_stats`
 /// uses; raw byte counts are reported alongside so nobody has to trust the /4.
@@ -25,15 +25,15 @@ pub fn est_tokens(bytes: usize) -> usize {
 pub struct SavingsRow {
     /// Human label for the workload.
     pub workload: String,
-    /// Which ctxforge tool produced the saving (sandbox | index | discovery | compression).
+    /// Which lens tool produced the saving (darkroom | index | discovery | compression).
     pub mechanism: String,
     /// Bytes a naive agent would load into context.
     pub before_bytes: usize,
-    /// Bytes ctxforge actually returns to context.
+    /// Bytes lens actually returns to context.
     pub after_bytes: usize,
     /// Savings percentage, rounded to a whole number.
     pub savings_pct: u32,
-    /// What the "without ctxforge" path concretely loads, and why a real session
+    /// What the "without lens" path concretely loads, and why a real session
     /// would do that (the honesty / no-strawman note).
     pub baseline: String,
     /// Extra reproducibility detail (counts, query set, etc.).
@@ -107,7 +107,7 @@ pub fn render_savings_markdown(rows: &[SavingsRow]) -> String {
 
     s.push_str("\n### Raw bytes and naive-agent baseline (no /4 to trust)\n\n");
     s.push_str(
-        "| Workload | Before (bytes) | After (bytes) | Without ctxforge, the agent… | Detail |\n",
+        "| Workload | Before (bytes) | After (bytes) | Without lens, the agent… | Detail |\n",
     );
     s.push_str("| --- | ---: | ---: | --- | --- |\n");
     for r in rows {
@@ -125,7 +125,7 @@ pub fn render_savings_markdown(rows: &[SavingsRow]) -> String {
 
 // --- Scale-curve diagnostic (§0.1) ------------------------------------------
 //
-// Drives the real ctxforge path at 1× / 10× / 50× the committed fixture and
+// Drives the real lens path at 1× / 10× / 50× the committed fixture and
 // reports how each weak workload's savings move with size. A mechanism whose
 // savings *rise* with scale was under-fixtured (artifact); one that stays
 // *flat/low* has a real weakness in the path. Deterministic: scaled fixtures
@@ -225,11 +225,11 @@ pub fn code_search_at(scale: usize) -> (usize, usize) {
     (before, after)
 }
 
-/// ctx_search vs grep at a given scale: (grep-line bytes, ctx_search snippet bytes).
+/// lens_search vs grep at a given scale: (grep-line bytes, lens_search snippet bytes).
 /// The HONEST search baseline: grep "before" is every matching LINE (file:line:text),
-/// the realistic find alternative, not full-file reads. ctx_search returns the top-5
+/// the realistic find alternative, not full-file reads. lens_search returns the top-5
 /// ranked snippets per query (flat with scale); grep grows with the corpus, so this
-/// finds the hit-count where ctx_search overtakes grep.
+/// finds the hit-count where lens_search overtakes grep.
 pub fn search_vs_grep_at(scale: usize) -> (usize, usize) {
     let src = bench_root().join("savings/workloads/code_search");
     let tmp = tempfile::tempdir().unwrap();
@@ -401,7 +401,7 @@ pub fn render_scale_curve_markdown(rows: &[ScaleRow]) -> String {
 }
 
 /// Render the realistic-scale **headline** savings table for the clean
-/// `BENCHMARKS.md`. Editorial rule (CTXFORGE_CLEAN_REPORT_PLAN.md §2.2): the
+/// `BENCHMARKS.md`. Editorial rule (LENS_CLEAN_REPORT_PLAN.md §2.2): the
 /// size-sensitive mechanisms headline their at-scale figure (the 1× fixtures
 /// were diagnostic-sized), the size-insensitive ones headline the committed
 /// fixture, and codebase exploration headlines no number because no single one
@@ -422,13 +422,13 @@ pub fn render_headline_savings_markdown(rows: &[SavingsRow], scale: &[ScaleRow])
     let cs50 = find_scale("Code search", 50);
     // Issue triage (compression): at-scale ceiling ~61%; anchor bytes at 10×.
     let it10 = find_scale("Issue triage", 10);
-    // Log debugging (sandbox): size-insensitive, headline the committed fixture.
-    let log = find_row("sandbox");
+    // Log debugging (darkroom): size-insensitive, headline the committed fixture.
+    let log = find_row("darkroom");
     // Codebase exploration (discovery): committed fixture, headlined as "see note".
     let cb = find_row("discovery");
 
     let mut s = String::new();
-    s.push_str("Headline savings are at **realistic session scale**, not the 1× diagnostic fixtures. Each row stays segmented by the ctxforge mechanism that produced it — never a single blended percentage.\n\n");
+    s.push_str("Headline savings are at **realistic session scale**, not the 1× diagnostic fixtures. Each row stays segmented by the lens mechanism that produced it — never a single blended percentage.\n\n");
     s.push_str("| Workload | Mechanism | Before (bytes) | After (bytes) | Savings |\n");
     s.push_str("| --- | --- | ---: | ---: | ---: |\n");
     s.push_str(&format!(
@@ -439,7 +439,7 @@ pub fn render_headline_savings_markdown(rows: &[SavingsRow], scale: &[ScaleRow])
         cs50.savings_pct,
     ));
     s.push_str(&format!(
-        "| Log debugging | sandbox | {} | {} | **{}%** |\n",
+        "| Log debugging | darkroom | {} | {} | **{}%** |\n",
         commas(log.before_bytes),
         commas(log.after_bytes),
         log.savings_pct,
@@ -491,8 +491,8 @@ fn sum_file_bytes(dir: &Path) -> usize {
 //
 // Naive path: to answer "where / how is X used", an agent greps for the terms,
 // then opens every file that matched to read the surrounding code. So "before"
-// is the full content of every file containing a hit. "With ctxforge": one
-// ctx_index + ctx_search call returns ranked snippets, so only the snippets
+// is the full content of every file containing a hit. "With lens": one
+// lens_index + lens_search call returns ranked snippets, so only the snippets
 // enter context.
 async fn code_search() -> anyhow::Result<SavingsRow> {
     let dir = bench_root().join("savings/workloads/code_search");
@@ -504,7 +504,7 @@ async fn code_search() -> anyhow::Result<SavingsRow> {
     let data = tempfile::tempdir()?;
     let index = Index::open(data.path())?;
     index.index_path(&dir, true)?;
-    // Realistic top-k per query (the ctx_search default neighbourhood).
+    // Realistic top-k per query (the lens_search default neighbourhood).
     let resp = index.search(&queries, 5)?;
     let after = serde_json::to_string(&resp)?.len();
     let hits: usize = resp.results.iter().map(|r| r.hits.len()).sum();
@@ -541,10 +541,10 @@ async fn code_search() -> anyhow::Result<SavingsRow> {
     ))
 }
 
-// --- Log debugging: mechanism = sandbox -------------------------------------
+// --- Log debugging: mechanism = darkroom -------------------------------------
 //
 // Naive path: load the whole log into context to find the buried FATAL. With
-// ctxforge: ctx_execute runs grep in a subprocess and only the matching lines
+// lens: lens_run runs grep in a subprocess and only the matching lines
 // (plus a little context) return.
 async fn log_debug() -> anyhow::Result<SavingsRow> {
     let dir = bench_root().join("savings/workloads/log_debug");
@@ -552,21 +552,21 @@ async fn log_debug() -> anyhow::Result<SavingsRow> {
     let before = std::fs::read_to_string(&log)?.len();
 
     let data = tempfile::tempdir()?;
-    let store = Store::open(&data.path().join(".ctxforge"))?;
+    let store = Store::open(&data.path().join(".lens"))?;
     let req = ExecuteRequest {
         language: "bash".into(),
         code: "grep -n -B2 -A2 -E 'FATAL|panic|Traceback' app.log".into(),
         timeout_secs: 30,
         stdin: None,
     };
-    let resp = sandbox::run(req, &dir, &store, 8192)
+    let resp = darkroom::run(req, &dir, &store, 8192)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     let after = resp.stdout.len() + resp.stderr.len();
 
     Ok(SavingsRow::new(
         "Log debugging (buried root cause)",
-        "sandbox",
+        "darkroom",
         before,
         after,
         "Agent loads the entire log into context to locate the one FATAL line.",
@@ -579,8 +579,8 @@ async fn log_debug() -> anyhow::Result<SavingsRow> {
 
 // --- Issue triage: mechanism = compression ----------------------------------
 //
-// Naive path: load the full structured triage payload. With ctxforge: the same
-// deterministic dictionary compaction ctxforge applies to large graph results
+// Naive path: load the full structured triage payload. With lens: the same
+// deterministic dictionary compaction lens applies to large graph results
 // (`store::compress::compact_json`) shrinks the repeated field values. "before"
 // is the minified JSON (not the pretty file) so the number isolates the
 // compaction effect from whitespace.
@@ -599,7 +599,7 @@ async fn issue_triage() -> anyhow::Result<SavingsRow> {
         after,
         "Agent loads the full structured triage payload (minified) into context.",
         &format!(
-            "reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via ctx_retrieve (raw file {} bytes)",
+            "reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file {} bytes)",
             raw.len()
         ),
     ))
@@ -608,8 +608,8 @@ async fn issue_triage() -> anyhow::Result<SavingsRow> {
 // --- Codebase exploration: mechanism = discovery ----------------------------
 //
 // Naive path: read every source file in the subtree to "understand" it. With
-// ctxforge: ctx_discover builds the structural graph once (a compact summary),
-// then a graph_query returns just the relevant neighborhood.
+// lens: lens_map builds the structural graph once (a compact summary),
+// then a lens_symbol returns just the relevant neighborhood.
 async fn codebase_explore() -> anyhow::Result<SavingsRow> {
     let dir = bench_root().join("savings/workloads/codebase_explore/repo");
     let before = sum_file_bytes(&dir);
@@ -628,7 +628,7 @@ async fn codebase_explore() -> anyhow::Result<SavingsRow> {
         after,
         "Agent reads every source file in the subtree to map its structure.",
         &format!(
-            "discover summary ({} nodes, {} edges) + one scoped graph_query",
+            "discover summary ({} nodes, {} edges) + one scoped lens_symbol",
             outcome.response.nodes, outcome.response.edges
         ),
     ))

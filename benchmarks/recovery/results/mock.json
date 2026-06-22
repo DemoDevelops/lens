@@ -4,8 +4,8 @@
       "cm_available": 4,
       "cm_tokens": 5070,
       "context_mode": 0.75,
-      "ctxforge": 1.0,
-      "ctxforge_tokens": 202,
+      "lens": 1.0,
+      "lens_tokens": 202,
       "n": 4,
       "no_continuity": 0.0,
       "set": "file_task"
@@ -14,8 +14,8 @@
       "cm_available": 4,
       "cm_tokens": 5136,
       "context_mode": 0.75,
-      "ctxforge": 1.0,
-      "ctxforge_tokens": 302,
+      "lens": 1.0,
+      "lens_tokens": 302,
       "n": 4,
       "no_continuity": 0.0,
       "set": "error_decision"
@@ -41,7 +41,7 @@
           "tokens": 1280
         },
         {
-          "arm": "ctxforge",
+          "arm": "lens",
           "available": true,
           "context_bytes": 237,
           "survived": true,
@@ -68,7 +68,7 @@
           "tokens": 1286
         },
         {
-          "arm": "ctxforge",
+          "arm": "lens",
           "available": true,
           "context_bytes": 296,
           "survived": true,
@@ -95,7 +95,7 @@
           "tokens": 1288
         },
         {
-          "arm": "ctxforge",
+          "arm": "lens",
           "available": true,
           "context_bytes": 303,
           "survived": true,
@@ -122,7 +122,7 @@
           "tokens": 1282
         },
         {
-          "arm": "ctxforge",
+          "arm": "lens",
           "available": true,
           "context_bytes": 377,
           "survived": true,
@@ -149,7 +149,7 @@
           "tokens": 1283
         },
         {
-          "arm": "ctxforge",
+          "arm": "lens",
           "available": true,
           "context_bytes": 292,
           "survived": true,
@@ -176,7 +176,7 @@
           "tokens": 1278
         },
         {
-          "arm": "ctxforge",
+          "arm": "lens",
           "available": true,
           "context_bytes": 230,
           "survived": true,
@@ -203,7 +203,7 @@
           "tokens": 1225
         },
         {
-          "arm": "ctxforge",
+          "arm": "lens",
           "available": true,
           "context_bytes": 122,
           "survived": true,
@@ -230,7 +230,7 @@
           "tokens": 1284
         },
         {
-          "arm": "ctxforge",
+          "arm": "lens",
           "available": true,
           "context_bytes": 169,
           "survived": true,

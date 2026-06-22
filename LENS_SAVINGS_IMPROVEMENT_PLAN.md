@@ -1,13 +1,13 @@
-# /goal: Diagnose and improve `ctxforge` savings on the weak workloads
+# /goal: Diagnose and improve `lens` savings on the weak workloads
 
-The first savings benchmark is in. Sandbox is strong (log debugging 93%). Three workloads are weak and trail the incumbents' published numbers: **code search 33%** (Headroom publishes 92% on this archetype), **issue triage 33%**, **codebase exploration 20%**. This goal is to find out *why* and fix what's actually fixable.
+The first savings benchmark is in. Darkroom is strong (log debugging 93%). Three workloads are weak and trail the incumbents' published numbers: **code search 33%** (Headroom publishes 92% on this archetype), **issue triage 33%**, **codebase exploration 20%**. This goal is to find out *why* and fix what's actually fixable.
 
 **Read first:** the existing `benchmarks/` tree, `BENCHMARKS.md`, the fixtures under `benchmarks/savings/workloads/`, and the real `src/` for the index, compression, and discovery paths. Match what exists.
 
 **Environment for this run (IMPORTANT):**
-- **Context Mode is still installed** and is NOT being uninstalled yet. For ctxforge savings measurements, ensure **ctxforge is the only sandbox actually exercised** in each savings run (don't let Context Mode's hooks intercept the workload), so the numbers are ctxforge's own. Document how you ensured this.
-- **Live head-to-head (do this while Context Mode is still here — you lose it after migration):** for each workload, also run the SAME workload through **Context Mode's real tools** (its `ctx_execute`/`ctx_index`/`ctx_search` via its installed plugin/bun) and record CM's *actual measured* savings on your machine. Compare ctxforge against CM's **real numbers**, not just Headroom's/CM's published claims. Add a `Context Mode (measured)` column to the savings table. If CM can't be exercised for a given workload, mark it `n/a` — never fake it.
-- **Source-inspection rigor:** use the same discipline the session-recovery benchmark used — it didn't trust its own table, it opened Context Mode's actual injected snapshot and diffed real behavior. Apply that here: read the reference's **actual code/output** and diff against ctxforge's, don't trust summaries or READMEs.
+- **Context Mode is still installed** and is NOT being uninstalled yet. For lens savings measurements, ensure **lens is the only darkroom actually exercised** in each savings run (don't let Context Mode's hooks intercept the workload), so the numbers are lens's own. Document how you ensured this.
+- **Live head-to-head (do this while Context Mode is still here — you lose it after migration):** for each workload, also run the SAME workload through **Context Mode's real tools** (its `lens_run`/`lens_index`/`lens_search` via its installed plugin/bun) and record CM's *actual measured* savings on your machine. Compare lens against CM's **real numbers**, not just Headroom's/CM's published claims. Add a `Context Mode (measured)` column to the savings table. If CM can't be exercised for a given workload, mark it `n/a` — never fake it.
+- **Source-inspection rigor:** use the same discipline the session-recovery benchmark used — it didn't trust its own table, it opened Context Mode's actual injected snapshot and diffed real behavior. Apply that here: read the reference's **actual code/output** and diff against lens's, don't trust summaries or READMEs.
 - **Batch the expensive run:** if `ANTHROPIC_API_KEY` is set, also execute the still-pending **real-model accuracy run** from the main benchmark in the same pass, so savings *and* accuracy both get real numbers from one API-key session rather than two.
 
 ---
@@ -44,10 +44,10 @@ The likely reason a workload is weak is NOT that Rust compresses worse — Rust 
 1. **Fetch and read the real source.** The reference projects are open source — read the ACTUAL code, not the README claims:
    - JSON/structural compaction → Headroom's **SmartCrusher** (its JSON compressor). Read how it actually compresses arrays of similar objects.
    - Code/AST result trimming → Headroom's **CodeCompressor** (AST-aware) for the structural parts only.
-   - Sandbox/search/index behavior → Context Mode's `ctx_execute` / `ctx_index` / `ctx_search` and its intent-driven filtering (it indexes large output and returns only matches).
+   - Darkroom/search/index behavior → Context Mode's `lens_run` / `lens_index` / `lens_search` and its intent-driven filtering (it indexes large output and returns only matches).
    - You have web access to read these repos. Pull the specific source files for the compressor in question, not the marketing.
 
-2. **Diff it against what ctxforge built.** Open ctxforge's current `compress::*` / index / discovery code and list, concretely, **which techniques the real algorithm uses that ours does not.** Write that diff into `DECISIONS.md` so the gap is explicit. Typical missing pieces in a naive JSON compactor:
+2. **Diff it against what lens built.** Open lens's current `compress::*` / index / discovery code and list, concretely, **which techniques the real algorithm uses that ours does not.** Write that diff into `DECISIONS.md` so the gap is explicit. Typical missing pieces in a naive JSON compactor:
    - Dictionary-encoding of **repeated string values** (not just keys) across an array of records.
    - Column/struct-of-arrays transposition for arrays of homogeneous objects (huge win on issue-triage-style data).
    - Type/shape templating: emit the schema once, then per-row values only.
@@ -57,9 +57,9 @@ The likely reason a workload is weak is NOT that Rust compresses worse — Rust 
 
 3. **Implement the genuine deterministic technique** in Rust — match the real algorithm's behavior, not its surface description. The output must remain **reversible via the existing store** (the original is recoverable). Port the *mechanism*, faithfully.
 
-4. **HARD CONSTRAINT — deterministic only.** Do **NOT** pull in Headroom's trained Kompress prose model, any ML/ONNX/HuggingFace dependency, Python, or any neural compressor. ctxforge stays Rust-only and dependency-light. We are only implementing the **deterministic** algorithms (SmartCrusher-style structural compaction, CodeCompressor's structural trimming, intent-driven index filtering). If a workload's residual is genuinely prose that only a trained model could compress, the correct move is **CCR** — route the prose to the reversible store and return a short head + `retrieve_ref`, keeping it out of context — NOT importing a model. State this explicitly if it comes up.
+4. **HARD CONSTRAINT — deterministic only.** Do **NOT** pull in Headroom's trained Kompress prose model, any ML/ONNX/HuggingFace dependency, Python, or any neural compressor. lens stays Rust-only and dependency-light. We are only implementing the **deterministic** algorithms (SmartCrusher-style structural compaction, CodeCompressor's structural trimming, intent-driven index filtering). If a workload's residual is genuinely prose that only a trained model could compress, the correct move is **CCR** — route the prose to the reversible store and return a short head + `retrieve_ref`, keeping it out of context — NOT importing a model. State this explicitly if it comes up.
 
-5. **Re-measure against the real workload.** After implementing the genuine algorithm, run ctxforge against a fixture matching the reference project's *own* published workload shape and compare to their stated number. If ctxforge now lands in range, the gap was a naive implementation (now fixed). If it still falls short with the real algorithm faithfully implemented and a matched fixture, document the residual reason — but a faithful deterministic port of SmartCrusher should land far above 33% on redundant JSON.
+5. **Re-measure against the real workload.** After implementing the genuine algorithm, run lens against a fixture matching the reference project's *own* published workload shape and compare to their stated number. If lens now lands in range, the gap was a naive implementation (now fixed). If it still falls short with the real algorithm faithfully implemented and a matched fixture, document the residual reason — but a faithful deterministic port of SmartCrusher should land far above 33% on redundant JSON.
 
 **The point:** stop guessing at improvements. Read the real code, find exactly what's missing, implement that specific deterministic mechanism. The numbers are low because we built an approximation; the fix is to build the real thing (minus the ML).
 
@@ -69,7 +69,7 @@ The likely reason a workload is weak is NOT that Rust compresses worse — Rust 
 
 ### 1.1 Code search (index path) — target: close the gap toward Headroom's 92%
 Likely culprits, investigate in order:
-- **Returning too much per hit.** Is `ctx_search` returning large windows / whole chunks instead of tight snippets around the match? Headroom's win comes from returning *snippets, not documents*. Tighten the returned window; return the matching lines + minimal context, not the whole chunk.
+- **Returning too much per hit.** Is `lens_search` returning large windows / whole chunks instead of tight snippets around the match? Headroom's win comes from returning *snippets, not documents*. Tighten the returned window; return the matching lines + minimal context, not the whole chunk.
 - **Returning too many hits.** Is `limit_per_query` too generous? A 100-result raw set should collapse to a small ranked set of snippets. Cap and rank harder (BM25 already there — make sure it's actually pruning).
 - **No dedup across hits.** If the same region matches multiple queries, dedup before returning.
 - **Measure the right baseline.** "Before" must be what a naive agent would load (all 100 raw results inline). Confirm the baseline isn't already trimmed.
@@ -87,7 +87,7 @@ Likely culprits, investigate in order:
 ### 1.3 Codebase exploration (discovery path) — target: beat 20%
 - 20% is the weakest and the most suspicious. Discovery's whole value is replacing many file reads with a small subgraph — that should be a *large* reduction, not 20%.
   - **Is the baseline realistic?** The "without discovery" path must be the agent actually reading the files it would need to answer the structural question (potentially many KB). If the baseline is just one small file, the win looks tiny artificially. This is the most likely artifact in the whole suite — check it first.
-  - **Is the subgraph too fat?** `graph_query` may be returning too many nodes/edges or full node payloads. Return a scoped subgraph: the relevant nodes + immediate edges + file:line, not the whole neighborhood. Compress the subgraph through the store if large.
+  - **Is the subgraph too fat?** `lens_symbol` may be returning too many nodes/edges or full node payloads. Return a scoped subgraph: the relevant nodes + immediate edges + file:line, not the whole neighborhood. Compress the subgraph through the store if large.
   - **Right question shape.** Make the fixture task a realistic structural question ("what calls X across the repo / how does A reach B") whose naive answer requires reading several files — that's where discovery earns 70%+, not 20%.
 
 ---
@@ -106,7 +106,7 @@ Likely culprits, investigate in order:
 ## 3. Phases
 
 1. **Diagnose:** build realistic fixtures, run the scale curve (1×/10×/50×), classify each weak workload as artifact vs real-weakness, write the curves to `BENCHMARKS.md`.
-2. **Study the real source (§0.5):** for each workload still weak at scale, fetch and read the actual reference algorithm (SmartCrusher / CodeCompressor / Context Mode index filtering), diff against ctxforge's current code, and write the concrete list of missing techniques into `DECISIONS.md`. Deterministic only — no ML, no prose model.
+2. **Study the real source (§0.5):** for each workload still weak at scale, fetch and read the actual reference algorithm (SmartCrusher / CodeCompressor / Context Mode index filtering), diff against lens's current code, and write the concrete list of missing techniques into `DECISIONS.md`. Deterministic only — no ML, no prose model.
 3. **Implement the genuine algorithm** for code search (tighten + real index filtering), issue triage (faithful SmartCrusher columnar/dictionary compaction), codebase exploration (verify baseline, then scope subgraph).
 4. **Re-run full savings suite**, comparing against the reference projects' own published workload shapes. Update `BENCHMARKS.md` with before/after-fix numbers and the scale curves. Update `expected/`.
 

@@ -31,7 +31,7 @@ The current `BENCHMARKS.md` is a development artifact — it interleaves results
 Keep it tight. Sections in this order:
 
 ### 2.1 One-paragraph intro
-What ctxforge is and that these are the measured results, with the appendix link. No methodology essay here.
+What lens is and that these are the measured results, with the appendix link. No methodology essay here.
 
 ### 2.2 Savings (headline = REALISTIC scale, not toy fixtures)
 **This is the key editorial decision.** The headline savings table uses the **realistic-scale** figure for each workload, NOT the 1× toy-fixture number. Rationale: the 1× fixtures were diagnostic-sized; a real session hits the larger scale. Pull the headline number per workload from the committed scale curve:
@@ -39,7 +39,7 @@ What ctxforge is and that these are the measured results, with the appendix link
 | Workload | Mechanism | Before | After | Savings |
 | --- | --- | ---: | ---: | ---: |
 | Code search | index | (10×/50× realistic) | … | **94–99%** |
-| Log debugging | sandbox | (committed) | … | **93%** |
+| Log debugging | darkroom | (committed) | … | **93%** |
 | Issue triage | compression | (10×/50×) | … | **~61%** |
 | Codebase exploration | discovery | (see note) | … | (honest figure) |
 
@@ -55,7 +55,7 @@ The committed real-model accuracy table, one model, as-is. Keep the two honest o
 - **small-N caveat (NEW, REQUIRED):** add a single sentence — "Samples are small (N = 6 / 3 / 2); these are directional confirmations consistent with the mechanism analysis, not statistically powered rates." This was missing and the doc is more honest with it.
 
 ### 2.4 Session recovery (the real Context Mode head-to-head)
-The recovery table as-is (it's already clean and it's the headline comparison): ctxforge ≥ Context Mode, ~20× lower token cost, bar = Context Mode. Keep the ✅ line. Add the same small-N note (N = 4 / 4).
+The recovery table as-is (it's already clean and it's the headline comparison): lens ≥ Context Mode, ~20× lower token cost, bar = Context Mode. Keep the ✅ line. Add the same small-N note (N = 4 / 4).
 
 ### 2.5 Honesty footer (short)
 Two sentences, not buried:

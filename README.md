@@ -1,14 +1,14 @@
-# ctxforge
+# lens
 
 A Rust tool for Claude Code that cuts an AI coding agent's token use and
 survives context compaction. It has two halves, installed independently:
 
 1. **An MCP server** (token savings) that fuses four deterministic primitives: a
-   **sandbox** that runs code in a subprocess and returns only what the script
+   **darkroom** that runs code in a subprocess and returns only what the script
    prints (not the raw data it processed), an **FTS5 search index** over your
    files, a **tree-sitter code graph** of symbols and relationships, and a
    **reversible compression store** that offloads large results and hands back a
-   compact view plus a retrieval ref. The sandbox is where most of the savings
+   compact view plus a retrieval ref. The darkroom is where most of the savings
    come from; the other layers are additive.
 
 2. **Session-continuity hooks** (recovery) — a drop-in replacement for the
@@ -26,29 +26,29 @@ agent calls; the recovery half is active hooks Claude Code fires on its own.
 
 - **Rust** stable, via [rustup](https://rustup.rs).
 - Optional language runtimes — only needed if you run that language through
-  `ctx_execute`:
+  `lens_run`:
   - `python3` (python)
   - `node` and `npx` (javascript / typescript; TypeScript runs via `tsx`)
   - `bash` (bash)
   - `ruby` (ruby)
   - `go` (go)
 
-If a runtime is missing, `ctx_execute` returns a clear "install X" error rather
+If a runtime is missing, `lens_run` returns a clear "install X" error rather
 than failing silently.
 
 ## Build
 
 ```
-git clone <repo> && cd ctxforge
+git clone <repo> && cd lens
 cargo build --release
 ```
 
-The binary is at `target/release/ctxforge`.
+The binary is at `target/release/lens`.
 
 ## Install into Claude Code
 
 ```
-claude mcp add ctxforge -- /absolute/path/to/target/release/ctxforge
+claude mcp add lens -- /absolute/path/to/target/release/lens
 ```
 
 …or add it manually to your `.mcp.json` / `claude_desktop_config.json`:
@@ -56,8 +56,8 @@ claude mcp add ctxforge -- /absolute/path/to/target/release/ctxforge
 ```json
 {
   "mcpServers": {
-    "ctxforge": {
-      "command": "/absolute/path/to/target/release/ctxforge"
+    "lens": {
+      "command": "/absolute/path/to/target/release/lens"
     }
   }
 }
@@ -69,57 +69,57 @@ After adding, restart Claude Code and verify with a quick `ctx_stats` call.
 
 The recovery half is separate from the MCP server: it registers five lifecycle
 hooks in Claude Code's `settings.json`, each invoking the **same** binary as
-`ctxforge hook claude <event>`. Run it from the built binary so the absolute
+`lens hook claude <event>`. Run it from the built binary so the absolute
 path is embedded correctly:
 
 ```
-./target/release/ctxforge session install
+./target/release/lens session install
 ```
 
 This adds hooks for `PreToolUse`, `PostToolUse`, `UserPromptSubmit`,
 `PreCompact`, and `SessionStart` to `~/.claude/settings.json`. Then:
 
 ```
-ctxforge session status      # show installed hooks + backing-store health
-ctxforge session uninstall   # remove only ctxforge's entries, leave others intact
+lens session status      # show installed hooks + backing-store health
+lens session uninstall   # remove only lens's entries, leave others intact
 ```
 
-**Conflict guard.** ctxforge and Context Mode both fire on the same lifecycle
+**Conflict guard.** lens and Context Mode both fire on the same lifecycle
 events, so `install` **refuses** to run while Context Mode is enabled — uninstall
 it first (`/plugin uninstall context-mode`). If you also run RTK on these events,
 disable it too (it isn't auto-detected, but it will double-fire). `install` is
-idempotent and `uninstall` removes only ctxforge-owned entries, so unrelated
+idempotent and `uninstall` removes only lens-owned entries, so unrelated
 hooks are never touched.
 
 Install is per-user by default (`~/.claude/settings.json`); point it elsewhere
-with `CTXFORGE_SETTINGS=/path/to/settings.json`.
+with `LENS_SETTINGS=/path/to/settings.json`.
 
 ## Tool reference
 
 | Tool | Description | Example input |
 | :- | :- | :- |
-| `ctx_execute` | Run code in a sandbox; only stdout/stderr return, not the data the script read. Large output is offloaded. | `{"language":"python","code":"print(sum(len(l) for l in open('big.log')))"}` |
-| `ctx_execute_file` | Analyze a file in the sandbox; your `code` receives the file path as its first CLI arg (`sys.argv[1]` / `process.argv[2]` / `$1`). Only printed output returns. | `{"path":"big.log","language":"python","code":"import sys;print(sum(1 for _ in open(sys.argv[1])))"}` |
-| `ctx_index` | Index a file/dir into FTS5 (respects `.gitignore`). | `{"path":"src","recursive":true}` |
-| `ctx_search` | BM25 search, multiple queries per call. | `{"queries":["auth","retry"],"limit_per_query":5}` |
-| `ctx_discover` | Parse the repo into a symbol/relationship graph. | `{"path":".","languages":["rust"]}` |
-| `graph_query` | Find symbols by name (+ optional kind) with their connections. | `{"name":"handle","kind":"function"}` |
-| `graph_neighbors` | Local subgraph around a node id. | `{"node_id":"<id>","depth":2}` |
-| `graph_path` | Shortest path between two symbols. | `{"from":"main","to":"helper"}` |
-| `ctx_retrieve` | Recover a full blob from a `retrieve_ref`. | `{"ref":"<hash>"}` |
+| `lens_run` | Run code in a darkroom; only stdout/stderr return, not the data the script read. Large output is offloaded. | `{"language":"python","code":"print(sum(len(l) for l in open('big.log')))"}` |
+| `lens_run_file` | Analyze a file in the darkroom; your `code` receives the file path as its first CLI arg (`sys.argv[1]` / `process.argv[2]` / `$1`). Only printed output returns. | `{"path":"big.log","language":"python","code":"import sys;print(sum(1 for _ in open(sys.argv[1])))"}` |
+| `lens_index` | Index a file/dir into FTS5 (respects `.gitignore`). | `{"path":"src","recursive":true}` |
+| `lens_search` | BM25 search, multiple queries per call. | `{"queries":["auth","retry"],"limit_per_query":5}` |
+| `lens_map` | Parse the repo into a symbol/relationship graph. | `{"path":".","languages":["rust"]}` |
+| `lens_symbol` | Find symbols by name (+ optional kind) with their connections. | `{"name":"handle","kind":"function"}` |
+| `lens_links` | Local subgraph around a node id. | `{"node_id":"<id>","depth":2}` |
+| `lens_path` | Shortest path between two symbols. | `{"from":"main","to":"helper"}` |
+| `lens_recall` | Recover a full blob from a `retrieve_ref`. | `{"ref":"<hash>"}` |
 | `ctx_stats` | Token-savings counters and index/graph sizes. | `{}` |
 
 ## Recommended workflow
 
-1. Run `ctx_discover` **once** per repo to build the structural graph.
-2. Lean on `ctx_execute` for anything data-heavy — log parsing, scanning large
+1. Run `lens_map` **once** per repo to build the structural graph.
+2. Lean on `lens_run` for anything data-heavy — log parsing, scanning large
    files, transforming data, computing aggregates. The script reads the data;
    only what it prints comes back to context. This is the biggest saver.
-3. Use `ctx_index` + `ctx_search` for lookup ("where is X mentioned").
-4. Use `graph_query` / `graph_neighbors` / `graph_path` for structure ("what
+3. Use `lens_index` + `lens_search` for lookup ("where is X mentioned").
+4. Use `lens_symbol` / `lens_links` / `lens_path` for structure ("what
    calls X", "how does A reach B") instead of reading many files.
 5. When a tool returns a `retrieve_ref` (large output / large subgraph), call
-   `ctx_retrieve` only if you actually need the full version.
+   `lens_recall` only if you actually need the full version.
 6. Check `ctx_stats` to see measured savings.
 
 ## Auto-routing (opt-in)
@@ -129,16 +129,16 @@ adds **interception at the hook layer** so savings happen automatically — the
 `PreToolUse` hook can deny, transparently rewrite, or nudge a built-in tool call,
 and `SessionStart` injects a short tool-selection guide.
 
-It is gated by `CTXFORGE_ROUTING` and **defaults to `off` (a true no-op:
+It is gated by `LENS_ROUTING` and **defaults to `off` (a true no-op:
 `PreToolUse` returns `{}`, identical to having no routing at all).** The four
 levels are the rollout — flip the level to widen the behavior:
 
-| `CTXFORGE_ROUTING` | Behavior |
+| `LENS_ROUTING` | Behavior |
 | :- | :- |
 | `off` (default) | Nothing. `PreToolUse` returns `{}`. |
-| `steer` | `WebFetch` → **deny** (fetch+process via `ctx_execute` instead); periodic per-tool guidance for `Bash`/`Grep`; inject the authoritative `SessionStart` tool-selection directive (`<context_window_protection>`: the *why*, a graph-first hierarchy, a nuanced when-not-to-use, and a deferred-tool `ToolSearch` bootstrap). No rewriting. |
-| `wrap` | Transparently rewrite allowlisted read-only `Bash` commands to `ctxforge wrap -- <cmd>` (deterministic savings, no reliance on model compliance). No deny/nudges. |
-| `full` | `steer` + `wrap` together, plus periodic `Read`→`ctx_execute_file` guidance. |
+| `steer` | `WebFetch` → **deny** (fetch+process via `lens_run` instead); periodic per-tool guidance for `Bash`/`Grep`; inject the authoritative `SessionStart` tool-selection directive (`<context_window_protection>`: the *why*, a graph-first hierarchy, a nuanced when-not-to-use, and a deferred-tool `ToolSearch` bootstrap). No rewriting. |
+| `wrap` | Transparently rewrite allowlisted read-only `Bash` commands to `lens wrap -- <cmd>` (deterministic savings, no reliance on model compliance). No deny/nudges. |
+| `full` | `steer` + `wrap` together, plus periodic `Read`→`lens_run_file` guidance. |
 
 **Bash wrap allowlist (read-only, high-output only).** Wrapping is restricted to
 commands whose every pipeline segment leads with an allowlisted program:
@@ -155,44 +155,44 @@ function defs — or any `&&`/`||`/`;`/`|` chain containing such a segment passe
 through untouched. Wrapping them in a subshell would silently break the
 persistent-shell cwd/env that Claude Code relies on.
 
-**Lossless + observable.** `ctxforge wrap` runs the command via `sh -c`
+**Lossless + observable.** `lens wrap` runs the command via `sh -c`
 (preserving exit code and streaming stderr), offloads large stdout to the
 reversible store, and returns a head+tail preview + a `retrieve_ref` — recover
-the full output byte-for-byte with `ctx_retrieve` (or `ctxforge verify --roundtrip
+the full output byte-for-byte with `lens_recall` (or `lens verify --roundtrip
 <ref>`). Every wrap writes one `ops.log` record (`tool: bash_wrap`), so the
-savings show up in `ctxforge stats` and on the dashboard.
+savings show up in `lens stats` and on the dashboard.
 
 **Safety rails.** Routing engages only while the MCP server is reachable (a
 liveness heartbeat at `<data_dir>/server.pid`); if it is down, every decision
 falls through to passthrough. Per-tool guidance re-injects on a **periodic cadence**
 (every Nth call per session per tool), so the directive stays live as context grows
 rather than firing once and being forgotten.
-You can run the wrapper directly: `ctxforge wrap -- find . -name '*.rs'`.
+You can run the wrapper directly: `lens wrap -- find . -name '*.rs'`.
 
 ## RTK shell savings (opt-in)
 
-ctxforge's MCP tools and the Bash wrap above only compress what gets routed
-through ctxforge. The shell commands Claude Code runs most (every `cd "<proj>" &&
+lens's MCP tools and the Bash wrap above only compress what gets routed
+through lens. The shell commands Claude Code runs most (every `cd "<proj>" &&
 …` chain) slip past, because wrapping a stateful chain would break the persistent
 shell. [RTK](https://github.com/rtk-ai/rtk) (Rust Token Killer, Apache-2.0) is
 built for exactly that case: it rewrites commands *per segment* through its own
 Claude Code hook and ships per-command compactors, so it fires constantly where
-ctxforge's wrap cannot.
+lens's wrap cannot.
 
-Rather than re-author RTK, ctxforge adopts the **headroom pattern**
+Rather than re-author RTK, lens adopts the **headroom pattern**
 (`chopratejas/headroom`): ship the prebuilt RTK binary, let RTK own Bash, and
 surface RTK's *own* measured savings. The division of labor:
 
-- **RTK owns Bash command rewriting.** ctxforge installs the pinned RTK binary and
-  lets RTK's hook rewrite shell commands. While RTK is active, ctxforge's
+- **RTK owns Bash command rewriting.** lens installs the pinned RTK binary and
+  lets RTK's hook rewrite shell commands. While RTK is active, lens's
   `PreToolUse` passes `Bash` straight through, so the two hooks never double-wrap.
   Non-Bash routing (WebFetch-deny, Read/Grep nudges) is unaffected.
-- **ctxforge surfaces RTK's savings.** `ctxforge rtk sync` reads `rtk gain --format
+- **lens surfaces RTK's savings.** `lens rtk sync` reads `rtk gain --format
   json` and appends the delta to `ops.log` as an `rtk_shell` op whose
-  `tokens_saved_est` is RTK's own measured `total_saved` (never a ctxforge
-  re-estimate). `ctxforge stats` and the dashboard then show an **RTK shell
-  savings** plane next to ctxforge's MCP-tool savings.
-- **ctxforge keeps its lane.** Sandboxed execution (`ctx_execute`), FTS5 search,
+  `tokens_saved_est` is RTK's own measured `total_saved` (never a lens
+  re-estimate). `lens stats` and the dashboard then show an **RTK shell
+  savings** plane next to lens's MCP-tool savings.
+- **lens keeps its lane.** Darkroom execution (`lens_run`), FTS5 search,
   the code graph, session continuity, and reversible compression stay the
   downstream context tools, unchanged.
 
@@ -200,31 +200,31 @@ Fully opt-in and additive: with no RTK installed every path here is a no-op and
 existing behavior is identical.
 
 ```sh
-ctxforge rtk install     # download the pinned RTK binary to ~/.ctxforge/bin/rtk
+lens rtk install     # download the pinned RTK binary to ~/.lens/bin/rtk
                          #   and register RTK's hook in $CLAUDE_CONFIG_DIR (else ~/.claude)
-ctxforge rtk status      # installed? which version? hook registered? + rtk gain summary
-ctxforge rtk sync        # fold RTK's measured savings delta into ops.log (rtk_shell op)
-ctxforge rtk uninstall   # remove RTK's Claude hook (rtk init --global --uninstall)
+lens rtk status      # installed? which version? hook registered? + rtk gain summary
+lens rtk sync        # fold RTK's measured savings delta into ops.log (rtk_shell op)
+lens rtk uninstall   # remove RTK's Claude hook (rtk init --global --uninstall)
 ```
 
 `install` is version-pinned (RTK `v0.28.2`, the headroom pin) and idempotent;
 re-running it re-registers the hook without re-downloading. The hook is registered
 in the dir your Claude Code actually reads, `$CLAUDE_CONFIG_DIR` (else `~/.claude`):
-since `rtk init` itself only writes `~/.claude`, ctxforge patches that dir's
+since `rtk init` itself only writes `~/.claude`, lens patches that dir's
 `settings.json` and copies the hook script into its `hooks/` so the hook is
-self-contained. Run `ctxforge rtk sync` periodically to keep the dashboard current. The dashboard (`ctxforge
-dashboard`) then renders three planes: ctxforge MCP tool savings, **RTK shell
+self-contained. Run `lens rtk sync` periodically to keep the dashboard current. The dashboard (`lens
+dashboard`) then renders three planes: lens MCP tool savings, **RTK shell
 savings**, and session activity.
 
-**Activating live rewriting.** `ctxforge rtk install` lands the binary at
-`~/.ctxforge/bin/rtk` and registers RTK's hook, but RTK's `rtk-rewrite.sh` finds
+**Activating live rewriting.** `lens rtk install` lands the binary at
+`~/.lens/bin/rtk` and registers RTK's hook, but RTK's `rtk-rewrite.sh` finds
 `rtk` via `PATH` and needs `jq`. So to have RTK actually rewrite shell commands
-going forward, add `~/.ctxforge/bin` to your `PATH` and install `jq`. `ctxforge
+going forward, add `~/.lens/bin` to your `PATH` and install `jq`. `lens
 rtk status` reports whether live rewriting is active or what is missing.
-(`ctxforge rtk sync` and the dashboard work regardless, since ctxforge calls the
+(`lens rtk sync` and the dashboard work regardless, since lens calls the
 binary by absolute path.)
 
-> Tests are network-free: a stub `rtk` placed on `CTXFORGE_HOME/bin` answers
+> Tests are network-free: a stub `rtk` placed on `LENS_HOME/bin` answers
 > `--version` / `gain --format json`, so `cargo test` never downloads. The real
 > download is exercised on-machine only.
 
@@ -232,16 +232,16 @@ binary by absolute path.)
 
 | Env var | Default | Meaning |
 | :- | :- | :- |
-| `CTXFORGE_DIR` | `<project>/.ctxforge` | Where `index.db`, `store.db`, and `graph.json` live. |
-| `CTXFORGE_MAX_INLINE` | `8192` | Stdout/subgraph byte threshold before offloading to the store. |
-| `CTXFORGE_ROUTING` | `off` | Auto-routing level: `off` \| `steer` \| `wrap` \| `full` (see above). |
-| `CTXFORGE_ROUTING_MCP` | *(auto)* | Override the MCP-ready guard: `up` forces routing on, `down` forces passthrough. Default reads the `server.pid` heartbeat. |
-| `CTXFORGE_MCP_TTL` | `90` | Seconds the `server.pid` heartbeat stays "fresh" for the routing guard. |
-| `CTXFORGE_SNAPSHOT_BUDGET` | `2048` | Byte budget for the session-resume snapshot (recovery half). |
-| `CTXFORGE_SETTINGS` | `~/.claude/settings.json` | Settings file `ctxforge session install` writes its hooks into. |
-| `CTXFORGE_HOME` | `~/.ctxforge` | Global home for the managed RTK binary (`<home>/bin/rtk`). Distinct from the per-project `CTXFORGE_DIR`. |
-| `CTXFORGE_DEFER_BASH_TO_RTK` | *(auto)* | Override the "RTK owns Bash" gate: `1` forces ctxforge to defer `Bash`, `0` forces normal routing. Default detects the RTK binary + its registered hook. |
-| `CTXFORGE_RTK_VERSION` | `v0.28.2` | RTK release that `ctxforge rtk install` downloads. |
+| `LENS_DIR` | `<project>/.lens` | Where `index.db`, `store.db`, and `graph.json` live. |
+| `LENS_MAX_INLINE` | `8192` | Stdout/subgraph byte threshold before offloading to the store. |
+| `LENS_ROUTING` | `off` | Auto-routing level: `off` \| `steer` \| `wrap` \| `full` (see above). |
+| `LENS_ROUTING_MCP` | *(auto)* | Override the MCP-ready guard: `up` forces routing on, `down` forces passthrough. Default reads the `server.pid` heartbeat. |
+| `LENS_MCP_TTL` | `90` | Seconds the `server.pid` heartbeat stays "fresh" for the routing guard. |
+| `LENS_SNAPSHOT_BUDGET` | `2048` | Byte budget for the session-resume snapshot (recovery half). |
+| `LENS_SETTINGS` | `~/.claude/settings.json` | Settings file `lens session install` writes its hooks into. |
+| `LENS_HOME` | `~/.lens` | Global home for the managed RTK binary (`<home>/bin/rtk`). Distinct from the per-project `LENS_DIR`. |
+| `LENS_DEFER_BASH_TO_RTK` | *(auto)* | Override the "RTK owns Bash" gate: `1` forces lens to defer `Bash`, `0` forces normal routing. Default detects the RTK binary + its registered hook. |
+| `LENS_RTK_VERSION` | `v0.28.2` | RTK release that `lens rtk install` downloads. |
 | `RUST_LOG` | `info` | Log level (logs go to **stderr**; stdout is the MCP channel). |
 
 ## Development
@@ -263,7 +263,7 @@ savings, accuracy, and the session-recovery head-to-head vs Context Mode);
 curves, mechanism classification, the discovery-regression investigation), and
 [benchmarks/README.md](benchmarks/README.md) covers methodology. Savings are
 measured headroom-style (token-in vs token-out, segmented by mechanism); the
-accuracy method is **task-based rather than GSM8K-style** because ctxforge sits
+accuracy method is **task-based rather than GSM8K-style** because lens sits
 beside the prompt path (as an MCP tool the agent chooses to call), not inside it,
 so the faithful question is whether tasks stay correct when the agent uses the
 tools instead of reading raw files. Both docs are generated — never hand-edited.

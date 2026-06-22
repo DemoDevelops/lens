@@ -1,13 +1,13 @@
-//! ctxforge entrypoint.
+//! lens entrypoint.
 //!
 //! Two modes:
 //!   * No subcommand → run the MCP stdio server (the default).
-//!   * `ctxforge hook <platform> <event>` → a short-lived session-continuity
+//!   * `lens hook <platform> <event>` → a short-lived session-continuity
 //!     lifecycle hook (stdin = hook payload, stdout = hook response).
-//!   * `ctxforge session <install|uninstall|status>` → manage the hooks.
-//!   * `ctxforge warmup [path]` → build the code graph + FTS index for a repo up
-//!     front, so graph_query / ctx_search work without the server's lazy first build.
-//!   * `ctxforge stats [...]` / `ctxforge verify [...]` → read-only observability
+//!   * `lens session <install|uninstall|status>` → manage the hooks.
+//!   * `lens warmup [path]` → build the code graph + FTS index for a repo up
+//!     front, so lens_symbol / lens_search work without the server's lazy first build.
+//!   * `lens stats [...]` / `lens verify [...]` → read-only observability
 //!     views over the op log + reversible store (separate processes, own stdout).
 //!
 //! CRITICAL: in server mode stdout is the JSON-RPC channel. NOTHING may be
@@ -20,9 +20,9 @@ use anyhow::Result;
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 
-use ctxforge::obs;
-use ctxforge::server::Forge;
-use ctxforge::session;
+use lens::obs;
+use lens::server::Forge;
+use lens::session;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -32,15 +32,15 @@ fn main() -> Result<()> {
         Some("stats") => return obs::stats::run_cli(&args[2..]),
         Some("verify") => return obs::verify::run_cli(&args[2..]),
         Some("dashboard") => return obs::dashboard::run_cli(&args[2..]),
-        Some("wrap") => return ctxforge::wrap::run_cli(&args[2..]),
-        Some("rtk") => return ctxforge::rtk::run_cli(&args[2..]),
-        Some("warmup") => return ctxforge::warmup::run_cli(&args[2..]),
-        Some("watch") => return ctxforge::warmup::run_watch_cli(&args[2..]),
+        Some("wrap") => return lens::wrap::run_cli(&args[2..]),
+        Some("rtk") => return lens::rtk::run_cli(&args[2..]),
+        Some("warmup") => return lens::warmup::run_cli(&args[2..]),
+        Some("watch") => return lens::warmup::run_watch_cli(&args[2..]),
         _ => {}
     }
-    // `--explain` is an alias for CTXFORGE_EXPLAIN=1 (opt-in per-op trace).
+    // `--explain` is an alias for LENS_EXPLAIN=1 (opt-in per-op trace).
     if args.iter().any(|a| a == "--explain") {
-        std::env::set_var("CTXFORGE_EXPLAIN", "1");
+        std::env::set_var("LENS_EXPLAIN", "1");
     }
     run_server()
 }
@@ -57,7 +57,7 @@ async fn run_server() -> Result<()> {
         .init();
 
     let forge = Forge::new()?;
-    tracing::info!("ctxforge starting on stdio");
+    tracing::info!("lens starting on stdio");
 
     // Liveness heartbeat for the routing layer's MCP-ready guard (a separate
     // hook process): it treats this server as reachable only while
@@ -85,11 +85,11 @@ async fn run_server() -> Result<()> {
 }
 
 /// Resolve `<data_dir>/server.pid`, matching how the server/hook resolve the
-/// data dir (`$CTXFORGE_DIR`, else `<cwd>/.ctxforge`). `None` if unresolvable.
+/// data dir (`$LENS_DIR`, else `<cwd>/.lens`). `None` if unresolvable.
 fn heartbeat_path() -> Option<std::path::PathBuf> {
-    let dir = match std::env::var_os("CTXFORGE_DIR") {
+    let dir = match std::env::var_os("LENS_DIR") {
         Some(d) => std::path::PathBuf::from(d),
-        None => std::env::current_dir().ok()?.join(".ctxforge"),
+        None => std::env::current_dir().ok()?.join(".lens"),
     };
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("server.pid"))

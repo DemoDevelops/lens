@@ -2,7 +2,7 @@
 
 ## The honest baseline
 
-ctxforge has **no roles, no accounts, no authentication, and no row-level
+lens has **no roles, no accounts, no authentication, and no row-level
 security**. It is a local tool whose security model is **inherited process
 privilege**: every operation runs with the rights of whatever launched the
 binary. Nothing here grants or checks access in the web-app sense.
@@ -15,28 +15,28 @@ capability. The gates are steering/safety controls, not authorization boundaries
 
 | Actor | How it acts | Effective privilege |
 | :- | :- | :- |
-| **AI agent** | Calls MCP tools; its tool calls pass through the routing hook | Full host privilege via `ctx_execute` and Bash. ctxforge does not raise or lower it. |
-| **Claude Code harness** | Fires `ctxforge hook claude <event>` on lifecycle events | Runs the hook subprocess with the session's environment |
-| **Human operator** | Runs `ctxforge <subcommand>` at a terminal | Their own shell privilege; the install subcommands edit their `~/.claude` config |
+| **AI agent** | Calls MCP tools; its tool calls pass through the routing hook | Full host privilege via `lens_run` and Bash. lens does not raise or lower it. |
+| **Claude Code harness** | Fires `lens hook claude <event>` on lifecycle events | Runs the hook subprocess with the session's environment |
+| **Human operator** | Runs `lens <subcommand>` at a terminal | Their own shell privilege; the install subcommands edit their `~/.claude` config |
 
 ## Capability x actor x gate
 
 | Capability | Agent | Claude Code | Operator | Gate that constrains it |
 | :- | :-: | :-: | :-: | :- |
-| Execute arbitrary code in a subprocess (`ctx_execute`) | yes | — | — | **None.** Only a timeout + supported-language check. Full FS + network (TB-1). |
-| Run a shell command via `ctxforge wrap` | yes (rewritten) | — | yes | Wrap allowlist decides *eligibility for rewriting*, not permission to run. |
-| Read/index repo files (`ctx_index`, `ctx_search`, `ctx_discover`, graph) | yes | — | yes | Path resolves under repo dir; `.gitignore` is respected by indexing. |
-| Retrieve an offloaded blob (`ctx_retrieve`) | yes | — | yes | Must present a valid `retrieve_ref`; unknown ref → error. |
-| Deny / rewrite / annotate a tool call (PreToolUse) | — | yes | — | `CTXFORGE_ROUTING` level (default `off` = no-op); `mcp_ready` for redirects. |
+| Execute arbitrary code in a subprocess (`lens_run`) | yes | — | — | **None.** Only a timeout + supported-language check. Full FS + network (TB-1). |
+| Run a shell command via `lens wrap` | yes (rewritten) | — | yes | Wrap allowlist decides *eligibility for rewriting*, not permission to run. |
+| Read/index repo files (`lens_index`, `lens_search`, `lens_map`, graph) | yes | — | yes | Path resolves under repo dir; `.gitignore` is respected by indexing. |
+| Retrieve an offloaded blob (`lens_recall`) | yes | — | yes | Must present a valid `retrieve_ref`; unknown ref → error. |
+| Deny / rewrite / annotate a tool call (PreToolUse) | — | yes | — | `LENS_ROUTING` level (default `off` = no-op); `mcp_ready` for redirects. |
 | Persist session events (prompts, files, errors) | — | yes | — | Skips system messages and empty prompts; startup clears prior events. |
-| Edit `~/.claude/settings.json` | — | — | yes | `session install` refuses under Context Mode; changes scoped to ctxforge entries. |
+| Edit `~/.claude/settings.json` | — | — | yes | `session install` refuses under Context Mode; changes scoped to lens entries. |
 | Download + execute the RTK binary | — | — | yes | Version pin only; **no checksum** (TB-5). Opt-in. |
 | Serve the dashboard | — | — | yes | Loopback bind by default; **no auth**; `--host` can widen it (TB-6). |
 
 ## Where "scope" is derived
 
-- **Data dir scope.** All persisted state is per-project under `$CTXFORGE_DIR`
-  (default `<project>/.ctxforge`), resolved identically by the server
+- **Data dir scope.** All persisted state is per-project under `$LENS_DIR`
+  (default `<project>/.lens`), resolved identically by the server
   (`server.rs::Forge::new`) and the hook (`session/mod.rs::resolve_data_dir`).
   Cross-project isolation is by directory, not by access control.
 - **Path resolution.** `ctx_*` tools resolve relative paths against the repo
@@ -59,9 +59,9 @@ constraint is **code-enforced** and advisory:
 
 ## Reviewer takeaways
 
-- Treat `ctx_execute` as equivalent to handing the agent a shell. The right
+- Treat `lens_run` as equivalent to handing the agent a shell. The right
   question is not "what can the agent access" (everything the user can) but
   "should this agent be driving this binary on this machine at all."
-- The only persisted-data exposure is `.ctxforge/` (see `variables.md`). Anyone
+- The only persisted-data exposure is `.lens/` (see `variables.md`). Anyone
   with read access to the project directory can read captured prompts and the
   offloaded blob store.

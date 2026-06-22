@@ -1,12 +1,12 @@
 [package]
-name = "ctxforge"
+name = "lens"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "A token-saving MCP server: sandboxed execution, FTS5 search, tree-sitter code graph, reversible compression."
+description = "A token-saving MCP server: darkroom execution, FTS5 search, tree-sitter code graph, reversible compression."
 
 [[bin]]
-name = "ctxforge"
+name = "lens"
 path = "src/main.rs"
 
 # --- Benchmark suite (see benchmarks/). These reuse the library crate and the

@@ -20,14 +20,14 @@ async fn full_mcp_session() {
     .unwrap();
     std::fs::write(repo.path().join("big.txt"), "z".repeat(200_000)).unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_ctxforge");
+    let bin = env!("CARGO_BIN_EXE_lens");
     let repo_path = repo.path().to_path_buf();
     let data_path = data.path().to_path_buf();
 
     let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
         cmd.current_dir(&repo_path)
-            .env("CTXFORGE_DIR", &data_path)
-            .env("CTXFORGE_MAX_INLINE", "8192");
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192");
     }))
     .unwrap();
 
@@ -38,14 +38,14 @@ async fn full_mcp_session() {
     let tools = client.list_tools(Default::default()).await.unwrap();
     let names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
     for expected in [
-        "ctx_execute",
-        "ctx_index",
-        "ctx_search",
-        "ctx_discover",
-        "graph_query",
-        "graph_neighbors",
-        "graph_path",
-        "ctx_retrieve",
+        "lens_run",
+        "lens_index",
+        "lens_search",
+        "lens_map",
+        "lens_symbol",
+        "lens_links",
+        "lens_path",
+        "lens_recall",
         "ctx_stats",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
@@ -76,9 +76,9 @@ async fn full_mcp_session() {
         }
     };
 
-    // --- ctx_execute: large output offloaded; raw input never returned ---
+    // --- lens_run: large output offloaded; raw input never returned ---
     let exec = call(
-        "ctx_execute",
+        "lens_run",
         json!({
             "language": "python",
             "code": "data = open('big.txt').read(); print('A' * 50000)"
@@ -90,17 +90,17 @@ async fn full_mcp_session() {
     assert!(!exec["stdout"].as_str().unwrap().contains(&"z".repeat(50)));
     let exec_ref = exec["retrieve_ref"].as_str().unwrap().to_string();
 
-    // --- ctx_retrieve: recover the full offloaded output ---
-    let retrieved = call("ctx_retrieve", json!({ "ref": exec_ref })).await;
+    // --- lens_recall: recover the full offloaded output ---
+    let retrieved = call("lens_recall", json!({ "ref": exec_ref })).await;
     assert!(retrieved["content"]
         .as_str()
         .unwrap()
         .contains(&"A".repeat(50000)));
 
-    // --- ctx_index + ctx_search ---
-    let indexed = call("ctx_index", json!({ "path": "." })).await;
+    // --- lens_index + lens_search ---
+    let indexed = call("lens_index", json!({ "path": "." })).await;
     assert!(indexed["files_indexed"].as_u64().unwrap() >= 1);
-    let searched = call("ctx_search", json!({ "queries": ["helper"] })).await;
+    let searched = call("lens_search", json!({ "queries": ["helper"] })).await;
     let hits = &searched["results"][0]["hits"];
     assert!(hits
         .as_array()
@@ -108,29 +108,29 @@ async fn full_mcp_session() {
         .iter()
         .any(|h| h["path"].as_str().unwrap().ends_with("lib.rs")));
 
-    // --- ctx_discover + graph_query ---
-    let discovered = call("ctx_discover", json!({ "path": "." })).await;
+    // --- lens_map + lens_symbol ---
+    let discovered = call("lens_map", json!({ "path": "." })).await;
     assert!(discovered["nodes"].as_u64().unwrap() >= 3);
-    let queried = call("graph_query", json!({ "name": "helper" })).await;
+    let queried = call("lens_symbol", json!({ "name": "helper" })).await;
     let found_nodes = queried["nodes"].as_array().unwrap();
     assert!(found_nodes.iter().any(|n| n["name"] == json!("helper")));
 
-    // graph_path between two connected symbols
-    let pathed = call("graph_path", json!({ "from": "main", "to": "helper" })).await;
+    // lens_path between two connected symbols
+    let pathed = call("lens_path", json!({ "from": "main", "to": "helper" })).await;
     assert_eq!(pathed["found"], json!(true));
 
-    // --- ctx_stats: non-zero savings after the large sandbox run ---
+    // --- ctx_stats: non-zero savings after the large darkroom run ---
     let stats = call("ctx_stats", json!({})).await;
-    assert!(stats["sandbox_calls"].as_i64().unwrap() >= 1);
+    assert!(stats["darkroom_calls"].as_i64().unwrap() >= 1);
     assert!(stats["estimated_tokens_saved"].as_i64().unwrap() > 0);
     assert!(stats["graph_nodes"].as_i64().unwrap() >= 3);
 
     client.cancel().await.ok();
 }
 
-/// Lazy auto-build: on a fresh repo with no prior ctx_index / ctx_discover, the
-/// first ctx_search and graph_query build the index/graph themselves and return
-/// results — so ctxforge works on any repo without an explicit init step.
+/// Lazy auto-build: on a fresh repo with no prior lens_index / lens_map, the
+/// first lens_search and lens_symbol build the index/graph themselves and return
+/// results — so lens works on any repo without an explicit init step.
 #[tokio::test]
 async fn lazy_autobuild_on_first_query() {
     let repo = tempfile::tempdir().unwrap();
@@ -142,14 +142,14 @@ async fn lazy_autobuild_on_first_query() {
     )
     .unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_ctxforge");
+    let bin = env!("CARGO_BIN_EXE_lens");
     let repo_path = repo.path().to_path_buf();
     let data_path = data.path().to_path_buf();
 
     let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
         cmd.current_dir(&repo_path)
-            .env("CTXFORGE_DIR", &data_path)
-            .env("CTXFORGE_MAX_INLINE", "8192");
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192");
     }))
     .unwrap();
     let client = ().serve(transport).await.expect("handshake");
@@ -165,26 +165,26 @@ async fn lazy_autobuild_on_first_query() {
         }
     };
 
-    // No ctx_index first: ctx_search must auto-index, then find the symbol.
-    let searched = call("ctx_search", json!({ "queries": ["helper"] })).await;
+    // No lens_index first: lens_search must auto-index, then find the symbol.
+    let searched = call("lens_search", json!({ "queries": ["helper"] })).await;
     let hits = &searched["results"][0]["hits"];
     assert!(
         hits.as_array()
             .unwrap()
             .iter()
             .any(|h| h["path"].as_str().unwrap().ends_with("lib.rs")),
-        "ctx_search should auto-index and find helper in lib.rs"
+        "lens_search should auto-index and find helper in lib.rs"
     );
 
-    // No ctx_discover first: graph_query must auto-build the graph, then find it.
-    let queried = call("graph_query", json!({ "name": "helper" })).await;
+    // No lens_map first: lens_symbol must auto-build the graph, then find it.
+    let queried = call("lens_symbol", json!({ "name": "helper" })).await;
     assert!(
         queried["nodes"]
             .as_array()
             .unwrap()
             .iter()
             .any(|n| n["name"] == json!("helper")),
-        "graph_query should auto-build the graph and find helper"
+        "lens_symbol should auto-build the graph and find helper"
     );
 
     // The graph was persisted and the stats reflect the auto-build.
@@ -199,22 +199,22 @@ async fn lazy_autobuild_on_first_query() {
     client.cancel().await.ok();
 }
 
-/// `ctx_execute_file` must credit the analyzed file's bytes as savings — they
+/// `lens_run_file` must credit the analyzed file's bytes as savings — they
 /// never entered context — even when the script prints a small, un-offloaded result.
 #[tokio::test]
-async fn ctx_execute_file_credits_the_file_bytes() {
+async fn lens_run_file_credits_the_file_bytes() {
     let repo = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
-    // A 40 KB file; analyzing it via the sandbox must not cost ~40 KB of context.
+    // A 40 KB file; analyzing it via the darkroom must not cost ~40 KB of context.
     std::fs::write(repo.path().join("big.log"), "x".repeat(40_000)).unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_ctxforge");
+    let bin = env!("CARGO_BIN_EXE_lens");
     let repo_path = repo.path().to_path_buf();
     let data_path = data.path().to_path_buf();
     let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
         cmd.current_dir(&repo_path)
-            .env("CTXFORGE_DIR", &data_path)
-            .env("CTXFORGE_MAX_INLINE", "8192");
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192");
     }))
     .unwrap();
     let client = ().serve(transport).await.expect("handshake");
@@ -235,7 +235,7 @@ async fn ctx_execute_file_credits_the_file_bytes() {
 
     // Analyze the 40 KB file but print only a tiny summary (no offload).
     let res = call(
-        "ctx_execute_file",
+        "lens_run_file",
         json!({
             "path": "big.log",
             "language": "python",

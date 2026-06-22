@@ -1,4 +1,4 @@
-//! `ctxforge stats` — a human-readable view of the op log + store counters.
+//! `lens stats` — a human-readable view of the op log + store counters.
 //!
 //! Read-only and additive: it reconstructs cumulative savings from `ops.log`
 //! (so totals reconcile with the log line-for-line) and reads store/graph sizes
@@ -45,8 +45,10 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                 i += 1;
             }
             other => {
-                eprintln!("ctxforge stats: unknown flag '{other}'");
-                eprintln!("usage: ctxforge stats [--watch] [--session <id>] [--since <iso8601>] [--last <n>]");
+                eprintln!("lens stats: unknown flag '{other}'");
+                eprintln!(
+                    "usage: lens stats [--watch] [--session <id>] [--since <iso8601>] [--last <n>]"
+                );
                 std::process::exit(2);
             }
         }
@@ -142,24 +144,22 @@ pub fn aggregate(records: &[OpRecord]) -> Totals {
     t
 }
 
-/// Which mechanism a tool belongs to (sandbox / index / discovery / retrieve).
+/// Which mechanism a tool belongs to (darkroom / index / discovery / retrieve).
 /// `rtk_shell` records (RTK's own shell-command savings, synced into the op log)
 /// bucket under "shell" so they read as a distinct lane in the mechanism rollup.
 fn mechanism(tool: &str) -> &'static str {
     match tool {
-        "ctx_execute" => "sandbox",
-        "ctx_index" | "ctx_search" => "index",
-        "ctx_discover" | "graph_query" | "graph_neighbors" | "graph_path" | "graph_find" => {
-            "discovery"
-        }
-        "ctx_retrieve" => "retrieve",
+        "lens_run" => "darkroom",
+        "lens_index" | "lens_search" => "index",
+        "lens_map" | "lens_symbol" | "lens_links" | "lens_path" | "lens_find" => "discovery",
+        "lens_recall" => "retrieve",
         "rtk_shell" => "shell",
         _ => "other",
     }
 }
 
 /// Best-effort snapshot of RTK's *own* measured shell-command savings, read from
-/// `rtk gain` (never re-estimated by ctxforge). Returns
+/// `rtk gain` (never re-estimated by lens). Returns
 /// `{"installed": false}` when RTK isn't installed or the call fails; otherwise
 /// `{"installed": true, ...}` with RTK's global summary totals. Cheap: skips the
 /// subprocess entirely unless a binary is resolvable.
@@ -296,7 +296,7 @@ pub fn snapshot_json_since(
         .collect();
 
     // The MCP-tool-savings plane must read MCP-only: exclude the synced `rtk_shell`
-    // op so a `ctxforge rtk sync` doesn't relabel RTK's shell savings as MCP savings.
+    // op so a `lens rtk sync` doesn't relabel RTK's shell savings as MCP savings.
     // RTK savings keep their own plane (`rtk` block + `by_mechanism` "shell"); the
     // grand-total `tokens_saved_est` still includes them (the ledger reconciles).
     let rtk_shell_saved: i64 = t.by_tool.get("rtk_shell").map(|a| a.saved).unwrap_or(0);
@@ -356,7 +356,7 @@ fn render(dir: &Path, filters: &Filters) -> String {
     let (store_size, index_chunks, graph_nodes, graph_edges) = store_index_graph(dir);
 
     let mut o = String::new();
-    o.push_str("ctxforge stats\n");
+    o.push_str("lens stats\n");
     o.push_str(&format!("  data dir        : {}\n", dir.display()));
     if let Some(s) = &filters.session {
         o.push_str(&format!("  session         : {s}\n"));
@@ -429,7 +429,7 @@ fn render(dir: &Path, filters: &Filters) -> String {
     o.push('\n');
 
     // RTK shell savings: RTK's *own* measured savings on shell commands (via
-    // `rtk gain`) — never re-estimated by ctxforge. Best-effort; degrades to a
+    // `rtk gain`) — never re-estimated by lens. Best-effort; degrades to a
     // "not installed" line when no RTK binary resolves.
     let rtk = rtk_snapshot();
     o.push_str("  RTK shell savings (rtk gain):\n");
@@ -450,7 +450,7 @@ fn render(dir: &Path, filters: &Filters) -> String {
         ));
         o.push_str(&format!("    avg savings     : {pct:.1}%\n"));
     } else {
-        o.push_str("    not installed   : run `ctxforge rtk install` to enable\n");
+        o.push_str("    not installed   : run `lens rtk install` to enable\n");
     }
     o.push('\n');
 
@@ -465,7 +465,7 @@ fn render(dir: &Path, filters: &Filters) -> String {
     o.push_str(&format!("    graph edges     : {graph_edges}\n"));
 
     // Session activity: the "first plane" — built-in tool use captured by the
-    // hooks (NOT ctxforge MCP tool usage; that is the savings totals above).
+    // hooks (NOT lens MCP tool usage; that is the savings totals above).
     let activity = SessionStore::open(dir)
         .and_then(|s| s.activity(filters.session.as_deref(), None))
         .unwrap_or_default();
@@ -530,11 +530,11 @@ mod tests {
     fn totals_reconcile_with_log() {
         let dir = tempdir().unwrap();
         let log = OpLog::open(dir.path());
-        log.start("ctx_execute", json!({}))
+        log.start("lens_run", json!({}))
             .finish(8000, 100, Some("a".into()), "ok", "", None);
-        log.start("ctx_search", json!({}))
+        log.start("lens_search", json!({}))
             .finish(50, 50, None, "ok", "", None);
-        log.start("ctx_execute", json!({}))
+        log.start("lens_run", json!({}))
             .finish(0, 0, None, "error", "boom", None);
 
         let records = read_records(dir.path(), None);
@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(t.errors, 1);
         assert_eq!(t.offloaded_ops, 1);
         assert_eq!(t.offloaded_bytes, 7900);
-        assert_eq!(t.by_tool["ctx_execute"].count, 2);
+        assert_eq!(t.by_tool["lens_run"].count, 2);
         // Sum of per-record returned bytes matches the aggregate exactly.
         let summed: u64 = records.iter().map(|r| r.bytes_returned).sum();
         assert_eq!(summed, t.bytes_returned);
@@ -556,13 +556,13 @@ mod tests {
     fn session_filter_scopes_records() {
         let dir = tempdir().unwrap();
         let log = OpLog::open(dir.path());
-        std::env::set_var("CTXFORGE_SESSION_ID", "s1");
-        log.start("ctx_search", json!({}))
+        std::env::set_var("LENS_SESSION_ID", "s1");
+        log.start("lens_search", json!({}))
             .finish(1, 1, None, "ok", "", None);
-        std::env::set_var("CTXFORGE_SESSION_ID", "s2");
-        log.start("ctx_search", json!({}))
+        std::env::set_var("LENS_SESSION_ID", "s2");
+        log.start("lens_search", json!({}))
             .finish(1, 1, None, "ok", "", None);
-        std::env::remove_var("CTXFORGE_SESSION_ID");
+        std::env::remove_var("LENS_SESSION_ID");
 
         let only_s1 = read_records(dir.path(), Some("s1"));
         assert_eq!(only_s1.len(), 1);
@@ -595,25 +595,25 @@ esac
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// RTK-dependent assertions live in ONE test: `CTXFORGE_HOME` is process-global
+    /// RTK-dependent assertions live in ONE test: `LENS_HOME` is process-global
     /// and `cargo test` runs in parallel, so we set it, run every rtk assertion,
     /// then remove it within this single test to keep the mutation tightly scoped.
     /// Data dirs are independent tempdirs passed straight to `snapshot_json`.
     #[cfg(unix)]
     #[test]
     fn rtk_plane_present_and_absent_and_buckets_shell() {
-        // Serialize with other CTXFORGE_HOME mutators (env is process-global).
+        // Serialize with other LENS_HOME mutators (env is process-global).
         let _g = crate::rtk::env_test_lock();
-        // --- 1. PRESENT: point CTXFORGE_HOME at a home holding the stub rtk. ---
+        // --- 1. PRESENT: point LENS_HOME at a home holding the stub rtk. ---
         let home = tempdir().unwrap();
         write_stub_rtk(home.path());
-        std::env::set_var("CTXFORGE_HOME", home.path());
+        std::env::set_var("LENS_HOME", home.path());
 
         // Seed an `rtk_shell` OpRecord (RTK's own number, raw/returned bytes 0)
         // plus a regular MCP op, so by_mechanism/by_tool can be checked.
         let data = tempdir().unwrap();
         let log = OpLog::open(data.path());
-        log.start("ctx_execute", json!({}))
+        log.start("lens_run", json!({}))
             .finish(8000, 100, Some("a".into()), "ok", "", None);
         // OpHandle::finish derives tokens_saved_est from bytes; rtk_shell carries
         // RTK's own figure instead, so append the record directly.
@@ -659,9 +659,9 @@ esac
         );
 
         // --- 2. ABSENT: empty home (no bin/rtk). PATH has no managed rtk here
-        // (the real binary lives only under ~/.ctxforge, which we've overridden).
+        // (the real binary lives only under ~/.lens, which we've overridden).
         let empty = tempdir().unwrap();
-        std::env::set_var("CTXFORGE_HOME", empty.path());
+        std::env::set_var("LENS_HOME", empty.path());
         let snap2 = snapshot_json(data.path(), None);
         let installed = snap2["rtk"]["installed"].as_bool();
         // Normally false; if a stray `rtk` is on PATH it could read true — either
@@ -671,15 +671,20 @@ esac
             assert_eq!(snap2["rtk"], json!({ "installed": false }));
         }
 
-        std::env::remove_var("CTXFORGE_HOME");
+        std::env::remove_var("LENS_HOME");
     }
 
     #[test]
     fn snapshot_since_scopes_ops_to_the_cutoff() {
         let dir = tempdir().unwrap();
-        OpLog::open(dir.path())
-            .start("ctx_execute", json!({}))
-            .finish(8000, 100, Some("a".into()), "ok", "", None);
+        OpLog::open(dir.path()).start("lens_run", json!({})).finish(
+            8000,
+            100,
+            Some("a".into()),
+            "ok",
+            "",
+            None,
+        );
 
         // No cutoff: the op is counted (today's behavior, unchanged).
         assert_eq!(snapshot_json(dir.path(), None)["ops"], json!(1));

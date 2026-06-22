@@ -1,12 +1,12 @@
-//! Integration tests for the CTXFORGE_ROUTING layer (plan §4).
+//! Integration tests for the LENS_ROUTING layer (plan §4).
 //!
 //! These drive the REAL compiled binary the way Claude Code does:
-//!   * `ctxforge hook claude PreToolUse/SessionStart` over stdin → assert the
+//!   * `lens hook claude PreToolUse/SessionStart` over stdin → assert the
 //!     exact hook JSON per routing level (and that `=off` is a byte-identical
 //!     no-op — the safety contract);
-//!   * `ctxforge wrap` → offload large stdout, then `verify --roundtrip` (PASS)
+//!   * `lens wrap` → offload large stdout, then `verify --roundtrip` (PASS)
 //!     and `stats` (the op surfaces with real savings);
-//!   * `ctx_execute_file` end-to-end through the rmcp client.
+//!   * `lens_run_file` end-to-end through the rmcp client.
 
 use std::io::Write;
 use std::path::Path;
@@ -15,10 +15,10 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ctxforge")
+    env!("CARGO_BIN_EXE_lens")
 }
 
-/// Run `ctxforge hook claude <event>` with `payload` on stdin under a clean,
+/// Run `lens hook claude <event>` with `payload` on stdin under a clean,
 /// explicit routing env. Returns (trimmed stdout, parsed JSON or Null).
 fn run_hook(
     event: &str,
@@ -28,14 +28,14 @@ fn run_hook(
 ) -> (String, Value) {
     let mut cmd = Command::new(bin());
     cmd.args(["hook", "claude", event])
-        .env("CTXFORGE_DIR", data_dir)
+        .env("LENS_DIR", data_dir)
         // Determinism: never inherit routing env from the test runner.
-        .env_remove("CTXFORGE_ROUTING")
-        .env_remove("CTXFORGE_ROUTING_MCP")
+        .env_remove("LENS_ROUTING")
+        .env_remove("LENS_ROUTING_MCP")
         // RTK coexistence (plan T4): force the defer-Bash-to-RTK gate OFF so these
         // Bash-wrap assertions are deterministic regardless of whether RTK happens
         // to be installed + hooked on the host machine.
-        .env("CTXFORGE_DEFER_BASH_TO_RTK", "0")
+        .env("LENS_DEFER_BASH_TO_RTK", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -72,14 +72,14 @@ fn webfetch_payload(dir: &Path, session: &str) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// §4: CTXFORGE_ROUTING=off ⇒ PreToolUse output identical to today (empty)
+// §4: LENS_ROUTING=off ⇒ PreToolUse output identical to today (empty)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn off_is_a_true_noop() {
     let d = tempfile::tempdir().unwrap();
     // Explicit `off` AND unset (the default) must both be byte-identical "{}".
-    for envs in [vec![("CTXFORGE_ROUTING", "off")], vec![]] {
+    for envs in [vec![("LENS_ROUTING", "off")], vec![]] {
         let (raw_wf, _) = run_hook(
             "PreToolUse",
             &webfetch_payload(d.path(), "s1"),
@@ -111,7 +111,7 @@ fn webfetch_denies_when_steering() {
         let (_, v) = run_hook(
             "PreToolUse",
             &webfetch_payload(d.path(), "s1"),
-            &[("CTXFORGE_ROUTING", lvl), ("CTXFORGE_ROUTING_MCP", "up")],
+            &[("LENS_ROUTING", lvl), ("LENS_ROUTING_MCP", "up")],
             d.path(),
         );
         let hso = &v["hookSpecificOutput"];
@@ -124,8 +124,8 @@ fn webfetch_denies_when_steering() {
             hso["permissionDecisionReason"]
                 .as_str()
                 .unwrap()
-                .contains("ctx_execute"),
-            "deny reason steers to the sandbox"
+                .contains("lens_run"),
+            "deny reason steers to the darkroom"
         );
     }
 }
@@ -137,7 +137,7 @@ fn webfetch_passes_through_at_wrap_only_level() {
     let (raw, _) = run_hook(
         "PreToolUse",
         &webfetch_payload(d.path(), "s1"),
-        &[("CTXFORGE_ROUTING", "wrap"), ("CTXFORGE_ROUTING_MCP", "up")],
+        &[("LENS_ROUTING", "wrap"), ("LENS_ROUTING_MCP", "up")],
         d.path(),
     );
     assert_eq!(raw, "{}");
@@ -148,12 +148,12 @@ fn webfetch_passes_through_at_wrap_only_level() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn wrappable_bash_rewrites_to_ctxforge_wrap_at_full() {
+fn wrappable_bash_rewrites_to_lens_wrap_at_full() {
     let d = tempfile::tempdir().unwrap();
     let (_, v) = run_hook(
         "PreToolUse",
         &bash_payload(d.path(), "s1", "find . -type f"),
-        &[("CTXFORGE_ROUTING", "full"), ("CTXFORGE_ROUTING_MCP", "up")],
+        &[("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")],
         d.path(),
     );
     let hso = &v["hookSpecificOutput"];
@@ -167,16 +167,13 @@ fn wrappable_bash_rewrites_to_ctxforge_wrap_at_full() {
         cmd.contains("find . -type f"),
         "original command preserved: {cmd}"
     );
-    assert!(
-        cmd.contains("ctxforge"),
-        "invokes the ctxforge binary: {cmd}"
-    );
+    assert!(cmd.contains("lens"), "invokes the lens binary: {cmd}");
 }
 
 #[test]
 fn git_subcommand_awareness() {
     let d = tempfile::tempdir().unwrap();
-    let envs = [("CTXFORGE_ROUTING", "full"), ("CTXFORGE_ROUTING_MCP", "up")];
+    let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
     // read-only subcommand → wrapped
     let (_, log) = run_hook(
         "PreToolUse",
@@ -202,7 +199,7 @@ fn stateful_chain_passes_through_unchanged() {
     let (raw, _) = run_hook(
         "PreToolUse",
         &bash_payload(d.path(), "s1", "cd src && find . -type f"),
-        &[("CTXFORGE_ROUTING", "full"), ("CTXFORGE_ROUTING_MCP", "up")],
+        &[("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")],
         d.path(),
     );
     assert_eq!(raw, "{}", "cd-chain must pass through unchanged");
@@ -215,10 +212,7 @@ fn stateful_chain_passes_through_unchanged() {
 #[test]
 fn bash_nudge_fires_once_then_passthrough_at_steer() {
     let d = tempfile::tempdir().unwrap();
-    let envs = [
-        ("CTXFORGE_ROUTING", "steer"),
-        ("CTXFORGE_ROUTING_MCP", "up"),
-    ];
+    let envs = [("LENS_ROUTING", "steer"), ("LENS_ROUTING_MCP", "up")];
     let p = bash_payload(d.path(), "s1", "find . -type f");
     let (_, v1) = run_hook("PreToolUse", &p, &envs, d.path());
     assert!(
@@ -240,10 +234,7 @@ fn bash_nudge_fires_once_then_passthrough_at_steer() {
 #[test]
 fn mcp_down_gates_redirects_not_wrap() {
     let d = tempfile::tempdir().unwrap();
-    let envs = [
-        ("CTXFORGE_ROUTING", "full"),
-        ("CTXFORGE_ROUTING_MCP", "down"),
-    ];
+    let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "down")];
     // WebFetch deny is an MCP redirect → suppressed to passthrough when down.
     let (raw_wf, _) = run_hook(
         "PreToolUse",
@@ -252,7 +243,7 @@ fn mcp_down_gates_redirects_not_wrap() {
         d.path(),
     );
     assert_eq!(raw_wf, "{}", "server down → WebFetch deny suppressed");
-    // curl→ctx_execute is an MCP redirect → suppressed to passthrough when down.
+    // curl→lens_run is an MCP redirect → suppressed to passthrough when down.
     let (raw_curl, _) = run_hook(
         "PreToolUse",
         &bash_payload(d.path(), "s1", "curl https://api.example.com/data"),
@@ -260,7 +251,7 @@ fn mcp_down_gates_redirects_not_wrap() {
         d.path(),
     );
     assert_eq!(raw_curl, "{}", "server down → curl redirect suppressed");
-    // Wrap shells the ctxforge CLI (not the MCP server) → still fires when down.
+    // Wrap shells the lens CLI (not the MCP server) → still fires when down.
     let (_, v_b) = run_hook(
         "PreToolUse",
         &bash_payload(d.path(), "s2", "find . -type f"),
@@ -285,7 +276,7 @@ fn sessionstart_injects_routing_block_when_steering() {
     let (_, v) = run_hook(
         "SessionStart",
         &payload,
-        &[("CTXFORGE_ROUTING", "full"), ("CTXFORGE_ROUTING_MCP", "up")],
+        &[("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")],
         d.path(),
     );
     let ctx = v["hookSpecificOutput"]["additionalContext"]
@@ -295,16 +286,13 @@ fn sessionstart_injects_routing_block_when_steering() {
         ctx.contains("context_window_protection"),
         "routing block present: {ctx}"
     );
+    assert!(ctx.contains("lens_run"), "tool hierarchy names lens_run");
     assert!(
-        ctx.contains("ctx_execute"),
-        "tool hierarchy names ctx_execute"
+        ctx.contains("lens_search"),
+        "tool hierarchy names lens_search"
     );
     assert!(
-        ctx.contains("ctx_search"),
-        "tool hierarchy names ctx_search"
-    );
-    assert!(
-        ctx.contains("graph_query"),
+        ctx.contains("lens_symbol"),
         "tool hierarchy names the graph"
     );
     assert!(
@@ -317,7 +305,7 @@ fn sessionstart_injects_routing_block_when_steering() {
     let (_, voff) = run_hook(
         "SessionStart",
         &payload,
-        &[("CTXFORGE_ROUTING", "off")],
+        &[("LENS_ROUTING", "off")],
         d.path(),
     );
     let ctxoff = voff["hookSpecificOutput"]["additionalContext"]
@@ -330,7 +318,7 @@ fn sessionstart_injects_routing_block_when_steering() {
 }
 
 // ---------------------------------------------------------------------------
-// §4: `ctxforge wrap` — large stdout offloads losslessly; verify + stats
+// §4: `lens wrap` — large stdout offloads losslessly; verify + stats
 // ---------------------------------------------------------------------------
 
 /// Pull the store ref out of a wrap preview footer (`... ref=<hex> ...`).
@@ -348,7 +336,7 @@ fn wrap_small_output_is_verbatim() {
     let d = tempfile::tempdir().unwrap();
     let out = Command::new(bin())
         .args(["wrap", "--", "printf 'hello-world'"])
-        .env("CTXFORGE_DIR", d.path())
+        .env("LENS_DIR", d.path())
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -366,7 +354,7 @@ fn wrap_offloads_roundtrips_and_shows_on_stats() {
     let gen = "head -c 50000 /dev/zero | tr '\\0' A";
     let out = Command::new(bin())
         .args(["wrap", "--", gen])
-        .env("CTXFORGE_DIR", d.path())
+        .env("LENS_DIR", d.path())
         .output()
         .expect("wrap run");
     assert!(
@@ -383,7 +371,7 @@ fn wrap_offloads_roundtrips_and_shows_on_stats() {
     // `verify --roundtrip` reproduces it byte-for-byte (PASS, exit 0).
     let v = Command::new(bin())
         .args(["verify", "--roundtrip", &reference])
-        .env("CTXFORGE_DIR", d.path())
+        .env("LENS_DIR", d.path())
         .output()
         .expect("verify");
     assert!(v.status.success(), "roundtrip must exit 0 (PASS)");
@@ -406,17 +394,17 @@ fn wrap_offloads_roundtrips_and_shows_on_stats() {
     );
     assert_eq!(rec["store_ref"].as_str().unwrap(), reference);
 
-    // `ctxforge stats` surfaces the wrapped op on the dashboard plane.
+    // `lens stats` surfaces the wrapped op on the dashboard plane.
     let s = Command::new(bin())
         .args(["stats"])
-        .env("CTXFORGE_DIR", d.path())
+        .env("LENS_DIR", d.path())
         .output()
         .expect("stats");
     let st = String::from_utf8_lossy(&s.stdout);
     assert!(st.contains("bash_wrap"), "stats lists the wrap op:\n{st}");
 
     // ...and the exact aggregate the web dashboard serves at /api/stats lists it.
-    let snap = ctxforge::obs::stats::snapshot_json(d.path(), None);
+    let snap = lens::obs::stats::snapshot_json(d.path(), None);
     let by_tool = snap["by_tool"].as_array().unwrap();
     assert!(
         by_tool.iter().any(|t| t["tool"] == "bash_wrap"),
@@ -425,11 +413,11 @@ fn wrap_offloads_roundtrips_and_shows_on_stats() {
 }
 
 // ---------------------------------------------------------------------------
-// T3 §: ctx_execute_file end-to-end via the rmcp client
+// T3 §: lens_run_file end-to-end via the rmcp client
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn ctx_execute_file_e2e() {
+async fn lens_run_file_e2e() {
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
     use rmcp::ServiceExt;
@@ -445,8 +433,8 @@ async fn ctx_execute_file_e2e() {
     let data_path = data.path().to_path_buf();
     let transport = TokioChildProcess::new(TokioCommand::new(bin()).configure(|cmd| {
         cmd.current_dir(&repo_path)
-            .env("CTXFORGE_DIR", &data_path)
-            .env("CTXFORGE_MAX_INLINE", "8192");
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192");
     }))
     .unwrap();
     let client = ().serve(transport).await.expect("handshake");
@@ -457,8 +445,8 @@ async fn ctx_execute_file_e2e() {
         tools
             .tools
             .iter()
-            .any(|t| t.name.as_ref() == "ctx_execute_file"),
-        "ctx_execute_file must be advertised"
+            .any(|t| t.name.as_ref() == "lens_run_file"),
+        "lens_run_file must be advertised"
     );
 
     let call = |name: &'static str, args: Value| {
@@ -478,7 +466,7 @@ async fn ctx_execute_file_e2e() {
     // 1) The file path is injected as argv[1]; only the printed length returns,
     //    never the 40 KB of contents.
     let r = call(
-        "ctx_execute_file",
+        "lens_run_file",
         json!({
             "path": "data.txt",
             "language": "python",
@@ -494,7 +482,7 @@ async fn ctx_execute_file_e2e() {
 
     // 2) Large derived output is offloaded with a working retrieve_ref.
     let big = call(
-        "ctx_execute_file",
+        "lens_run_file",
         json!({
             "path": "data.txt",
             "language": "python",
@@ -504,7 +492,7 @@ async fn ctx_execute_file_e2e() {
     .await;
     assert_eq!(big["truncated"], json!(true));
     let r2 = big["retrieve_ref"].as_str().unwrap().to_string();
-    let recovered = call("ctx_retrieve", json!({ "ref": r2 })).await;
+    let recovered = call("lens_recall", json!({ "ref": r2 })).await;
     assert!(recovered["content"]
         .as_str()
         .unwrap()

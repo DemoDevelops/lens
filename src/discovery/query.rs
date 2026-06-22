@@ -1,4 +1,4 @@
-//! Graph traversal: `graph_query`, `graph_neighbors`, `graph_path`.
+//! Graph traversal: `lens_symbol`, `lens_links`, `lens_path`.
 
 use super::graph::{Edge, Graph, Node};
 use crate::tools::{EdgeView, GraphView, NodeView, PathResponse};

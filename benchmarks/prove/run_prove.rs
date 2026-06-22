@@ -18,7 +18,7 @@ mod savings;
 
 use serde_json::Value;
 
-use ctxforge::store::{compress, Store};
+use lens::store::{compress, Store};
 use navigation::compute_navigation;
 use savings::{bench_root, code_search_at, compute_savings, issue_triage_at};
 
@@ -40,17 +40,17 @@ fn pct(before: usize, after: usize) -> i64 {
 async fn compute_claims() -> anyhow::Result<Vec<Claim>> {
     let mut claims = Vec::new();
 
-    // Sandbox: a buried-root-cause log stays out of context (grep in the sandbox).
+    // Darkroom: a buried-root-cause log stays out of context (grep in the darkroom).
     let rows = compute_savings().await?;
-    let sandbox = rows
+    let darkroom = rows
         .iter()
-        .find(|r| r.mechanism == "sandbox")
-        .expect("sandbox row");
+        .find(|r| r.mechanism == "darkroom")
+        .expect("darkroom row");
     claims.push(Claim {
-        name: "Sandbox keeps large output out of context".into(),
+        name: "Darkroom keeps large output out of context".into(),
         threshold: "log-debug byte savings >= 90%".into(),
-        measured: format!("{}%", sandbox.savings_pct),
-        pass: sandbox.savings_pct >= 90,
+        measured: format!("{}%", darkroom.savings_pct),
+        pass: darkroom.savings_pct >= 90,
     });
 
     // Index: at realistic session scale (1x is a 37% diagnostic fixture).
@@ -91,7 +91,7 @@ async fn compute_claims() -> anyhow::Result<Vec<Claim>> {
 
     // Offload is lossless: store.get(put(x)) == x, byte-for-byte.
     let data = tempfile::tempdir()?;
-    let store = Store::open(&data.path().join(".ctxforge"))?;
+    let store = Store::open(&data.path().join(".lens"))?;
     let blob = issues_raw.repeat(4);
     let reference = store.put(&blob)?;
     let got = store.get(&reference)?.unwrap_or_default();
@@ -135,7 +135,7 @@ async fn compute_claims() -> anyhow::Result<Vec<Claim>> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let claims = compute_claims().await?;
-    println!("# ctxforge claim proof (deterministic, no model)\n");
+    println!("# lens claim proof (deterministic, no model)\n");
     println!("| Claim | Threshold | Measured | Verdict |");
     println!("| --- | --- | --- | :---: |");
     for c in &claims {

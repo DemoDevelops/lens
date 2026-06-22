@@ -5,7 +5,7 @@
   "ground_truth": { "count": 12 },
   "check": "numeric_tolerance",
   "tolerance": 0,
-  "primary_mechanism": "sandbox",
+  "primary_mechanism": "darkroom",
   "evidence": ["timeout"],
   "treatment": {
     "language": "bash",

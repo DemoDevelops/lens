@@ -3,8 +3,8 @@
 //! Measures the graph's per-operation leverage on code-navigation questions — the
 //! "fewer tokens + fewer round trips to find the file" claim — WITHOUT a model, so
 //! it is fully deterministic. For each question we run a realistic naive path
-//! (grep + read the files it would open) and the graph path (one `graph_query` /
-//! `graph_neighbors` / `graph_path` call), and record both axes:
+//! (grep + read the files it would open) and the graph path (one `lens_symbol` /
+//! `lens_links` / `lens_path` call), and record both axes:
 //!
 //!   * **bytes into context** — what the agent has to read either way;
 //!   * **round trips** — tool calls. This is the speed metric: each round trip is
@@ -17,7 +17,7 @@
 //! (not from the graph — that would be circular), so a fast-but-wrong answer fails.
 //!
 //! Honesty notes baked into the rows: a bare definition lookup is the graph's
-//! weakest case — `grep -n` already returns `file:line`, so `graph_query` can
+//! weakest case — `grep -n` already returns `file:line`, so `lens_symbol` can
 //! return *more* bytes (it includes neighbors). The graph wins decisively on
 //! callers and reachability, where grep returns ambiguous text matches or cannot
 //! answer in one shot at all.
@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use ctxforge::discovery::graph::Graph;
-use ctxforge::discovery::{self, query as gquery};
+use lens::discovery::graph::Graph;
+use lens::discovery::{self, query as gquery};
 
 /// Absolute path to the `benchmarks/` directory, resolved at compile time so the
 /// runner works regardless of the current working directory.
@@ -376,9 +376,9 @@ pub fn render_navigation_markdown(rows: &[NavRow]) -> String {
     s.push_str(concat!(
         "\n**Reading these numbers.**\n",
         "- **Round-trips is the speed metric.** Each tool call is a full model-generation + tool-exec cycle, usually the dominant latency. A graph call answers in 1 round trip what the naive path needs several for. Tool CPU time (microseconds at this fixture size) is not reported — it would understate the per-round-trip model latency it stands in for.\n",
-        "- **Definition lookup is the graph's weakest case, shown honestly.** `grep -n` already returns `file:line`, so `graph_query` can return *more* bytes (it bundles the symbol's neighbors). The graph's win is on who-calls and reachability, not bare lookup.\n",
-        "- **Who-calls:** grep returns every textual match (definition, imports, comments, real calls); the naive path reads each matched file to disambiguate, while `graph_neighbors` returns the exact call edges in one call.\n",
-        "- **Reachability:** grep cannot answer a multi-hop \"does A reach B\" in one shot; the naive baseline reads the source subtree to trace edges by hand. `graph_path` returns the path (or proves none) in one call.\n",
+        "- **Definition lookup is the graph's weakest case, shown honestly.** `grep -n` already returns `file:line`, so `lens_symbol` can return *more* bytes (it bundles the symbol's neighbors). The graph's win is on who-calls and reachability, not bare lookup.\n",
+        "- **Who-calls:** grep returns every textual match (definition, imports, comments, real calls); the naive path reads each matched file to disambiguate, while `lens_links` returns the exact call edges in one call.\n",
+        "- **Reachability:** grep cannot answer a multi-hop \"does A reach B\" in one shot; the naive baseline reads the source subtree to trace edges by hand. `lens_path` returns the path (or proves none) in one call.\n",
         "- **Scale caveat:** the fixture is 5 files, so absolute bytes are small; the round-trip and disambiguation-read *ratios* are the signal, and they grow with repo size.\n",
     ));
     s

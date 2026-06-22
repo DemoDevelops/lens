@@ -5,7 +5,7 @@
 //! GSM8K). For each task we build two contexts for the *same* model: a `control`
 //! context (the raw fixture bytes, capped at a naive-agent budget — the regime
 //! where a real session truncates and misses things) and a `treatment` context
-//! (the compact output of the ctxforge tool the task names: sandbox stdout,
+//! (the compact output of the lens tool the task names: darkroom stdout,
 //! search snippets, or a graph view).
 //!
 //! The model answers from each; we score against deterministic ground truth and
@@ -19,11 +19,11 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use ctxforge::discovery::{self, query as gquery};
-use ctxforge::index::Index;
-use ctxforge::sandbox;
-use ctxforge::store::Store;
-use ctxforge::tools::ExecuteRequest;
+use lens::darkroom;
+use lens::discovery::{self, query as gquery};
+use lens::index::Index;
+use lens::store::Store;
+use lens::tools::ExecuteRequest;
 
 /// Naive-agent context budget (bytes). Raw fixtures larger than this are
 /// truncated in the control arm — the regime where naive sessions lose data.
@@ -39,9 +39,9 @@ pub fn accuracy_root() -> PathBuf {
 }
 
 /// Default model id: a current small-but-capable model. Override with
-/// `CTXFORGE_BENCH_MODEL`.
+/// `LENS_BENCH_MODEL`.
 pub fn default_model() -> String {
-    std::env::var("CTXFORGE_BENCH_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string())
+    std::env::var("LENS_BENCH_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string())
 }
 
 // --- Task spec --------------------------------------------------------------
@@ -211,21 +211,21 @@ pub fn build_control_context(task: &Task) -> anyhow::Result<String> {
     Ok(truncate_bytes(&s, CONTROL_BUDGET))
 }
 
-/// Treatment: the compact output of the ctxforge tool the task names.
+/// Treatment: the compact output of the lens tool the task names.
 pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
     let t = &task.treatment;
-    // Sandbox.
+    // Darkroom.
     if let Some(script) = &t.script {
         let dir = accuracy_root();
         let data = tempfile::tempdir()?;
-        let store = Store::open(&data.path().join(".ctxforge"))?;
+        let store = Store::open(&data.path().join(".lens"))?;
         let req = ExecuteRequest {
             language: t.language.clone().unwrap_or_else(|| "bash".to_string()),
             code: script.clone(),
             timeout_secs: 30,
             stdin: None,
         };
-        let resp = sandbox::run(req, &dir, &store, 8192)
+        let resp = darkroom::run(req, &dir, &store, 8192)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         let mut out = resp.stdout;
@@ -563,7 +563,7 @@ pub struct Group {
 
 /// Aggregate per-task results into per-mechanism groups (fixed order).
 pub fn aggregate(results: &[TaskResult]) -> Vec<Group> {
-    let order = ["sandbox", "discovery", "search"];
+    let order = ["darkroom", "discovery", "search"];
     let mut groups = Vec::new();
     for mech in order {
         let rows: Vec<&TaskResult> = results.iter().filter(|r| r.mechanism == mech).collect();
@@ -593,7 +593,7 @@ pub fn render_accuracy_markdown(groups: &[Group], model_label: &str, pending: bo
         s.push_str("> **Accuracy: pending real-model run.** The numbers below are from the mock oracle (a context-presence stub that tests scoring/plumbing only). Set `ANTHROPIC_API_KEY` and re-run `bench_accuracy` for real-model results.\n\n");
     }
     s.push_str(&format!("Model: `{model_label}`\n\n"));
-    s.push_str("| Task set | N | Control acc | ctxforge acc | Δ acc | Control tokens | ctxforge tokens | Token Δ |\n");
+    s.push_str("| Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |\n");
     s.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     let mut neg = Vec::new();
     for g in groups {

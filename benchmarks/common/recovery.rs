@@ -1,7 +1,7 @@
 //! Shared session-recovery benchmark logic, `#[path]`-included by the recovery
 //! harness and the report generator.
 //!
-//! The bar here is **Context Mode's behavior**, not ctxforge's own sense of
+//! The bar here is **Context Mode's behavior**, not lens's own sense of
 //! working. Each scenario establishes a working state (file edits, tasks, an
 //! error, a user decision, git ops), forces a compaction boundary, then poses a
 //! follow-up that is *only* answerable if the working state survived. We run it
@@ -9,7 +9,7 @@
 //!
 //!   * **No continuity** (floor): nothing survives the compaction.
 //!   * **Context Mode** (the bar): its real hook scripts build the snapshot.
-//!   * **ctxforge** (the candidate): its session pipeline builds the snapshot.
+//!   * **lens** (the candidate): its session pipeline builds the snapshot.
 //!
 //! Mock-model mode (a context-presence oracle) tests the plumbing with no API
 //! key; a real-model run happens when `ANTHROPIC_API_KEY` is set.
@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use ctxforge::session::{extract, snapshot, store::SessionStore};
+use lens::session::{extract, snapshot, store::SessionStore};
 
 pub fn est_tokens(bytes: usize) -> usize {
     bytes / 4
@@ -32,7 +32,7 @@ pub fn recovery_root() -> PathBuf {
 }
 
 pub fn default_model() -> String {
-    std::env::var("CTXFORGE_BENCH_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string())
+    std::env::var("LENS_BENCH_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string())
 }
 
 // --- Scenario spec ----------------------------------------------------------
@@ -98,7 +98,7 @@ impl Arm {
         match self {
             Arm::NoContinuity => "no_continuity",
             Arm::ContextMode => "context_mode",
-            Arm::Ctxforge => "ctxforge",
+            Arm::Ctxforge => "lens",
         }
     }
 }
@@ -108,14 +108,14 @@ impl Arm {
 pub fn recover(scenario: &Scenario, arm: Arm) -> anyhow::Result<Option<String>> {
     match arm {
         Arm::NoContinuity => Ok(Some(String::new())),
-        Arm::Ctxforge => Ok(Some(ctxforge_recover(scenario)?)),
+        Arm::Ctxforge => Ok(Some(lens_recover(scenario)?)),
         Arm::ContextMode => context_mode_recover(scenario),
     }
 }
 
-/// ctxforge arm: drive the scenario through the real session pipeline
+/// lens arm: drive the scenario through the real session pipeline
 /// (extract → store → snapshot), exactly as the PreCompact hook would.
-fn ctxforge_recover(scenario: &Scenario) -> anyhow::Result<String> {
+fn lens_recover(scenario: &Scenario) -> anyhow::Result<String> {
     let data = tempfile::tempdir()?;
     let store = SessionStore::open(data.path())?;
     let sid = "bench";
@@ -143,7 +143,7 @@ fn ctxforge_recover(scenario: &Scenario) -> anyhow::Result<String> {
     let events = store.events_for_session(sid)?;
     Ok(snapshot::build_snapshot(
         &events,
-        ctxforge::session::snapshot_budget(),
+        lens::session::snapshot_budget(),
         1,
     ))
 }
@@ -545,10 +545,10 @@ pub struct Group {
     pub n: usize,
     pub no_continuity: f64,
     pub context_mode: Option<f64>,
-    pub ctxforge: f64,
+    pub lens: f64,
     pub cm_available: usize,
     pub cm_tokens: usize,
-    pub ctxforge_tokens: usize,
+    pub lens_tokens: usize,
 }
 
 fn survival(results: &[&ScenarioResult], arm: &str) -> (usize, usize, usize) {
@@ -581,7 +581,7 @@ pub fn aggregate(results: &[ScenarioResult]) -> Vec<Group> {
         let n = rows.len();
         let (nc_s, _nc_a, _) = survival(&rows, "no_continuity");
         let (cm_s, cm_a, cm_tok) = survival(&rows, "context_mode");
-        let (cf_s, _cf_a, cf_tok) = survival(&rows, "ctxforge");
+        let (cf_s, _cf_a, cf_tok) = survival(&rows, "lens");
         groups.push(Group {
             set: set.to_string(),
             n,
@@ -591,10 +591,10 @@ pub fn aggregate(results: &[ScenarioResult]) -> Vec<Group> {
             } else {
                 None
             },
-            ctxforge: cf_s as f64 / n as f64,
+            lens: cf_s as f64 / n as f64,
             cm_available: cm_a,
             cm_tokens: cm_tok,
-            ctxforge_tokens: cf_tok,
+            lens_tokens: cf_tok,
         });
     }
     groups
@@ -606,7 +606,7 @@ pub fn render_recovery_markdown(groups: &[Group], model_label: &str, pending: bo
         s.push_str("> **Recovery: pending real-model run.** Numbers below are from the mock survival oracle (context-presence; tests plumbing only). Set `ANTHROPIC_API_KEY` and re-run `bench_recovery` for real-model results.\n\n");
     }
     s.push_str(&format!("Model: `{model_label}`. Survival = % of scenarios whose working state was recoverable from the post-compaction context.\n\n"));
-    s.push_str("| Scenario set | N | No-continuity | Context Mode | ctxforge | Δ (ctxforge − CM) | CM tokens | ctxforge tokens |\n");
+    s.push_str("| Scenario set | N | No-continuity | Context Mode | lens | Δ (lens − CM) | CM tokens | lens tokens |\n");
     s.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
 
     let cm_unavailable = groups.iter().any(|g| g.context_mode.is_none());
@@ -618,7 +618,7 @@ pub fn render_recovery_markdown(groups: &[Group], model_label: &str, pending: bo
         };
         let delta_cell = match g.context_mode {
             Some(v) => {
-                let d = g.ctxforge - v;
+                let d = g.lens - v;
                 if d < -0.0001 {
                     regressions.push(g.set.clone());
                 }
@@ -637,10 +637,10 @@ pub fn render_recovery_markdown(groups: &[Group], model_label: &str, pending: bo
             g.n,
             g.no_continuity * 100.0,
             cm_cell,
-            g.ctxforge * 100.0,
+            g.lens * 100.0,
             delta_cell,
             cm_tok,
-            g.ctxforge_tokens,
+            g.lens_tokens,
         ));
     }
 
@@ -650,11 +650,11 @@ pub fn render_recovery_markdown(groups: &[Group], model_label: &str, pending: bo
     }
     if !regressions.is_empty() {
         s.push_str(&format!(
-            "❌ **ctxforge underperforms Context Mode on: {}.** Do not rely on the swap for these until fixed.\n",
+            "❌ **lens underperforms Context Mode on: {}.** Do not rely on the swap for these until fixed.\n",
             regressions.join(", ")
         ));
     } else if !cm_unavailable && !groups.is_empty() {
-        s.push_str("✅ **ctxforge ≥ Context Mode** on every scenario set above — the swap is safe on recovery fidelity.\n");
+        s.push_str("✅ **lens ≥ Context Mode** on every scenario set above — the swap is safe on recovery fidelity.\n");
     }
     s
 }

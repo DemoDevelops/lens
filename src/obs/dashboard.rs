@@ -1,4 +1,4 @@
-//! `ctxforge dashboard` — a local web view of the op log.
+//! `lens dashboard` — a local web view of the op log.
 //!
 //! A tiny dependency-free HTTP/1.1 server (thread per connection) bound to
 //! loopback only. It serves a self-contained page at `/` that polls `/api/stats`
@@ -45,10 +45,8 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                 i += 1;
             }
             other => {
-                eprintln!("ctxforge dashboard: unknown flag '{other}'");
-                eprintln!(
-                    "usage: ctxforge dashboard [--port <n>] [--host <addr>] [--session <id>]"
-                );
+                eprintln!("lens dashboard: unknown flag '{other}'");
+                eprintln!("usage: lens dashboard [--port <n>] [--host <addr>] [--session <id>]");
                 std::process::exit(2);
             }
         }
@@ -58,7 +56,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     let dir = data_dir();
     let listener = TcpListener::bind((host.as_str(), port))
         .with_context(|| format!("binding {host}:{port}"))?;
-    println!("ctxforge dashboard serving on http://{host}:{port}  (Ctrl-C to stop)");
+    println!("lens dashboard serving on http://{host}:{port}  (Ctrl-C to stop)");
     println!("  data dir: {}", dir.display());
     if let Some(s) = &session {
         println!("  session : {s}");
@@ -176,7 +174,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ctxforge dashboard</title>
+<title>lens dashboard</title>
 <style>
   :root{
     --bg:#0b0d10; --panel:#14181d; --line:#222a31; --ink:#e6edf3;
@@ -243,7 +241,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 </head>
 <body>
 <header>
-  <h1>ctxforge</h1>
+  <h1>lens</h1>
   <div class="live"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
   <select id="win" title="time window — how far back to scope savings + activity"></select>
   <input id="winAt" type="text" placeholder="2pm" size="6" title="custom start time, e.g. 2pm or 14:30 — Enter to apply">
@@ -278,8 +276,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <footer id="footer">—</footer>
 <script>
 const hist=[];
-// Canonical ctxforge MCP tools, shown in the merged tool table even at 0 calls.
-const ADOPTION_TOOLS=['ctx_execute','ctx_execute_file','ctx_search','ctx_index','ctx_discover','ctx_retrieve','graph_query','graph_neighbors','graph_path','graph_find'];
+// Canonical lens MCP tools, shown in the merged tool table even at 0 calls.
+const ADOPTION_TOOLS=['lens_run','lens_run_file','lens_search','lens_index','lens_map','lens_recall','lens_symbol','lens_links','lens_path','lens_find'];
 const savedSeries=[], bytesSeries=[];
 const histAct=[], actSeries=[];
 const MAXPTS=60;
@@ -364,7 +362,7 @@ scopeBtn.addEventListener('click',function(){
 // them at the input rate. Click the basis to cycle model; remembered in localStorage.
 const RATES=[{m:'Opus 4.8',r:5},{m:'Sonnet 4.6',r:3},{m:'Haiku 4.5',r:1}];
 let rateIdx=0;
-try{const s=localStorage.getItem('ctxforge_rate_model');const i=RATES.findIndex(x=>x.m===s);if(i>=0)rateIdx=i;}catch(e){}
+try{const s=localStorage.getItem('lens_rate_model');const i=RATES.findIndex(x=>x.m===s);if(i>=0)rateIdx=i;}catch(e){}
 let savedTotal=0;
 function money(v){return '$'+(v>=1?v.toFixed(2):v>=0.01?v.toFixed(3):v.toFixed(4));}
 function renderCost(){
@@ -374,7 +372,7 @@ function renderCost(){
 }
 document.getElementById('cost').addEventListener('click',function(){
   rateIdx=(rateIdx+1)%RATES.length;
-  try{localStorage.setItem('ctxforge_rate_model',RATES[rateIdx].m);}catch(e){}
+  try{localStorage.setItem('lens_rate_model',RATES[rateIdx].m);}catch(e){}
   renderCost();
 });
 renderCost();
@@ -490,7 +488,7 @@ async function tick(){
     document.getElementById('savedTop').textContent=humanCount((d.tokens_saved_mcp||0)+dSaved)+' tok';
     savedTotal=(d.tokens_saved_mcp||0)+dSaved; renderCost();
   } else {
-    document.getElementById('rtkCards').innerHTML='<span class="dim2">not installed — run ctxforge rtk install</span>';
+    document.getElementById('rtkCards').innerHTML='<span class="dim2">not installed — run lens rtk install</span>';
     document.getElementById('savedTop').textContent=humanCount(savedMcp)+' tok';
     savedTotal=savedMcp; renderCost();
   }
@@ -535,9 +533,14 @@ mod tests {
     #[test]
     fn route_serves_html_and_json_and_404() {
         let dir = tempdir().unwrap();
-        OpLog::open(dir.path())
-            .start("ctx_execute", json!({}))
-            .finish(8000, 100, Some("a".into()), "ok", "", None);
+        OpLog::open(dir.path()).start("lens_run", json!({})).finish(
+            8000,
+            100,
+            Some("a".into()),
+            "ok",
+            "",
+            None,
+        );
         // Seed session-hook activity (the "first plane") so the JSON carries it.
         let ss = crate::session::store::SessionStore::open(dir.path()).unwrap();
         ss.insert_events(&[crate::session::Event {
@@ -557,7 +560,7 @@ mod tests {
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["ops"], json!(1));
         assert!(v["tokens_saved_est"].as_i64().unwrap() > 0);
-        assert_eq!(v["by_tool"][0]["tool"], json!("ctx_execute"));
+        assert_eq!(v["by_tool"][0]["tool"], json!("lens_run"));
         // Per-tool offload breakdown for the measured-savings vs adoption split: the
         // seeded op stored a blob (store_ref) with raw > returned, so it offloaded.
         assert_eq!(v["by_tool"][0]["offloaded_ops"], json!(1));
@@ -575,7 +578,7 @@ mod tests {
         let (s2, ct2, body2) = route("/", dir.path(), None);
         assert_eq!(s2, 200);
         assert!(ct2.contains("html"));
-        assert!(body2.contains("ctxforge"));
+        assert!(body2.contains("lens"));
         assert!(body2.contains("/api/stats"));
         // The RTK shell-savings panel markup is baked into the self-contained page.
         assert!(body2.contains("RTK shell savings"));
@@ -583,7 +586,7 @@ mod tests {
         // The tool-adoption panel and its canonical tool list are baked into the page.
         assert!(body2.contains("tool adoption"));
         assert!(body2.contains("ADOPTION_TOOLS"));
-        assert!(body2.contains("graph_neighbors"));
+        assert!(body2.contains("lens_links"));
 
         let (s3, _, _) = route("/nope", dir.path(), None);
         assert_eq!(s3, 404);
@@ -593,7 +596,7 @@ mod tests {
     fn tcp_roundtrip_serves_json() {
         let dir = tempdir().unwrap();
         OpLog::open(dir.path())
-            .start("ctx_search", json!({}))
+            .start("lens_search", json!({}))
             .finish(10, 10, None, "ok", "", None);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

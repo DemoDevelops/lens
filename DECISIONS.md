@@ -1,6 +1,6 @@
 # Decisions
 
-Choices made under ambiguity while building `ctxforge`, per the plan's
+Choices made under ambiguity while building `lens`, per the plan's
 instruction to pick the simplest reasonable option and record it.
 
 ## MCP SDK (rmcp 1.7)
@@ -16,7 +16,7 @@ instruction to pick the simplest reasonable option and record it.
 - The `client` + `transport-child-process` rmcp features are dev-only
   dependencies, used by the e2e harness so the release binary stays minimal.
 
-## Sandbox (`ctx_execute`)
+## Darkroom (`lens_run`)
 
 - Runtimes: python→`python3`, javascript→`node`, typescript→`npx --yes tsx`,
   bash→`bash`, ruby→`ruby`, go→`go run`. TypeScript uses `tsx` so no build step
@@ -25,7 +25,7 @@ instruction to pick the simplest reasonable option and record it.
   awaiting `child.wait()` under `tokio::time::timeout`; on overrun the child is
   killed and `timed_out: true` is returned with `exit_code: -1`.
 - Temp scripts use `tempfile` (auto-deleted on drop) so nothing leaks.
-- Large stdout (> `CTXFORGE_MAX_INLINE`, default 8 KB) is offloaded to the
+- Large stdout (> `LENS_MAX_INLINE`, default 8 KB) is offloaded to the
   reversible store and replaced with a head+tail preview plus a `retrieve_ref`.
 
 ## Stats metric
@@ -37,7 +37,7 @@ instruction to pick the simplest reasonable option and record it.
   it never enters context), so savings are measured at the output boundary and
   materialise when large output is offloaded rather than inlined.
 
-## Index (`ctx_index` / `ctx_search`)
+## Index (`lens_index` / `lens_search`)
 
 - Single FTS5 virtual table `chunks(path UNINDEXED, chunk_id UNINDEXED, content)`
   with the `porter` tokenizer. Markdown is chunked by headings; other files by
@@ -47,7 +47,7 @@ instruction to pick the simplest reasonable option and record it.
   errors from punctuation. Ranking is BM25; scores are returned negated so that
   higher = better.
 
-## Discovery (`ctx_discover` + graph)
+## Discovery (`lens_map` + graph)
 
 - Stable node IDs are `blake3(file:kind:name:line)` truncated to 16 hex chars.
   Files are processed in sorted order and nodes/edges sorted before saving, so
@@ -55,9 +55,9 @@ instruction to pick the simplest reasonable option and record it.
 - Edge kinds: `contains` (module→definition), `calls` (resolved by callee name
   within the repo), `imports` (module→matching repo symbol, or a synthetic
   `import` node when the target is external).
-- `graph_path` traverses **only** semantic edges (`calls`/`imports`), excluding
+- `lens_path` traverses **only** semantic edges (`calls`/`imports`), excluding
   `contains`, so two unrelated functions in the same file are correctly reported
-  as having no path. `graph_neighbors` includes all edges.
+  as having no path. `lens_links` includes all edges.
 - Call attribution walks up the AST from each call site to the nearest enclosing
   callable scope; top-level calls are attributed to the file's module node.
 
@@ -82,7 +82,7 @@ No other module changes are required.
 The *idea* — parse a repo once into a queryable graph of symbols and
 relationships so the agent reasons over a scoped subgraph instead of reading
 many files — is from **Graphify** (MIT). It was the named lineage source for
-this layer in the build plan (`CONTEXT_FORGE_PLAN.md` §2, `CTXFORGE_ROUTING_PLAN.md`),
+this layer in the build plan (`LENS_PLAN.md` §2, `LENS_ROUTING_PLAN.md`),
 studied for the *concept only* under the plan's explicit "study MIT/Apache
 projects for ideas, do not copy code" posture — via design notes on its
 cache layout and edge model, not its source tree. The implementation is
@@ -90,7 +90,7 @@ written fresh in Rust on the `tree-sitter` crate: the per-language `LangSpec`
 queries (`extract.rs`), the `blake3(file:kind:name:line)` node IDs, the
 `calls`/`imports`/`contains` edge model, and the BFS `neighbors`/`shortest_path`
 (`graph.rs`) are all original. No Graphify source is vendored or copied.
-**Left behind:** any LLM/semantic-enrichment layer — ctxforge's graph is purely
+**Left behind:** any LLM/semantic-enrichment layer — lens's graph is purely
 deterministic tree-sitter extraction.
 
 ## Compression (`compress.rs`)
@@ -99,8 +99,8 @@ deterministic tree-sitter extraction.
   dictionary-encode repeated string values (length ≥ 5, appearing ≥ 2×) into a
   shared table, replacing each with `{"$": index}`. Output is
   `{"_d": [...], "_v": ...}`; `expand_json` is the exact inverse.
-- Large `graph_query` / `graph_neighbors` results are stored in full (plain
-  JSON) for `ctx_retrieve` and returned in compacted form — reversibility is
+- Large `lens_symbol` / `lens_links` results are stored in full (plain
+  JSON) for `lens_recall` and returned in compacted form — reversibility is
   guaranteed by the store ref regardless of the compaction.
 
 ## SQLite concurrency
@@ -111,10 +111,10 @@ deterministic tree-sitter extraction.
 
 ## Data directory
 
-- State lives in `./.ctxforge/` (`index.db`, `store.db`, `graph.json`),
-  overridable via `CTXFORGE_DIR`, created on first use.
+- State lives in `./.lens/` (`index.db`, `store.db`, `graph.json`),
+  overridable via `LENS_DIR`, created on first use.
 
-## Session continuity (`ctxforge hook` / `ctxforge session`)
+## Session continuity (`lens hook` / `lens session`)
 
 ### Claude Code hook contract adapted to
 
@@ -140,9 +140,9 @@ The real contract, as implemented:
   (unlike the MCP server, whose stdout is the JSON-RPC channel). Logging stays on
   stderr; every error is swallowed so a hook can never block the session.
 - Registration lives in `~/.claude/settings.json` under `hooks.<Event>[]` as
-  `{matcher, hooks:[{type:"command", command}]}`. `ctxforge session install`
+  `{matcher, hooks:[{type:"command", command}]}`. `lens session install`
   embeds the **absolute** binary path (`current_exe()`) so hooks fire regardless
-  of PATH. Overridable for tests via `CTXFORGE_SETTINGS`.
+  of PATH. Overridable for tests via `LENS_SETTINGS`.
 
 ### Conflict guard (what makes the swap atomic)
 
@@ -155,11 +155,11 @@ state, so this is a hard refusal, not a warning.
 
 §2.2 (snapshot) and §2.3 (restore guide) are the same artifact: PreCompact builds
 the budget-bounded Session Guide and persists it; SessionStart re-emits it. The
-budget (`CTXFORGE_SNAPSHOT_BUDGET`, default 2048 B) drops optional tiers
+budget (`LENS_SNAPSHOT_BUDGET`, default 2048 B) drops optional tiers
 lowest-priority-first while always preserving the must-keep set (last request,
 tasks, project rules, files modified, unresolved errors, key decisions). Per-item
 caps keep the must-keep set small (rule **paths** only inline; full rule content
-goes to the FTS5 index for `ctx_search`).
+goes to the FTS5 index for `lens_search`).
 
 ### Borrowed-as-pattern vs written-fresh
 
@@ -172,29 +172,29 @@ goes to the FTS5 index for `ctx_search`).
 - **Written fresh** (original Rust): the entire implementation — the SQLite event
   store (`session.db`: `session_events` / `session_meta` / `session_resume`), the
   extractors (`extract_tool_events` / `extract_user_events`), the budget-tiered
-  snapshot builder, the restore path, the `ctxforge hook` dispatcher, and the
-  settings.json install/uninstall/status with the conflict guard. ctxforge inlines
+  snapshot builder, the restore path, the `lens hook` dispatcher, and the
+  settings.json install/uninstall/status with the conflict guard. lens inlines
   the working state into the guide; Context Mode defers most detail to an events
-  file + `ctx_search`.
+  file + `lens_search`.
 
 ### Recovery benchmark finding (mock oracle)
 
 The three-arm recovery benchmark (`bench_recovery`) drives the same scenario
 stream through the no-continuity floor, Context Mode's **real** hook scripts (via
-`bun`), and ctxforge's pipeline. Under the context-presence mock oracle, ctxforge
+`bun`), and lens's pipeline. Under the context-presence mock oracle, lens
 ≥ Context Mode on both scenario sets (100% vs 75%), with the genuine wins being
 that Context Mode's injected snapshot **drops `TodoWrite` tasks and inline tool
-errors** (it keeps only intent/role/decisions/file-basenames), where ctxforge
+errors** (it keeps only intent/role/decisions/file-basenames), where lens
 surfaces tasks and unresolved errors directly. To avoid overclaiming on
 formatting, file-recovery evidence uses the **basename** both systems capture
-(ctxforge additionally keeps full paths). Real-model numbers require
+(lens additionally keeps full paths). Real-model numbers require
 `ANTHROPIC_API_KEY`; the Context Mode arm is reported as `n/a` if `bun`/the plugin
 are not runnable rather than faked.
 
 ## Savings: columnar compaction (faithful SmartCrusher port)
 
 The first savings run had three weak workloads. The §0.1 scale-curve diagnostic
-(`cargo run --bin bench_scale_curve`, drives the **real** ctxforge code path at
+(`cargo run --bin bench_scale_curve`, drives the **real** lens code path at
 1×/10×/50× the committed fixture) classified them:
 
 | Workload | 1× | 10× | 50× | Verdict |
@@ -222,7 +222,7 @@ cost, factoring the schema out is the win.**
 
 ### Diff: what the real algorithm had that ours did not
 
-ctxforge's `compress::compact_json` did only (1) drop nulls and (2)
+lens's `compress::compact_json` did only (1) drop nulls and (2)
 dictionary-encode repeated string *values*. Missing vs SmartCrusher:
 
 - **Schema/template extraction (columnar transposition)** — emit field names
@@ -237,16 +237,16 @@ dictionary-encode repeated string *values*. Missing vs SmartCrusher:
 - **Drop null/empty fields** — ← already present; kept.
 - **Nested-uniform flatten to dotted columns, stringified-JSON recursion,
   heterogeneous bucket-by-discriminator** — ← **not ported.** They help shapes
-  the ctxforge payloads (issue lists, graph node/edge sets) don't exhibit: those
+  the lens payloads (issue lists, graph node/edge sets) don't exhibit: those
   are already flat homogeneous tables. Recursion into nested homogeneous arrays
   *is* handled (the graph `{nodes,edges}` case). Deferred as speculative until a
   real payload needs them.
 - **Opaque-blob → CCR pointer** — ← not ported into `compact_json` itself;
-  ctxforge already offloads any oversized payload to the reversible store with a
-  `retrieve_ref` at the tool boundary (`Forge::maybe_compact`, sandbox/index
+  lens already offloads any oversized payload to the reversible store with a
+  `retrieve_ref` at the tool boundary (`Forge::maybe_compact`, darkroom/index
   offload), which is the same CCR idea applied one layer up.
 - **Lossy row-sampling / anomaly preservation (keep ~50 of 1000 rows)** — ←
-  **deliberately not ported.** It is lossy and not reversible. ctxforge keeps
+  **deliberately not ported.** It is lossy and not reversible. lens keeps
   every row; the residual (long unique issue *bodies* — genuine prose) is what
   CCR/the store is for, not a denser deterministic encoding. Per the hard
   constraint: deterministic only, no ML / Kompress prose model.
@@ -274,7 +274,7 @@ The real-model accuracy/recovery arms call a model. The committed account's
 **API credit balance is zero**, so the `curl` Anthropic path returns
 `credit balance too low`. Rather than leave accuracy permanently "pending", the
 harnesses gained a third backend, `Model::ClaudePty`, selected with
-`CTXFORGE_BENCH_BACKEND=claude-pty`: it drives interactive Claude Code through
+`LENS_BENCH_BACKEND=claude-pty`: it drives interactive Claude Code through
 the `claude-pty` binary, which bills against **plan quota** instead of the Agent
 SDK credit pool. Tools are disabled (`--allowed-tools ""`) and it runs in the
 already-trusted project dir, so each arm answers purely from its given context —
@@ -288,10 +288,10 @@ first real run, on `claude-haiku-4-5`, showed discovery **−33pp** (N=3, so one
 task = 33pp). The auto-warning flags any negative delta as "dropping load-bearing
 context", but investigation showed otherwise: the one regressing task
 (`0008_reachable_path`, "can `handle_request` reach `connect_db`?") has a
-treatment context — the `graph_path` op — that returns the **correct** answer
+treatment context — the `lens_path` op — that returns the **correct** answer
 (`found:true`, full path `handle_request → fetch_user → connect_db`), i.e. *more*
 explicit than the raw-file control, yet Haiku still answered `reachable:false`.
-A weak-model reasoning slip on a correct context, **not** a ctxforge context-drop.
+A weak-model reasoning slip on a correct context, **not** a lens context-drop.
 Re-running just the discovery set on `claude-sonnet-4-6` (via the same backend)
 confirmed it: discovery returns to **100% / 100% (+0pp)**, `0008` answering
 `reachable:yes`. Lesson encoded in `bench_report`: a negative aggregate delta is

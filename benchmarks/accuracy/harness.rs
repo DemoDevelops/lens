@@ -1,7 +1,7 @@
 //! Accuracy benchmark harness.
 //!
 //! Runs every task in `tasks/*.json` through two arms (control = raw fixtures
-//! capped at a naive budget; treatment = ctxforge tool output) with the same
+//! capped at a naive budget; treatment = lens tool output) with the same
 //! model, scores against deterministic ground truth, and emits the accuracy
 //! table segmented by mechanism.
 //!
@@ -21,9 +21,9 @@ use accuracy::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Backend precedence: explicit `CTXFORGE_BENCH_BACKEND=claude-pty` (bills to
+    // Backend precedence: explicit `LENS_BENCH_BACKEND=claude-pty` (bills to
     // plan quota via interactive Claude Code) > Anthropic API key > mock.
-    let backend = std::env::var("CTXFORGE_BENCH_BACKEND").unwrap_or_default();
+    let backend = std::env::var("LENS_BENCH_BACKEND").unwrap_or_default();
     let has_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
     let (model, pending, mode) = if backend == "claude-pty" {
         eprintln!("running accuracy harness via claude-pty (plan quota, tools disabled)");
@@ -39,18 +39,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut tasks = load_tasks()?;
-    // Optional focus filter: `CTXFORGE_BENCH_ONLY=<substr>` keeps only tasks
+    // Optional focus filter: `LENS_BENCH_ONLY=<substr>` keeps only tasks
     // whose mechanism or id contains the substring (e.g. "discovery"). Used to
     // re-run a single mechanism without spending calls on the rest.
     let mut filtered = false;
-    if let Ok(only) = std::env::var("CTXFORGE_BENCH_ONLY") {
+    if let Ok(only) = std::env::var("LENS_BENCH_ONLY") {
         if !only.is_empty() {
             tasks.retain(|t| t.primary_mechanism.contains(&only) || t.id.contains(&only));
             filtered = true;
-            eprintln!(
-                "filter CTXFORGE_BENCH_ONLY={only} -> {} task(s)",
-                tasks.len()
-            );
+            eprintln!("filter LENS_BENCH_ONLY={only} -> {} task(s)", tasks.len());
         }
     }
     let mut results: Vec<TaskResult> = Vec::new();
@@ -99,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let groups = aggregate(&results);
-    println!("# ctxforge accuracy benchmark\n");
+    println!("# lens accuracy benchmark\n");
     print!(
         "{}",
         render_accuracy_markdown(&groups, &model.label(), pending)
@@ -234,7 +231,7 @@ mod tests {
         );
 
         let groups = aggregate(&results);
-        assert_eq!(groups.len(), 3, "expected sandbox/discovery/search groups");
+        assert_eq!(groups.len(), 3, "expected darkroom/discovery/search groups");
         for g in &groups {
             assert!(
                 g.treatment_acc >= g.control_acc,

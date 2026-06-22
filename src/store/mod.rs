@@ -1,7 +1,7 @@
 //! Reversible store: persist full blobs keyed by blake3 hash, return compact refs.
 //!
-//! Anything truncated or compressed elsewhere in ctxforge is first written here,
-//! so the agent can always recover the full version with `ctx_retrieve`.
+//! Anything truncated or compressed elsewhere in lens is first written here,
+//! so the agent can always recover the full version with `lens_recall`.
 
 pub mod compress;
 

@@ -1,4 +1,4 @@
-//! `ctxforge hook <platform> <event>` — the active lifecycle entrypoint.
+//! `lens hook <platform> <event>` — the active lifecycle entrypoint.
 //!
 //! Claude Code invokes this on PreToolUse / PostToolUse / UserPromptSubmit /
 //! PreCompact / SessionStart, passing a JSON payload on stdin. We read it, do
@@ -54,8 +54,8 @@ impl HookInput {
         // The hook fires from whatever directory the current sub-agent / skill /
         // cd'd shell happens to be in — which may be a subdirectory of the
         // project. The data dir must stay anchored to the repo root so we reuse
-        // the single `.ctxforge` the long-lived MCP server captured at startup,
-        // and never scatter a nested stray `.ctxforge` through the source tree
+        // the single `.lens` the long-lived MCP server captured at startup,
+        // and never scatter a nested stray `.lens` through the source tree
         // (untracked dirs there break globbing build tools like xcodegen). Climb
         // to the enclosing repo root if we can find one; else use the candidate.
         repo_root(&candidate).unwrap_or(candidate)
@@ -86,7 +86,7 @@ impl HookInput {
 
 /// Nearest enclosing repo root at or above `start`: the deepest ancestor that
 /// holds a `.git` entry, or — failing that — one that already holds a
-/// `.ctxforge` data dir. `.git` is preferred so a pre-existing stray `.ctxforge`
+/// `.lens` data dir. `.git` is preferred so a pre-existing stray `.lens`
 /// in a subdirectory can't pin the search below the real root. Returns `None`
 /// when neither marker is found, leaving the caller's candidate untouched (e.g.
 /// a tempdir under `/var` in tests).
@@ -96,7 +96,7 @@ fn repo_root(start: &Path) -> Option<PathBuf> {
         if dir.join(".git").exists() {
             return Some(dir.to_path_buf());
         }
-        if ctx_root.is_none() && dir.join(".ctxforge").is_dir() {
+        if ctx_root.is_none() && dir.join(".lens").is_dir() {
             ctx_root = Some(dir.to_path_buf());
         }
     }
@@ -114,7 +114,7 @@ pub fn run_cli(args: &[String]) -> anyhow::Result<()> {
     let input: HookInput = serde_json::from_str(&raw).unwrap_or_default();
 
     let stdout = handle(&event, &input).unwrap_or_else(|e| {
-        eprintln!("ctxforge hook {event}: {e}");
+        eprintln!("lens hook {event}: {e}");
         default_response(&event)
     });
     println!("{stdout}");
@@ -136,7 +136,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
 
     match event {
         "PreToolUse" => {
-            // Routing is gated by CTXFORGE_ROUTING; `off` (the default) is a
+            // Routing is gated by LENS_ROUTING; `off` (the default) is a
             // true no-op that returns `{}` without touching the store.
             let level = routing::Level::from_env();
             if level == routing::Level::Off {
@@ -146,7 +146,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             let ti = input.tool_input.clone().unwrap_or(json!({}));
             let bin = std::env::current_exe()
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "ctxforge".to_string());
+                .unwrap_or_else(|_| "lens".to_string());
             let rc = routing::RouteCtx {
                 level,
                 mcp_ready: routing::mcp_ready(&data_dir),
@@ -167,7 +167,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             let events = attribute(raws, &session_id, &project_str, ts, "PostToolUse");
             store.insert_events(&events)?;
             // Scale-aware search steer: a Grep whose result floods context gets a
-            // one-shot nudge toward ctx_search (ctx_search only beats grep at scale).
+            // one-shot nudge toward lens_search (lens_search only beats grep at scale).
             // Capture above runs regardless of routing level; the nudge is steer-only.
             let level = routing::Level::from_env();
             if level.steers() {
@@ -248,7 +248,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             }))?)
         }
         other => {
-            eprintln!("ctxforge hook: unknown event {other}");
+            eprintln!("lens hook: unknown event {other}");
             Ok(default_response(other))
         }
     }
@@ -333,7 +333,7 @@ fn write_current_session(data_dir: &Path, session_id: &str) {
 }
 
 /// Read project rule files from disk and turn them into rule events
-/// (path + content; content is what gets indexed for `ctx_search`).
+/// (path + content; content is what gets indexed for `lens_search`).
 fn capture_rules(project: &Path) -> Vec<RawEvent> {
     let mut out = Vec::new();
     let candidates = [
@@ -355,7 +355,7 @@ fn capture_rules(project: &Path) -> Vec<RawEvent> {
     out
 }
 
-/// Write detailed events into the FTS5 index so the model can `ctx_search`
+/// Write detailed events into the FTS5 index so the model can `lens_search`
 /// them on demand after resume. Best-effort.
 fn index_events(data_dir: &Path, session_id: &str, events: &[Event]) {
     let idx = match Index::open(data_dir) {
@@ -468,8 +468,8 @@ mod tests {
     #[test]
     fn hook_anchors_data_dir_to_repo_root_not_subdir() {
         // Regression: a hook fired with cwd set to a SUBDIRECTORY of the repo must
-        // resolve its data dir to the repo-root `.ctxforge` and must NOT scatter a
-        // nested stray `.ctxforge` under the subdir (that broke an xcodegen build).
+        // resolve its data dir to the repo-root `.lens` and must NOT scatter a
+        // nested stray `.lens` under the subdir (that broke an xcodegen build).
         let repo = tempdir().unwrap();
         std::fs::create_dir_all(repo.path().join(".git")).unwrap();
         let subdir = repo.path().join("Sources").join("Core");
@@ -486,9 +486,9 @@ mod tests {
         handle("PostToolUse", &input).unwrap();
 
         // Canonical data dir at the repo root; nothing scattered under the subdir.
-        assert!(repo.path().join(".ctxforge").is_dir());
-        assert!(!subdir.join(".ctxforge").exists());
-        assert!(!repo.path().join("Sources").join(".ctxforge").exists());
+        assert!(repo.path().join(".lens").is_dir());
+        assert!(!subdir.join(".lens").exists());
+        assert!(!repo.path().join("Sources").join(".lens").exists());
     }
 
     #[test]
@@ -574,18 +574,18 @@ mod tests {
         // this hook fires, so server.pid isn't fresh yet (mcp_ready == false) — yet
         // the guide has to inject anyway, or the model never learns to use the ctx
         // tools. tempdir() has no server.pid, so mcp_ready is false here; the guide
-        // must still appear. (CTXFORGE_ROUTING is read by no other test.)
+        // must still appear. (LENS_ROUTING is read by no other test.)
         let dir = tempdir().unwrap();
-        let prev = std::env::var("CTXFORGE_ROUTING").ok();
-        std::env::set_var("CTXFORGE_ROUTING", "full");
+        let prev = std::env::var("LENS_ROUTING").ok();
+        std::env::set_var("LENS_ROUTING", "full");
 
         let mut ss = input_for(dir.path());
         ss.source = Some("startup".into());
         let out = handle("SessionStart", &ss).unwrap();
 
         match prev {
-            Some(v) => std::env::set_var("CTXFORGE_ROUTING", v),
-            None => std::env::remove_var("CTXFORGE_ROUTING"),
+            Some(v) => std::env::set_var("LENS_ROUTING", v),
+            None => std::env::remove_var("LENS_ROUTING"),
         }
 
         let v: Value = serde_json::from_str(&out).unwrap();

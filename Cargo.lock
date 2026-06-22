@@ -218,37 +218,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
-name = "ctxforge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "blake3",
- "ignore",
- "predicates",
- "regex",
- "rmcp",
- "rusqlite",
- "schemars",
- "serde",
- "serde_json",
- "streaming-iterator",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-go",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-swift",
- "tree-sitter-typescript",
- "walkdir",
-]
-
-[[package]]
 name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -594,6 +563,37 @@ name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
+
+[[package]]
+name = "lens"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "blake3",
+ "ignore",
+ "predicates",
+ "regex",
+ "rmcp",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "streaming-iterator",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-swift",
+ "tree-sitter-typescript",
+ "walkdir",
+]
 
 [[package]]
 name = "libc"

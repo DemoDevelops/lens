@@ -1,4 +1,4 @@
-//! `ctx_execute`: run code in a subprocess and capture only its stdout/stderr.
+//! `lens_run`: run code in a subprocess and capture only its stdout/stderr.
 //!
 //! The raw data the script reads never enters the agent's context: only what the
 //! script prints comes back. Large stdout is offloaded to the reversible store
@@ -18,7 +18,7 @@ use crate::tools::{ExecuteRequest, ExecuteResponse};
 /// How much of a truncated stdout to keep at the head and at the tail.
 const PREVIEW_SIDE: usize = 2048;
 
-/// Run a sandbox request. `repo_dir` is the working directory for the child
+/// Run a darkroom request. `repo_dir` is the working directory for the child
 /// process. `max_inline` is the stdout byte threshold above which output is
 /// offloaded to `store`.
 pub async fn run(
@@ -51,7 +51,7 @@ pub async fn run_file(
     .await
 }
 
-/// Shared sandbox runner. Spawns `runtime.program pre_args <script_path>`
+/// Shared darkroom runner. Spawns `runtime.program pre_args <script_path>`
 /// followed by `extra_args`, captures stdout/stderr, offloads oversized stdout
 /// to `store`, and bumps the savings counters.
 async fn run_with_args(
@@ -71,7 +71,7 @@ async fn run_with_args(
     // Write the script to a temp file next to the repo so relative paths in the
     // script resolve against the working dir. The file auto-deletes on drop.
     let mut tmp = tempfile::Builder::new()
-        .prefix("ctxforge_")
+        .prefix("lens_")
         .suffix(&format!(".{}", runtime.extension))
         .tempfile()
         .map_err(|e| format!("creating temp script: {e}"))?;
@@ -165,7 +165,7 @@ async fn run_with_args(
     let returned_bytes = stdout.len() + stderr.len();
     // Stats: count the script's full output as "processed" and what we actually
     // hand back as "returned". Savings materialise when large output is offloaded.
-    let _ = store.bump_stat("sandbox_calls", 1);
+    let _ = store.bump_stat("darkroom_calls", 1);
     let _ = store.bump_stat("raw_bytes_processed", stdout_bytes as i64);
     let _ = store.bump_stat("bytes_returned_to_context", returned_bytes as i64);
 
@@ -186,7 +186,7 @@ fn make_preview(full: &str) -> String {
     let tail_start = ceil_char_boundary(full, full.len().saturating_sub(PREVIEW_SIDE));
     let omitted = tail_start.saturating_sub(head_end);
     format!(
-        "{}\n... [{} bytes omitted; full output via ctx_retrieve] ...\n{}",
+        "{}\n... [{} bytes omitted; full output via lens_recall] ...\n{}",
         &full[..head_end],
         omitted,
         &full[tail_start..]
@@ -219,7 +219,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn store_in(dir: &std::path::Path) -> Store {
-        Store::open(&dir.join(".ctxforge")).unwrap()
+        Store::open(&dir.join(".lens")).unwrap()
     }
 
     #[tokio::test]

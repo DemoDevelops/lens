@@ -455,8 +455,11 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if cmd.is_empty() {
         return Decision::Passthrough;
     }
+    // Compute once; thread through to avoid recomputing in is_stateful /
+    // bash_redirect / is_wrappable.
+    let segs = segments(cmd);
     // Stateful commands mutate shell state; rewriting them would change behavior.
-    if is_stateful(cmd) {
+    if is_stateful_segs(cmd, &segs) {
         return Decision::Passthrough;
     }
     // Network/build/inline-HTTP → hard redirect into lens_run (port of
@@ -465,7 +468,7 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     // `mcp_redirect` (these point at lens_run); when the server is down the
     // command passes through untouched rather than redirecting into a dead tool.
     if ctx.level.steers() {
-        if let Some(d) = bash_redirect(cmd) {
+        if let Some(d) = bash_redirect_segs(cmd, &segs) {
             return mcp_redirect(ctx, d);
         }
     }
@@ -475,7 +478,7 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if classify::classify(cmd) == classify::Risk::Safe {
         return Decision::Passthrough;
     }
-    if is_wrappable(cmd) {
+    if is_wrappable_segs(&segs) {
         if ctx.level.wraps() {
             let mut updated = tool_input.clone();
             let rewritten = format!("{} wrap -- {}", q(ctx.bin), q(cmd));
@@ -498,11 +501,12 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
 /// (`hooks/core/routing.mjs`): replace a context-flooding network or build command
 /// with an `echo` that tells the model to run it through `lens_run` instead, so
 /// the raw output stays in the darkroom. `None` for commands that don't match.
-fn bash_redirect(cmd: &str) -> Option<Decision> {
+/// Accepts pre-computed `segs` from the caller to avoid a redundant allocation.
+fn bash_redirect_segs(cmd: &str, segs: &[String]) -> Option<Decision> {
     // Per-segment: a curl/wget that would dump the body to stdout, or a build tool.
-    for seg in segments(cmd) {
-        match basename(first_token(&seg)) {
-            "curl" | "wget" if is_unsafe_fetch(&seg) => return Some(net_redirect()),
+    for seg in segs {
+        match basename(first_token(seg)) {
+            "curl" | "wget" if is_unsafe_fetch(seg) => return Some(net_redirect()),
             "gradle" | "gradlew" | "mvn" | "mvnw" | "sbt" => return Some(build_redirect(cmd)),
             _ => {}
         }
@@ -623,7 +627,14 @@ fn first_token(seg: &str) -> &str {
 /// the wrapper runs in a child process and the mutation would be lost (or worse,
 /// silently change semantics). Conservative: any segment that *looks* stateful
 /// taints the whole line.
+/// Single-argument wrapper kept for tests; production callers use [`is_stateful_segs`].
+#[cfg(test)]
 fn is_stateful(cmd: &str) -> bool {
+    is_stateful_segs(cmd, &segments(cmd))
+}
+
+/// Segments-accepting variant used by [`bash_decision`] to avoid recomputing.
+fn is_stateful_segs(cmd: &str, segs: &[String]) -> bool {
     // Backtick command substitution and function definitions are hard to reason
     // about; treat the whole command as stateful.
     if cmd.contains('`') {
@@ -633,8 +644,8 @@ fn is_stateful(cmd: &str) -> bool {
         "cd", "export", "source", ".", "alias", "unalias", "set", "unset", "pushd", "popd", "eval",
         "trap",
     ];
-    for seg in segments(cmd) {
-        let tok = first_token(&seg);
+    for seg in segs {
+        let tok = first_token(seg);
         if tok.is_empty() {
             continue;
         }
@@ -646,7 +657,7 @@ fn is_stateful(cmd: &str) -> bool {
             return true;
         }
         // Function definition: `name()` anywhere in the segment.
-        if contains_fn_def(&seg) {
+        if contains_fn_def(seg) {
             return true;
         }
     }
@@ -769,14 +780,21 @@ fn is_external_mcp_tool(tool: &str) -> bool {
 /// Is the whole command line safe to wrap? Every pipeline/chain segment's
 /// leading program must be read-only and allowlisted, so a single mutating stage
 /// (`find … | xargs rm`) disqualifies the line.
+/// Single-argument wrapper kept for tests; production callers use [`is_wrappable_segs`].
+#[cfg(test)]
 fn is_wrappable(cmd: &str) -> bool {
+    is_wrappable_segs(&segments(cmd))
+}
+
+/// Segments-accepting variant used by [`bash_decision`] to avoid recomputing.
+fn is_wrappable_segs(segs: &[String]) -> bool {
     let mut any = false;
-    for seg in segments(cmd) {
+    for seg in segs {
         if seg.trim().is_empty() {
             continue;
         }
         any = true;
-        if !segment_allowlisted(&seg) {
+        if !segment_allowlisted(seg) {
             return false;
         }
     }

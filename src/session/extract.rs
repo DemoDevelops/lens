@@ -2,9 +2,79 @@
 //! categorized, prioritized [`RawEvent`]s. Pure functions, no I/O, so they are
 //! cheap to unit-test against representative payloads.
 
+use std::sync::LazyLock;
+
+use aho_corasick::{AhoCorasick, MatchKind};
 use serde_json::{json, Value};
 
 use super::RawEvent;
+
+/// Marker categories for the single-pass user-prompt scan.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MarkerKind {
+    Decision,
+    Blocker,
+    Constraint,
+    Role,
+}
+
+/// All user-prompt markers in one Aho-Corasick automaton with
+/// `ascii_case_insensitive`, so no `to_lowercase` allocation is needed.
+/// Pattern order matches `MARKER_KINDS`.
+static MARKER_AC: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasick::builder()
+        .match_kind(MatchKind::LeftmostLongest)
+        .ascii_case_insensitive(true)
+        .build(MARKER_PATTERNS)
+        .expect("static marker patterns compile")
+});
+
+const MARKER_PATTERNS: &[&str] = &[
+    // Decision markers (index 0-9)
+    " instead",
+    "don't ",
+    "do not ",
+    "use ",
+    "stop ",
+    "actually ",
+    "rather than",
+    "never ",
+    "always ",
+    "make sure",
+    // Blocker markers (index 10-13)
+    "blocked",
+    "waiting on",
+    "can't ",
+    "cannot ",
+    // Constraint markers (index 14-17)
+    "must ",
+    "required",
+    "constraint",
+    "has to ",
+    // Role markers (index 18-20)
+    "you are ",
+    "act as ",
+    "your role",
+];
+
+/// Number of decision-marker patterns (first slice of `MARKER_PATTERNS`).
+const DECISION_COUNT: usize = 10;
+/// Number of blocker patterns (second slice).
+const BLOCKER_COUNT: usize = 4;
+/// Number of constraint patterns (third slice).
+const CONSTRAINT_COUNT: usize = 4;
+
+fn marker_kind(pattern_id: usize) -> MarkerKind {
+    if pattern_id < DECISION_COUNT {
+        MarkerKind::Decision
+    } else if pattern_id < DECISION_COUNT + BLOCKER_COUNT {
+        MarkerKind::Blocker
+    } else if pattern_id < DECISION_COUNT + BLOCKER_COUNT + CONSTRAINT_COUNT {
+        MarkerKind::Constraint
+    } else {
+        MarkerKind::Role
+    }
+}
 
 /// Extract events from a completed tool call (PostToolUse).
 ///
@@ -206,57 +276,44 @@ pub fn extract_user_events(prompt: &str) -> Vec<RawEvent> {
     // Always capture the raw prompt (P1) — last-prompt restore depends on it.
     out.push(RawEvent::new("user-prompt", 1, json!({"prompt": trimmed})));
 
-    let low = trimmed.to_lowercase();
+    // Single-pass scan over all decision/blocker/constraint/role markers using
+    // a case-insensitive AC automaton; no to_lowercase allocation needed.
+    let (mut has_decision, mut has_blocker, mut has_constraint, mut has_role) =
+        (false, false, false, false);
+    for m in MARKER_AC.find_iter(trimmed) {
+        match marker_kind(m.pattern().as_usize()) {
+            MarkerKind::Decision => has_decision = true,
+            MarkerKind::Blocker => has_blocker = true,
+            MarkerKind::Constraint => has_constraint = true,
+            MarkerKind::Role => has_role = true,
+        }
+        if has_decision && has_blocker && has_constraint && has_role {
+            break;
+        }
+    }
 
-    // Decisions / corrections (P2)
-    let decision_markers = [
-        " instead",
-        "don't ",
-        "do not ",
-        "use ",
-        "stop ",
-        "actually ",
-        "rather than",
-        "never ",
-        "always ",
-        "make sure",
-    ];
-    if decision_markers.iter().any(|m| low.contains(m)) {
+    if has_decision {
         out.push(RawEvent::new(
             "decision",
             2,
             json!({"text": truncate(trimmed, 300)}),
         ));
     }
-
-    // Blockers (P2)
-    if low.contains("blocked")
-        || low.contains("waiting on")
-        || low.contains("can't ")
-        || low.contains("cannot ")
-    {
+    if has_blocker {
         out.push(RawEvent::new(
             "blocker",
             2,
             json!({"text": truncate(trimmed, 240)}),
         ));
     }
-
-    // Constraints (P2)
-    if low.contains("must ")
-        || low.contains("required")
-        || low.contains("constraint")
-        || low.contains("has to ")
-    {
+    if has_constraint {
         out.push(RawEvent::new(
             "constraint",
             2,
             json!({"text": truncate(trimmed, 240)}),
         ));
     }
-
-    // Role directives (P3)
-    if low.contains("you are ") || low.contains("act as ") || low.contains("your role") {
+    if has_role {
         out.push(RawEvent::new(
             "role",
             3,
@@ -269,7 +326,9 @@ pub fn extract_user_events(prompt: &str) -> Vec<RawEvent> {
         out.push(RawEvent::new("external-ref", 3, json!({"ref": r})));
     }
 
-    // Session intent (P4): coarse classification
+    // Session intent (P4): coarse classification (still needs lowercase for
+    // classify_intent; that allocation is outside the marker-scan hot path).
+    let low = trimmed.to_lowercase();
     let intent = classify_intent(&low);
     out.push(RawEvent::new("intent", 4, json!({"intent": intent})));
 
@@ -428,5 +487,51 @@ mod tests {
         assert!(ev
             .iter()
             .any(|e| e.category == "mcp-tool" && e.priority == 3));
+    }
+
+    // ── AC-based marker detection ─────────────────────────────────────────────
+
+    #[test]
+    fn ac_marker_scan_detects_correct_categories() {
+        // Decision: " instead" marker
+        let ev = extract_user_events("use lens_run instead of grep");
+        assert!(ev.iter().any(|e| e.category == "decision"), "decision detected");
+        assert!(!ev.iter().any(|e| e.category == "blocker"), "no false-positive blocker");
+        assert!(!ev.iter().any(|e| e.category == "constraint"), "no false-positive constraint");
+
+        // Blocker: "blocked" marker
+        let ev = extract_user_events("I am blocked on the deploy");
+        assert!(ev.iter().any(|e| e.category == "blocker"), "blocker detected");
+        assert!(!ev.iter().any(|e| e.category == "decision"), "no false-positive decision");
+
+        // Constraint: "must " marker
+        let ev = extract_user_events("the output must be deterministic");
+        assert!(ev.iter().any(|e| e.category == "constraint"), "constraint detected");
+        assert!(!ev.iter().any(|e| e.category == "blocker"), "no false-positive blocker");
+
+        // Role: "act as " marker
+        let ev = extract_user_events("act as a senior engineer");
+        assert!(ev.iter().any(|e| e.category == "role"), "role detected");
+        assert!(!ev.iter().any(|e| e.category == "blocker"), "no false-positive blocker");
+
+        // Case-insensitive: uppercase markers match without to_lowercase alloc
+        let ev = extract_user_events("NEVER do this again");
+        assert!(ev.iter().any(|e| e.category == "decision"), "case-insensitive decision");
+
+        let ev = extract_user_events("Cannot find the file");
+        assert!(ev.iter().any(|e| e.category == "blocker"), "case-insensitive blocker");
+
+        // Neutral prompt: no false positives on any category
+        let ev = extract_user_events("please run the tests");
+        assert!(!ev.iter().any(|e| e.category == "decision"), "no spurious decision");
+        assert!(!ev.iter().any(|e| e.category == "blocker"), "no spurious blocker");
+        assert!(!ev.iter().any(|e| e.category == "constraint"), "no spurious constraint");
+        assert!(!ev.iter().any(|e| e.category == "role"), "no spurious role");
+
+        // Multiple categories in one prompt
+        let ev = extract_user_events("You are an expert. Never use echo. I am blocked on CI.");
+        assert!(ev.iter().any(|e| e.category == "role"), "role in multi");
+        assert!(ev.iter().any(|e| e.category == "decision"), "decision in multi");
+        assert!(ev.iter().any(|e| e.category == "blocker"), "blocker in multi");
     }
 }

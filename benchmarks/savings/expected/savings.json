@@ -3,8 +3,8 @@
     "workload": "Code search (results across files)",
     "mechanism": "index",
     "before_bytes": 15915,
-    "after_bytes": 10627,
-    "savings_pct": 33,
+    "after_bytes": 10507,
+    "savings_pct": 34,
     "baseline": "Agent greps for the terms, then opens every matched file in full to read context.",
     "detail": "6 queries, 30 hits returned, 12 matched files read by the naive path"
   },
@@ -21,8 +21,8 @@
     "workload": "Issue triage (structured payload)",
     "mechanism": "compression",
     "before_bytes": 8902,
-    "after_bytes": 3885,
-    "savings_pct": 56,
+    "after_bytes": 3327,
+    "savings_pct": 63,
     "baseline": "Agent loads the full structured triage payload (minified) into context.",
     "detail": "reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file 8903 bytes)"
   },

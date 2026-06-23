@@ -568,6 +568,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 name = "lens"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "assert_cmd",
  "blake3",
@@ -579,6 +580,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "shell-words",
  "streaming-iterator",
  "tempfile",
  "thiserror",
@@ -1010,6 +1012,12 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"

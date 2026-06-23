@@ -20,10 +20,14 @@
 //! passed through untouched, because rewriting them would silently change behavior.
 
 use std::path::Path;
-use std::sync::OnceLock;
 
-use regex::Regex;
 use serde_json::{json, Value};
+
+mod classify;
+mod log;
+pub mod throttle;
+
+pub use classify::is_structurally_bounded;
 
 /// Active routing level, parsed from `LENS_ROUTING`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +138,26 @@ pub fn to_post_hook_json(d: &Decision) -> Value {
     }
 }
 
+/// Short decision tag for the routing log.
+fn decision_label(d: &Decision) -> String {
+    match d {
+        Decision::Passthrough => "passthrough",
+        Decision::Deny(_) => "deny",
+        Decision::Modify { .. } => "modify",
+        Decision::Context(_) => "context",
+    }
+    .to_string()
+}
+
+/// Decision reason for the routing log (empty for passthrough; a tag for nudges).
+fn decision_reason(d: &Decision) -> String {
+    match d {
+        Decision::Passthrough => String::new(),
+        Decision::Deny(r) | Decision::Modify { reason: r, .. } => r.clone(),
+        Decision::Context(_) => "nudge".to_string(),
+    }
+}
+
 /// Everything [`route`] needs that isn't the tool call itself.
 pub struct RouteCtx<'a> {
     /// Active routing level.
@@ -215,6 +239,27 @@ fn mcp_redirect(ctx: &RouteCtx, d: Decision) -> Decision {
 /// only the MCP-redirect decisions via [`mcp_redirect`], so nudges and sub-agent
 /// injection keep firing even before the server's heartbeat lands.
 pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
+    let decision = route_inner(tool, tool_input, ctx);
+    if log::enabled() {
+        log::emit(
+            ctx.data_dir,
+            log::RoutingEvent {
+                session: ctx.session_id.to_string(),
+                tool: tool.to_string(),
+                cmd: tool_input
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                decision: decision_label(&decision),
+                reason: decision_reason(&decision),
+            },
+        );
+    }
+    decision
+}
+
+/// The routing policy; [`route`] wraps this to emit the optional routing log.
+fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if ctx.level == Level::Off {
         return Decision::Passthrough;
     }
@@ -235,7 +280,7 @@ pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             }
         }
         "Grep" => {
-            if ctx.level.steers() && guidance_once(ctx, "grep") {
+            if ctx.level.steers() && nudge_once(ctx, "grep") {
                 Decision::Context(GREP_NUDGE.to_string())
             } else {
                 Decision::Passthrough
@@ -284,7 +329,7 @@ pub fn post_route(tool: &str, tool_response: &str, ctx: &RouteCtx) -> Decision {
     }
     if tool == "Grep"
         && tool_response.len() > grep_flood_bytes()
-        && guidance_once(ctx, "grep-flood")
+        && nudge_once(ctx, "grep-flood")
     {
         Decision::Context(SEARCH_NUDGE.to_string())
     } else {
@@ -373,13 +418,13 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
         .map(|ext| crate::discovery::extract::spec_for_extension(&ext).is_some())
         .unwrap_or(false);
     if is_code {
-        let n = bump_counter(ctx, "read-code");
+        let n = throttle::bump(ctx.data_dir, ctx.session_id, "read-code");
         let threshold = read_graph_threshold();
         if n >= threshold && (n - threshold).is_multiple_of(READ_GRAPH_PERIOD) {
             return Decision::Context(read_graph_nudge(n));
         }
     }
-    if guidance_once(ctx, "read") {
+    if nudge_once(ctx, "read") {
         Decision::Context(READ_NUDGE.to_string())
     } else {
         Decision::Passthrough
@@ -427,7 +472,7 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     // Structurally-bounded commands (git status, ls, --version probes, …) produce
     // little output — nudging or wrapping them is noise that trains the agent to
     // ignore the advisory. Skip both (port of context-mode #463).
-    if is_structurally_bounded(cmd) {
+    if classify::classify(cmd) == classify::Risk::Safe {
         return Decision::Passthrough;
     }
     if is_wrappable(cmd) {
@@ -439,7 +484,7 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 reason: WRAP_REASON.to_string(),
                 updated_input: updated,
             }
-        } else if ctx.level.steers() && guidance_once(ctx, "bash") {
+        } else if ctx.level.steers() && nudge_once(ctx, "bash") {
             Decision::Context(BASH_NUDGE.to_string())
         } else {
             Decision::Passthrough
@@ -661,12 +706,6 @@ fn basename(token: &str) -> &str {
     }
 }
 
-/// Programs that are read-only regardless of their arguments.
-const PLAIN_ALLOW: &[&str] = &[
-    "find", "cat", "ls", "tree", "rg", "grep", "egrep", "fgrep", "tail", "head", "wc", "sort",
-    "uniq", "nl", "curl", "wget", "gradle", "gradlew", "mvn", "sbt", "pytest", "jest", "vitest",
-];
-
 /// For tools that mix read-only and mutating subcommands, the subcommand
 /// (token[1]) must be in the read-only set for the segment to be allowlisted.
 fn subcommand_ok(prog: &str, sub: &str) -> Option<bool> {
@@ -710,101 +749,7 @@ fn segment_allowlisted(seg: &str) -> bool {
     if let Some(ok) = subcommand_ok(prog, tokens.next().unwrap_or("")) {
         return ok;
     }
-    PLAIN_ALLOW.contains(&prog)
-}
-
-/// Port of context-mode's `SAFE_COMMAND_PATTERNS` (core/routing.mjs #463/#470/#517):
-/// commands whose stdout is structurally bounded (system probes, simple read-only git
-/// subcommands, `--version` checks, silent filesystem ops). Compiled once per process.
-///
-/// The `regex` crate has no lookahead, so the five verbose/recursive carve-outs
-/// (mv/cp/rm/ln/ls) are handled separately in [`is_structurally_bounded`]; the rest
-/// port verbatim from the source.
-fn bounded_patterns() -> &'static Vec<Regex> {
-    static P: OnceLock<Vec<Regex>> = OnceLock::new();
-    P.get_or_init(|| {
-        [
-            r"^pwd$",
-            r"^whoami$",
-            r"^hostname(?:\s+-[a-zA-Z]+)?$",
-            r"^uname(?:\s+-[a-zA-Z]+)?$",
-            r"^id(?:\s+\S+)?$",
-            r"^date(?:\s+[^\r\n]+)?$",
-            r"^echo\s",
-            r"^printf\s",
-            r"^which\s+\S+(?:\s+\S+)*$",
-            r"^type\s+\S+(?:\s+\S+)*$",
-            r"^command\s+-v\s+\S+(?:\s+\S+)*$",
-            r"^readlink(?:\s+[^\r\n]+)?$",
-            r"^basename(?:\s+[^\r\n]+)?$",
-            r"^dirname(?:\s+[^\r\n]+)?$",
-            r"^realpath(?:\s+[^\r\n]+)?$",
-            r"^cd(?:\s+[^\r\n]+)?$",
-            r"^mkdir(?:\s+[^\r\n]+)?$",
-            r"^touch\s+[^\r\n]+$",
-            r"^git\s+status(?:\s+[^\r\n]+)?$",
-            r"^git\s+rev-parse(?:\s+[^\r\n]+)?$",
-            r"^git\s+remote(?:\s+-v|\s+show\s+\S+)?$",
-            r"^git\s+branch(?:\s+[^\r\n]+)?$",
-            r"^git\s+config\s+--get(?:\s+[^\r\n]+)?$",
-            r"^git\s+diff\s+--stat(?:\s+[^\r\n]+)?$",
-            r"^git\s+diff\s+--name-only(?:\s+[^\r\n]+)?$",
-            r"^git\s+stash\s+list$",
-            r"^git\s+tag(?:\s+-l(?:\s+[^\r\n]+)?)?$",
-            r"^git\s+log\s+-\d{1,2}(?:\s+[^\r\n]+)?$",
-            r"(?:^|\s)--version(?:\s|$)",
-            r"^\S+\s+-V(?:\s|$)",
-        ]
-        .iter()
-        .map(|p| Regex::new(p).expect("static bounded-command pattern compiles"))
-        .collect()
-    })
-}
-
-/// True when `cmd` is a single-dash flag bundle token (e.g. `-rvf`) containing `ch`.
-/// Mirrors context-mode's `-[a-zA-Z]*<ch>[a-zA-Z]*` lookahead carve-out.
-fn flag_bundle_has(cmd: &str, ch: char) -> bool {
-    cmd.split_whitespace()
-        .any(|tok| match tok.strip_prefix('-') {
-            Some(rest) => {
-                !rest.starts_with('-')
-                    && !rest.is_empty()
-                    && rest.chars().all(|c| c.is_ascii_alphabetic())
-                    && rest.contains(ch)
-            }
-            None => false,
-        })
-}
-
-/// Port of context-mode's `isStructurallyBounded` (#463): is this command's output
-/// bounded enough that the routing nudge/wrap would be noise? Conservative — any
-/// shell control operator, or an unknown command, returns false.
-pub(crate) fn is_structurally_bounded(command: &str) -> bool {
-    let cmd = command.trim();
-    if cmd.is_empty() {
-        return false;
-    }
-    // Any control operator can compose a bounded command with an unbounded sink
-    // (`git status | xargs cat`), so disqualify — port of SHELL_CONTROL_OPERATORS.
-    // (The `regex` crate lacks lookahead; presence of any single operator char is
-    // sufficient to disqualify, which is exactly the source's intent.)
-    if cmd.contains(['|', '`', '\n', '\r', ';', '>', '<', '&']) || cmd.contains("$(") {
-        return false;
-    }
-    if bounded_patterns().iter().any(|re| re.is_match(cmd)) {
-        return true;
-    }
-    // Lookahead carve-outs: mv/cp/rm/ln are bounded only without a verbose flag
-    // (verbose prints one line per file → can flood); ls only without recursive.
-    match cmd.split_whitespace().next().unwrap_or("") {
-        "mv" | "cp" | "rm" | "ln" => {
-            cmd.split_whitespace().count() >= 2
-                && !flag_bundle_has(cmd, 'v')
-                && !cmd.contains("--verbose")
-        }
-        "ls" => !flag_bundle_has(cmd, 'R') && !cmd.contains("--recursive"),
-        _ => false,
-    }
+    classify::is_safe_command(prog)
 }
 
 /// Port of context-mode's `isExternalMcpTool` (#529): a non-lens MCP tool, whose
@@ -841,62 +786,26 @@ fn is_wrappable(cmd: &str) -> bool {
 /// External-MCP nudge cadence: fire on the 1st, then every `EXTERNAL_MCP_PERIOD`-th
 /// matching call. context-mode's default (`EXTERNAL_MCP_NUDGE_DEFAULT`) is 10 — keeps
 /// the guidance fresh across an MCP-heavy run (50+ calls) without flooding context.
-/// Bash/Grep use [`guidance_once`] (one shot); Read mixes a one-shot general tip
+/// Bash/Grep use [`nudge_once`] (one shot); Read mixes a one-shot general tip
 /// with a periodic graph escalation (see [`read_decision`]); external MCP repeats.
 pub const EXTERNAL_MCP_PERIOD: u64 = 10;
 
-/// Increment the per-`(session, key)` counter file under `<data_dir>/throttle`
-/// and return its new value (first call returns 1). Returns 0 on any IO error,
-/// which callers treat as "suppress". Best-effort under concurrency: the
-/// read-increment-write isn't atomic across parallel hook processes, but a
-/// missed/extra reminder is harmless.
-fn bump_counter(ctx: &RouteCtx, key: &str) -> u64 {
-    let dir = ctx.data_dir.join("throttle");
-    let _ = std::fs::create_dir_all(&dir); // best effort
-    let marker = dir.join(format!("{}.{}.count", sanitize(ctx.session_id), key));
-    let prev = std::fs::read_to_string(&marker)
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0);
-    let next = prev.saturating_add(1);
-    if std::fs::write(&marker, next.to_string()).is_err() {
-        return 0;
+/// Fire a nudge at most once per (session, key): true only on the first call
+/// (the in-memory successor to the old `guidance_once` marker file).
+fn nudge_once(ctx: &RouteCtx, key: &str) -> bool {
+    if throttle::fired(ctx.data_dir, ctx.session_id, key) {
+        false
+    } else {
+        throttle::mark(ctx.data_dir, ctx.session_id, key);
+        true
     }
-    next
 }
 
-/// Fire a periodic nudge per `(session, key)`: returns `true` on calls 1,
-/// `period+1`, `2·period+1`, … Backed by [`bump_counter`]; any IO error
-/// suppresses the nudge. Port of context-mode's `guidancePeriodic`.
+/// Fire a periodic nudge per (session, key): true on calls 1, period+1, … Backed
+/// by the [`throttle::bump`] counter.
 fn throttle_periodic(ctx: &RouteCtx, key: &str, period: u64) -> bool {
-    match bump_counter(ctx, key) {
-        0 => false,
-        next => period <= 1 || next % period == 1,
-    }
-}
-
-/// Fire a nudge at most ONCE per `(session, key)` — port of context-mode's
-/// `guidanceOnce`. Returns `true` only on the first call: an atomic create-or-fail
-/// (`O_CREAT | O_EXCL`) on a marker file under `<data_dir>/throttle` means the first
-/// of the session's parallel hook processes wins and the rest get `false`. Any IO
-/// error suppresses the nudge rather than risking a repeat.
-fn guidance_once(ctx: &RouteCtx, key: &str) -> bool {
-    let dir = ctx.data_dir.join("throttle");
-    let _ = std::fs::create_dir_all(&dir); // best effort
-    let marker = dir.join(format!("{}.{}.once", sanitize(ctx.session_id), key));
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)
-        .is_ok()
-}
-
-/// Replace every non-alphanumeric byte with `_` so a session id is filesystem
-/// safe.
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+    let next = throttle::bump(ctx.data_dir, ctx.session_id, key);
+    period <= 1 || next % period == 1
 }
 
 /// Is the MCP server reachable right now?
@@ -929,16 +838,45 @@ pub fn mcp_ready(data_dir: &Path) -> bool {
 }
 
 /// The authoritative tool-selection directive injected at `SessionStart` while
-/// steering is active. Replaces the old soft "prefer lens tools" nudge with
-/// context-mode's `<context_window_protection>` pattern (prose adapted from
-/// `context-mode` `hooks/routing-block.mjs`, tool names mapped to lens): the
+/// steering is active. context-mode's `<context_window_protection>` pattern
+/// (prose adapted from `hooks/routing-block.mjs`, tool names mapped to lens): the
 /// *why*, a hierarchy that puts the code graph first, a nuanced when-NOT-to-use,
-/// and a deferred-tool ToolSearch bootstrap — the lens MCP tools are often
-/// deferred in-harness, so a willing model can't call them without loading first
-/// (a likely reason the tools sat unused). `_level` is unused (the block is
-/// level-agnostic; the caller already gates injection on `level.steers()`).
+/// and a deferred-tool ToolSearch bootstrap. `_level` is unused (the block is
+/// level-agnostic; the caller already gates injection on `level.steers()`). The
+/// full block; [`session_block_for`] tailors the when-not-to-use bullets.
 pub fn session_block(_level: Level) -> String {
-    r##"<context_window_protection>
+    session_block_with(true, true)
+}
+
+/// Tailored variant: emit the per-tool when-not-to-use bullets only for the tool
+/// groups active this session (`bash`, `file`). With neither active (a fresh
+/// session with no tool history) this falls back to the full block.
+pub fn session_block_for(_level: Level, bash: bool, file: bool) -> String {
+    if !bash && !file {
+        session_block_with(true, true)
+    } else {
+        session_block_with(bash, file)
+    }
+}
+
+/// Assemble the block with the selected per-tool bullets. The WebFetch bullet is
+/// always present (a universal deny, not a per-tool tip).
+fn session_block_with(bash: bool, file: bool) -> String {
+    let mut s = String::from(BLOCK_HEAD);
+    if bash {
+        s.push_str(BULLET_BASH);
+    }
+    if file {
+        s.push_str(BULLET_READ);
+        s.push_str(BULLET_SEARCH);
+    }
+    s.push_str(BULLET_WEBFETCH);
+    s.push_str(BLOCK_TAIL);
+    s
+}
+
+/// `<context_window_protection>` through the open `<when_not_to_use>` tag.
+const BLOCK_HEAD: &str = r##"<context_window_protection>
   <priority_instructions>
     Every byte a tool returns enters your conversation memory and costs reasoning capacity for the rest of the session. The lens tools let you do the work in a darkroom and surface only the derived answer — the raw bytes stay out. Think-in-Code: program the analysis, do not compute it by reading raw data into your conversation.
   </priority_instructions>
@@ -956,18 +894,23 @@ pub fn session_block(_level: Level) -> String {
        - Derive answers FROM data: filter, count, aggregate, parse, transform. Only what you print() enters your conversation; the raw bytes stay in the darkroom.
     4. RECOVER: lens_recall(ref) — pull back the full version of an offloaded result only when you actually need it.
   </tool_selection_hierarchy>
-  <when_not_to_use>
-    - You intend to PROCESS the output (filter, count, parse, aggregate) → use lens_run. Bash stays correct when you intend to OBSERVE a short fixed output (git status on a clean tree, whoami, pwd) or when you are mutating state (git, mkdir, rm, mv, navigation).
-    - You want to analyze, summarize, or extract from a file → use lens_run_file. Read stays correct when you intend to Edit the file (Edit needs the exact bytes in your conversation to match against).
-    - You want to find where something is, or who calls it → use lens_search or lens_symbol, not repeated Read/Grep over many files.
-    - WebFetch is denied — fetch and reduce a URL with lens_run (python): fetch in the darkroom and print only what you need; the full response stays out of context and is recoverable via lens_recall.
+  <when_not_to_use>"##;
+
+const BULLET_BASH: &str = "\n    - You intend to PROCESS the output (filter, count, parse, aggregate) → use lens_run. Bash stays correct when you intend to OBSERVE a short fixed output (git status on a clean tree, whoami, pwd) or when you are mutating state (git, mkdir, rm, mv, navigation).";
+
+const BULLET_READ: &str = "\n    - You want to analyze, summarize, or extract from a file → use lens_run_file. Read stays correct when you intend to Edit the file (Edit needs the exact bytes in your conversation to match against).";
+
+const BULLET_SEARCH: &str = "\n    - You want to find where something is, or who calls it → use lens_search or lens_symbol, not repeated Read/Grep over many files.";
+
+const BULLET_WEBFETCH: &str = "\n    - WebFetch is denied — fetch and reduce a URL with lens_run (python): fetch in the darkroom and print only what you need; the full response stays out of context and is recoverable via lens_recall.";
+
+/// Close `</when_not_to_use>` through `</context_window_protection>`.
+const BLOCK_TAIL: &str = r##"
   </when_not_to_use>
   <session_continuity>
     Skills, roles, and directives set during this session remain active until the user revokes them. Do not drop these behavioral directives as context grows.
   </session_continuity>
-</context_window_protection>"##
-        .to_string()
-}
+</context_window_protection>"##;
 
 #[cfg(test)]
 mod tests {
@@ -1130,58 +1073,7 @@ mod tests {
         assert!(!is_wrappable("cd x && find /"));
     }
 
-    // ── is_structurally_bounded (#463 port) ────────────────────────────────
-
-    #[test]
-    fn bounded_commands_are_recognized() {
-        for c in [
-            "pwd",
-            "whoami",
-            "git status",
-            "git status --short",
-            "git rev-parse HEAD",
-            "git branch",
-            "git diff --stat",
-            "git log -5",
-            "git stash list",
-            "node --version",
-            "python3 --version",
-            "cargo -V",
-            "ls",
-            "ls -la",
-            "cd /tmp",
-            "echo hi",
-            "mkdir -p a/b",
-            "mv a b",
-            "cp a b",
-            "rm a",
-        ] {
-            assert!(is_structurally_bounded(c), "{c:?} should be bounded");
-        }
-    }
-
-    #[test]
-    fn unbounded_commands_are_rejected() {
-        for c in [
-            "find .",
-            "cat file.txt",
-            "grep -r foo",
-            "git log",
-            "git diff",
-            "ls -R",
-            "ls --recursive",
-            "cp -rv a b",
-            "rm -v x",
-            "mv --verbose a b",
-            "git status | xargs cat",
-            "cat huge && echo done",
-            "echo $(cat f)",
-            "",
-            "rg pattern",
-        ] {
-            assert!(!is_structurally_bounded(c), "{c:?} should NOT be bounded");
-        }
-    }
+    // is_structurally_bounded / classify accept-set lives in `classify.rs` tests.
 
     #[test]
     fn bounded_wrappable_command_passes_through_instead_of_wrapping() {
@@ -1213,12 +1105,18 @@ mod tests {
     // ── route(): MCP-ready gate ────────────────────────────────────────────
 
     fn rc<'a>(level: Level, mcp_ready: bool, dir: &'a Path) -> RouteCtx<'a> {
+        // A unique session per ctx keeps the process-global in-memory throttle
+        // isolated across tests (the old per-tempdir markers gave this for free).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let id = N.fetch_add(1, Ordering::Relaxed);
+        let sid: &'static str = Box::leak(format!("sess-{id}").into_boxed_str());
         RouteCtx {
             level,
             mcp_ready,
             bin: "/path with space/lens",
             data_dir: dir,
-            session_id: "sess-1",
+            session_id: sid,
             rtk_active: false,
         }
     }
@@ -1748,12 +1646,6 @@ mod tests {
         // period 1 fires every time.
         assert!(throttle_periodic(&ctx, "always", 1));
         assert!(throttle_periodic(&ctx, "always", 1));
-    }
-
-    #[test]
-    fn sanitize_replaces_non_alphanumeric() {
-        assert_eq!(sanitize("a-b/c.d 1"), "a_b_c_d_1");
-        assert_eq!(sanitize("abc123"), "abc123");
     }
 
     // ── mcp_ready ──────────────────────────────────────────────────────────

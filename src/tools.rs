@@ -102,6 +102,8 @@ pub struct IndexRequest {
 pub struct IndexResponse {
     pub files_indexed: usize,
     pub chunks: usize,
+    /// Number of files actually read and re-indexed this call (0 if all unchanged).
+    pub files_read: usize,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -41,6 +41,10 @@ impl Index {
                 chunk_id UNINDEXED,
                 content,
                 tokenize = 'porter'
+             );
+             CREATE TABLE IF NOT EXISTS file_manifest (
+                 path TEXT PRIMARY KEY,
+                 mtime INTEGER NOT NULL
              );",
         )?;
         Ok(())

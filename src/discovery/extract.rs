@@ -5,11 +5,47 @@
 //! scope. Adding a language is a single `LangSpec` entry (see DECISIONS.md).
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Node as TsNode, Parser, Query, QueryCursor};
 
 use super::graph::Node;
+
+// Compiled queries per language, cached for the process lifetime.
+// tree_sitter::Query is Send + Sync (upstream unsafe impl), so LazyLock/OnceLock are safe.
+struct CachedQueries {
+    defs: Query,
+    calls: Query,
+    imports: Query,
+}
+
+static RUST_QUERIES: OnceLock<CachedQueries> = OnceLock::new();
+static PYTHON_QUERIES: OnceLock<CachedQueries> = OnceLock::new();
+static JS_QUERIES: OnceLock<CachedQueries> = OnceLock::new();
+static TS_QUERIES: OnceLock<CachedQueries> = OnceLock::new();
+static GO_QUERIES: OnceLock<CachedQueries> = OnceLock::new();
+static SWIFT_QUERIES: OnceLock<CachedQueries> = OnceLock::new();
+
+fn cached_queries(spec: &LangSpec) -> Option<&'static CachedQueries> {
+    let slot: &OnceLock<CachedQueries> = match spec.name {
+        "rust" => &RUST_QUERIES,
+        "python" => &PYTHON_QUERIES,
+        "javascript" => &JS_QUERIES,
+        "typescript" => &TS_QUERIES,
+        "go" => &GO_QUERIES,
+        "swift" => &SWIFT_QUERIES,
+        _ => return None,
+    };
+    Some(slot.get_or_init(|| {
+        let lang = (spec.language)();
+        CachedQueries {
+            defs: Query::new(&lang, spec.defs_query).expect("defs query"),
+            calls: Query::new(&lang, spec.calls_query).expect("calls query"),
+            imports: Query::new(&lang, spec.imports_query).expect("imports query"),
+        }
+    }))
+}
 
 /// Description of how to extract one language.
 pub struct LangSpec {
@@ -203,11 +239,14 @@ pub fn extract_file(path: &str, source: &str, spec: &LangSpec) -> Option<FileExt
     // Map: AST scope node id -> graph node id (function-like defs only).
     let mut scope_map: HashMap<usize, String> = HashMap::new();
 
+    // Use process-wide cached queries (compiled once per language per process).
+    let queries = cached_queries(spec)?;
+
     // --- definitions ---
-    let defs_q = Query::new(&language, spec.defs_query).ok()?;
+    let defs_q = &queries.defs;
     let capture_names = defs_q.capture_names();
     let mut cursor = QueryCursor::new();
-    let mut it = cursor.matches(&defs_q, root, src);
+    let mut it = cursor.matches(defs_q, root, src);
     while let Some(m) = it.next() {
         for cap in m.captures {
             let kind = capture_names[cap.index as usize];
@@ -230,34 +269,32 @@ pub fn extract_file(path: &str, source: &str, spec: &LangSpec) -> Option<FileExt
     // --- calls ---
     let mut calls: Vec<(String, String)> = Vec::new();
     let scope_kinds = fn_scope_kinds(spec.name);
-    if let Ok(calls_q) = Query::new(&language, spec.calls_query) {
-        let mut ccur = QueryCursor::new();
-        let mut cit = ccur.matches(&calls_q, root, src);
-        while let Some(m) = cit.next() {
-            for cap in m.captures {
-                let callee = last_segment(&node_text(&cap.node, src));
-                if callee.is_empty() {
-                    continue;
-                }
-                let caller = enclosing_scope(&cap.node, &scope_map, scope_kinds)
-                    .unwrap_or_else(|| module.id.clone());
-                calls.push((caller, callee));
+    let calls_q = &queries.calls;
+    let mut ccur = QueryCursor::new();
+    let mut cit = ccur.matches(calls_q, root, src);
+    while let Some(m) = cit.next() {
+        for cap in m.captures {
+            let callee = last_segment(&node_text(&cap.node, src));
+            if callee.is_empty() {
+                continue;
             }
+            let caller = enclosing_scope(&cap.node, &scope_map, scope_kinds)
+                .unwrap_or_else(|| module.id.clone());
+            calls.push((caller, callee));
         }
     }
 
     // --- imports ---
     let mut imports: Vec<(String, usize)> = Vec::new();
-    if let Ok(imp_q) = Query::new(&language, spec.imports_query) {
-        let mut icur = QueryCursor::new();
-        let mut iit = icur.matches(&imp_q, root, src);
-        while let Some(m) = iit.next() {
-            for cap in m.captures {
-                let line = cap.node.start_position().row + 1;
-                let text = node_text(&cap.node, src);
-                if let Some(seg) = import_target(&text) {
-                    imports.push((seg, line));
-                }
+    let imp_q = &queries.imports;
+    let mut icur = QueryCursor::new();
+    let mut iit = icur.matches(imp_q, root, src);
+    while let Some(m) = iit.next() {
+        for cap in m.captures {
+            let line = cap.node.start_position().row + 1;
+            let text = node_text(&cap.node, src);
+            if let Some(seg) = import_target(&text) {
+                imports.push((seg, line));
             }
         }
     }

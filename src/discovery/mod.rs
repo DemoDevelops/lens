@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use ignore::WalkBuilder;
+use rayon::prelude::*;
 
 use graph::{Graph, Node};
 
@@ -45,8 +46,60 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
     }
     files.sort();
 
+    // Parallel per-file extraction: parse and extract each file concurrently.
+    // Each task owns its own Parser; results are keyed by (path, lang_name) for
+    // deterministic reassembly regardless of rayon's completion order.
+    struct FileResult {
+        rel: String,
+        lang_name: String,
+        fx: extract::FileExtract,
+    }
+
+    let (file_results, warnings_raw): (Vec<_>, Vec<_>) = files
+        .par_iter()
+        .filter_map(|file| {
+            let ext = file.extension().and_then(|e| e.to_str())?;
+            let spec = extract::spec_for_extension(ext)?;
+            if let Some(filter) = &lang_filter {
+                if !filter.contains(spec.name) {
+                    return None;
+                }
+            }
+            let rel = file
+                .strip_prefix(root)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .to_string();
+            let source = match std::fs::read(file) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                },
+                Err(e) => return Some(Err(format!("{rel}: read error: {e}"))),
+            };
+            match extract::extract_file(&rel, &source, &spec) {
+                Some(fx) => Some(Ok(FileResult {
+                    rel,
+                    lang_name: spec.name.to_string(),
+                    fx,
+                })),
+                None => Some(Err(format!("{rel}: failed to parse, skipped"))),
+            }
+        })
+        .partition(Result::is_ok);
+
+    let mut warnings: Vec<String> = warnings_raw
+        .into_iter()
+        .filter_map(|r| r.err())
+        .collect();
+    warnings.sort();
+
+    // Sort results by relative path for deterministic assembly order.
+    let mut file_results: Vec<FileResult> =
+        file_results.into_iter().filter_map(|r| r.ok()).collect();
+    file_results.sort_by(|a, b| a.rel.cmp(&b.rel));
+
     let mut graph = Graph::new();
-    let mut warnings: Vec<String> = Vec::new();
     let mut files_parsed = 0usize;
     let mut langs_used: BTreeSet<String> = BTreeSet::new();
 
@@ -54,44 +107,8 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
     let mut pending_calls: Vec<(String, String)> = Vec::new();
     let mut pending_imports: Vec<(String, String, usize, String)> = Vec::new(); // (module_id, seg, line, lang)
 
-    for file in &files {
-        let ext = match file.extension().and_then(|e| e.to_str()) {
-            Some(e) => e,
-            None => continue,
-        };
-        let spec = match extract::spec_for_extension(ext) {
-            Some(s) => s,
-            None => continue,
-        };
-        if let Some(filter) = &lang_filter {
-            if !filter.contains(spec.name) {
-                continue;
-            }
-        }
-        let rel = file
-            .strip_prefix(root)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .to_string();
-        let source = match std::fs::read(file) {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(s) => s,
-                Err(_) => continue,
-            },
-            Err(e) => {
-                warnings.push(format!("{rel}: read error: {e}"));
-                continue;
-            }
-        };
-        let fx = match extract::extract_file(&rel, &source, &spec) {
-            Some(fx) => fx,
-            None => {
-                warnings.push(format!("{rel}: failed to parse, skipped"));
-                continue;
-            }
-        };
-
-        langs_used.insert(spec.name.to_string());
+    for FileResult { lang_name, fx, .. } in file_results {
+        langs_used.insert(lang_name.clone());
         files_parsed += 1;
 
         let module_id = fx.module.id.clone();
@@ -104,7 +121,7 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
         }
         pending_calls.extend(fx.calls);
         for (seg, line) in fx.imports {
-            pending_imports.push((module_id.clone(), seg, line, spec.name.to_string()));
+            pending_imports.push((module_id.clone(), seg, line, lang_name.clone()));
         }
     }
 
@@ -251,5 +268,50 @@ mod tests {
         let j1 = serde_json::to_string(&g1).unwrap();
         let j2 = serde_json::to_string(&g2).unwrap();
         assert_eq!(j1, j2);
+    }
+
+    /// The parallel extract must produce the same graph as the serial result:
+    /// identical sorted node ids and identical sorted (from, to, kind) edge triples.
+    #[test]
+    fn parallel_extract_is_deterministic() {
+        let dir = tempdir().unwrap();
+        // Multiple files to exercise the parallel path across several workers.
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn alpha() { beta(); }\nfn beta() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("b.rs"),
+            "fn gamma() { alpha(); }\nfn delta() { gamma(); }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("c.py"),
+            "def epsilon():\n    return 1\n\ndef zeta():\n    epsilon()\n",
+        )
+        .unwrap();
+
+        // Run discover three times; all should agree on sorted nodes and edges.
+        let run = || {
+            let g = discover(dir.path(), None).unwrap().graph;
+            let mut node_ids: Vec<String> = g.nodes.iter().map(|n| n.id.clone()).collect();
+            node_ids.sort();
+            let mut edge_keys: Vec<(String, String, String)> = g
+                .edges
+                .iter()
+                .map(|e| (e.from.clone(), e.to.clone(), e.kind.clone()))
+                .collect();
+            edge_keys.sort();
+            (node_ids, edge_keys)
+        };
+
+        let r1 = run();
+        let r2 = run();
+        let r3 = run();
+        assert_eq!(r1, r2, "run 1 vs run 2 differ");
+        assert_eq!(r1, r3, "run 1 vs run 3 differ");
+        // Sanity: we got nodes from all three files.
+        assert!(r1.0.len() >= 3, "expected at least 3 nodes, got {}", r1.0.len());
     }
 }

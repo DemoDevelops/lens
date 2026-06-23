@@ -62,7 +62,7 @@ than failing silently.
 ## Build
 
 ```
-git clone https://github.com/your-org/lens && cd lens
+git clone https://github.com/DemoDevelops/lens && cd lens
 cargo build --release
 ```
 

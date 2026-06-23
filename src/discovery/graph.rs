@@ -54,6 +54,12 @@ pub struct Edge {
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    /// Dedup sets: skipped by serde so the on-disk JSON is unchanged.
+    /// Rebuilt lazily from the Vecs if out of sync (e.g. after deserialization).
+    #[serde(skip)]
+    node_ids: HashSet<String, foldhash::fast::RandomState>,
+    #[serde(skip)]
+    edges_seen: HashSet<Edge, foldhash::fast::RandomState>,
 }
 
 impl Graph {
@@ -61,10 +67,20 @@ impl Graph {
         Graph::default()
     }
 
+    /// Rebuild the dedup sets from the Vecs when they are out of sync.
+    /// This happens exactly once after deserialization.
+    fn sync_dedup_sets(&mut self) {
+        self.node_ids = self.nodes.iter().map(|n| n.id.clone()).collect();
+        self.edges_seen = self.edges.iter().cloned().collect();
+    }
+
     /// Insert a node if its id is new; returns the id either way.
     pub fn add_node(&mut self, node: Node) -> String {
+        if self.node_ids.len() != self.nodes.len() {
+            self.sync_dedup_sets();
+        }
         let id = node.id.clone();
-        if !self.nodes.iter().any(|n| n.id == id) {
+        if self.node_ids.insert(id.clone()) {
             self.nodes.push(node);
         }
         id
@@ -72,12 +88,15 @@ impl Graph {
 
     /// Insert an edge if an identical one isn't already present.
     pub fn add_edge(&mut self, from: &str, to: &str, kind: &str) {
+        if self.edges_seen.len() != self.edges.len() {
+            self.sync_dedup_sets();
+        }
         let edge = Edge {
             from: from.to_string(),
             to: to.to_string(),
             kind: kind.to_string(),
         };
-        if !self.edges.contains(&edge) {
+        if self.edges_seen.insert(edge.clone()) {
             self.edges.push(edge);
         }
     }
@@ -118,7 +137,7 @@ impl Graph {
     }
 
     /// Undirected adjacency over edges whose kind passes `keep`.
-    fn adjacency(&self, keep: impl Fn(&str) -> bool) -> HashMap<String, Vec<String>> {
+    pub(crate) fn adjacency(&self, keep: impl Fn(&str) -> bool) -> HashMap<String, Vec<String>> {
         let mut adj: HashMap<String, Vec<String>> = HashMap::new();
         for e in &self.edges {
             if !keep(&e.kind) {
@@ -298,5 +317,69 @@ mod tests {
         let g2 = Graph::load(&p).unwrap();
         assert_eq!(g.nodes.len(), g2.nodes.len());
         assert_eq!(g.edges.len(), g2.edges.len());
+    }
+
+    #[test]
+    fn dedup_correctness() {
+        let mut g = Graph::new();
+        let id = g.add_node(Node::new("f.rs", "function", "a", 1, "rust"));
+        let id2 = g.add_node(Node::new("f.rs", "function", "a", 1, "rust"));
+        assert_eq!(id, id2);
+        assert_eq!(g.nodes.len(), 1);
+
+        g.add_edge(&id, &id, "calls");
+        g.add_edge(&id, &id, "calls");
+        assert_eq!(g.edges.len(), 1);
+    }
+
+    #[test]
+    fn post_load_dedup() {
+        // Round-trip clears the skip-fields; adding a duplicate must still dedup.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("graph.json");
+        let mut g = Graph::new();
+        let a = g.add_node(Node::new("f.rs", "function", "a", 1, "rust"));
+        let b = g.add_node(Node::new("f.rs", "function", "b", 5, "rust"));
+        g.add_edge(&a, &b, "calls");
+        g.save(&p).unwrap();
+
+        let mut g2 = Graph::load(&p).unwrap();
+        // skip-sets are empty after deserialization
+        assert_eq!(g2.node_ids.len(), 0);
+        assert_eq!(g2.edges_seen.len(), 0);
+
+        // Adding duplicates must not grow the vecs
+        g2.add_node(Node::new("f.rs", "function", "a", 1, "rust"));
+        assert_eq!(g2.nodes.len(), 2);
+        g2.add_edge(&a, &b, "calls");
+        assert_eq!(g2.edges.len(), 1);
+    }
+
+    #[test]
+    fn adjacency_equivalence() {
+        let g = sample();
+        let a = Node::make_id("f.rs", "function", "a", 1);
+        let b = Node::make_id("f.rs", "function", "b", 5);
+        let c = Node::make_id("f.rs", "function", "c", 9);
+
+        let adj = g.adjacency(|_| true);
+        // a-b edge; b-c edge; d is isolated
+        assert!(adj[&a].contains(&b));
+        assert!(adj[&b].contains(&a));
+        assert!(adj[&b].contains(&c));
+        assert!(adj[&c].contains(&b));
+        // d not in adjacency (no edges)
+        let d = Node::make_id("f.rs", "function", "d", 13);
+        assert!(!adj.contains_key(&d));
+
+        // BFS results must still be correct
+        let path = g.shortest_path(&a, &c).unwrap();
+        assert_eq!(path, vec![a.clone(), b.clone(), c.clone()]);
+
+        let (nodes, _) = g.neighbors(&a, 1);
+        let ids: Vec<_> = nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&a.as_str()));
+        assert!(ids.contains(&b.as_str()));
+        assert_eq!(nodes.len(), 2);
     }
 }

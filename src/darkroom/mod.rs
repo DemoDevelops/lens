@@ -7,13 +7,26 @@
 pub mod runtimes;
 
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::store::Store;
 use crate::tools::{ExecuteRequest, ExecuteResponse};
+
+/// On-disk directory for Go compiled binaries, keyed by blake3(source).
+/// Initialized once; cleaned by the OS on reboot (uses std::env::temp_dir).
+fn go_cache_dir() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let p = std::env::temp_dir().join("lens_go_cache");
+        let _ = std::fs::create_dir_all(&p);
+        p
+    })
+}
 
 /// How much of a truncated stdout to keep at the head and at the tail.
 const PREVIEW_SIDE: usize = 2048;
@@ -68,6 +81,11 @@ async fn run_with_args(
         )
     })?;
 
+    // Go: compile once per unique source (keyed by blake3), exec the cached binary.
+    if runtime.extension == "go" {
+        return run_go_cached(req, repo_dir, store, max_inline, extra_args).await;
+    }
+
     // Write the script to a temp file next to the repo so relative paths in the
     // script resolve against the working dir. The file auto-deletes on drop.
     let mut tmp = tempfile::Builder::new()
@@ -81,8 +99,8 @@ async fn run_with_args(
         .map_err(|e| format!("flushing temp script: {e}"))?;
     let script_path = tmp.path().to_path_buf();
 
-    let mut cmd = tokio::process::Command::new(runtime.program);
-    cmd.args(runtime.pre_args)
+    let mut cmd = tokio::process::Command::new(&runtime.program);
+    cmd.args(&runtime.pre_args)
         .arg(&script_path)
         .args(extra_args)
         .current_dir(repo_dir)
@@ -165,6 +183,159 @@ async fn run_with_args(
     let returned_bytes = stdout.len() + stderr.len();
     // Stats: count the script's full output as "processed" and what we actually
     // hand back as "returned". Savings materialise when large output is offloaded.
+    let _ = store.bump_stat("darkroom_calls", 1);
+    let _ = store.bump_stat("raw_bytes_processed", stdout_bytes as i64);
+    let _ = store.bump_stat("bytes_returned_to_context", returned_bytes as i64);
+
+    Ok(ExecuteResponse {
+        stdout,
+        stderr,
+        exit_code,
+        timed_out,
+        stdout_bytes,
+        truncated,
+        retrieve_ref,
+    })
+}
+
+/// Compile a Go source file once (keyed by blake3 of source), then exec the cached
+/// binary. Subsequent calls with identical source skip `go build` entirely.
+/// Each invocation is still its own sandboxed subprocess; only the compiled artifact
+/// is reused, not any process state.
+async fn run_go_cached(
+    req: ExecuteRequest,
+    repo_dir: &std::path::Path,
+    store: &Store,
+    max_inline: usize,
+    extra_args: &[std::ffi::OsString],
+) -> Result<ExecuteResponse, String> {
+    let key = runtimes::source_key(req.code.as_bytes());
+    let bin_path = go_cache_dir().join(&key);
+
+    // Build if the cached binary is not yet present.
+    if !bin_path.exists() {
+        // Write source to a temp file; Go requires a .go extension.
+        let mut tmp = tempfile::Builder::new()
+            .prefix("lens_go_")
+            .suffix(".go")
+            .tempfile()
+            .map_err(|e| format!("creating Go temp source: {e}"))?;
+        tmp.write_all(req.code.as_bytes())
+            .map_err(|e| format!("writing Go source: {e}"))?;
+        tmp.flush()
+            .map_err(|e| format!("flushing Go source: {e}"))?;
+        let src_path = tmp.path().to_path_buf();
+
+        // Build to a temp path in the same directory, then atomically rename so
+        // concurrent runs do not corrupt a partial binary.
+        let tmp_bin = go_cache_dir().join(format!("{key}.tmp"));
+        let dur = Duration::from_secs(req.timeout_secs.max(1));
+        let output = match tokio::time::timeout(
+            dur,
+            tokio::process::Command::new("go")
+                .args(["build", "-o"])
+                .arg(&tmp_bin)
+                .arg(&src_path)
+                .current_dir(repo_dir)
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(
+                    "interpreter 'go' not found on PATH. Install it to run go code.".to_owned(),
+                );
+            }
+            Ok(Err(e)) => return Err(format!("failed to spawn 'go build': {e}")),
+            Err(_) => return Err("go build timed out".to_owned()),
+        };
+
+        if !output.status.success() {
+            return Err(format!(
+                "go build failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        // Atomic rename: if two concurrent runs race here, the last rename wins and
+        // both end up with the same valid binary.
+        std::fs::rename(&tmp_bin, &bin_path)
+            .map_err(|e| format!("caching Go binary: {e}"))?;
+    }
+
+    // Execute the cached binary as a fresh sandboxed subprocess.
+    let mut cmd = tokio::process::Command::new(&bin_path);
+    cmd.args(extra_args)
+        .current_dir(repo_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return Err(format!("failed to spawn Go binary: {e}")),
+    };
+
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+    let out_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf).await;
+        buf
+    });
+    let err_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf).await;
+        buf
+    });
+
+    if let Some(input) = req.stdin.as_ref() {
+        if let Some(mut si) = child.stdin.take() {
+            let _ = si.write_all(input.as_bytes()).await;
+            drop(si);
+        }
+    } else {
+        drop(child.stdin.take());
+    }
+
+    let dur = Duration::from_secs(req.timeout_secs.max(1));
+    let mut timed_out = false;
+    let status = match tokio::time::timeout(dur, child.wait()).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(format!("waiting on Go child: {e}")),
+        Err(_elapsed) => {
+            timed_out = true;
+            let _ = child.kill().await;
+            child.wait().await.ok();
+            std::process::ExitStatus::default()
+        }
+    };
+
+    let stdout_bytes_full = out_task.await.unwrap_or_default();
+    let stderr_bytes_full = err_task.await.unwrap_or_default();
+    let stdout_full = String::from_utf8_lossy(&stdout_bytes_full).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr_bytes_full).into_owned();
+
+    let stdout_bytes = stdout_full.len();
+    let exit_code = if timed_out {
+        -1
+    } else {
+        status.code().unwrap_or(-1)
+    };
+
+    let (stdout, truncated, retrieve_ref) = if stdout_bytes > max_inline {
+        let reference = store
+            .put(&stdout_full)
+            .map_err(|e| format!("storing large stdout: {e}"))?;
+        let preview = make_preview(&stdout_full);
+        (preview, true, Some(reference))
+    } else {
+        (stdout_full, false, None)
+    };
+
+    let returned_bytes = stdout.len() + stderr.len();
     let _ = store.bump_stat("darkroom_calls", 1);
     let _ = store.bump_stat("raw_bytes_processed", stdout_bytes as i64);
     let _ = store.bump_stat("bytes_returned_to_context", returned_bytes as i64);
@@ -391,5 +562,80 @@ mod tests {
         let full = store.get(&reference).unwrap().unwrap();
         assert!(full.contains(&"A".repeat(50000)));
         assert!(r.stdout.len() < full.len());
+    }
+
+    // T6 invariant: TS runtime selection and Go compile-cache hit/miss.
+    //
+    // The TS selection tests live in runtimes.rs (pure fn, no bun required).
+    // Here we test the Go cache key bookkeeping: same source => same cache
+    // path (hit); changed source => different path (miss). Does not require
+    // `go` to be installed.
+    #[test]
+    fn t6_go_cache_same_source_same_key_different_source_different_key() {
+        let src_a = b"package main\nfunc main() { println(\"a\") }";
+        let src_b = b"package main\nfunc main() { println(\"b\") }";
+
+        let key_a1 = runtimes::source_key(src_a);
+        let key_a2 = runtimes::source_key(src_a);
+        let key_b = runtimes::source_key(src_b);
+
+        // Identical source => same cache path => cache hit.
+        assert_eq!(key_a1, key_a2, "same source must produce the same key");
+
+        // Changed source => different key => rebuild (cache miss).
+        assert_ne!(key_a1, key_b, "changed source must produce a different key");
+
+        // Verify the cache dir path is consistent for a given key.
+        let bin_a = go_cache_dir().join(&key_a1);
+        let bin_a2 = go_cache_dir().join(&key_a2);
+        assert_eq!(bin_a, bin_a2, "same key must map to the same binary path");
+
+        let bin_b = go_cache_dir().join(&key_b);
+        assert_ne!(bin_a, bin_b, "different key must map to a different binary path");
+    }
+
+    // T6 invariant: when go IS available, build once and reuse on second call.
+    #[tokio::test]
+    async fn t6_go_cache_build_once_exec_cached() {
+        if std::process::Command::new("go").arg("version").output().is_err() {
+            // go not installed; skip the live-build half.
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+        let src = "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"cached\") }";
+
+        let req1 = ExecuteRequest {
+            language: "go".into(),
+            code: src.into(),
+            timeout_secs: 30,
+            stdin: None,
+        };
+        let req2 = ExecuteRequest {
+            language: "go".into(),
+            code: src.into(),
+            timeout_secs: 30,
+            stdin: None,
+        };
+
+        let r1 = run(req1, dir.path(), &store, 8192).await.unwrap();
+        assert_eq!(r1.stdout.trim(), "cached");
+        assert_eq!(r1.exit_code, 0);
+
+        // Second call with identical source must succeed (hits cache, no rebuild).
+        let r2 = run(req2, dir.path(), &store, 8192).await.unwrap();
+        assert_eq!(r2.stdout.trim(), "cached");
+        assert_eq!(r2.exit_code, 0);
+
+        // Changed source produces a different output (different key => rebuild).
+        let req3 = ExecuteRequest {
+            language: "go".into(),
+            code: "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"rebuilt\") }".into(),
+            timeout_secs: 30,
+            stdin: None,
+        };
+        let r3 = run(req3, dir.path(), &store, 8192).await.unwrap();
+        assert_eq!(r3.stdout.trim(), "rebuilt");
+        assert_eq!(r3.exit_code, 0);
     }
 }

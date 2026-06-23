@@ -10,7 +10,7 @@ Token savings at realistic session scale:
 | --- | --- | ---: | ---: | ---: |
 | Code search | FTS5 index | 160,230 | 9,825 | **94–99%** |
 | Log debugging | darkroom | 7,210 | 517 | **93%** |
-| Issue triage | compression | 94,195 | 36,963 | **~61%** |
+| Issue triage | compression | 94,195 | 31,323 | **~67%** |
 
 Accuracy on real tasks (`claude-opus-4-8`):
 

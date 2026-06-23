@@ -26,6 +26,13 @@ const DEFAULT_MAX_INLINE: usize = 8 * 1024;
 /// single cached adjacency could not serve both without changing results.
 type GraphCache = Arc<RwLock<Option<(BTreeMap<String, u64>, Graph)>>>;
 
+/// Per-file tree-sitter parse cache (path -> source/tree/extract), shared across
+/// `Forge` clones. Drives the incremental rediscovery in `ensure_graph`: unchanged
+/// files are reused, changed files re-parsed via tree-sitter's incremental parse.
+/// Held behind its own lock (independent of `graph_cache`) and only ever touched by
+/// the single-threaded `ensure_graph` rebuild path.
+type ParseCache = Arc<RwLock<discovery::ParseCache>>;
+
 #[derive(Clone)]
 pub struct Forge {
     /// Working dir the darkroom and walkers operate in (the repo root).
@@ -42,6 +49,11 @@ pub struct Forge {
     /// its methods take `&self`). Filled lazily on a cache miss in `load_graph`,
     /// emptied on every rebuild in `finish_discovery`.
     graph_cache: GraphCache,
+    /// Per-file tree-sitter parse cache driving incremental rediscovery in
+    /// `ensure_graph`. Sibling of `graph_cache`, not a replacement: `graph_cache`
+    /// skips the mtime-stable case entirely; this one makes the rebuild itself
+    /// cheap by re-parsing only changed files.
+    parse_cache: ParseCache,
 }
 
 impl Forge {
@@ -76,6 +88,7 @@ impl Forge {
             index,
             ops,
             graph_cache: Arc::new(RwLock::new(None)),
+            parse_cache: Arc::new(RwLock::new(discovery::ParseCache::new())),
         })
     }
 }
@@ -850,6 +863,24 @@ impl Forge {
         Ok(outcome.response)
     }
 
+    /// Rediscover the whole repo via the incremental parse cache, returning a
+    /// `DiscoverOutcome` byte-identical to a full `discover`. Holds the parse-cache
+    /// write lock for the duration (the rebuild is single-owner). Errors only on a
+    /// poisoned lock or a non-existent root, in which case the caller falls back to
+    /// a full rebuild.
+    fn reparse_incremental(&self) -> Result<discovery::DiscoverOutcome, ErrorData> {
+        let mut cache = self
+            .parse_cache
+            .write()
+            .map_err(|_| ErrorData::internal_error("parse cache poisoned", None))?;
+        let inc = discovery::discover_incremental(&self.repo_dir, None, &mut cache)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(discovery::DiscoverOutcome {
+            graph: inc.graph,
+            response: inc.response,
+        })
+    }
+
     /// Ensure `graph.json` is present AND current before a query. Rebuilds the
     /// whole-repo graph when it is missing, empty (a poisoned prior build), or
     /// **stale** — i.e. any source file was added, edited, or removed since the last
@@ -868,12 +899,20 @@ impl Forge {
         let op = self
             .ops
             .start("lens_map", serde_json::json!({ "auto": true }));
-        let outcome = match discovery::discover(&self.repo_dir, None) {
+        // Incremental rediscovery: re-parse only changed files, reuse cached extracts
+        // for the rest, then assemble the graph by the SAME path `discover` uses — so
+        // the result is byte-identical to a full rebuild. The repo-root + no-language
+        // build here is exactly what the parse cache is keyed for. Any error (e.g. a
+        // poisoned lock) falls back to a full from-scratch `discover`.
+        let outcome = match self.reparse_incremental() {
             Ok(o) => o,
-            Err(e) => {
-                op.finish(0, 0, None, "error", e.to_string(), None);
-                return Err(ErrorData::internal_error(e.to_string(), None));
-            }
+            Err(_) => match discovery::discover(&self.repo_dir, None) {
+                Ok(o) => o,
+                Err(e) => {
+                    op.finish(0, 0, None, "error", e.to_string(), None);
+                    return Err(ErrorData::internal_error(e.to_string(), None));
+                }
+            },
         };
         self.finish_discovery(op, outcome, true, &self.repo_dir)?;
         Ok(())

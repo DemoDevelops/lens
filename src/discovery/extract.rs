@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Language, Node as TsNode, Parser, Query, QueryCursor};
+use tree_sitter::{InputEdit, Language, Node as TsNode, Parser, Point, Query, QueryCursor, Tree};
 
 use super::graph::Node;
 
@@ -61,6 +61,7 @@ pub struct LangSpec {
 }
 
 /// Raw, unresolved extraction for one file.
+#[derive(Clone)]
 pub struct FileExtract {
     pub module: Node,
     pub defs: Vec<Node>,
@@ -226,10 +227,120 @@ fn fn_scope_kinds(lang: &str) -> &'static [&'static str] {
 /// Parse `source` and extract symbols and relationships. Returns `None` if the
 /// grammar can't be loaded or the source fails to parse into a tree.
 pub fn extract_file(path: &str, source: &str, spec: &LangSpec) -> Option<FileExtract> {
+    extract_file_with_tree(path, source, spec).map(|(fx, _tree)| fx)
+}
+
+/// Like [`extract_file`] but also returns the parsed `Tree` so callers can cache
+/// it and feed it back into [`reparse_incremental`] on the next edit. Parses from
+/// scratch (no prior tree).
+pub fn extract_file_with_tree(
+    path: &str,
+    source: &str,
+    spec: &LangSpec,
+) -> Option<(FileExtract, Tree)> {
     let language = (spec.language)();
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
     let tree = parser.parse(source, None)?;
+    let fx = extract_from_tree(path, source, spec, &tree)?;
+    Some((fx, tree))
+}
+
+/// Incrementally re-parse a changed file: edit `old_tree` to match the byte delta
+/// between `old_source` and `new_source`, then re-parse `new_source` reusing the
+/// old tree (tree-sitter only re-walks the changed regions). Returns the fresh
+/// extract and the new tree.
+///
+/// Byte-identity safety: the returned tree is a complete, correct parse of
+/// `new_source` regardless of how precise the [`InputEdit`] was. The edit is only
+/// a performance hint for what to re-scan; an imprecise hint costs extra re-scan,
+/// never a wrong tree. Extraction reads only the returned tree over `new_source`,
+/// so the resulting [`FileExtract`] equals a from-scratch [`extract_file`].
+pub fn reparse_incremental(
+    path: &str,
+    old_source: &str,
+    new_source: &str,
+    mut old_tree: Tree,
+    spec: &LangSpec,
+) -> Option<(FileExtract, Tree)> {
+    let language = (spec.language)();
+    let mut parser = Parser::new();
+    parser.set_language(&language).ok()?;
+    let edit = input_edit(old_source, new_source);
+    old_tree.edit(&edit);
+    let tree = parser.parse(new_source, Some(&old_tree))?;
+    let fx = extract_from_tree(path, new_source, spec, &tree)?;
+    Some((fx, tree))
+}
+
+/// Describe the change from `old` to `new` as a single contiguous replacement
+/// (the span between the common prefix and the common suffix). Exact for a
+/// localized edit; for scattered edits it spans a larger region, which is still
+/// correct (tree-sitter just re-scans more). Byte offsets and row/column Points
+/// are both filled in, as `Tree::edit` requires.
+fn input_edit(old: &str, new: &str) -> InputEdit {
+    let ob = old.as_bytes();
+    let nb = new.as_bytes();
+
+    // Common prefix length (in bytes), clamped to a char boundary of both.
+    let max_pre = ob.len().min(nb.len());
+    let mut start = 0;
+    while start < max_pre && ob[start] == nb[start] {
+        start += 1;
+    }
+    while start > 0 && (!old.is_char_boundary(start) || !new.is_char_boundary(start)) {
+        start -= 1;
+    }
+
+    // Common suffix length (in bytes), not overlapping the prefix in either.
+    let mut suf = 0;
+    let old_max_suf = ob.len() - start;
+    let new_max_suf = nb.len() - start;
+    let max_suf = old_max_suf.min(new_max_suf);
+    while suf < max_suf && ob[ob.len() - 1 - suf] == nb[nb.len() - 1 - suf] {
+        suf += 1;
+    }
+    let mut old_end = ob.len() - suf;
+    let mut new_end = nb.len() - suf;
+    while old_end < ob.len()
+        && new_end < nb.len()
+        && (!old.is_char_boundary(old_end) || !new.is_char_boundary(new_end))
+    {
+        old_end += 1;
+        new_end += 1;
+    }
+
+    InputEdit {
+        start_byte: start,
+        old_end_byte: old_end,
+        new_end_byte: new_end,
+        start_position: byte_to_point(old, start),
+        old_end_position: byte_to_point(old, old_end),
+        new_end_position: byte_to_point(new, new_end),
+    }
+}
+
+/// Row/column ([`Point`]) of a byte offset within `s` (0-based row, byte column
+/// within the row, matching tree-sitter's convention).
+fn byte_to_point(s: &str, byte: usize) -> Point {
+    let upto = &s.as_bytes()[..byte];
+    let row = upto.iter().filter(|&&b| b == b'\n').count();
+    let col = match upto.iter().rposition(|&b| b == b'\n') {
+        Some(nl) => byte - nl - 1,
+        None => byte,
+    };
+    Point::new(row, col)
+}
+
+/// Extract symbols and relationships from an already-parsed `tree` over `source`.
+/// Shared by the from-scratch and incremental parse paths so both produce an
+/// identical [`FileExtract`] for identical source.
+fn extract_from_tree(
+    path: &str,
+    source: &str,
+    spec: &LangSpec,
+    tree: &Tree,
+) -> Option<FileExtract> {
     let root = tree.root_node();
     let src = source.as_bytes();
 
@@ -542,5 +653,58 @@ func main() {
         assert_eq!(spec_for_extension("rs").unwrap().name, "rust");
         assert_eq!(spec_for_extension("py").unwrap().name, "python");
         assert!(spec_for_extension("xyz").is_none());
+    }
+
+    /// Compare two extracts on every field, in order, so an incremental reparse can
+    /// be proven equal to a from-scratch parse.
+    fn assert_extract_eq(a: &FileExtract, b: &FileExtract) {
+        assert_eq!(a.module, b.module, "module node differs");
+        assert_eq!(a.defs, b.defs, "defs differ");
+        assert_eq!(a.calls, b.calls, "calls differ");
+        assert_eq!(a.imports, b.imports, "imports differ");
+        assert_eq!(a.contains, b.contains, "contains differ");
+    }
+
+    /// The core per-file guarantee behind byte-identity: an incremental reparse
+    /// (edit old tree, reparse reusing it) yields an extract identical to a
+    /// from-scratch parse of the new source. Exercised across edit shapes:
+    /// in-place rename, insertion, deletion, and a no-op.
+    #[test]
+    fn incremental_reparse_matches_fresh() {
+        let spec = spec_for_language("rust").unwrap();
+        let old = "fn helper() -> i32 { 42 }\nfn main() { let _ = helper(); }\n";
+        let cases = [
+            // rename a callee (changes ids, calls resolution endpoints)
+            "fn helper2() -> i32 { 42 }\nfn main() { let _ = helper2(); }\n",
+            // insert a new function in the middle
+            "fn helper() -> i32 { 42 }\nfn extra() {}\nfn main() { let _ = helper(); }\n",
+            // delete the body / shrink
+            "fn helper() -> i32 { 0 }\nfn main() {}\n",
+            // prepend an import (shifts every byte/line below)
+            "use std::fs;\nfn helper() -> i32 { 42 }\nfn main() { let _ = helper(); }\n",
+            // no-op edit (identical text)
+            "fn helper() -> i32 { 42 }\nfn main() { let _ = helper(); }\n",
+        ];
+
+        for new in cases {
+            let (_, base_tree) = extract_file_with_tree("a.rs", old, &spec).unwrap();
+            let (inc_fx, _) =
+                reparse_incremental("a.rs", old, new, base_tree, &spec).unwrap();
+            let fresh_fx = extract_file("a.rs", new, &spec).unwrap();
+            assert_extract_eq(&inc_fx, &fresh_fx);
+        }
+    }
+
+    /// Multi-byte UTF-8 in the changed region must not break the InputEdit boundary
+    /// math (the parse must still match a fresh parse).
+    #[test]
+    fn incremental_reparse_handles_unicode() {
+        let spec = spec_for_language("rust").unwrap();
+        let old = "fn greet() { let s = \"hi\"; }\n";
+        let new = "fn greet() { let s = \"héllo wörld 🌍\"; }\n";
+        let (_, base_tree) = extract_file_with_tree("u.rs", old, &spec).unwrap();
+        let (inc_fx, _) = reparse_incremental("u.rs", old, new, base_tree, &spec).unwrap();
+        let fresh_fx = extract_file("u.rs", new, &spec).unwrap();
+        assert_extract_eq(&inc_fx, &fresh_fx);
     }
 }

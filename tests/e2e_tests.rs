@@ -46,7 +46,7 @@ async fn full_mcp_session() {
         "lens_links",
         "lens_path",
         "lens_recall",
-        "ctx_stats",
+        "lens_stats",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
@@ -119,8 +119,8 @@ async fn full_mcp_session() {
     let pathed = call("lens_path", json!({ "from": "main", "to": "helper" })).await;
     assert_eq!(pathed["found"], json!(true));
 
-    // --- ctx_stats: non-zero savings after the large darkroom run ---
-    let stats = call("ctx_stats", json!({})).await;
+    // --- lens_stats: non-zero savings after the large darkroom run ---
+    let stats = call("lens_stats", json!({})).await;
     assert!(stats["darkroom_calls"].as_i64().unwrap() >= 1);
     assert!(stats["estimated_tokens_saved"].as_i64().unwrap() > 0);
     assert!(stats["graph_nodes"].as_i64().unwrap() >= 3);
@@ -192,7 +192,7 @@ async fn lazy_autobuild_on_first_query() {
         data.path().join("graph.json").exists(),
         "graph.json should be persisted by the lazy build"
     );
-    let stats = call("ctx_stats", json!({})).await;
+    let stats = call("lens_stats", json!({})).await;
     assert!(stats["graph_nodes"].as_i64().unwrap() >= 3);
     assert!(stats["index_chunks"].as_i64().unwrap() >= 1);
 
@@ -251,7 +251,7 @@ async fn lens_run_file_credits_the_file_bytes() {
 
     // Savings must reflect the ~40 KB file that stayed out of context (≈10k tokens),
     // not the handful of bytes actually printed.
-    let stats = call("ctx_stats", json!({})).await;
+    let stats = call("lens_stats", json!({})).await;
     let saved = stats["estimated_tokens_saved"].as_i64().unwrap();
     assert!(
         saved >= 9000,

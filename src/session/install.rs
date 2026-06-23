@@ -30,7 +30,7 @@ const SELF_MARKER: &str = "lens";
 /// CLI entry: `args` is everything after `session`.
 pub fn run_cli(args: &[String]) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
-    let settings = settings_path()?;
+    let settings = settings_path(settings_override(args))?;
     let bin = std::env::current_exe()
         .context("resolving lens binary path")?
         .to_string_lossy()
@@ -72,12 +72,38 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     }
 }
 
-fn settings_path() -> Result<PathBuf> {
+/// `--config-dir <dir>` -> `<dir>/settings.json`; `--settings <file>` -> that
+/// file. Lets you target a specific account's config (e.g. `~/.claude-personal`
+/// vs the work `~/.claude`) without relying on ambient env. Flags follow the
+/// subcommand: `lens session install --config-dir ~/.claude-personal`.
+fn settings_override(args: &[String]) -> Option<PathBuf> {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config-dir" => return args.get(i + 1).map(|d| PathBuf::from(d).join("settings.json")),
+            "--settings" => return args.get(i + 1).map(PathBuf::from),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Resolve the settings.json to write, by precedence: an explicit CLI override
+/// (`--config-dir`/`--settings`), then `LENS_SETTINGS`, then the dir THIS Claude
+/// Code reads (`$CLAUDE_CONFIG_DIR` if set, e.g. `~/.claude-personal`, else
+/// `~/.claude`). Mirrors the RTK side (`rtk::claude_settings_path`) so session +
+/// rtk hooks land in the same settings.json.
+fn settings_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = override_path {
+        return Ok(p);
+    }
     if let Some(p) = std::env::var_os("LENS_SETTINGS") {
         return Ok(PathBuf::from(p));
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME not set"))?;
-    Ok(PathBuf::from(home).join(".claude").join("settings.json"))
+    crate::rtk::claude_config_dir()
+        .map(|d| d.join("settings.json"))
+        .ok_or_else(|| anyhow!("HOME not set"))
 }
 
 fn load(settings: &Path) -> Result<Value> {
@@ -290,6 +316,21 @@ mod tests {
 
     fn write(path: &Path, v: &Value) {
         std::fs::write(path, serde_json::to_string_pretty(v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn settings_override_parses_config_dir_and_settings() {
+        let s = |a: &[&str]| super::settings_override(&a.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            s(&["install", "--config-dir", "/x/.claude-personal"]),
+            Some(PathBuf::from("/x/.claude-personal/settings.json"))
+        );
+        assert_eq!(
+            s(&["install", "--settings", "/x/custom.json"]),
+            Some(PathBuf::from("/x/custom.json"))
+        );
+        assert_eq!(s(&["install"]), None);
+        assert_eq!(s(&["install", "--config-dir"]), None); // missing value
     }
 
     #[test]

@@ -39,6 +39,13 @@ pub struct Activity {
 #[derive(Clone)]
 pub struct SessionStore {
     db_path: PathBuf,
+    /// Machine-global mirror under `home_root()`, so the dashboard's global scope
+    /// can total built-in-tool activity across every repo and launch profile —
+    /// symmetric with [`crate::obs::OpLog`]'s `ops.log` mirror. `None` when this
+    /// data dir already is the global home (no self-mirror) or none is resolvable.
+    /// Only the activity-plane writes (`session_events`) mirror; resume/compaction
+    /// state stays repo-local, where the MCP server and `/resume` read it.
+    global: Option<Box<SessionStore>>,
 }
 
 impl SessionStore {
@@ -46,9 +53,20 @@ impl SessionStore {
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating data dir {}", dir.display()))?;
-        let store = SessionStore {
-            db_path: dir.join("session.db"),
-        };
+        let db_path = dir.join("session.db");
+        // Best-effort global mirror: a failure to open it must never break the
+        // primary store (and thus a hook). Mirrors the OpLog mirror's tolerance.
+        let global = global_session_path(&db_path).and_then(|g| {
+            if let Some(parent) = g.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let m = SessionStore {
+                db_path: g,
+                global: None,
+            };
+            m.init().ok().map(|_| Box::new(m))
+        });
+        let store = SessionStore { db_path, global };
         store.init()?;
         Ok(store)
     }
@@ -102,6 +120,9 @@ impl SessionStore {
              VALUES (?1, ?2, ?3)",
             rusqlite::params![session_id, project, started_at],
         )?;
+        if let Some(g) = &self.global {
+            let _ = g.ensure_session(session_id, project, started_at);
+        }
         Ok(())
     }
 
@@ -126,6 +147,9 @@ impl SessionStore {
             )?;
         }
         tx.commit()?;
+        if let Some(g) = &self.global {
+            let _ = g.insert_events(events);
+        }
         Ok(events.len())
     }
 
@@ -167,6 +191,9 @@ impl SessionStore {
     pub fn clear_project_events(&self, project: &str) -> Result<usize> {
         let conn = self.conn()?;
         let n = conn.execute("DELETE FROM session_events WHERE project = ?1", [project])?;
+        if let Some(g) = &self.global {
+            let _ = g.clear_project_events(project);
+        }
         Ok(n)
     }
 
@@ -379,6 +406,23 @@ impl SessionStore {
     }
 }
 
+/// The machine-global `session.db` mirror for a per-repo `local` store: `home_root()`
+/// joined with `session.db`, unless that equals `local` (the data dir already is home).
+/// In test builds the mirror is suppressed unless `LENS_HOME` is set, so unit tests
+/// never write to the developer's real `~/.lens/session.db`. Mirrors
+/// [`crate::obs`]'s `global_ops_path`.
+fn global_session_path(local: &Path) -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        if std::env::var_os("LENS_HOME").is_none() {
+            return None;
+        }
+    }
+    crate::rtk::home_root()
+        .map(|h| h.join("session.db"))
+        .filter(|g| g != local)
+}
+
 /// Entity key for an event, or None if the category has no natural identity.
 /// `file` events are keyed by their payload path; everything else is left
 /// untouched (no reversible identifier in the current payloads).
@@ -564,6 +608,27 @@ mod tests {
         // Original order preserved among survivors: decision (last inserted) stays last.
         assert_eq!(got.len(), 3);
         assert_eq!(got.last().unwrap().category, "decision");
+    }
+
+    #[test]
+    fn events_mirror_into_global_home() {
+        // home_root() is env-driven and process-global; serialize with other mutators.
+        // While LENS_HOME is set, any concurrent SessionStore test also mirrors into
+        // this home, so scope assertions to a unique session id, never a global count.
+        let _g = crate::rtk::env_test_lock();
+        let home = tempdir().unwrap();
+        std::env::set_var("LENS_HOME", home.path());
+        let data = tempdir().unwrap();
+        let s = SessionStore::open(data.path()).unwrap();
+        s.insert_events(&[ev("mirror-uniq", "/p", "file", 1, 10)])
+            .unwrap();
+        std::env::remove_var("LENS_HOME");
+
+        // The per-repo store carries the event...
+        assert_eq!(s.events_for_session("mirror-uniq").unwrap().len(), 1);
+        // ...and so does the machine-global mirror under home_root().
+        let global = SessionStore::open(home.path()).unwrap();
+        assert_eq!(global.events_for_session("mirror-uniq").unwrap().len(), 1);
     }
 
     #[test]

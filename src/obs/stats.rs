@@ -182,24 +182,31 @@ fn rtk_snapshot() -> serde_json::Value {
 
 /// Read all op records under `dir` (rotated `ops.log.1` first, then `ops.log`,
 /// preserving chronological order), then apply scope/window filters.
+///
+/// Streams each log through a buffered reader line-by-line rather than slurping
+/// the whole file into memory first, so a multi-megabyte log never materializes
+/// as one allocation. Records and order are identical to the prior read-all path.
 pub fn read_records(dir: &Path, filters_session: Option<&str>) -> Vec<OpRecord> {
+    use std::io::{BufRead, BufReader};
     let mut out = Vec::new();
     let main = dir.join("ops.log");
     let rotated_log = rotated(&main);
     for path in [rotated_log, main] {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            for line in raw.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(rec) = serde_json::from_str::<OpRecord>(line) {
-                    if let Some(s) = filters_session {
-                        if rec.session_id.as_deref() != Some(s) {
-                            continue;
-                        }
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        for line in BufReader::new(file).lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(rec) = serde_json::from_str::<OpRecord>(&line) {
+                if let Some(s) = filters_session {
+                    if rec.session_id.as_deref() != Some(s) {
+                        continue;
                     }
-                    out.push(rec);
                 }
+                out.push(rec);
             }
         }
     }

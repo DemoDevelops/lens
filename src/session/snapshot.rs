@@ -19,13 +19,38 @@ struct Section {
     text: String,
 }
 
+/// Events partitioned by category in a single pass, so each section reads its
+/// own bucket instead of re-scanning the whole vector. Buckets hold borrowed
+/// events in original order, so per-category logic (dedup, latest-status, freq,
+/// reverse-find) behaves exactly as a full-slice `.filter(|e| e.category == k)`.
+#[derive(Default)]
+struct Categorized<'a> {
+    by_category: BTreeMap<&'a str, Vec<&'a Event>>,
+}
+
+impl<'a> Categorized<'a> {
+    fn new(events: &'a [Event]) -> Self {
+        let mut by_category: BTreeMap<&'a str, Vec<&'a Event>> = BTreeMap::new();
+        for e in events {
+            by_category.entry(e.category.as_str()).or_default().push(e);
+        }
+        Categorized { by_category }
+    }
+
+    /// Events for a category in original order (empty slice if none).
+    fn get(&self, category: &str) -> &[&'a Event] {
+        self.by_category.get(category).map_or(&[], |v| v.as_slice())
+    }
+}
+
 /// Build the Session Guide from a session's events, bounded by `budget` bytes.
 /// `compact_count` is how many times this session has compacted (for the header).
 pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> String {
     let mut sections: Vec<Section> = Vec::new();
+    let cats = Categorized::new(events);
 
     // ── Last Request (must) ──
-    if let Some(p) = last_payload(events, "user-prompt", "prompt") {
+    if let Some(p) = last_payload(cats.get("user-prompt"), "prompt") {
         sections.push(Section {
             rank: MUST,
             text: section("Last Request", &[cap(&p, 500)]),
@@ -33,7 +58,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Tasks (must) ── dedupe by text, keep latest status, render checkboxes.
-    let tasks = tasks(events);
+    let tasks = tasks(cats.get("task"));
     if !tasks.is_empty() {
         let lines: Vec<String> = tasks
             .iter()
@@ -54,9 +79,9 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Plans (optional) ──
-    let plans: Vec<String> = events
+    let plans: Vec<String> = cats
+        .get("plan")
         .iter()
-        .filter(|e| e.category == "plan")
         .filter_map(|e| {
             let action = e
                 .payload
@@ -81,7 +106,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Key Decisions (must) ──
-    let decisions = texts(events, "decision", "text", 8);
+    let decisions = texts(cats.get("decision"), "text", 8);
     if !decisions.is_empty() {
         sections.push(Section {
             rank: MUST,
@@ -90,7 +115,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Files Modified (must) ──
-    let files = files_modified(events);
+    let files = files_modified(cats.get("file"));
     if !files.is_empty() {
         sections.push(Section {
             rank: MUST,
@@ -115,7 +140,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Constraints (optional) ──
-    let constraints = texts(events, "constraint", "text", 5);
+    let constraints = texts(cats.get("constraint"), "text", 5);
     if !constraints.is_empty() {
         sections.push(Section {
             rank: 60,
@@ -124,7 +149,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Blockers (optional) ──
-    let blockers = texts(events, "blocker", "text", 5);
+    let blockers = texts(cats.get("blocker"), "text", 5);
     if !blockers.is_empty() {
         sections.push(Section {
             rank: 60,
@@ -133,9 +158,9 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Git ops (optional) ──
-    let gits: Vec<String> = events
+    let gits: Vec<String> = cats
+        .get("git")
         .iter()
-        .filter(|e| e.category == "git")
         .map(|e| {
             let op = e.payload.get("op").and_then(|v| v.as_str()).unwrap_or("?");
             let cmd = e.payload.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
@@ -150,9 +175,9 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Project Rules (must) — paths only; full content lives in FTS index ──
-    let rules: Vec<String> = events
+    let rules: Vec<String> = cats
+        .get("rule")
         .iter()
-        .filter(|e| e.category == "rule")
         .filter_map(|e| {
             e.payload
                 .get("path")
@@ -168,7 +193,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── MCP Tools Used (optional) — counts ──
-    let mcp = counts(events, "mcp-tool", "tool");
+    let mcp = counts(cats.get("mcp-tool"), "tool");
     if !mcp.is_empty() {
         let lines: Vec<String> = mcp.iter().map(|(k, n)| format!("{k} ×{n}")).collect();
         sections.push(Section {
@@ -178,9 +203,9 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Subagent findings (optional) ──
-    let findings: Vec<String> = events
+    let findings: Vec<String> = cats
+        .get("subagent")
         .iter()
-        .filter(|e| e.category == "subagent")
         .filter_map(|e| {
             e.payload
                 .get("finding")
@@ -196,7 +221,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Rejected Approaches (optional) ──
-    let rejected = texts(events, "rejected-approach", "text", 5);
+    let rejected = texts(cats.get("rejected-approach"), "text", 5);
     if !rejected.is_empty() {
         sections.push(Section {
             rank: 55,
@@ -205,9 +230,9 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── External Refs (optional) ──
-    let refs: Vec<String> = events
+    let refs: Vec<String> = cats
+        .get("external-ref")
         .iter()
-        .filter(|e| e.category == "external-ref")
         .filter_map(|e| {
             e.payload
                 .get("ref")
@@ -223,9 +248,9 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Environment (optional) ──
-    let envs: Vec<String> = events
+    let envs: Vec<String> = cats
+        .get("environment")
         .iter()
-        .filter(|e| e.category == "environment")
         .filter_map(|e| {
             e.payload
                 .get("cmd")
@@ -241,7 +266,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── User Role (optional) ──
-    if let Some(role) = last_payload(events, "role", "text") {
+    if let Some(role) = last_payload(cats.get("role"), "text") {
         sections.push(Section {
             rank: 30,
             text: section("User Role", &[cap(&role, 200)]),
@@ -249,7 +274,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     }
 
     // ── Session Intent (optional, lowest) ──
-    let intent = counts(events, "intent", "intent");
+    let intent = counts(cats.get("intent"), "intent");
     if let Some((top, _)) = intent.first() {
         sections.push(Section {
             rank: 10,
@@ -310,25 +335,20 @@ fn section(title: &str, lines: &[String]) -> String {
     s
 }
 
-/// Latest payload string for a category/field.
-fn last_payload(events: &[Event], category: &str, field: &str) -> Option<String> {
-    events
-        .iter()
-        .rev()
-        .find(|e| e.category == category)
-        .and_then(|e| {
-            e.payload
-                .get(field)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
+/// Latest payload string for a field, over a category's events (in order).
+fn last_payload(events: &[&Event], field: &str) -> Option<String> {
+    events.iter().rev().find_map(|e| {
+        e.payload
+            .get(field)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    })
 }
 
-/// Distinct text values for a category (latest-last, capped).
-fn texts(events: &[Event], category: &str, field: &str, max: usize) -> Vec<String> {
+/// Distinct text values for a field (latest-last, capped), over a category's events.
+fn texts(events: &[&Event], field: &str, max: usize) -> Vec<String> {
     let v: Vec<String> = events
         .iter()
-        .filter(|e| e.category == category)
         .filter_map(|e| {
             e.payload
                 .get(field)
@@ -340,10 +360,10 @@ fn texts(events: &[Event], category: &str, field: &str, max: usize) -> Vec<Strin
 }
 
 /// Tasks deduped by text, keeping the latest status seen.
-fn tasks(events: &[Event]) -> Vec<(String, String)> {
+fn tasks(events: &[&Event]) -> Vec<(String, String)> {
     let mut order: Vec<String> = Vec::new();
     let mut map: BTreeMap<String, String> = BTreeMap::new();
-    for e in events.iter().filter(|e| e.category == "task") {
+    for e in events {
         let t = e.payload.get("task").and_then(|v| v.as_str()).unwrap_or("");
         let s = e
             .payload
@@ -368,10 +388,9 @@ fn tasks(events: &[Event]) -> Vec<(String, String)> {
 }
 
 /// Edited/written file paths, deduped (most-recent order preserved).
-fn files_modified(events: &[Event]) -> Vec<String> {
+fn files_modified(events: &[&Event]) -> Vec<String> {
     let v: Vec<String> = events
         .iter()
-        .filter(|e| e.category == "file")
         .filter(|e| {
             matches!(
                 e.payload.get("action").and_then(|v| v.as_str()),
@@ -435,10 +454,10 @@ fn errors(events: &[Event]) -> (Vec<String>, Vec<(String, String)>) {
     (unresolved, pairs)
 }
 
-/// Value frequency for a category/field, most-frequent first.
-fn counts(events: &[Event], category: &str, field: &str) -> Vec<(String, usize)> {
+/// Value frequency for a field, most-frequent first, over a category's events.
+fn counts(events: &[&Event], field: &str) -> Vec<(String, usize)> {
     let mut map: BTreeMap<String, usize> = BTreeMap::new();
-    for e in events.iter().filter(|e| e.category == category) {
+    for e in events {
         if let Some(v) = e.payload.get(field).and_then(|x| x.as_str()) {
             *map.entry(v.to_string()).or_insert(0) += 1;
         }

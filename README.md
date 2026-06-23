@@ -98,16 +98,17 @@ with `LENS_SETTINGS=/path/to/settings.json`.
 
 | Tool | Description | Example input |
 | :- | :- | :- |
-| `lens_run` | Run code in a darkroom; only stdout/stderr return, not the data the script read. Large output is offloaded. | `{"language":"python","code":"print(sum(len(l) for l in open('big.log')))"}` |
-| `lens_run_file` | Analyze a file in the darkroom; your `code` receives the file path as its first CLI arg (`sys.argv[1]` / `process.argv[2]` / `$1`). Only printed output returns. | `{"path":"big.log","language":"python","code":"import sys;print(sum(1 for _ in open(sys.argv[1])))"}` |
-| `lens_index` | Index a file/dir into FTS5 (respects `.gitignore`). | `{"path":"src","recursive":true}` |
-| `lens_search` | BM25 search, multiple queries per call. | `{"queries":["auth","retry"],"limit_per_query":5}` |
-| `lens_map` | Parse the repo into a symbol/relationship graph. | `{"path":".","languages":["rust"]}` |
-| `lens_symbol` | Find symbols by name (+ optional kind) with their connections. | `{"name":"handle","kind":"function"}` |
-| `lens_links` | Local subgraph around a node id. | `{"node_id":"<id>","depth":2}` |
-| `lens_path` | Shortest path between two symbols. | `{"from":"main","to":"helper"}` |
-| `lens_recall` | Recover a full blob from a `retrieve_ref`. | `{"ref":"<hash>"}` |
-| `ctx_stats` | Token-savings counters and index/graph sizes. | `{}` |
+| `lens_run` | Run code (python/js/ts/bash/ruby/go) in a darkroom subprocess; only stdout/stderr returns to context, not the data the script read. Large output is offloaded with a recall ref. | `{"language":"python","code":"print(sum(len(l) for l in open('big.log')))"}` |
+| `lens_run_file` | Analyze one file in the darkroom; your `code` receives the file path as its first CLI arg (`sys.argv[1]` / `process.argv[2]` / `$1`). Only what it prints returns; the file's bytes stay out of context. | `{"path":"big.log","language":"python","code":"import sys;print(sum(1 for _ in open(sys.argv[1])))"}` |
+| `lens_index` | Build an FTS5 full-text index over a file or directory (respects `.gitignore`). Returns files indexed and chunk count; prerequisite for `lens_search`. | `{"path":"src","recursive":true}` |
+| `lens_search` | Run one or more BM25-ranked full-text queries in a single call. Returns the top snippets per query with path and relevance score; answers "where is X mentioned". | `{"queries":["auth","retry"],"limit_per_query":5}` |
+| `lens_map` | Parse the whole repo with tree-sitter into a symbol graph (functions, types, modules) and their relationships (calls, imports, contains). Run once before the other graph tools. | `{"path":".","languages":["rust"]}` |
+| `lens_symbol` | Find graph symbols by name substring (+ optional kind) and return each with its immediate connections: where a symbol lives and what directly touches it. | `{"name":"handle","kind":"function"}` |
+| `lens_find` | Find symbols by a natural-language query, ranked lexically by word overlap with symbol names. Use when you know what a symbol does but not its exact name. | `{"query":"retry with backoff","limit":20}` |
+| `lens_links` | Return the local subgraph within N hops of a node id: a symbol's neighborhood or blast radius at a chosen depth. | `{"node_id":"<id>","depth":2}` |
+| `lens_path` | Find the shortest path between two symbols via BFS over graph edges: how A reaches B through the call/import chain. | `{"from":"main","to":"helper"}` |
+| `lens_recall` | Recover the full blob behind a `retrieve_ref` returned by another tool, reversing any truncation or offloading. | `{"ref":"<hash>"}` |
+| `ctx_stats` | Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo. | `{}` |
 
 ## Recommended workflow
 

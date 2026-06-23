@@ -317,6 +317,55 @@ pub fn snapshot_json_since(
         .map(|(h, n)| serde_json::json!({ "hook": h, "count": n }))
         .collect();
 
+    // Bucketed timelines for the dashboard's windowed sparklines + cumulative
+    // chart. Computed server-side so the curves reflect the whole selected
+    // window, not just samples taken since the page opened. `since == 0`
+    // ("all time") falls back to the earliest op so the axis starts at first
+    // activity, not 1970. Cumulative; the client diffs for per-bucket rates.
+    const BUCKETS: usize = 60;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let start = since.filter(|&s| s > 0).unwrap_or_else(|| {
+        records
+            .iter()
+            .filter_map(|r| super::iso8601_to_secs(&r.ts))
+            .min()
+            .unwrap_or(now)
+    });
+    let span = (now - start).max(1);
+    let bucket = |ts: i64| {
+        (((ts - start) as f64 / span as f64).clamp(0.0, 1.0) * BUCKETS as f64) as usize
+    };
+    let cumulative = |b: &[i64]| -> Vec<i64> {
+        let mut acc = 0i64;
+        b.iter()
+            .map(|x| {
+                acc += x;
+                acc
+            })
+            .collect()
+    };
+    let (mut saved_b, mut bytes_b) = (vec![0i64; BUCKETS], vec![0i64; BUCKETS]);
+    for r in &records {
+        if let Some(ts) = super::iso8601_to_secs(&r.ts) {
+            let i = bucket(ts).min(BUCKETS - 1);
+            bytes_b[i] += r.bytes_returned as i64;
+            // saved is MCP-only (excludes the synced rtk_shell op), matching tokens_saved_mcp.
+            if r.tool != "rtk_shell" {
+                saved_b[i] += r.tokens_saved_est;
+            }
+        }
+    }
+    let saved_buckets = cumulative(&saved_b);
+    let bytes_buckets = cumulative(&bytes_b);
+    let event_buckets = cumulative(
+        &SessionStore::open(dir)
+            .and_then(|s| s.event_buckets(session, start, now, BUCKETS))
+            .unwrap_or_else(|_| vec![0i64; BUCKETS]),
+    );
+
     serde_json::json!({
         "ts": super::iso8601_now(),
         "ops": t.ops,
@@ -324,6 +373,11 @@ pub fn snapshot_json_since(
         "bytes_returned": t.bytes_returned,
         "tokens_saved_est": t.tokens_saved_est,
         "tokens_saved_mcp": tokens_saved_mcp,
+        "saved_buckets": saved_buckets,
+        "bytes_buckets": bytes_buckets,
+        "event_buckets": event_buckets,
+        "window_start": start,
+        "window_end": now,
         "errors": t.errors,
         "timeouts": t.timeouts,
         "lock_wait_ms": t.lock_wait_ms,

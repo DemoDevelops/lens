@@ -246,11 +246,15 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .actline i{color:var(--dim);font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.4px;margin-right:4px}
   .actline b{font-size:13px;font-weight:600}
   .actrow{display:flex;align-items:center;gap:10px;margin-top:3px}
-  .actrow canvas{flex:1;height:22px;display:block}
+  .actrow canvas{flex:1;min-width:0;height:22px;display:block}
   .actrow .rate{color:var(--warn);font-size:10px;white-space:nowrap}
   .cats{display:flex;flex-wrap:wrap;gap:2px 13px;margin-top:5px;font-size:10px}
   .cats span{color:var(--dim)}
   .cats b{color:var(--warn)}
+  .tname{cursor:help;border-bottom:1px dotted var(--line);padding-bottom:1px}
+  .tip{position:fixed;z-index:60;display:none;max-width:320px;background:var(--panel);
+    border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:11px;
+    line-height:1.5;color:var(--ink);box-shadow:0 8px 24px rgba(0,0,0,.5);pointer-events:none}
   footer{color:var(--dim);font-size:9px;padding:3px 10px 8px;text-align:center}
 </style>
 </head>
@@ -297,12 +301,22 @@ const INDEX_HTML: &str = r##"<!doctype html>
 </main>
 <footer id="footer">—</footer>
 <script>
-const hist=[];
 // Canonical lens MCP tools, shown in the merged tool table even at 0 calls.
 const ADOPTION_TOOLS=['lens_run','lens_run_file','lens_search','lens_index','lens_map','lens_recall','lens_symbol','lens_links','lens_path','lens_find'];
-const savedSeries=[], bytesSeries=[];
-const histAct=[], actSeries=[];
-const MAXPTS=60;
+// Hover description per tool, shown as a native title tooltip on the tool name.
+const TOOL_DESC={
+  lens_run:"Run code (python/js/ts/bash/ruby/go) in a darkroom subprocess; only stdout/stderr returns to context, not the data the script read. Large output is offloaded with a recall ref.",
+  lens_run_file:"Analyze one file in the darkroom; your code gets the file path as its first CLI arg (sys.argv[1] / process.argv[2] / $1). Only what it prints returns; the file's bytes stay out of context.",
+  lens_index:"Build an FTS5 full-text index over a file or directory (respects .gitignore). Returns files indexed and chunk count; prerequisite for lens_search.",
+  lens_search:"Run one or more BM25-ranked full-text queries in a single call. Returns the top snippets per query with path and relevance score; answers 'where is X mentioned'.",
+  lens_map:"Parse the whole repo with tree-sitter into a symbol graph (functions, types, modules) and their relationships (calls, imports, contains). Run once before the other graph tools.",
+  lens_symbol:"Find graph symbols by name substring (+ optional kind) and return each with its immediate connections: where a symbol lives and what directly touches it.",
+  lens_find:"Find symbols by a natural-language query, ranked lexically by word overlap with symbol names. Use when you know what a symbol does but not its exact name.",
+  lens_links:"Return the local subgraph within N hops of a node id: a symbol's neighborhood or blast radius at a chosen depth.",
+  lens_path:"Find the shortest path between two symbols via BFS over graph edges: how A reaches B through the call/import chain.",
+  lens_recall:"Recover the full blob behind a retrieve_ref returned by another tool, reversing any truncation or offloading.",
+  ctx_stats:"Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo."
+};
 let rtkBase=null;
 let scope='repo';
 
@@ -358,8 +372,7 @@ function winLabel(){
   if(winMode==='at') return atLabel;
   return 'since '+at; // custom text
 }
-function resetSeries(){hist.length=0;savedSeries.length=0;bytesSeries.length=0;histAct.length=0;actSeries.length=0;}
-function applyWin(){resetSeries();tick();}
+function applyWin(){tick();}
 winSel.addEventListener('change',function(){
   const v=this.value;
   winAt.style.display = v==='custom'?'':'none';
@@ -377,7 +390,7 @@ scopeBtn.addEventListener('click',function(){
   scope = scope==='repo' ? 'global' : 'repo';
   this.textContent = scope==='global' ? 'all repos' : 'this repo';
   this.classList.toggle('on', scope==='global');
-  resetSeries(); tick();
+  tick();
 });
 
 // Cost estimate: "tokens saved" are context INPUT tokens you avoided sending, so price
@@ -409,14 +422,20 @@ function humanCount(n){
   if(n>=1e3) return (n/1e3).toFixed(1)+'K';
   return ''+n;
 }
-function spark(id,series,color){
-  const c=document.getElementById(id), dpr=window.devicePixelRatio||1;
+function spark(id,series,color,fromZero){
+  const c=document.getElementById(id); if(!c.clientWidth) return; const dpr=window.devicePixelRatio||1;
   const w=c.clientWidth, h=c.clientHeight;
   c.width=w*dpr; c.height=h*dpr;
   const x=c.getContext('2d'); x.scale(dpr,dpr); x.clearRect(0,0,w,h);
   if(series.length<2) return;
-  const max=Math.max(1,...series), n=series.length;
-  const px=i=>i/(n-1)*w, py=v=>h-3-(v/max)*(h-6);
+  const n=series.length, px=i=>i/(n-1)*w;
+  let py;
+  if(fromZero===false){ // cumulative: auto-scale to min..max so the shape shows; flat -> centered line
+    const mx=Math.max(...series), mn=Math.min(...series), pad=4;
+    py = mx===mn ? (()=>h/2) : (v=>h-pad-((v-mn)/(mx-mn))*(h-2*pad));
+  } else {              // rates: 0-baseline (a spike from zero should read as a spike)
+    const max=Math.max(1,...series); py=v=>h-3-(v/max)*(h-6);
+  }
   x.beginPath();
   series.forEach((v,i)=>{const X=px(i),Y=py(v); i?x.lineTo(X,Y):x.moveTo(X,Y);});
   x.lineTo(w,h); x.lineTo(0,h); x.closePath();
@@ -425,6 +444,7 @@ function spark(id,series,color){
   series.forEach((v,i)=>{const X=px(i),Y=py(v); i?x.lineTo(X,Y):x.moveTo(X,Y);});
   x.strokeStyle=color; x.lineWidth=1.5; x.stroke();
 }
+function diffs(a){return a.map((v,i)=>i?v-a[i-1]:v);}
 function stat(k,v){return `<span class="st"><i>${k}</i><b>${v}</b></span>`;}
 function hbar(label,frac,val,zero){
   const w=Math.max(0,Math.min(100,Math.round(frac*100)));
@@ -445,19 +465,12 @@ async function tick(){
   document.getElementById('dot').classList.remove('stale');
   document.getElementById('status').textContent=(scope==='global'?'GLOBAL · ':'')+winLabel()+(d.session?(' · '+d.session):'')+' · '+(d.activity&&d.activity.sessions||0)+' session(s)';
 
-  const now=Date.now()/1000;
   const savedMcp=(d.tokens_saved_mcp!==undefined?d.tokens_saved_mcp:d.tokens_saved_est);
-  hist.push({t:now,saved:savedMcp,bytes:d.bytes_returned});
-  if(hist.length>1){
-    const a=hist[hist.length-2], b=hist[hist.length-1], dt=Math.max(0.001,b.t-a.t);
-    savedSeries.push(Math.max(0,(b.saved-a.saved)/dt*60));
-    bytesSeries.push(Math.max(0,(b.bytes-a.bytes)/dt*60));
-    if(savedSeries.length>MAXPTS) savedSeries.shift();
-    if(bytesSeries.length>MAXPTS) bytesSeries.shift();
-  }
-  const first=hist[0], last=hist[hist.length-1], span=Math.max(0.001,last.t-first.t);
-  const savedPerMin=(last.saved-first.saved)/span*60;
-  const bytesPerMin=(last.bytes-first.bytes)/span*60;
+  // Windowed sparklines: the backend buckets the selected window [since, now];
+  // diff the cumulative buckets for per-bucket throughput, and divide the window
+  // total by window-minutes for the rate label.
+  const winMin=Math.max(1/60,((d.window_end||0)-(d.window_start||0))/60);
+  const sB=d.saved_buckets||[], bB=d.bytes_buckets||[], eB=d.event_buckets||[];
 
   // Stat strip — the old six cards, now one compact line.
   const overallPct=d.raw_bytes_in>0?Math.round((d.raw_bytes_in-d.bytes_returned)/d.raw_bytes_in*100):0;
@@ -472,10 +485,10 @@ async function tick(){
     stat('offloaded',d.offloaded_ops+' ('+humanBytes(d.offloaded_bytes)+')')+
     stat('lock',d.lock_wait_ms+' ms');
 
-  spark('savedChart',savedSeries,'#4cc4b0');
-  spark('bytesChart',bytesSeries,'#4cc4b0');
-  document.getElementById('savedRate').textContent=humanCount(Math.round(savedPerMin))+' tok/min';
-  document.getElementById('bytesRate').textContent=humanBytes(Math.round(bytesPerMin))+'/min';
+  spark('savedChart',diffs(sB),'#4cc4b0');
+  spark('bytesChart',diffs(bB),'#4cc4b0');
+  document.getElementById('savedRate').textContent=humanCount(Math.round((sB.at(-1)||0)/winMin))+' tok/min';
+  document.getElementById('bytesRate').textContent=humanBytes(Math.round((bB.at(-1)||0)/winMin))+'/min';
 
   // Merged tool table = by-tool (savings) + tool adoption (firing/err/timeout) in one.
   // Canonical tools always listed (dim if 0 calls) so a dormant tool is visible, not absent.
@@ -491,7 +504,9 @@ async function tick(){
     const w=Math.round(raw/maxRaw*48);
     const pct=raw>0?Math.round((raw-ret)/raw*100):null;
     const offtxt=offc?(offc+'·'+humanBytes(offb)):'—';
-    return `<tr${ops?'':' class="z"'}><td>${name}</td><td>${ops.toLocaleString()}</td>`+
+    const desc=TOOL_DESC[name];
+    const nm=desc?`<span class="tname" data-desc="${desc}">${name}</span>`:name;
+    return `<tr${ops?'':' class="z"'}><td>${nm}</td><td>${ops.toLocaleString()}</td>`+
       `<td>${t?('<span class="bar" style="width:'+w+'px"></span> '+humanBytes(raw)):'—'}</td>`+
       `<td>${t?humanBytes(ret):'—'}</td><td>${saved?saved.toLocaleString():'—'}</td>`+
       `<td>${pct==null?'—':pct+'%'}</td>`+
@@ -525,20 +540,12 @@ async function tick(){
 
   // session activity (built-in tools via hooks)
   const a=d.activity||{total_events:0,sessions:0,by_category:[],last_ts:null};
-  histAct.push({t:now,ev:a.total_events});
-  if(histAct.length>1){
-    const x=histAct[histAct.length-2], y=histAct[histAct.length-1], dt=Math.max(0.001,y.t-x.t);
-    actSeries.push(Math.max(0,(y.ev-x.ev)/dt*60));
-    if(actSeries.length>MAXPTS) actSeries.shift();
-  }
-  const af=histAct[0], al=histAct[histAct.length-1], asp=Math.max(0.001,al.t-af.t);
-  const evPerMin=(al.ev-af.ev)/asp*60;
   document.getElementById('actLine').innerHTML=
     `<span class="st"><i>events</i><b>${(a.total_events||0).toLocaleString()}</b></span>`+
     `<span class="st"><i>sessions</i><b>${a.sessions||0}</b></span>`+
     `<span class="st"><i>last</i><b>${a.last_ts?new Date(a.last_ts*1000).toLocaleTimeString():'—'}</b></span>`;
-  spark('actChart',actSeries,'#e0a458');
-  document.getElementById('actRate').textContent=Math.round(evPerMin)+' ev/min';
+  spark('actChart',diffs(eB),'#e0a458');
+  document.getElementById('actRate').textContent=Math.round((eB.at(-1)||0)/winMin)+' ev/min';
   document.getElementById('byCat').innerHTML=a.by_category.map(c=>
     `<span>${c.category} <b>${c.count}</b></span>`
   ).join('')||'<span class="dim2">no activity captured yet</span>';
@@ -548,7 +555,9 @@ async function tick(){
     `graph ${d.graph_nodes}n/${d.graph_edges}e · updated ${d.ts}`;
 
   // Expansive full-view charts (computed always; CSS shows them only in full mode).
-  spark('cumChart', hist.map(p=>p.saved), '#4cc4b0');
+  // Cumulative uses the server-bucketed timeline so it reflects the whole selected
+  // window, not just samples taken since the page opened.
+  spark('cumChart', d.saved_buckets||[], '#4cc4b0', false);
   const tt=d.by_tool;
   const bySaved=tt.filter(t=>t.saved>0).sort((a,b)=>b.saved-a.saved).slice(0,12);
   const maxSaved=Math.max(1,...bySaved.map(t=>t.saved));
@@ -566,6 +575,26 @@ function applyView(){document.body.classList.toggle('full',view==='full');viewBt
 try{const v=localStorage.getItem('lens_view');if(v==='full')view='full';}catch(e){}
 applyView();
 viewBtn.addEventListener('click',function(){view=view==='full'?'mini':'full';try{localStorage.setItem('lens_view',view);}catch(e){}applyView();tick();});
+// Instant styled tooltip for tool descriptions (native title is delayed + clipped by the panel).
+(function(){
+  const tip=document.createElement('div'); tip.className='tip'; document.body.appendChild(tip);
+  let cur=null;
+  function place(el){
+    tip.textContent=el.getAttribute('data-desc')||'';
+    tip.style.display='block';
+    const r=el.getBoundingClientRect(), tw=tip.offsetWidth, th=tip.offsetHeight;
+    let x=r.left, y=r.bottom+6;
+    if(x+tw>innerWidth-8) x=Math.max(8,innerWidth-8-tw);
+    if(y+th>innerHeight-8) y=Math.max(8,r.top-6-th);
+    tip.style.left=x+'px'; tip.style.top=y+'px';
+  }
+  const tbl=document.getElementById('tools');
+  tbl.addEventListener('mouseover',function(e){
+    const el=e.target.closest('.tname');
+    if(el){ if(el!==cur){cur=el; place(el);} } else { cur=null; tip.style.display='none'; }
+  });
+  tbl.addEventListener('mouseleave',function(){ cur=null; tip.style.display='none'; });
+})();
 tick(); setInterval(tick,1000);
 </script>
 </body>

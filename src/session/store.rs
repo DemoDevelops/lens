@@ -276,6 +276,37 @@ impl SessionStore {
         })
     }
 
+    /// Per-bucket event counts over `[start, end]` (unix seconds) split into `n`
+    /// equal buckets, optionally scoped to one session. Raw counts, not
+    /// cumulative. Mirrors [`activity`]'s session filter. Backs the dashboard's
+    /// windowed session-activity sparkline.
+    pub fn event_buckets(
+        &self,
+        session: Option<&str>,
+        start: i64,
+        end: i64,
+        n: usize,
+    ) -> Result<Vec<i64>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT session_id, timestamp FROM session_events")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let span = (end - start).max(1);
+        let mut b = vec![0i64; n];
+        for (sid, ts) in rows.flatten() {
+            if let Some(f) = session {
+                if sid != f {
+                    continue;
+                }
+            }
+            if ts < start || ts > end {
+                continue;
+            }
+            let i = (((ts - start) as f64 / span as f64).clamp(0.0, 1.0) * n as f64) as usize;
+            b[i.min(n - 1)] += 1;
+        }
+        Ok(b)
+    }
+
     /// Current compaction count for a session (0 if unknown).
     pub fn compact_count(&self, session_id: &str) -> Result<i64> {
         let conn = self.conn()?;

@@ -78,26 +78,26 @@ fn webfetch_payload(dir: &Path, session: &str) -> Value {
 #[test]
 fn off_is_a_true_noop() {
     let d = tempfile::tempdir().unwrap();
-    // Explicit `off` AND unset (the default) must both be byte-identical "{}".
-    for envs in [vec![("LENS_ROUTING", "off")], vec![]] {
-        let (raw_wf, _) = run_hook(
-            "PreToolUse",
-            &webfetch_payload(d.path(), "s1"),
-            &envs,
-            d.path(),
-        );
-        assert_eq!(
-            raw_wf, "{}",
-            "off must be a byte-identical no-op for WebFetch"
-        );
-        let (raw_b, _) = run_hook(
-            "PreToolUse",
-            &bash_payload(d.path(), "s1", "find . -type f"),
-            &envs,
-            d.path(),
-        );
-        assert_eq!(raw_b, "{}", "off must be a byte-identical no-op for Bash");
-    }
+    // Explicit `off` must be byte-identical "{}" (the safety contract). The unset
+    // default is now `full`, exercised by the steering tests below.
+    let envs = [("LENS_ROUTING", "off")];
+    let (raw_wf, _) = run_hook(
+        "PreToolUse",
+        &webfetch_payload(d.path(), "s1"),
+        &envs,
+        d.path(),
+    );
+    assert_eq!(
+        raw_wf, "{}",
+        "off must be a byte-identical no-op for WebFetch"
+    );
+    let (raw_b, _) = run_hook(
+        "PreToolUse",
+        &bash_payload(d.path(), "s1", "find . -type f"),
+        &envs,
+        d.path(),
+    );
+    assert_eq!(raw_b, "{}", "off must be a byte-identical no-op for Bash");
 }
 
 // ---------------------------------------------------------------------------

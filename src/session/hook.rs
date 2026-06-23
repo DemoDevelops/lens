@@ -231,7 +231,10 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             // server can't back would be wrong.
             let level = routing::Level::from_env();
             let ctx = if level.steers() {
-                let b = routing::session_block(level);
+                // Tailor the guide's per-tool bullets to the tools active this
+                // session; with no tool history (fresh startup) fall back to full.
+                let (bash, file) = active_tool_groups(&store, &session_id);
+                let b = routing::session_block_for(level, bash, file);
                 if ctx.is_empty() {
                     b
                 } else {
@@ -394,6 +397,27 @@ fn attribute(raws: Vec<RawEvent>, session: &str, project: &str, ts: i64, hook: &
     raws.into_iter()
         .map(|r| r.attribute(session, project, ts, hook))
         .collect()
+}
+
+/// Which tool groups has this session used, from the stored event categories?
+/// Returns `(bash, file)`; `(false, false)` means no tool history, so the caller
+/// injects the full guide. `git`/`environment` are Bash-only signals; `file`
+/// covers Read/Edit/Write.
+fn active_tool_groups(store: &SessionStore, session_id: &str) -> (bool, bool) {
+    let cats = match store.activity(Some(session_id), None) {
+        Ok(a) => a.by_category,
+        Err(_) => return (false, false),
+    };
+    let mut bash = false;
+    let mut file = false;
+    for (cat, _) in cats {
+        match cat.as_str() {
+            "git" | "environment" => bash = true,
+            "file" => file = true,
+            _ => {}
+        }
+    }
+    (bash, file)
 }
 
 fn is_system_message(prompt: &str) -> bool {

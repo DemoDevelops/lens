@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
@@ -17,6 +18,14 @@ use crate::tools::*;
 /// Default inline stdout limit (bytes) before offloading to the store.
 const DEFAULT_MAX_INLINE: usize = 8 * 1024;
 
+/// In-memory parsed-graph cache: the `source_manifest` mtime map the graph was
+/// built from, paired with the graph itself. A cached entry is served only while
+/// its manifest byte-equals a fresh walk, so any add/edit/remove forces a rebuild.
+/// Adjacency is intentionally NOT cached: the two callers use different `keep`
+/// filters (`neighbors` keeps all edges; `shortest_path` drops `contains`), so a
+/// single cached adjacency could not serve both without changing results.
+type GraphCache = Arc<RwLock<Option<(BTreeMap<String, u64>, Graph)>>>;
+
 #[derive(Clone)]
 pub struct Forge {
     /// Working dir the darkroom and walkers operate in (the repo root).
@@ -29,6 +38,10 @@ pub struct Forge {
     index: Index,
     /// Always-on operation log (side channel; never touches tool payloads).
     ops: OpLog,
+    /// Parsed-graph cache shared across every clone (`Forge` is `Arc`-cloned and
+    /// its methods take `&self`). Filled lazily on a cache miss in `load_graph`,
+    /// emptied on every rebuild in `finish_discovery`.
+    graph_cache: GraphCache,
 }
 
 impl Forge {
@@ -62,6 +75,7 @@ impl Forge {
             store,
             index,
             ops,
+            graph_cache: Arc::new(RwLock::new(None)),
         })
     }
 }
@@ -640,9 +654,84 @@ impl Forge {
 
     /// Load the structural graph, building it on first use if discovery hasn't run
     /// yet (so graph queries work on any repo without an explicit lens_map).
+    ///
+    /// Repeated queries with no source change are served from the in-memory
+    /// `graph_cache` (mtime walk only — no disk read, no deserialize). On a miss the
+    /// disk path runs exactly as before (`ensure_graph` rebuilds-if-stale + persists,
+    /// then load from `graph.json`), and the result repopulates the cache.
+    ///
+    /// Lock discipline: the cache is checked under a read lock that is dropped before
+    /// any write lock is taken (never held across an acquire — so it cannot deadlock),
+    /// and the write path re-checks under the write lock so a thundering herd does at
+    /// most one rebuild. A cached entry is returned only when its manifest byte-equals
+    /// the freshly walked `current`, and `finish_discovery` empties the cache on every
+    /// rebuild, so a query after a rebuild never sees stale data.
     fn load_graph(&self) -> Result<Graph, ErrorData> {
+        // The cheap per-query staleness walk (stat-only). Kept by design; a
+        // generation counter to skip even this is deliberately deferred.
+        let current = discovery::source_manifest(&self.repo_dir);
+
+        // Check under the read lock, then DROP it before doing anything else.
+        if let Some(g) = self.cache_hit(&current) {
+            return Ok(g);
+        }
+
+        // Miss: rebuild-if-stale on disk (unchanged behavior) and load.
         self.ensure_graph()?;
-        Graph::load(&self.graph_file()).map_err(|e| ErrorData::internal_error(e.to_string(), None))
+        let graph = Graph::load(&self.graph_file())
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        // Repopulate under the write lock, re-checking first so a concurrent miss
+        // that already filled the cache for this manifest wins (no double store).
+        self.cache_store(current, graph)
+    }
+
+    /// Read-locked cache probe: returns a clone of the cached graph iff its stored
+    /// manifest equals `current`. The guard is released when this returns.
+    fn cache_hit(&self, current: &BTreeMap<String, u64>) -> Option<Graph> {
+        let guard = match self.graph_cache.read() {
+            Ok(g) => g,
+            // A poisoned lock means a prior panic while holding it; the stored tuple
+            // is still internally consistent (we only ever write a matched pair), so
+            // recover the guard rather than panic and wedge every later query.
+            Err(p) => p.into_inner(),
+        };
+        match guard.as_ref() {
+            Some((manifest, graph)) if manifest == current => Some(graph.clone()),
+            _ => None,
+        }
+    }
+
+    /// Write-locked cache store with a double-check: if another thread already
+    /// populated the cache for `current` while we were rebuilding, serve theirs;
+    /// otherwise store ours. Returns the graph to serve either way.
+    fn cache_store(
+        &self,
+        current: BTreeMap<String, u64>,
+        graph: Graph,
+    ) -> Result<Graph, ErrorData> {
+        let mut guard = match self.graph_cache.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some((manifest, cached)) = guard.as_ref() {
+            if *manifest == current {
+                return Ok(cached.clone());
+            }
+        }
+        *guard = Some((current, graph.clone()));
+        Ok(graph)
+    }
+
+    /// Empty the in-memory graph cache. Called after a rebuild persists a new graph
+    /// so the next `load_graph` re-reads the now-authoritative disk graph instead of
+    /// serving the pre-rebuild copy.
+    fn invalidate_graph_cache(&self) {
+        let mut guard = match self.graph_cache.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = None;
     }
 
     /// Paths the user recently touched this session, newest first (bounded), used
@@ -728,6 +817,11 @@ impl Forge {
             op.finish(0, 0, None, "error", e.to_string(), None);
             return Err(ErrorData::internal_error(e.to_string(), None));
         }
+        // The persisted graph just changed, so the in-memory cache (which holds the
+        // pre-rebuild graph) is now stale. Empty it AFTER the new graph is on disk so
+        // the next load_graph miss reads the fresh graph, never the old one. This is
+        // the guard that a query after a discovery rebuild returns fresh data.
+        self.invalidate_graph_cache();
         // A full-repo build refreshes the staleness manifest so `ensure_graph` can
         // serve from cache until the next file change. Subpath builds don't represent
         // the whole repo, so they must not touch the manifest.
@@ -789,9 +883,9 @@ impl Forge {
     /// repo when it has never been indexed (gated on the `index_chunks` stat, which
     /// only code indexing writes — never session records) or when **stale**: any
     /// file added/edited/removed since the last build, via a cheap mtime manifest.
-    /// Reindex is additive and idempotent per path — it refreshes changed files and
-    /// adds new ones, but does NOT prune chunks for deleted files (a known
-    /// limitation: those linger until a from-scratch reindex).
+    /// Reindex is incremental: `index_path` reads only changed/new files, prunes
+    /// chunks for deleted files internally (a separate prune walk is redundant), and
+    /// leaves unchanged files untouched.
     fn ensure_index(&self) -> Result<(), ErrorData> {
         let current = crate::index::file_manifest(&self.repo_dir);
         if self.store.get_stat("index_chunks").unwrap_or(0) > 0
@@ -804,9 +898,6 @@ impl Forge {
             .start("lens_index", serde_json::json!({ "auto": true }));
         match self.index.index_path(&self.repo_dir, true) {
             Ok(resp) => {
-                // Drop chunks for files deleted since the last build (keeps
-                // lens_search from returning ghosts). Safe here: always the repo root.
-                let _ = self.index.prune_missing(&self.repo_dir);
                 if let Ok(total) = self.index.chunk_count() {
                     let _ = self.store.set_stat("index_chunks", total);
                 }
@@ -832,11 +923,13 @@ impl Forge {
     /// instead of the raw node/edge lists.
     fn maybe_compact(&self, view: GraphView) -> GraphView {
         let original = serde_json::json!({ "nodes": view.nodes, "edges": view.edges });
-        let size = original.to_string().len();
-        if size <= self.max_inline {
+        // Serialize once and reuse the string for both the size gate and the store
+        // put (it was serialized twice before).
+        let serialized = original.to_string();
+        if serialized.len() <= self.max_inline {
             return view;
         }
-        let reference = self.store.put(&original.to_string()).ok();
+        let reference = self.store.put(&serialized).ok();
         let compact = crate::store::compress::compact_json(&original);
         GraphView {
             nodes: vec![],
@@ -1260,5 +1353,144 @@ mod tests {
         let stored = f.store.get(&reference).unwrap().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
         assert_eq!(parsed, original);
+    }
+
+    /// T8 invariant: the in-memory graph cache must never serve stale data across a
+    /// discovery rebuild, and an unchanged repeated query must be served from cache.
+    ///
+    /// 1. Query once -> cache populated.
+    /// 2. Add a source file -> next query auto-rebuilds (ensure_graph -> finish_discovery),
+    ///    which invalidates the cache; the query must reflect the NEW graph (new symbol
+    ///    present AND the original symbol still present, proving a fresh full rebuild,
+    ///    not a stale partial).
+    /// 3. Repeated query with no change -> served from cache: proven by deleting
+    ///    graph.json after the cache is warm and asserting the query still resolves
+    ///    the symbol (source_manifest excludes the non-source graph.json, so the cache
+    ///    key is unchanged -> a hit that never touches disk).
+    #[tokio::test]
+    async fn graph_cache_invalidates_on_rebuild_and_serves_hits() {
+        let (f, dir) = forge_with_source();
+
+        // (1) First query populates the cache.
+        let first = f
+            .lens_symbol(Parameters(GraphQueryRequest {
+                name: "helper".into(),
+                kind: None,
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert!(first.0.nodes.iter().any(|n| n.name == "helper"));
+        {
+            let guard = f.graph_cache.read().unwrap();
+            assert!(guard.is_some(), "cache must be populated after first query");
+        }
+
+        // (2) Add a file: the manifest goes stale, so the next query rebuilds and the
+        // cache is invalidated mid-rebuild. The result must be FRESH, not the cached
+        // pre-rebuild graph.
+        std::fs::write(
+            dir.path().join("added.rs"),
+            "fn freshly_added_symbol() -> i32 { 42 }\n",
+        )
+        .unwrap();
+        let after_add = f
+            .lens_symbol(Parameters(GraphQueryRequest {
+                name: "freshly_added_symbol".into(),
+                kind: None,
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            after_add
+                .0
+                .nodes
+                .iter()
+                .any(|n| n.name == "freshly_added_symbol"),
+            "query after a rebuild must see the NEW symbol, not the stale cached graph"
+        );
+        // The original symbol must still be present: a fresh FULL rebuild, not a
+        // partial that dropped what was there.
+        let still_helper = f
+            .lens_symbol(Parameters(GraphQueryRequest {
+                name: "helper".into(),
+                kind: None,
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            still_helper.0.nodes.iter().any(|n| n.name == "helper"),
+            "the original symbol must survive the rebuild"
+        );
+
+        // (3) No change since the last query -> must serve from cache. Delete the
+        // on-disk graph; a cache hit (manifest unchanged) resolves the symbol with no
+        // disk read. If it fell through to disk it would error / find nothing.
+        assert!(f.graph_file().exists(), "graph.json should exist while warm");
+        std::fs::remove_file(f.graph_file()).unwrap();
+        let from_cache = f
+            .lens_symbol(Parameters(GraphQueryRequest {
+                name: "freshly_added_symbol".into(),
+                kind: None,
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            from_cache
+                .0
+                .nodes
+                .iter()
+                .any(|n| n.name == "freshly_added_symbol"),
+            "an unchanged repeated query must be served from the in-memory cache \
+             (it resolved the symbol even with graph.json deleted)"
+        );
+    }
+
+    /// Measured (not a gate): cold load_graph (cache miss: walk + ensure_graph +
+    /// deserialize graph.json) vs warm (cache hit: mtime walk only). Reports the
+    /// speedup ratio so the T8 win is visible. Run with `--nocapture` to see it.
+    #[tokio::test]
+    async fn measure_cold_vs_warm_load_graph() {
+        use std::time::Instant;
+        let (f, _dir) = forge_with_source();
+
+        // Build the graph and warm the cache once (so the cold timing below is a pure
+        // miss: drop the cache, then time the rebuild-from-disk path).
+        f.lens_symbol(Parameters(GraphQueryRequest {
+            name: "helper".into(),
+            kind: None,
+            limit: 20,
+        }))
+        .await
+        .unwrap();
+
+        // Cold: invalidate so load_graph misses and reloads + deserializes from disk.
+        let cold = {
+            f.invalidate_graph_cache();
+            let t = Instant::now();
+            let _ = f.load_graph().unwrap();
+            t.elapsed()
+        };
+
+        // Warm: cache is now populated; subsequent loads are mtime-walk + clone only.
+        // Average a few to smooth scheduler noise.
+        let runs = 50u32;
+        let t = Instant::now();
+        for _ in 0..runs {
+            let _ = f.load_graph().unwrap();
+        }
+        let warm = t.elapsed() / runs;
+
+        let ratio = cold.as_secs_f64() / warm.as_secs_f64().max(f64::MIN_POSITIVE);
+        println!(
+            "[T8 measured] cold load_graph (miss, reads+deserializes graph.json) = {:?}; \
+             warm (hit, mtime walk only) = {:?}; cold/warm ratio = {:.1}x",
+            cold, warm, ratio
+        );
+        // Sanity only (not a perf gate): warm must not be slower than cold.
+        assert!(warm <= cold, "warm ({warm:?}) should not exceed cold ({cold:?})");
     }
 }

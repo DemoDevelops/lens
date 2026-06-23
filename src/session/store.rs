@@ -93,6 +93,8 @@ impl SessionStore {
              );
              CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id);
              CREATE INDEX IF NOT EXISTS idx_events_project ON session_events(project);
+             CREATE INDEX IF NOT EXISTS idx_events_session_ts
+                 ON session_events(session_id, timestamp);
              CREATE TABLE IF NOT EXISTS session_meta (
                 session_id    TEXT PRIMARY KEY,
                 project       TEXT NOT NULL,
@@ -130,12 +132,14 @@ impl SessionStore {
     pub fn insert_events(&self, events: &[Event]) -> Result<usize> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
-        for e in events {
-            tx.execute(
+        {
+            let mut stmt = tx.prepare_cached(
                 "INSERT INTO session_events
                    (session_id, project, timestamp, category, priority, payload, source_hook)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
+            )?;
+            for e in events {
+                stmt.execute(rusqlite::params![
                     e.session_id,
                     e.project,
                     e.timestamp,
@@ -143,8 +147,8 @@ impl SessionStore {
                     e.priority,
                     e.payload.to_string(),
                     e.source_hook,
-                ],
-            )?;
+                ])?;
+            }
         }
         tx.commit()?;
         if let Some(g) = &self.global {
@@ -234,13 +238,13 @@ impl SessionStore {
     /// Bump a session's compaction counter, returning the new value.
     pub fn increment_compact_count(&self, session_id: &str) -> Result<i64> {
         let conn = self.conn()?;
-        conn.execute(
-            "UPDATE session_meta SET compact_count = compact_count + 1 WHERE session_id = ?1",
-            [session_id],
-        )?;
+        // Increment and read the new value in one statement. An unknown session
+        // matches no row, so RETURNING yields nothing and we report 0 (matching
+        // the prior separate-SELECT path's `unwrap_or(0)`).
         let n: i64 = conn
             .query_row(
-                "SELECT compact_count FROM session_meta WHERE session_id = ?1",
+                "UPDATE session_meta SET compact_count = compact_count + 1
+                 WHERE session_id = ?1 RETURNING compact_count",
                 [session_id],
                 |r| r.get(0),
             )
@@ -249,57 +253,46 @@ impl SessionStore {
     }
 
     /// Aggregate hook-captured activity, optionally scoped to one session.
-    /// Read-only: aggregates rows in Rust so the (bounded, per-session) event
-    /// set needs no extra indexes or grouped queries.
+    /// Read-only: the `WHERE`/`GROUP BY` run in SQL (covered by
+    /// `idx_events_session_ts`), so we never scan rows from other sessions.
     pub fn activity(&self, session: Option<&str>, since: Option<i64>) -> Result<Activity> {
         let conn = self.conn()?;
-        let mut stmt = conn
-            .prepare("SELECT session_id, category, source_hook, timestamp FROM session_events")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        })?;
+        // Shared filter, byte-for-byte equivalent to the prior Rust path:
+        // `session` -> exact session match; `since` -> keep ts >= cut (the Rust
+        // path skipped `ts < cut`, a half-open lower bound).
+        let (where_sql, params) = activity_filter(session, since);
 
-        let mut by_cat: BTreeMap<String, i64> = BTreeMap::new();
-        let mut by_hook: BTreeMap<String, i64> = BTreeMap::new();
-        let mut sessions: BTreeSet<String> = BTreeSet::new();
-        let mut total = 0i64;
-        let mut last_ts: Option<i64> = None;
-        for (sid, cat, hook, ts) in rows.flatten() {
-            if let Some(f) = session {
-                if sid != f {
-                    continue;
-                }
-            }
-            // `since` cutoff: keep only events at/after it (the dashboard's
-            // "live since the page loaded" scope).
-            if let Some(cut) = since {
-                if ts < cut {
-                    continue;
-                }
-            }
-            total += 1;
-            *by_cat.entry(cat).or_insert(0) += 1;
-            *by_hook.entry(hook).or_insert(0) += 1;
-            sessions.insert(sid);
-            last_ts = Some(last_ts.map_or(ts, |p| p.max(ts)));
-        }
+        // Scalar plane: total rows, distinct sessions, and the max timestamp
+        // (NULL over zero rows -> None, matching the prior `Option` accumulator).
+        let (total, sessions, last_ts): (i64, i64, Option<i64>) = conn.query_row(
+            &format!(
+                "SELECT count(*), count(DISTINCT session_id), max(timestamp)
+                 FROM session_events{where_sql}"
+            ),
+            rusqlite::params_from_iter(params.iter()),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
 
-        let sort_desc = |m: BTreeMap<String, i64>| {
-            let mut v: Vec<(String, i64)> = m.into_iter().collect();
-            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            v
+        // Grouped planes. `ORDER BY count DESC, key ASC` reproduces the prior
+        // `sort_desc` tie-break exactly: SQLite's default BINARY collation orders
+        // TEXT byte-wise, identical to Rust's `str` `Ord`.
+        let grouped = |column: &str| -> Result<Vec<(String, i64)>> {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {column}, count(*) FROM session_events{where_sql}
+                 GROUP BY {column} ORDER BY count(*) DESC, {column} ASC"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         };
+
         Ok(Activity {
             total_events: total,
-            sessions: sessions.len() as i64,
+            sessions,
             last_ts,
-            by_category: sort_desc(by_cat),
-            by_hook: sort_desc(by_hook),
+            by_category: grouped("category")?,
+            by_hook: grouped("source_hook")?,
         })
     }
 
@@ -315,19 +308,26 @@ impl SessionStore {
         n: usize,
     ) -> Result<Vec<i64>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare("SELECT session_id, timestamp FROM session_events")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        // Push the row filter into SQL (covered by `idx_events_session_ts`) so we
+        // never scan other sessions or out-of-window rows: `BETWEEN` is the closed
+        // interval `[start, end]`, matching the prior `ts < start || ts > end` skip.
+        // The float bucket assignment stays in Rust, bit-for-bit identical to the
+        // prior path: SQLite integer division would diverge from this f64 clamp at
+        // bucket edges (e.g. 28.999.. truncating to 28, where i64 math yields 29).
+        let mut where_sql = String::from(" WHERE timestamp BETWEEN ?1 AND ?2");
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&start, &end];
+        if let Some(f) = session.as_ref() {
+            where_sql.push_str(" AND session_id = ?3");
+            params.push(f);
+        }
+        let mut stmt = conn.prepare(&format!(
+            "SELECT timestamp FROM session_events{where_sql}"
+        ))?;
+        let rows = stmt.query_map(params.as_slice(), |r| r.get::<_, i64>(0))?;
         let span = (end - start).max(1);
         let mut b = vec![0i64; n];
-        for (sid, ts) in rows.flatten() {
-            if let Some(f) = session {
-                if sid != f {
-                    continue;
-                }
-            }
-            if ts < start || ts > end {
-                continue;
-            }
+        for ts in rows {
+            let ts = ts?;
             let i = (((ts - start) as f64 / span as f64).clamp(0.0, 1.0) * n as f64) as usize;
             b[i.min(n - 1)] += 1;
         }
@@ -404,6 +404,32 @@ impl SessionStore {
             None => Ok(None),
         }
     }
+}
+
+/// Build the shared `WHERE` clause + bound params for [`SessionStore::activity`].
+/// Returns the SQL fragment (empty when unscoped) and the owned positional params.
+/// `session` matches one id exactly; `since` keeps `timestamp >= cut` (the prior
+/// Rust path's half-open lower bound, which skipped `ts < cut`).
+fn activity_filter(
+    session: Option<&str>,
+    since: Option<i64>,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut clauses: Vec<&str> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(s) = session {
+        params.push(Box::new(s.to_string()));
+        clauses.push("session_id = ?");
+    }
+    if let Some(cut) = since {
+        params.push(Box::new(cut));
+        clauses.push("timestamp >= ?");
+    }
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    (where_sql, params)
 }
 
 /// The machine-global `session.db` mirror for a per-repo `local` store: `home_root()`
@@ -637,5 +663,179 @@ mod tests {
         assert_eq!(s.increment_compact_count("s1").unwrap(), 1);
         assert_eq!(s.increment_compact_count("s1").unwrap(), 2);
         assert_eq!(s.compact_count("s1").unwrap(), 2);
+    }
+
+    // ── SQL-pushdown equivalence ────────────────────────────────────────────
+    //
+    // The pre-pushdown `activity`/`event_buckets` filtered+grouped in Rust over a
+    // full-table scan. These reference fns reproduce that exact logic; the test
+    // asserts the SQL-backed methods equal them structurally on a deliberately
+    // adversarial dataset (multiple sessions, categories, on-boundary timestamps,
+    // an empty bucket).
+
+    /// Verbatim copy of the prior Rust-filter `activity` aggregation.
+    fn ref_activity(events: &[Event], session: Option<&str>, since: Option<i64>) -> Activity {
+        let mut by_cat: BTreeMap<String, i64> = BTreeMap::new();
+        let mut by_hook: BTreeMap<String, i64> = BTreeMap::new();
+        let mut sessions: BTreeSet<String> = BTreeSet::new();
+        let mut total = 0i64;
+        let mut last_ts: Option<i64> = None;
+        for e in events {
+            if let Some(f) = session {
+                if e.session_id != f {
+                    continue;
+                }
+            }
+            if let Some(cut) = since {
+                if e.timestamp < cut {
+                    continue;
+                }
+            }
+            total += 1;
+            *by_cat.entry(e.category.clone()).or_insert(0) += 1;
+            *by_hook.entry(e.source_hook.clone()).or_insert(0) += 1;
+            sessions.insert(e.session_id.clone());
+            last_ts = Some(last_ts.map_or(e.timestamp, |p| p.max(e.timestamp)));
+        }
+        let sort_desc = |m: BTreeMap<String, i64>| {
+            let mut v: Vec<(String, i64)> = m.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            v
+        };
+        Activity {
+            total_events: total,
+            sessions: sessions.len() as i64,
+            last_ts,
+            by_category: sort_desc(by_cat),
+            by_hook: sort_desc(by_hook),
+        }
+    }
+
+    /// Verbatim copy of the prior Rust-filter `event_buckets` aggregation.
+    fn ref_event_buckets(
+        events: &[Event],
+        session: Option<&str>,
+        start: i64,
+        end: i64,
+        n: usize,
+    ) -> Vec<i64> {
+        let span = (end - start).max(1);
+        let mut b = vec![0i64; n];
+        for e in events {
+            if let Some(f) = session {
+                if e.session_id != f {
+                    continue;
+                }
+            }
+            if e.timestamp < start || e.timestamp > end {
+                continue;
+            }
+            let i = (((e.timestamp - start) as f64 / span as f64).clamp(0.0, 1.0) * n as f64)
+                as usize;
+            b[i.min(n - 1)] += 1;
+        }
+        b
+    }
+
+    fn evh(session: &str, cat: &str, hook: &str, ts: i64) -> Event {
+        Event {
+            session_id: session.into(),
+            project: "/p".into(),
+            timestamp: ts,
+            category: cat.into(),
+            priority: 1,
+            payload: json!({"k": cat}),
+            source_hook: hook.into(),
+        }
+    }
+
+    #[test]
+    fn sql_pushdown_matches_rust_reference() {
+        let dir = tempdir().unwrap();
+        let s = SessionStore::open(dir.path()).unwrap();
+
+        // Window [100, 700], 6 buckets => each bucket spans 100s. Seed events on
+        // the exact bucket edges (100,200,...,700), outside the window (50, 1000),
+        // multiple categories and hooks, across three sessions. Bucket index 3
+        // ([400,500)) is deliberately left empty. Edge timestamps exercise the
+        // float-truncation boundary the SQL path must NOT diverge from.
+        let start = 100i64;
+        let end = 700i64;
+        let n = 6usize;
+        let events = vec![
+            evh("s1", "file", "PostToolUse", 50),    // before window: excluded
+            evh("s1", "file", "PostToolUse", 100),   // lower edge -> bucket 0
+            evh("s1", "git", "PostToolUse", 199),    // bucket 0
+            evh("s2", "file", "PreToolUse", 200),    // bucket 1
+            evh("s2", "error", "PreToolUse", 250),   // bucket 1
+            evh("s1", "file", "PostToolUse", 300),   // bucket 2
+            evh("s3", "task", "UserPromptSubmit", 350), // bucket 2
+            // (no events in [400,500) -> empty bucket 3)
+            evh("s2", "file", "PreToolUse", 550),    // bucket 4
+            evh("s1", "error", "PostToolUse", 600),  // bucket 5 (upper-half edge)
+            evh("s3", "file", "PostToolUse", 700),   // upper edge -> clamped into last bucket
+            evh("s3", "git", "PostToolUse", 1000),   // after window: excluded
+            // duplicate category/session to drive count ties & distinct-session count
+            evh("s2", "file", "PreToolUse", 660),    // bucket 5
+            evh("s1", "git", "PostToolUse", 120),    // bucket 0
+        ];
+        s.insert_events(&events).unwrap();
+
+        // activity: every scope the dashboard uses must match the reference exactly.
+        for session in [None, Some("s1"), Some("s2"), Some("s3"), Some("absent")] {
+            for since in [None, Some(0), Some(200), Some(250), Some(701), Some(2000)] {
+                let got = s.activity(session, since).unwrap();
+                let want = ref_activity(&events, session, since);
+                assert_eq!(
+                    got.total_events, want.total_events,
+                    "total mismatch session={session:?} since={since:?}"
+                );
+                assert_eq!(got.sessions, want.sessions, "sessions session={session:?} since={since:?}");
+                assert_eq!(got.last_ts, want.last_ts, "last_ts session={session:?} since={since:?}");
+                assert_eq!(
+                    got.by_category, want.by_category,
+                    "by_category session={session:?} since={since:?}"
+                );
+                assert_eq!(
+                    got.by_hook, want.by_hook,
+                    "by_hook session={session:?} since={since:?}"
+                );
+            }
+        }
+
+        // event_buckets: full vector equality, including the empty bucket and the
+        // on-edge timestamps. Exercise several windows / bucket counts.
+        for session in [None, Some("s1"), Some("s2"), Some("s3"), Some("absent")] {
+            for &(st, en, nn) in &[
+                (start, end, n),
+                (0, 1000, 10),
+                (100, 700, 60),
+                (200, 200, 4), // degenerate span -> clamped to 1
+                (300, 350, 3),
+            ] {
+                let got = s.event_buckets(session, st, en, nn).unwrap();
+                let want = ref_event_buckets(&events, session, st, en, nn);
+                assert_eq!(
+                    got, want,
+                    "buckets session={session:?} start={st} end={en} n={nn}"
+                );
+            }
+        }
+
+        // The empty bucket is genuinely present in the canonical window.
+        let canonical = s.event_buckets(None, start, end, n).unwrap();
+        assert_eq!(canonical.len(), n);
+        assert_eq!(canonical[3], 0, "bucket [400,500) must be empty");
+        assert!(canonical[0] >= 3, "lower-edge events land in bucket 0");
+
+        // increment_compact_count: one-statement UPDATE...RETURNING returns the
+        // incremented value across repeated calls, and reads back consistently.
+        s.ensure_session("c1", "/p", 1).unwrap();
+        assert_eq!(s.increment_compact_count("c1").unwrap(), 1);
+        assert_eq!(s.increment_compact_count("c1").unwrap(), 2);
+        assert_eq!(s.increment_compact_count("c1").unwrap(), 3);
+        assert_eq!(s.compact_count("c1").unwrap(), 3);
+        // Unknown session: no row updated -> 0 (matches the prior unwrap_or(0)).
+        assert_eq!(s.increment_compact_count("never-seen").unwrap(), 0);
     }
 }

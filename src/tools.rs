@@ -249,7 +249,7 @@ pub struct PathResponse {
 pub struct EmptyRequest {}
 
 // ---------------------------------------------------------------------------
-// ctx_stats
+// lens_stats
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]

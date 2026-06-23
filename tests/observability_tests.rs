@@ -84,7 +84,7 @@ async fn every_tool_call_logs_one_correct_record() {
     call("lens_map", json!({ "path": "." })).await;
     call("lens_symbol", json!({ "name": "helper" })).await;
     call("lens_path", json!({ "from": "main", "to": "helper" })).await;
-    call("ctx_stats", json!({})).await;
+    call("lens_stats", json!({})).await;
     client.cancel().await.ok();
 
     // 8 successful tool calls -> exactly 8 records, all well-formed.

@@ -63,7 +63,7 @@ claude mcp add lens -- /absolute/path/to/target/release/lens
 }
 ```
 
-After adding, restart Claude Code and verify with a quick `ctx_stats` call.
+After adding, restart Claude Code and verify with a quick `lens_stats` call.
 
 ## Install session continuity (optional)
 
@@ -91,8 +91,20 @@ disable it too (it isn't auto-detected, but it will double-fire). `install` is
 idempotent and `uninstall` removes only lens-owned entries, so unrelated
 hooks are never touched.
 
-Install is per-user by default (`~/.claude/settings.json`); point it elsewhere
-with `LENS_SETTINGS=/path/to/settings.json`.
+**Choosing the config folder.** Install targets, in precedence order:
+`--config-dir <dir>` (or `--settings <file>`), then `LENS_SETTINGS`, then
+`$CLAUDE_CONFIG_DIR` (the dir the running Claude Code reads), then `~/.claude`.
+So with separate accounts (e.g. a personal `~/.claude-personal` and a work
+`~/.claude`):
+
+```
+lens session install --config-dir ~/.claude-personal   # personal
+lens session install --config-dir ~/.claude            # work
+```
+
+`status`/`uninstall` take the same flag, so point them at the same folder you
+installed into. Run from inside a Claude session and `$CLAUDE_CONFIG_DIR`
+already selects the right account, no flag needed.
 
 ## Tool reference
 
@@ -108,7 +120,7 @@ with `LENS_SETTINGS=/path/to/settings.json`.
 | `lens_links` | Return the local subgraph within N hops of a node id: a symbol's neighborhood or blast radius at a chosen depth. | `{"node_id":"<id>","depth":2}` |
 | `lens_path` | Find the shortest path between two symbols via BFS over graph edges: how A reaches B through the call/import chain. | `{"from":"main","to":"helper"}` |
 | `lens_recall` | Recover the full blob behind a `retrieve_ref` returned by another tool, reversing any truncation or offloading. | `{"ref":"<hash>"}` |
-| `ctx_stats` | Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo. | `{}` |
+| `lens_stats` | Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo. | `{}` |
 
 ## Recommended workflow
 
@@ -121,7 +133,7 @@ with `LENS_SETTINGS=/path/to/settings.json`.
    calls X", "how does A reach B") instead of reading many files.
 5. When a tool returns a `retrieve_ref` (large output / large subgraph), call
    `lens_recall` only if you actually need the full version.
-6. Check `ctx_stats` to see measured savings.
+6. Check `lens_stats` to see measured savings.
 
 ## Auto-routing (opt-in)
 

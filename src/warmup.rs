@@ -309,7 +309,7 @@ mod tests {
             "search finds lib.rs"
         );
 
-        // Count stats recorded for ctx_stats / dashboard.
+        // Count stats recorded for lens_stats / dashboard.
         let store = Store::open(data.path()).unwrap();
         assert!(store.get_stat("graph_nodes").unwrap() >= 3);
         assert!(store.get_stat("index_chunks").unwrap() >= 1);

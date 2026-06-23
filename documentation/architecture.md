@@ -24,7 +24,7 @@ The two halves are installed and used independently:
 
 1. **Savings half (passive MCP server).** Exposes nine tools (`lens_run`,
    `lens_run_file`, `lens_index`, `lens_search`, `lens_map`, `lens_symbol`,
-   `lens_links`, `lens_path`, `lens_recall`, `ctx_stats`). The agent
+   `lens_links`, `lens_path`, `lens_recall`, `lens_stats`). The agent
    *chooses* to call them. The headline primitive is a **darkroom** that runs
    agent-supplied code in a subprocess and returns only what the script prints.
 

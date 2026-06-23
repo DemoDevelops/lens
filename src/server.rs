@@ -160,7 +160,7 @@ impl Forge {
         match darkroom::run_file(&p, exec, &self.repo_dir, &self.store, self.max_inline).await {
             Ok(resp) => {
                 let raw_in = resp.stdout_bytes as u64 + file_size;
-                // Mirror the credit into the persistent counter ctx_stats reads
+                // Mirror the credit into the persistent counter lens_stats reads
                 // (the darkroom already counted stdout; add the file bytes).
                 if file_size > 0 {
                     let _ = self
@@ -478,11 +478,11 @@ impl Forge {
     #[tool(
         description = "Report darkroom usage, estimated tokens saved, and index/graph sizes for this repo's lens state."
     )]
-    async fn ctx_stats(
+    async fn lens_stats(
         &self,
         Parameters(_): Parameters<EmptyRequest>,
     ) -> Result<Json<StatsResponse>, ErrorData> {
-        let op = self.ops.start("ctx_stats", serde_json::json!({}));
+        let op = self.ops.start("lens_stats", serde_json::json!({}));
         let s = &self.store;
         let read = |k: &str| s.get_stat(k).unwrap_or(0);
         let raw = read("raw_bytes_processed");
@@ -532,7 +532,7 @@ impl ServerHandler for Forge {
              lens_path on a scoped subgraph instead of reading many files. (2) where is X \
              mentioned → lens_index then lens_search(queries). (3) derive an answer FROM data \
              or a file → lens_run / lens_run_file. (4) recover an offloaded result → \
-             lens_recall. (5) savings → ctx_stats.\n\
+             lens_recall. (5) savings → lens_stats.\n\
              RULES: DO NOT use Read to analyze a file — use lens_run_file (Read is correct \
              only when you will Edit it). DO NOT use Grep/Bash to count, filter, or aggregate \
              — use lens_search, lens_symbol, or lens_run. DO NOT use WebFetch — fetch and \

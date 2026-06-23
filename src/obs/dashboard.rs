@@ -315,7 +315,7 @@ const TOOL_DESC={
   lens_links:"Return the local subgraph within N hops of a node id: a symbol's neighborhood or blast radius at a chosen depth.",
   lens_path:"Find the shortest path between two symbols via BFS over graph edges: how A reaches B through the call/import chain.",
   lens_recall:"Recover the full blob behind a retrieve_ref returned by another tool, reversing any truncation or offloading.",
-  ctx_stats:"Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo."
+  lens_stats:"Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo."
 };
 let rtkBase=null;
 let scope='repo';

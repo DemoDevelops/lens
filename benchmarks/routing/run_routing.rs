@@ -43,7 +43,15 @@ const N: usize = 100_000;
 
 fn main() {
     // ── classify / is_structurally_bounded: one Aho-Corasick pass ──────────
+    // Warm up first: build the lazy automaton and page in the code so the timed
+    // loop measures steady state. The very first post-build pass is ~1.5x slower
+    // (CPU ramp + cold instruction cache) and would spuriously trip the assert.
     let mut sink = 0usize;
+    for i in 0..N {
+        sink += routing::is_structurally_bounded(CORPUS[i % CORPUS.len()]) as usize;
+    }
+    std::hint::black_box(sink);
+    sink = 0;
     let t = Instant::now();
     for i in 0..N {
         if routing::is_structurally_bounded(CORPUS[i % CORPUS.len()]) {
@@ -58,6 +66,9 @@ fn main() {
     // that recurring cost is what the routing hot path pays.
     let dir = std::env::temp_dir().join(format!("lens-bench-throttle-{}", std::process::id()));
     throttle::mark(&dir, "bench", "k");
+    for _ in 0..N {
+        std::hint::black_box(throttle::fired(&dir, "bench", "k"));
+    }
     let mut sink2 = 0usize;
     let t = Instant::now();
     for _ in 0..N {

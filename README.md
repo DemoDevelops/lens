@@ -1,26 +1,49 @@
 # lens
 
-A Rust tool for Claude Code that cuts an AI coding agent's token use and
-survives context compaction. It has two halves, installed independently:
+AI coding agents burn tokens by reading raw data into context: full file dumps,
+grep floods, build logs, web pages. lens is a Claude Code MCP server that keeps
+that data out of context — your code runs in a darkroom and only what it prints
+comes back. It also ships session-continuity hooks so working state survives
+context compaction.
 
-1. **An MCP server** (token savings) that fuses four deterministic primitives: a
-   **darkroom** that runs code in a subprocess and returns only what the script
-   prints (not the raw data it processed), an **FTS5 search index** over your
-   files, a **tree-sitter code graph** of symbols and relationships, and a
-   **reversible compression store** that offloads large results and hands back a
-   compact view plus a retrieval ref. The darkroom is where most of the savings
-   come from; the other layers are additive.
+Two halves, installed independently:
 
-2. **Session-continuity hooks** (recovery) — a drop-in replacement for the
-   **Context Mode** Claude Code plugin. It captures lifecycle events, builds a
-   priority-tiered resume snapshot when Claude Code compacts the conversation,
-   and re-injects a Session Guide on resume so working state (open files, the
-   task, the last error, decisions) survives the boundary. In the benchmarks it
-   recovers **≥ Context Mode at ~20× lower token cost** (see
-   [BENCHMARKS.md](BENCHMARKS.md)).
+1. **MCP server** (token savings) — four primitives:
+   - **Darkroom**: runs your code in a subprocess; only stdout returns to context
+   - **FTS5 search index**: ranked full-text search across your repo
+   - **Tree-sitter code graph**: symbols and relationships, queryable without reading files
+   - **Reversible compression store**: offloads large results, hands back a compact ref
 
-You can install either half alone. The savings half is a passive MCP server the
-agent calls; the recovery half is active hooks Claude Code fires on its own.
+2. **Session-continuity hooks** (recovery) — drop-in replacement for the Context Mode
+   plugin. Captures working state before compaction and re-injects it on resume.
+
+## Benchmarks
+
+Savings are measured token-in vs token-out per mechanism, at realistic session scale.
+
+| Workload | Mechanism | Before | After | Savings |
+| --- | --- | ---: | ---: | ---: |
+| Code search | index | 160,230 | 9,825 | **94–99%** |
+| Log debugging | darkroom | 7,210 | 517 | **93%** |
+| Issue triage | compression | 94,195 | 36,963 | **~61%** |
+
+Accuracy (real model, `claude-opus-4-8`):
+
+| Task set | Control | lens | Δ |
+| --- | ---: | ---: | ---: |
+| Darkroom tasks | 17% | 100% | +83pp |
+| Discovery tasks | 67% | 100% | +33pp |
+| Search tasks | 100% | 100% | +0pp |
+
+Session recovery vs Context Mode (N=4 each, 100% lens vs 75% CM):
+
+| Scenario | Context Mode tokens | lens tokens |
+| --- | ---: | ---: |
+| File/task recovery | 5,070 | 202 |
+| Error/decision recovery | 5,136 | 302 |
+
+lens matches or beats Context Mode on every scenario at ~25x lower token cost.
+Full methodology and scale curves: [BENCHMARKS.md](BENCHMARKS.md) and [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md).
 
 ## Prerequisites
 
@@ -39,7 +62,7 @@ than failing silently.
 ## Build
 
 ```
-git clone <repo> && cd lens
+git clone https://github.com/your-org/lens && cd lens
 cargo build --release
 ```
 
@@ -264,29 +287,15 @@ cargo test          # unit + integration + e2e (spawns the real binary)
 cargo clippy -- -D warnings
 ```
 
-To add a language to discovery, add one `LangSpec` (grammar + three queries)
-plus a scope-kinds entry in `src/discovery/extract.rs`. See **DECISIONS.md**
-("Adding a language") for the exact steps.
-
-## Benchmarks
-
-[BENCHMARKS.md](BENCHMARKS.md) is the results-first headline doc (realistic-scale
-savings, accuracy, and the session-recovery head-to-head vs Context Mode);
-[BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md) is the full audit trail (scale
-curves, mechanism classification, the discovery-regression investigation), and
-[benchmarks/README.md](benchmarks/README.md) covers methodology. Savings are
-measured headroom-style (token-in vs token-out, segmented by mechanism); the
-accuracy method is **task-based rather than GSM8K-style** because lens sits
-beside the prompt path (as an MCP tool the agent chooses to call), not inside it,
-so the faithful question is whether tasks stay correct when the agent uses the
-tools instead of reading raw files. Both docs are generated — never hand-edited.
-
 ```sh
 cargo run --bin bench_savings    # savings table (no credentials needed)
 cargo run --bin bench_accuracy   # accuracy harness (real model if ANTHROPIC_API_KEY set, else mock)
 cargo run --bin bench_recovery   # session-recovery head-to-head vs Context Mode
 cargo run --bin bench_report     # regenerate BENCHMARKS.md + BENCHMARKS_APPENDIX.md
 ```
+
+To add a language to discovery, add one `LangSpec` (grammar + three queries)
+plus a scope-kinds entry in `src/discovery/extract.rs`. See [benchmarks/README.md](benchmarks/README.md) for benchmark methodology.
 
 ## License
 

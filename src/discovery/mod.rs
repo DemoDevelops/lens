@@ -5,13 +5,15 @@ pub mod extract;
 pub mod graph;
 pub mod query;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use anyhow::Result;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
+use tree_sitter::Tree;
 
+use extract::FileExtract;
 use graph::{Graph, Node};
 
 use crate::tools::DiscoverResponse;
@@ -49,12 +51,6 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
     // Parallel per-file extraction: parse and extract each file concurrently.
     // Each task owns its own Parser; results are keyed by (path, lang_name) for
     // deterministic reassembly regardless of rayon's completion order.
-    struct FileResult {
-        rel: String,
-        lang_name: String,
-        fx: extract::FileExtract,
-    }
-
     let (file_results, warnings_raw): (Vec<_>, Vec<_>) = files
         .par_iter()
         .filter_map(|file| {
@@ -94,9 +90,29 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
         .collect();
     warnings.sort();
 
+    let file_results: Vec<FileResult> = file_results.into_iter().filter_map(|r| r.ok()).collect();
+
+    Ok(assemble_graph(file_results, warnings))
+}
+
+/// One file's extraction plus the bookkeeping the graph assembly needs. Keyed by
+/// relative path for deterministic reassembly regardless of completion order.
+struct FileResult {
+    rel: String,
+    lang_name: String,
+    fx: extract::FileExtract,
+}
+
+/// Assemble the whole [`Graph`] from per-file extracts. This is the single,
+/// deterministic assembly path used by BOTH the full [`discover`] and the
+/// incremental rediscovery: it sorts the per-file results by relative path, adds
+/// every node/edge in that fixed order, resolves cross-file calls/imports against
+/// the same name index, and applies the same final node/edge sort. Because the
+/// output depends ONLY on the set of `FileResult`s (not on how each was parsed),
+/// feeding it the same extracts always yields a byte-identical graph — which is
+/// how the incremental path stays identical to a from-scratch rebuild.
+fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> DiscoverOutcome {
     // Sort results by relative path for deterministic assembly order.
-    let mut file_results: Vec<FileResult> =
-        file_results.into_iter().filter_map(|r| r.ok()).collect();
     file_results.sort_by(|a, b| a.rel.cmp(&b.rel));
 
     let mut graph = Graph::new();
@@ -168,7 +184,7 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
         warnings,
     };
 
-    Ok(DiscoverOutcome { graph, response })
+    DiscoverOutcome { graph, response }
 }
 
 /// Cheap staleness signature for the graph: every supported source file under
@@ -209,6 +225,159 @@ pub fn source_manifest(root: &Path) -> BTreeMap<String, u64> {
         manifest.insert(rel, mtime);
     }
     manifest
+}
+
+/// One file's cached parse: the source bytes it was parsed from, the resulting
+/// tree-sitter `Tree` (reused as the base for the next incremental parse), and the
+/// extracted symbols/relationships. `Tree` is `Send + Sync` and `FileExtract` holds
+/// only owned primitives, so the whole cache is shareable behind an `Arc<RwLock>`.
+pub struct CachedFile {
+    /// blake3 of the source bytes the cache entry was built from.
+    pub hash: [u8; 32],
+    /// The source text the `tree` was parsed from, retained so the next
+    /// incremental reparse can compute the byte delta against it.
+    pub source: String,
+    pub tree: Tree,
+    pub extract: FileExtract,
+}
+
+/// Per-file parse cache keyed by relative path. Owned by the caller (the server's
+/// `Forge`), passed in so [`discover_incremental`] can reuse unchanged files and
+/// incrementally re-parse changed ones.
+pub type ParseCache = HashMap<String, CachedFile>;
+
+/// Outcome of an incremental rediscovery: the graph (byte-identical to a full
+/// [`discover`]) plus how many files actually required a (re)parse this run.
+pub struct IncrementalOutcome {
+    pub graph: Graph,
+    pub response: DiscoverResponse,
+    /// Number of files parsed from disk this run (changed + new). Unchanged files
+    /// served from `cache` are NOT counted.
+    pub files_reparsed: usize,
+}
+
+/// Rediscover `root`, reparsing ONLY files whose content changed since the last
+/// run and reusing cached extracts for the rest. `cache` is updated in place:
+/// changed/new files get a fresh `(hash, tree, extract)`, deleted files are
+/// dropped. The graph is then assembled by the SAME [`assemble_graph`] path the
+/// full [`discover`] uses, over every file's current `FileExtract`, so the result
+/// is byte-identical to a from-scratch `discover` of the post-edit tree.
+///
+/// `languages` filters by language name exactly as [`discover`] does.
+pub fn discover_incremental(
+    root: &Path,
+    languages: Option<&[String]>,
+    cache: &mut ParseCache,
+) -> Result<IncrementalOutcome> {
+    if !root.exists() {
+        anyhow::bail!("discover root does not exist: {}", root.display());
+    }
+
+    let lang_filter: Option<BTreeSet<String>> =
+        languages.map(|ls| ls.iter().map(|l| l.to_ascii_lowercase()).collect());
+
+    // Collect candidate files deterministically (same walk as `discover`).
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut builder = WalkBuilder::new(root);
+    builder.standard_filters(true);
+    for entry in builder.build().flatten() {
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            files.push(entry.into_path());
+        }
+    }
+    files.sort();
+
+    let mut file_results: Vec<FileResult> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut files_reparsed = 0usize;
+    // Relative paths of supported source files seen this run; cache entries not in
+    // this set are deleted files and get pruned below.
+    let mut live: BTreeSet<String> = BTreeSet::new();
+
+    for file in &files {
+        let ext = match file.extension().and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => continue,
+        };
+        let spec = match extract::spec_for_extension(ext) {
+            Some(s) => s,
+            None => continue,
+        };
+        if let Some(filter) = &lang_filter {
+            if !filter.contains(spec.name) {
+                continue;
+            }
+        }
+        let rel = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .to_string();
+        let source = match std::fs::read(file) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => continue, // non-UTF8: skipped, exactly like `discover`
+            },
+            Err(e) => {
+                warnings.push(format!("{rel}: read error: {e}"));
+                continue;
+            }
+        };
+        live.insert(rel.clone());
+        let hash: [u8; 32] = *blake3::hash(source.as_bytes()).as_bytes();
+
+        // Unchanged: reuse the cached extract verbatim (no parse).
+        if let Some(cached) = cache.get(&rel) {
+            if cached.hash == hash {
+                file_results.push(FileResult {
+                    rel,
+                    lang_name: spec.name.to_string(),
+                    fx: cached.extract.clone(),
+                });
+                continue;
+            }
+        }
+
+        // Changed (have a prior tree) → incremental reparse from the retained old
+        // source + tree; new file → fresh parse.
+        let parsed = match cache.remove(&rel) {
+            Some(prev) => {
+                extract::reparse_incremental(&rel, &prev.source, &source, prev.tree, &spec)
+            }
+            None => extract::extract_file_with_tree(&rel, &source, &spec),
+        };
+        match parsed {
+            Some((fx, tree)) => {
+                files_reparsed += 1;
+                cache.insert(
+                    rel.clone(),
+                    CachedFile {
+                        hash,
+                        source: source.clone(),
+                        tree,
+                        extract: fx.clone(),
+                    },
+                );
+                file_results.push(FileResult {
+                    rel,
+                    lang_name: spec.name.to_string(),
+                    fx,
+                });
+            }
+            None => warnings.push(format!("{rel}: failed to parse, skipped")),
+        }
+    }
+
+    // Prune cache entries for files that no longer exist (deletions).
+    cache.retain(|path, _| live.contains(path));
+
+    warnings.sort();
+    let DiscoverOutcome { graph, response } = assemble_graph(file_results, warnings);
+    Ok(IncrementalOutcome {
+        graph,
+        response,
+        files_reparsed,
+    })
 }
 
 #[cfg(test)]
@@ -313,5 +482,121 @@ mod tests {
         assert_eq!(r1, r3, "run 1 vs run 3 differ");
         // Sanity: we got nodes from all three files.
         assert!(r1.0.len() >= 3, "expected at least 3 nodes, got {}", r1.0.len());
+    }
+
+    /// THE hard gate for T11: the incremental rediscovery path must produce a graph
+    /// BYTE-IDENTICAL to a full from-scratch `discover` of the same on-disk tree, for
+    /// an edit, an add, and a delete — and must reparse only the files that changed.
+    ///
+    /// Byte-identity is checked as exact equality of the serialized graph (the form
+    /// persisted to graph.json), which pins both node and edge content AND order.
+    #[test]
+    fn incremental_reparse_is_byte_identical_to_full_rebuild() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.rs");
+        let b = dir.path().join("b.rs");
+        let c = dir.path().join("c.py");
+        fs::write(&a, "fn alpha() { beta(); }\nfn beta() {}\n").unwrap();
+        fs::write(&b, "fn gamma() { alpha(); }\nfn delta() { gamma(); }\n").unwrap();
+        fs::write(&c, "def epsilon():\n    return 1\n\ndef zeta():\n    epsilon()\n").unwrap();
+
+        let json = |g: &Graph| serde_json::to_string(g).unwrap();
+
+        // Prime the cache with a full incremental run over the initial tree. Every
+        // file is new, so all three parse.
+        let mut cache = ParseCache::new();
+        let primed = discover_incremental(dir.path(), None, &mut cache).unwrap();
+        assert_eq!(primed.files_reparsed, 3, "initial run parses every file");
+        assert_eq!(
+            json(&primed.graph),
+            json(&discover(dir.path(), None).unwrap().graph),
+            "primed incremental graph must equal a full rebuild"
+        );
+
+        // (a) EDIT exactly one file. Only it must reparse, and the graph must equal a
+        // full rebuild of the edited tree.
+        fs::write(&a, "fn alpha() { delta(); }\nfn beta() { alpha(); }\n").unwrap();
+        let edited = discover_incremental(dir.path(), None, &mut cache).unwrap();
+        assert_eq!(
+            edited.files_reparsed, 1,
+            "a 1-file edit must reparse exactly 1 file, got {}",
+            edited.files_reparsed
+        );
+        assert_eq!(
+            json(&edited.graph),
+            json(&discover(dir.path(), None).unwrap().graph),
+            "incremental graph after a 1-file edit must be byte-identical to a full rebuild"
+        );
+
+        // (b) ADD a file. Only the new file parses; the graph still matches a full
+        // rebuild.
+        let d = dir.path().join("d.rs");
+        fs::write(&d, "fn omega() { alpha(); }\n").unwrap();
+        let added = discover_incremental(dir.path(), None, &mut cache).unwrap();
+        assert_eq!(added.files_reparsed, 1, "adding 1 file reparses exactly 1");
+        assert_eq!(
+            json(&added.graph),
+            json(&discover(dir.path(), None).unwrap().graph),
+            "incremental graph after an add must be byte-identical to a full rebuild"
+        );
+
+        // (c) DELETE a file. Nothing reparses (no changed/new content), the cache
+        // entry is pruned, and the graph still matches a full rebuild.
+        fs::remove_file(&b).unwrap();
+        let deleted = discover_incremental(dir.path(), None, &mut cache).unwrap();
+        assert_eq!(
+            deleted.files_reparsed, 0,
+            "a pure deletion reparses no files, got {}",
+            deleted.files_reparsed
+        );
+        assert!(
+            !cache.contains_key("b.rs"),
+            "deleted file must be pruned from the cache"
+        );
+        assert_eq!(
+            json(&deleted.graph),
+            json(&discover(dir.path(), None).unwrap().graph),
+            "incremental graph after a delete must be byte-identical to a full rebuild"
+        );
+    }
+
+    /// Measured (not a gate): full `discover` of lens's own `src/` vs an incremental
+    /// rediscovery after a single 1-byte edit. Reports the speedup. Run with
+    /// `--nocapture` to see it.
+    #[test]
+    fn measure_incremental_vs_full_on_src() {
+        use std::time::Instant;
+
+        // lens's own source tree (this test runs from the crate root).
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        if !src.exists() {
+            return; // be robust if run from an unusual layout
+        }
+
+        // Full build timing (cold parse of every file).
+        let t = Instant::now();
+        let full = discover(&src, None).unwrap();
+        let full_ms = t.elapsed();
+
+        // Prime the cache, then make a tiny edit to one file in a temp copy is heavy;
+        // instead drive the SAME tree but flip one cached file's hash so exactly one
+        // file is treated as changed and incrementally reparsed. This isolates the
+        // per-edit cost (1 reparse + reuse-the-rest + assemble) from FS churn.
+        let mut cache = ParseCache::new();
+        let _ = discover_incremental(&src, None, &mut cache).unwrap();
+        if let Some((_k, v)) = cache.iter_mut().next() {
+            v.hash = [0u8; 32]; // force a single-file reparse next run
+        }
+        let t = Instant::now();
+        let inc = discover_incremental(&src, None, &mut cache).unwrap();
+        let inc_ms = t.elapsed();
+
+        let ratio = full_ms.as_secs_f64() / inc_ms.as_secs_f64().max(f64::MIN_POSITIVE);
+        println!(
+            "[T11 measured] full discover(src) = {:?} ({} nodes); incremental after 1-file \
+             change = {:?} (files_reparsed={}); full/incremental ratio = {:.1}x",
+            full_ms, full.response.nodes, inc_ms, inc.files_reparsed, ratio
+        );
+        assert_eq!(inc.files_reparsed, 1, "exactly one file should reparse");
     }
 }

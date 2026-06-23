@@ -206,7 +206,7 @@ fn group_is_lens(group: &Value) -> bool {
     group
         .get("hooks")
         .and_then(|h| h.as_array())
-        .map(|hs| hs.iter().any(|h| command_is_lens(h)))
+        .map(|hs| hs.iter().any(command_is_lens))
         .unwrap_or(false)
 }
 

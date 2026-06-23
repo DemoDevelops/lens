@@ -414,9 +414,7 @@ impl SessionStore {
 fn global_session_path(local: &Path) -> Option<PathBuf> {
     #[cfg(test)]
     {
-        if std::env::var_os("LENS_HOME").is_none() {
-            return None;
-        }
+        std::env::var_os("LENS_HOME")?;
     }
     crate::rtk::home_root()
         .map(|h| h.join("session.db"))

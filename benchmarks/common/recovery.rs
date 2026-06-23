@@ -120,9 +120,8 @@ fn lens_recover(scenario: &Scenario) -> anyhow::Result<String> {
     let store = SessionStore::open(data.path())?;
     let sid = "bench";
     let proj = "/bench";
-    let mut ts = 0i64;
-    for step in &scenario.steps {
-        ts += 1;
+    for (i, step) in scenario.steps.iter().enumerate() {
+        let ts = i as i64 + 1;
         let raws = match step.hook.as_str() {
             "UserPromptSubmit" => {
                 extract::extract_user_events(step.prompt.as_deref().unwrap_or(""))

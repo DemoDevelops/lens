@@ -349,9 +349,12 @@ pub fn issue_triage_at(scale: usize) -> (usize, usize) {
     (before, after)
 }
 
+/// A scale-curve workload: display name, mechanism label, and the size-parameterized fn.
+type ScaleWorkload = (&'static str, &'static str, fn(usize) -> (usize, usize));
+
 /// Compute the full scale curve for the three weak workloads.
 pub fn compute_scale_curve() -> Vec<ScaleRow> {
-    let workloads: [(&str, &str, fn(usize) -> (usize, usize)); 3] = [
+    let workloads: [ScaleWorkload; 3] = [
         ("Code search", "index", code_search_at),
         ("Issue triage", "compression", issue_triage_at),
         ("Codebase exploration", "discovery", codebase_explore_at),

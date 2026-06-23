@@ -307,9 +307,10 @@ fn find_external_refs(text: &str) -> Vec<String> {
         let t = tok.trim_matches(|c: char| {
             !c.is_alphanumeric() && c != ':' && c != '/' && c != '#' && c != '.'
         });
-        if t.starts_with("http://") || t.starts_with("https://") {
-            refs.push(t.to_string());
-        } else if t.starts_with('#') && t.len() > 1 && t[1..].chars().all(|c| c.is_ascii_digit()) {
+        if t.starts_with("http://")
+            || t.starts_with("https://")
+            || (t.starts_with('#') && t.len() > 1 && t[1..].chars().all(|c| c.is_ascii_digit()))
+        {
             refs.push(t.to_string());
         }
     }

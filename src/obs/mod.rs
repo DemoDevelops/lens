@@ -243,9 +243,7 @@ fn rotate_if_needed_at(path: &Path, max_bytes: u64, next_len: u64) {
 fn global_ops_path(local: &Path) -> Option<PathBuf> {
     #[cfg(test)]
     {
-        if std::env::var_os("LENS_HOME").is_none() {
-            return None;
-        }
+        std::env::var_os("LENS_HOME")?;
     }
     crate::rtk::home_root()
         .map(|h| h.join("ops.log"))

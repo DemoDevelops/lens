@@ -319,6 +319,7 @@ const TOOL_DESC={
 };
 let rtkBase=null;
 let scope='repo';
+try{const s=localStorage.getItem('lens_scope');if(s==='global'||s==='repo')scope=s;}catch(e){}
 
 // Time window: the backend /api/stats?since= cutoff scopes ops + session activity.
 // "live" = since the page opened (default). Concrete clock times ("since 2:00 PM") and
@@ -340,7 +341,15 @@ function addOpt(label,val){const o=document.createElement('option');o.textConten
   }
   addOpt('all time','all'); addOpt('custom…','custom');
 })();
-winSel.value='all';
+// Restore the last-picked window, but only if its option still exists: the concrete
+// "since 2pm" marks regenerate per current hour, so an old absolute pick may be gone —
+// fall back to all time then. Presets ('live','15m',…) always exist and recompute now.
+(function restoreWin(){
+  let w='all';
+  try{const s=localStorage.getItem('lens_win');if(s)w=s;const a=localStorage.getItem('lens_winat');if(a!=null)winAt.value=a;}catch(e){}
+  if(![...winSel.options].some(o=>o.value===w)) w='all';
+  winSel.value=w; applyWinValue(w);
+})();
 function presetSince(m){
   const now=Math.floor(Date.now()/1000);
   if(m==='all') return 0;
@@ -373,23 +382,33 @@ function winLabel(){
   return 'since '+at; // custom text
 }
 function applyWin(){tick();}
-winSel.addEventListener('change',function(){
-  const v=this.value;
+// Update window state from a selector value, without ticking or focusing — shared by
+// the change handler and the on-load restore.
+function applyWinValue(v){
   winAt.style.display = v==='custom'?'':'none';
-  if(v==='custom'){ winMode='custom'; const u=parseTime(winAt.value); if(u!=null){activeSince=u;applyWin();} winAt.focus(); return; }
-  if(v.indexOf('at:')===0){ winMode='at'; atLabel=this.options[this.selectedIndex].text; activeSince=parseInt(v.slice(3),10); }
+  if(v==='custom'){ winMode='custom'; const u=parseTime(winAt.value); if(u!=null) activeSince=u; return; }
+  if(v.indexOf('at:')===0){ winMode='at'; atLabel=winSel.options[winSel.selectedIndex].text; activeSince=parseInt(v.slice(3),10); }
   else { winMode=v; activeSince=presetSince(v); }
+}
+winSel.addEventListener('change',function(){
+  applyWinValue(this.value);
+  try{localStorage.setItem('lens_win',this.value);}catch(e){}
+  if(this.value==='custom') winAt.focus();
   applyWin();
 });
-function commitCustom(){ if(winMode!=='custom') return; const u=parseTime(winAt.value); if(u!=null){activeSince=u;applyWin();} else { winAt.style.borderColor='var(--bad)'; setTimeout(function(){winAt.style.borderColor='';},800); } }
+function commitCustom(){ if(winMode!=='custom') return; const u=parseTime(winAt.value); if(u!=null){activeSince=u;try{localStorage.setItem('lens_winat',winAt.value);}catch(e){}applyWin();} else { winAt.style.borderColor='var(--bad)'; setTimeout(function(){winAt.style.borderColor='';},800); } }
 winAt.addEventListener('change',commitCustom);
 winAt.addEventListener('keydown',function(e){if(e.key==='Enter')commitCustom();});
 winAt.style.display='none';
 const scopeBtn=document.getElementById('scope');
+// Reflect the restored scope on the button before the first tick.
+scopeBtn.textContent = scope==='global' ? 'all repos' : 'this repo';
+scopeBtn.classList.toggle('on', scope==='global');
 scopeBtn.addEventListener('click',function(){
   scope = scope==='repo' ? 'global' : 'repo';
   this.textContent = scope==='global' ? 'all repos' : 'this repo';
   this.classList.toggle('on', scope==='global');
+  try{localStorage.setItem('lens_scope',scope);}catch(e){}
   tick();
 });
 

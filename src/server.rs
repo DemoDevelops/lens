@@ -765,10 +765,10 @@ impl Forge {
     fn ensure_graph(&self) -> Result<(), ErrorData> {
         let current = discovery::source_manifest(&self.repo_dir);
         if let Ok(g) = Graph::load(&self.graph_file()) {
-            if !g.nodes.is_empty() {
-                if read_manifest(&self.graph_manifest_file()).as_ref() == Some(&current) {
-                    return Ok(()); // present and up to date
-                }
+            if !g.nodes.is_empty()
+                && read_manifest(&self.graph_manifest_file()).as_ref() == Some(&current)
+            {
+                return Ok(()); // present and up to date
             }
         }
         let op = self

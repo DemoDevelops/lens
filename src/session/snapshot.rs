@@ -136,10 +136,10 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     let gits: Vec<String> = events
         .iter()
         .filter(|e| e.category == "git")
-        .filter_map(|e| {
+        .map(|e| {
             let op = e.payload.get("op").and_then(|v| v.as_str()).unwrap_or("?");
             let cmd = e.payload.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
-            Some(format!("{op}: {}", cap(cmd, 100)))
+            format!("{op}: {}", cap(cmd, 100))
         })
         .collect();
     if !gits.is_empty() {
@@ -253,7 +253,7 @@ pub fn build_snapshot(events: &[Event], budget: usize, compact_count: i64) -> St
     if let Some((top, _)) = intent.first() {
         sections.push(Section {
             rank: 10,
-            text: section("Session Intent", &[top.clone()]),
+            text: section("Session Intent", std::slice::from_ref(top)),
         });
     }
 

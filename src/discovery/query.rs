@@ -137,8 +137,8 @@ fn tokenize(s: &str) -> Vec<String> {
     out
 }
 
-/// Lexical score of a symbol `name` against query `tokens`: exact (3) > prefix (2)
-/// > substring (1) per token, summed over distinct hitting tokens, plus a bonus of
+/// Lexical score of a symbol `name` against query `tokens`: exact (3) > prefix (2) >
+/// substring (1) per token, summed over distinct hitting tokens, plus a bonus of
 /// 2 per hit beyond the first so multi-token matches outrank single-token ones.
 fn score_name(name: &str, tokens: &[String]) -> u32 {
     let lname = name.to_ascii_lowercase();

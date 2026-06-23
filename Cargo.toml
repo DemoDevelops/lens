@@ -52,6 +52,10 @@ path = "benchmarks/changes/run_changes.rs"
 name = "bench_routing"
 path = "benchmarks/routing/run_routing.rs"
 
+[[bin]]
+name = "bench_hotpaths"
+path = "benchmarks/hotpaths/run_hotpaths.rs"
+
 [dependencies]
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync"] }
@@ -78,6 +82,8 @@ regex = "1"
 aho-corasick = "1"
 shell-words = "1"
 tree-sitter-swift = "0.6"
+foldhash = "0.1"
+rayon = "1"
 
 [dev-dependencies]
 assert_cmd = "2"

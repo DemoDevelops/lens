@@ -130,7 +130,7 @@ fn c2_proximity() -> anyhow::Result<(String, bool)> {
         .map(|p| p + 1)
         .unwrap_or(0);
 
-    let boosted = gquery::query(g, &q, None, 50, &[focus_file.clone()]);
+    let boosted = gquery::query(g, &q, None, 50, std::slice::from_ref(&focus_file));
     let after = boosted
         .nodes
         .iter()

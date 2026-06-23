@@ -1,7 +1,6 @@
 //! PreToolUse routing policy — pass through, deny, rewrite, or nudge a tool call.
 //!
-//! Gated by `LENS_ROUTING` (off|steer|wrap|full); default `off` is a true
-//! no-op (PreToolUse returns `{}`). Three concerns layer on top of `off`:
+//! Gated by `LENS_ROUTING` (off|steer|wrap|full); default `full`. Three concerns layer:
 //!
 //!   * **steer** — deny `WebFetch`; redirect curl/wget/build/inline-HTTP `Bash`
 //!     commands into `lens_run`; inject the tool-selection guide into every
@@ -51,9 +50,9 @@ impl Level {
         }
     }
 
-    /// Read the level from `LENS_ROUTING` (unset => `off`).
+    /// Read the level from `LENS_ROUTING` (unset => `full`).
     pub fn from_env() -> Level {
-        Level::parse(&std::env::var("LENS_ROUTING").unwrap_or_default())
+        Level::parse(&std::env::var("LENS_ROUTING").unwrap_or_else(|_| "full".to_string()))
     }
 
     /// Whether this level steers: WebFetch deny, Bash/Grep/Read nudges, and the

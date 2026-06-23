@@ -109,10 +109,9 @@ lens session uninstall   # remove only lens's entries, leave others intact
 
 **Conflict guard.** lens and Context Mode both fire on the same lifecycle
 events, so `install` **refuses** to run while Context Mode is enabled — uninstall
-it first (`/plugin uninstall context-mode`). If you also run RTK on these events,
-disable it too (it isn't auto-detected, but it will double-fire). `install` is
-idempotent and `uninstall` removes only lens-owned entries, so unrelated
-hooks are never touched.
+it first (`/plugin uninstall context-mode`). RTK is installed automatically as
+part of `session install`. `install` is idempotent and `uninstall` removes only
+lens-owned entries, so unrelated hooks are never touched.
 
 **Choosing the config folder.** Install targets, in precedence order:
 `--config-dir <dir>` (or `--settings <file>`), then `LENS_SETTINGS`, then
@@ -165,13 +164,11 @@ adds **interception at the hook layer** so savings happen automatically — the
 `PreToolUse` hook can deny, transparently rewrite, or nudge a built-in tool call,
 and `SessionStart` injects a short tool-selection guide.
 
-It is gated by `LENS_ROUTING` and **defaults to `off` (a true no-op:
-`PreToolUse` returns `{}`, identical to having no routing at all).** The four
-levels are the rollout — flip the level to widen the behavior:
+It is gated by `LENS_ROUTING` and **defaults to `full`.** The four levels:
 
 | `LENS_ROUTING` | Behavior |
 | :- | :- |
-| `off` (default) | Nothing. `PreToolUse` returns `{}`. |
+| `off` | Nothing. `PreToolUse` returns `{}`. |
 | `steer` | `WebFetch` → **deny** (fetch+process via `lens_run` instead); periodic per-tool guidance for `Bash`/`Grep`; inject the authoritative `SessionStart` tool-selection directive (`<context_window_protection>`: the *why*, a graph-first hierarchy, a nuanced when-not-to-use, and a deferred-tool `ToolSearch` bootstrap). No rewriting. |
 | `wrap` | Transparently rewrite allowlisted read-only `Bash` commands to `lens wrap -- <cmd>` (deterministic savings, no reliance on model compliance). No deny/nudges. |
 | `full` | `steer` + `wrap` together, plus periodic `Read`→`lens_run_file` guidance. |
@@ -270,7 +267,7 @@ binary by absolute path.)
 | :- | :- | :- |
 | `LENS_DIR` | `<project>/.lens` | Where `index.db`, `store.db`, and `graph.json` live. |
 | `LENS_MAX_INLINE` | `8192` | Stdout/subgraph byte threshold before offloading to the store. |
-| `LENS_ROUTING` | `off` | Auto-routing level: `off` \| `steer` \| `wrap` \| `full` (see above). |
+| `LENS_ROUTING` | `full` | Auto-routing level: `off` \| `steer` \| `wrap` \| `full` (see above). |
 | `LENS_ROUTING_MCP` | *(auto)* | Override the MCP-ready guard: `up` forces routing on, `down` forces passthrough. Default reads the `server.pid` heartbeat. |
 | `LENS_MCP_TTL` | `90` | Seconds the `server.pid` heartbeat stays "fresh" for the routing guard. |
 | `LENS_SNAPSHOT_BUDGET` | `2048` | Byte budget for the session-resume snapshot (recovery half). |

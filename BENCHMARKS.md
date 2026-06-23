@@ -16,7 +16,7 @@ Savings move with size, and sometimes the conclusion flips, so each feature is m
 | --- | ---: | ---: | ---: | ---: | --- |
 | Crunch a big file/log, return the answer | 93% | 93% | 93% | 93% | flat |
 | Find where something is across the repo (vs grep) | 3% | 91% | 98% | 100% | **flips** |
-| Shrink repetitive structured data (big JSON) | 56% | 61% | 61% | 61% | flat |
+| Shrink repetitive structured data (big JSON) | 63% | 67% | 67% | 67% | flat |
 | Run a noisy command, keep a preview | 54% | 95% | 99% | 100% | grows |
 | Stop a web page / build log flooding the chat | 100% | 100% | 100% | 100% | flat |
 | Map code structure (round-trips: read each file vs 1 graph call) | 20→4 | 200→4 | 1000→4 | 4000→4 | grows |
@@ -50,7 +50,7 @@ Headline savings are at **realistic session scale**, not the 1× diagnostic fixt
 | --- | --- | ---: | ---: | ---: |
 | Code search | index | 160,230 | 9,825 | **94–99%** |
 | Log debugging | darkroom | 7,210 | 517 | **93%** |
-| Issue triage | compression | 94,195 | 36,963 | **~61%** |
+| Issue triage | compression | 94,195 | 31,323 | **~67%** |
 | Codebase exploration | discovery | 2,606 | 2,094 | see note |
 
 Code search and issue triage are shown at 10× the committed fixture (code search reaches 99% at 50×); log debugging is size-insensitive and shown at the committed fixture. The full 1×/10×/50× curve and the artifact-vs-real classification are in the appendix.

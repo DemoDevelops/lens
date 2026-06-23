@@ -39,18 +39,18 @@ marked pending a real-model run.
 
 | Workload | Before | After | Savings | Mechanism |
 | --- | ---: | ---: | ---: | --- |
-| Code search (results across files) | 3,978 | 2,656 | 33% | index |
+| Code search (results across files) | 3,978 | 2,626 | 34% | index |
 | Log debugging (buried root cause) | 1,802 | 129 | 93% | darkroom |
-| Issue triage (structured payload) | 2,225 | 971 | 56% | compression |
+| Issue triage (structured payload) | 2,225 | 831 | 63% | compression |
 | Codebase exploration (subtree) | 651 | 523 | 20% | discovery |
 
 ### Raw bytes and naive-agent baseline (no /4 to trust)
 
 | Workload | Before (bytes) | After (bytes) | Without lens, the agent… | Detail |
 | --- | ---: | ---: | --- | --- |
-| Code search (results across files) | 15,915 | 10,627 | Agent greps for the terms, then opens every matched file in full to read context. | 6 queries, 30 hits returned, 12 matched files read by the naive path |
+| Code search (results across files) | 15,915 | 10,507 | Agent greps for the terms, then opens every matched file in full to read context. | 6 queries, 30 hits returned, 12 matched files read by the naive path |
 | Log debugging (buried root cause) | 7,210 | 517 | Agent loads the entire log into context to locate the one FATAL line. | grep over 7210 bytes -> 517 bytes of matching lines (+context) |
-| Issue triage (structured payload) | 8,902 | 3,885 | Agent loads the full structured triage payload (minified) into context. | reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file 8903 bytes) |
+| Issue triage (structured payload) | 8,902 | 3,327 | Agent loads the full structured triage payload (minified) into context. | reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file 8903 bytes) |
 | Codebase exploration (subtree) | 2,606 | 2,094 | Agent reads every source file in the subtree to map its structure. | discover summary (30 nodes, 40 edges) + one scoped lens_symbol |
 
 ### Scale curve (real path at 1× / 10× / 50× the committed fixture)
@@ -61,13 +61,13 @@ The §0.1 diagnostic: savings that *rise* with size mean the fixture was too sma
 | --- | --- | ---: | ---: | ---: | ---: |
 | Code search | index | 1× | 15,915 | 9,997 | 37% |
 | Code search | index | 10× | 160,230 | 9,825 | 94% |
-| Code search | index | 50× | 802,110 | 9,860 | 99% |
-| Issue triage | compression | 1× | 8,902 | 3,885 | 56% |
-| Issue triage | compression | 10× | 94,195 | 36,963 | 61% |
-| Issue triage | compression | 50× | 476,155 | 186,487 | 61% |
+| Code search | index | 50× | 802,110 | 9,867 | 99% |
+| Issue triage | compression | 1× | 8,902 | 3,327 | 63% |
+| Issue triage | compression | 10× | 94,195 | 31,323 | 67% |
+| Issue triage | compression | 50× | 476,155 | 158,287 | 67% |
 | Codebase exploration | discovery | 1× | 2,606 | 2,076 | 20% |
-| Codebase exploration | discovery | 10× | 26,690 | 21,870 | 18% |
-| Codebase exploration | discovery | 50× | 134,010 | 385,004 | 0% |
+| Codebase exploration | discovery | 10× | 26,690 | 15,896 | 40% |
+| Codebase exploration | discovery | 50× | 134,010 | 268,573 | 0% |
 
 **Classification.**
 - **Code search (index): artifact.** 37% → 94% → 99%. The mechanism returns a fixed set of capped snippets regardless of corpus size, so savings rise sharply as the naive "read every matched file" baseline grows. The original 33% was the 12-file fixture, not the path.

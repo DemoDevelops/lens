@@ -411,6 +411,31 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (year, m as u32, d)
 }
 
+/// Parse an ISO-8601 `YYYY-MM-DDTHH:MM:SS(.mmm)Z` string (as produced by
+/// [`iso8601`]) back to unix seconds. Millis are ignored. Returns `None` on
+/// malformed input.
+pub fn iso8601_to_secs(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let num = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse().ok() };
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)? as u32, num(8, 10)? as u32);
+    let (hh, mm, ss) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    Some(days_from_civil(y, mo, d) * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// Days since the Unix epoch for a civil date. Inverse of [`civil_from_days`]
+/// (Howard Hinnant; proleptic Gregorian).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let (m, d) = (m as i64, d as i64);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

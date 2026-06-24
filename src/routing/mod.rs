@@ -1,17 +1,18 @@
 //! PreToolUse routing policy — pass through, deny, rewrite, or nudge a tool call.
 //!
-//! Gated by `LENS_ROUTING` (off|steer|wrap|full); default `full`. Three concerns layer:
+//! Gated by `LENS_ROUTING` (off|nudge|steer|wrap|full); default `full`. Concerns layer:
 //!
-//!   * **steer** — deny `WebFetch`; redirect curl/wget/build/inline-HTTP `Bash`
-//!     commands into `lens_run`; inject the tool-selection guide into every
-//!     sub-agent (`Agent`/`Task`) prompt; emit once-per-session non-blocking nudges
-//!     toward lens tools for `Bash` / `Grep` / `Read` (structurally-bounded
-//!     commands are skipped); and a periodic nudge for external (non-lens) MCP
-//!     tools. Also injects the guide at `SessionStart`. (All ports of context-mode's
+//!   * **nudge** — emit once-per-session non-blocking nudges toward lens tools for
+//!     `Bash` / `Grep` / `Read` (structurally-bounded commands are skipped); a
+//!     periodic nudge for external (non-lens) MCP tools; inject the tool-selection
+//!     guide into every sub-agent (`Agent`/`Task`) prompt and at `SessionStart`.
+//!     Never denies, redirects, or rewrites a call. (Ports of context-mode's
 //!     `hooks/core/routing.mjs`.)
+//!   * **steer** — nudge, plus deny `WebFetch` and redirect curl/wget/build/
+//!     inline-HTTP `Bash` commands into `lens_run`.
 //!   * **wrap** — transparently rewrite a read-only, high-output `Bash` command
 //!     into `lens wrap -- <cmd>` so its output is offloaded losslessly.
-//!   * **full** — both of the above.
+//!   * **full** — both steer and wrap.
 //!
 //! Safety rails: MCP-redirect decisions (WebFetch deny, curl/build rewrites) are
 //! gated on [`mcp_ready`] via [`mcp_redirect`] so the agent is never sent to a dead
@@ -34,7 +35,10 @@ pub use classify::is_structurally_bounded;
 pub enum Level {
     /// True no-op: PreToolUse returns `{}`, SessionStart unchanged.
     Off,
-    /// Deny WebFetch + emit one-shot nudges + inject the SessionStart guide.
+    /// Emit one-shot nudges + inject the SessionStart guide, but never deny,
+    /// redirect, or rewrite a call. The least-surprising way to drive adoption.
+    Nudge,
+    /// Nudge, plus deny WebFetch + redirect curl/build Bash into the darkroom.
     Steer,
     /// Transparently wrap read-only high-output Bash commands.
     Wrap,
@@ -47,6 +51,7 @@ impl Level {
     /// Anything unrecognized — including the empty string — is [`Level::Off`].
     pub fn parse(s: &str) -> Level {
         match s.trim().to_ascii_lowercase().as_str() {
+            "nudge" => Level::Nudge,
             "steer" => Level::Steer,
             "wrap" => Level::Wrap,
             "full" => Level::Full,
@@ -59,10 +64,17 @@ impl Level {
         Level::parse(&std::env::var("LENS_ROUTING").unwrap_or_else(|_| "full".to_string()))
     }
 
-    /// Whether this level steers: WebFetch deny, Bash/Grep/Read nudges, and the
-    /// SessionStart guide block.
+    /// Whether this level redirects: WebFetch deny + curl/build Bash rewrites.
+    /// Nudges are gated by [`Level::nudges`] instead, so `Nudge` is excluded here.
     pub(crate) fn steers(self) -> bool {
         matches!(self, Level::Steer | Level::Full)
+    }
+
+    /// Whether this level emits nudges (Bash/Grep/Read/Agent/external-MCP/
+    /// grep-flood) and injects the SessionStart guide. `Nudge` does this without
+    /// denying or redirecting anything.
+    pub(crate) fn nudges(self) -> bool {
+        matches!(self, Level::Nudge | Level::Steer | Level::Full)
     }
 
     /// Whether this level rewrites read-only Bash commands into `lens wrap`.
@@ -280,7 +292,7 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             }
         }
         "Grep" => {
-            if ctx.level.steers() && nudge_once(ctx, "grep") {
+            if ctx.level.nudges() && nudge_once(ctx, "grep") {
                 Decision::Context(GREP_NUDGE.to_string())
             } else {
                 Decision::Passthrough
@@ -295,7 +307,7 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
         // default to Read/Grep/Bash and never touch the lens tools. Inject the
         // guide into the sub-agent's prompt (every call — each is a fresh context).
         "Agent" | "Task" => {
-            if ctx.level.steers() {
+            if ctx.level.nudges() {
                 agent_inject(tool_input, ctx)
             } else {
                 Decision::Passthrough
@@ -305,7 +317,7 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
         // file content, search results). Periodically nudge toward lens_run — a
         // single one-shot nudge gets lost in long MCP-heavy sessions (port of
         // context-mode's #529/#567 periodic external-MCP guidance).
-        other if ctx.level.steers() && is_external_mcp_tool(other) => {
+        other if ctx.level.nudges() && is_external_mcp_tool(other) => {
             if throttle_periodic(ctx, "external-mcp", EXTERNAL_MCP_PERIOD) {
                 Decision::Context(EXTERNAL_MCP_NUDGE.to_string())
             } else {
@@ -324,7 +336,7 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
 /// Steering-only; not gated on `mcp_ready` (a nudge, like the graph escalation).
 /// `tool_response` is the serialized Grep result. One-shot per session.
 pub fn post_route(tool: &str, tool_response: &str, ctx: &RouteCtx) -> Decision {
-    if !ctx.level.steers() {
+    if !ctx.level.nudges() {
         return Decision::Passthrough;
     }
     if tool == "Grep"
@@ -409,7 +421,7 @@ fn grep_flood_bytes() -> usize {
 /// session's code-read count crosses [`READ_GRAPH_THRESHOLD`] the graph-specific
 /// nudge fires, then again every [`READ_GRAPH_PERIOD`]-th read after.
 fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
-    if !ctx.level.steers() {
+    if !ctx.level.nudges() {
         return Decision::Passthrough;
     }
     let is_code = tool_input["file_path"]
@@ -487,7 +499,7 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 reason: WRAP_REASON.to_string(),
                 updated_input: updated,
             }
-        } else if ctx.level.steers() && nudge_once(ctx, "bash") {
+        } else if ctx.level.nudges() && nudge_once(ctx, "bash") {
             Decision::Context(BASH_NUDGE.to_string())
         } else {
             Decision::Passthrough
@@ -860,7 +872,7 @@ pub fn mcp_ready(data_dir: &Path) -> bool {
 /// (prose adapted from `hooks/routing-block.mjs`, tool names mapped to lens): the
 /// *why*, a hierarchy that puts the code graph first, a nuanced when-NOT-to-use,
 /// and a deferred-tool ToolSearch bootstrap. `_level` is unused (the block is
-/// level-agnostic; the caller already gates injection on `level.steers()`). The
+/// level-agnostic; the caller already gates injection on `level.nudges()`). The
 /// full block; [`session_block_for`] tailors the when-not-to-use bullets.
 pub fn session_block(_level: Level) -> String {
     session_block_with(true, true)
@@ -951,15 +963,17 @@ mod tests {
         assert_eq!(Level::parse(""), Level::Off);
         assert_eq!(Level::parse("   "), Level::Off);
         assert_eq!(Level::parse("off"), Level::Off);
+        assert_eq!(Level::parse("nudge"), Level::Nudge);
         assert_eq!(Level::parse("nonsense"), Level::Off);
     }
 
     #[test]
     fn steers_and_wraps_flags() {
-        assert!(!Level::Off.steers() && !Level::Off.wraps());
-        assert!(Level::Steer.steers() && !Level::Steer.wraps());
-        assert!(!Level::Wrap.steers() && Level::Wrap.wraps());
-        assert!(Level::Full.steers() && Level::Full.wraps());
+        assert!(!Level::Off.steers() && !Level::Off.wraps() && !Level::Off.nudges());
+        assert!(Level::Nudge.nudges() && !Level::Nudge.steers() && !Level::Nudge.wraps());
+        assert!(Level::Steer.steers() && Level::Steer.nudges() && !Level::Steer.wraps());
+        assert!(!Level::Wrap.steers() && !Level::Wrap.nudges() && Level::Wrap.wraps());
+        assert!(Level::Full.steers() && Level::Full.nudges() && Level::Full.wraps());
     }
 
     // ── to_hook_json golden payloads ───────────────────────────────────────

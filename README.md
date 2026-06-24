@@ -33,13 +33,19 @@ Full methodology: [BENCHMARKS.md](BENCHMARKS.md)
 
 ### Quick install (no Rust)
 
-The token-saving MCP tools install in one line, no toolchain required:
+One line installs the prebuilt binary, the MCP tools, and the session hooks (continuity, dashboard, adoption nudges) at the safe `nudge` default:
 
 ```sh
-claude mcp add lens -- npx -y lens-mcp
+curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh
 ```
 
-Restart Claude Code and verify with the `lens_stats` tool. A prebuilt binary for your platform (macOS arm64/x64, Linux x64) is fetched as an npm optional dependency; nothing is built locally and nothing touches your hook config. This installs only the MCP tools (darkroom, search, graph, compression). For the optional session-continuity and routing layer, use "Build from source" below.
+Restart Claude Code and verify with the `lens_stats` tool. No Rust toolchain. The `nudge` default encourages the lens tools but never denies WebFetch or rewrites commands. For the aggressive routing (WebFetch and noisy commands redirected into the darkroom) plus RTK shell compression, add `--full`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh -s -- --full
+```
+
+Supported: macOS (arm64, x64), Linux (x64). The uninstall command is printed when it finishes.
 
 ### Build from source
 

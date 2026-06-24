@@ -59,12 +59,25 @@ bin="$bindir/lens"
 mkdir -p "$bindir"
 
 say "Downloading lens ($target)..."
+downloaded=0
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$url" -o "$bin" || die "download failed: $url"
+  if curl -fsSL "$url" -o "$bin" 2>/dev/null; then downloaded=1; fi
 elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$bin" "$url" || die "download failed: $url"
-else
-  die "need curl or wget to download the binary."
+  if wget -qO "$bin" "$url" 2>/dev/null; then downloaded=1; fi
+fi
+if [ "$downloaded" = "0" ]; then
+  # Public download failed (private repo, or asset missing). Fall back to an
+  # authenticated gh download so the owner can install before going public.
+  command -v gh >/dev/null 2>&1 \
+    || die "download failed and 'gh' not found. If $REPO is private, install GitHub CLI (https://cli.github.com), run 'gh auth login', then re-run."
+  say "Public download failed; pulling via authenticated gh (private repo)..."
+  if [ -n "${LENS_VERSION:-}" ]; then
+    gh release download "$LENS_VERSION" --repo "$REPO" --pattern "lens-$target" --output "$bin" --clobber \
+      || die "gh release download failed. Check 'gh auth status' and your access to $REPO."
+  else
+    gh release download --repo "$REPO" --pattern "lens-$target" --output "$bin" --clobber \
+      || die "gh release download failed. Check 'gh auth status' and your access to $REPO."
+  fi
 fi
 chmod +x "$bin"
 # curl/wget downloads are not quarantined like browser downloads, but strip it

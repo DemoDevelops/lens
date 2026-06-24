@@ -58,35 +58,3 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           files: staged/lens-${{ matrix.target }}
           fail_on_unmatched_files: true
-
-  publish-npm:
-    name: publish to npm
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Stage npm packages
-        run: node npm/scripts/build-packages.mjs
-        env:
-          VERSION: ${{ env.RELEASE_TAG }}
-      - name: Publish (platform packages first, then the launcher)
-        run: |
-          set -e
-          for d in npm/dist/lens-mcp-*/; do
-            echo "publishing $d"
-            npm publish "$d" --access public
-          done
-          echo "publishing npm/dist/lens-mcp/"
-          npm publish npm/dist/lens-mcp/ --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

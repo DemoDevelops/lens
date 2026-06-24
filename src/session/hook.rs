@@ -168,9 +168,10 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             store.insert_events(&events)?;
             // Scale-aware search steer: a Grep whose result floods context gets a
             // one-shot nudge toward lens_search (lens_search only beats grep at scale).
-            // Capture above runs regardless of routing level; the nudge is steer-only.
+            // Capture above runs regardless of routing level; the nudge fires whenever
+            // nudges are active.
             let level = routing::Level::from_env();
-            if level.steers() {
+            if level.nudges() {
                 let rc = routing::RouteCtx {
                     level,
                     mcp_ready: false,
@@ -219,7 +220,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 ts,
                 &source,
             )?;
-            // Prepend the routing tool-selection guide whenever steering is active.
+            // Prepend the routing tool-selection guide whenever nudges are active.
             // NOT gated on mcp_ready (unlike PreToolUse): at SessionStart the MCP
             // server is registered in the same config as this hook and is still
             // booting, so its heartbeat (`server.pid`) usually isn't fresh yet. Gating
@@ -230,7 +231,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             // mcp_ready rail still gates PreToolUse, where denying/rewriting a call the
             // server can't back would be wrong.
             let level = routing::Level::from_env();
-            let ctx = if level.steers() {
+            let ctx = if level.nudges() {
                 // Tailor the guide's per-tool bullets to the tools active this
                 // session; with no tool history (fresh startup) fall back to full.
                 let (bash, file) = active_tool_groups(&store, &session_id);

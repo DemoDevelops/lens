@@ -2,3 +2,5 @@
 /.lens/
 /.ctxforge/
 /dev/
+/npm/dist/
+/artifacts/

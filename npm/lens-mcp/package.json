@@ -1,0 +1,33 @@
+{
+  "name": "lens-mcp",
+  "version": "0.1.0",
+  "description": "A token-saving MCP server: darkroom execution, FTS5 search, tree-sitter code graph, reversible compression.",
+  "bin": {
+    "lens-mcp": "bin/lens.js"
+  },
+  "files": [
+    "bin/lens.js"
+  ],
+  "optionalDependencies": {
+    "lens-mcp-darwin-arm64": "0.1.0",
+    "lens-mcp-darwin-x64": "0.1.0",
+    "lens-mcp-linux-x64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Elastic-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DemoDevelops/lens.git"
+  },
+  "homepage": "https://github.com/DemoDevelops/lens#readme",
+  "keywords": [
+    "mcp",
+    "claude",
+    "claude-code",
+    "tokens",
+    "context",
+    "llm"
+  ]
+}

@@ -31,6 +31,18 @@ Full methodology: [BENCHMARKS.md](BENCHMARKS.md)
 
 ## Install
 
+### Quick install (no Rust)
+
+The token-saving MCP tools install in one line, no toolchain required:
+
+```sh
+claude mcp add lens -- npx -y lens-mcp
+```
+
+Restart Claude Code and verify with the `lens_stats` tool. A prebuilt binary for your platform (macOS arm64/x64, Linux x64) is fetched as an npm optional dependency; nothing is built locally and nothing touches your hook config. This installs only the MCP tools (darkroom, search, graph, compression). For the optional session-continuity and routing layer, use "Build from source" below.
+
+### Build from source
+
 **Prerequisites:** [Rust](https://rustup.rs) stable. Optional: `python3`, `node`/`npx`, `ruby`, `go` — only needed if you run those languages through `lens_run`.
 
 ```sh

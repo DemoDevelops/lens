@@ -58,7 +58,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/accuracy/results");
+    // `LENS_BENCH_OUT` redirects results so concurrent runs don't clobber the
+    // shared committed path (the default), enabling parallel trials.
+    let out_dir = std::env::var_os("LENS_BENCH_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/accuracy/results"));
     std::fs::create_dir_all(&out_dir)?;
     let out_path = out_dir.join(format!("{mode}.json"));
 

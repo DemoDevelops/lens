@@ -56,7 +56,11 @@ async fn main() -> anyhow::Result<()> {
         render_recovery_markdown(&groups, &model.label(), pending)
     );
 
-    let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/recovery/results");
+    // `LENS_BENCH_OUT` redirects results so concurrent runs don't clobber the
+    // shared committed path (the default), enabling parallel trials.
+    let out_dir = std::env::var_os("LENS_BENCH_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/recovery/results"));
     std::fs::create_dir_all(&out_dir)?;
     let payload = serde_json::json!({
         "mode": mode,

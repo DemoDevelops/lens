@@ -29,9 +29,10 @@ use lens::tools::ExecuteRequest;
 /// truncated in the control arm — the regime where naive sessions lose data.
 pub const CONTROL_BUDGET: usize = 2000;
 
-/// bytes / 4, matching `ctx_stats` and the savings suite.
-pub fn est_tokens(bytes: usize) -> usize {
-    bytes / 4
+/// Accurate token count via the offline o200k_base BPE (replaces the old bytes/4
+/// heuristic), so the control/treatment token figures reflect real tokenization.
+pub fn est_tokens(text: &str) -> usize {
+    lens::obs::count_tokens(text)
 }
 
 pub fn accuracy_root() -> PathBuf {
@@ -176,7 +177,7 @@ fn run_arm(task: &Task, model: &Model, context: &str) -> anyhow::Result<ArmResul
     let correct = score(&answer, &task.ground_truth, &task.check, task.tolerance);
     Ok(ArmResult {
         correct,
-        tokens: est_tokens(context.len()),
+        tokens: est_tokens(context),
         context_bytes: context.len(),
         answer,
     })
@@ -516,6 +517,32 @@ fn coerce_f64(v: &Value) -> Option<f64> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
+/// Map a yes/no predicate value to a bool. A reachability/boolean prompt may be
+/// answered as `true`, `"yes"`, `"true"`, etc. — and a JSON tool output that
+/// carries `found:true` primes the model toward the boolean form. Returns `None`
+/// for anything that isn't a yes/no token, so file names, kinds, and counts fall
+/// through to the normal string/numeric comparison untouched.
+fn as_bool_token(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "yes" | "true" | "y" => Some(true),
+            "no" | "false" | "n" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Compare as predicates iff *both* sides are yes/no tokens; otherwise `None`
+/// (caller falls back to its default comparison).
+fn bool_token_eq(got: &Value, expected: &Value) -> Option<bool> {
+    match (as_bool_token(got), as_bool_token(expected)) {
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
+    }
+}
+
 fn exact_eq(got: Option<&Value>, expected: &Value) -> bool {
     let got = match got {
         Some(g) => g,
@@ -527,6 +554,9 @@ fn exact_eq(got: Option<&Value>, expected: &Value) -> bool {
             _ => false,
         };
     }
+    if let Some(eq) = bool_token_eq(got, expected) {
+        return eq;
+    }
     value_str(got)
         .trim()
         .eq_ignore_ascii_case(value_str(expected).trim())
@@ -537,6 +567,9 @@ fn contains_eq(got: Option<&Value>, expected: &Value) -> bool {
         Some(g) => g,
         None => return false,
     };
+    if let Some(eq) = bool_token_eq(got, expected) {
+        return eq;
+    }
     value_str(got)
         .to_ascii_lowercase()
         .contains(&value_str(expected).to_ascii_lowercase())

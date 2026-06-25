@@ -1,0 +1,110 @@
+//! C11 overview fixture: five hubs called by every worker (high importance) plus
+//! 100 peripheral workers that are never called (low importance). The full
+//! overview exceeds a 2000-token budget, so the budgeted map must drop workers
+//! but keep all five hubs.
+pub fn hub_a() -> i32 { 1 }
+pub fn hub_b() -> i32 { 1 }
+pub fn hub_c() -> i32 { 1 }
+pub fn hub_d() -> i32 { 1 }
+pub fn hub_e() -> i32 { 1 }
+
+pub fn worker_00() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_01() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_02() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_03() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_04() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_05() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_06() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_07() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_08() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_09() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_10() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_11() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_12() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_13() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_14() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_15() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_16() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_17() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_18() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_19() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_20() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_21() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_22() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_23() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_24() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_25() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_26() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_27() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_28() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_29() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_30() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_31() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_32() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_33() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_34() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_35() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_36() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_37() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_38() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_39() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_40() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_41() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_42() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_43() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_44() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_45() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_46() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_47() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_48() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_49() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_50() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_51() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_52() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_53() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_54() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_55() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_56() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_57() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_58() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_59() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_60() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_61() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_62() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_63() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_64() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_65() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_66() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_67() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_68() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_69() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_70() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_71() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_72() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_73() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_74() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_75() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_76() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_77() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_78() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_79() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_80() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_81() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_82() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_83() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_84() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_85() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_86() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_87() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_88() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_89() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_90() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_91() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_92() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_93() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_94() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_95() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_96() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_97() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_98() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }
+pub fn worker_99() -> i32 { hub_a() + hub_b() + hub_c() + hub_d() + hub_e() }

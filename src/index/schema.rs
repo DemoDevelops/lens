@@ -33,14 +33,38 @@ impl Index {
 
     fn init(&self) -> Result<()> {
         let conn = self.conn()?;
-        // `path` and `chunk_id` are stored but not tokenized; `content` is the
-        // searchable column. Porter stemming improves recall on code/prose.
+        // BM25F migration: an index built before the `symbols` column has the wrong
+        // shape, so drop it (and its manifest) to recreate fresh. The next
+        // index_path re-reads every file and repopulates both.
+        let stale_schema = conn.prepare("SELECT 1 FROM chunks LIMIT 0").is_ok()
+            && conn.prepare("SELECT symbols FROM chunks LIMIT 0").is_err();
+        if stale_schema {
+            conn.execute_batch(
+                "DROP TABLE chunks; DROP TABLE IF EXISTS chunks_tri; DROP TABLE IF EXISTS file_manifest;",
+            )?;
+        }
+        // `path` and `chunk_id` are stored but not tokenized; `symbols` (the symbol
+        // names defined in the chunk) and `content` are searchable, with `symbols`
+        // field-weighted higher in `bm25()` so a query that names a symbol ranks the
+        // file that defines it above files that merely mention it. Porter stemming
+        // improves recall on code/prose.
+        //
+        // `chunks_tri` mirrors the same content under a trigram tokenizer so
+        // structural/operator queries (`std::fs`, `->`) the porter path strips can be
+        // matched as literal substrings. Kept in sync with `chunks` on every write.
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
                 path UNINDEXED,
                 chunk_id UNINDEXED,
+                symbols,
                 content,
                 tokenize = 'porter'
+             );
+             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_tri USING fts5(
+                path UNINDEXED,
+                chunk_id UNINDEXED,
+                content,
+                tokenize = 'trigram'
              );
              CREATE TABLE IF NOT EXISTS file_manifest (
                  path TEXT PRIMARY KEY,

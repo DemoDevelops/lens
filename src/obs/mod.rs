@@ -360,6 +360,19 @@ pub fn json_len<T: Serialize>(v: &T) -> u64 {
     serde_json::to_vec(v).map(|b| b.len() as u64).unwrap_or(0)
 }
 
+/// Accurate token count for `text` via an offline BPE tokenizer (o200k_base, the
+/// GPT-4o family; the vocab is embedded in `tiktoken-rs`, so no network). Replaces
+/// the bytes/4 heuristic wherever the actual text is in hand (the benchmark arms,
+/// the token-estimate gate). The cumulative byte-savings counters in
+/// [`OpHandle::finish`] stay a bytes ratio because they only ever see byte counts
+/// of data that never entered context, never the text itself.
+pub fn count_tokens(text: &str) -> usize {
+    use std::sync::OnceLock;
+    static BPE: OnceLock<tiktoken_rs::CoreBPE> = OnceLock::new();
+    let bpe = BPE.get_or_init(|| tiktoken_rs::o200k_base().expect("load o200k_base BPE"));
+    bpe.encode_ordinary(text).len()
+}
+
 /// Resolve the data dir the way the server does: `$LENS_DIR`, else
 /// `<cwd>/.lens`. Used by the read-only CLI subcommands.
 pub fn data_dir() -> PathBuf {

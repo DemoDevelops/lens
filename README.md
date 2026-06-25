@@ -16,16 +16,16 @@ Accuracy on real tasks (`claude-opus-4-8`):
 
 | Task type | Without lens | With lens |
 | --- | ---: | ---: |
-| Darkroom (data analysis) | 17% | **100%** |
-| Discovery (code structure) | 67% | **100%** |
+| Darkroom (data analysis) | 33% | **100%** |
+| Discovery (code structure) | 100% | 100% |
 | Search | 100% | 100% |
 
 Session recovery vs Context Mode:
 
 | Scenario | Context Mode | lens | CM tokens | lens tokens |
 | --- | ---: | ---: | ---: | ---: |
-| File/task recovery | 75% | **100%** | 5,070 | 202 |
-| Error/decision recovery | 75% | **100%** | 5,136 | 302 |
+| File/task recovery | 75% | **100%** | 4,622 | 205 |
+| Error/decision recovery | 75% | **100%** | 4,677 | 291 |
 
 Full methodology: [BENCHMARKS.md](BENCHMARKS.md)
 
@@ -159,7 +159,7 @@ cargo clippy -- -D warnings
 
 ```sh
 cargo run --bin bench_savings    # savings table (no credentials needed)
-cargo run --bin bench_accuracy   # accuracy harness (ANTHROPIC_API_KEY or mock)
+cargo run --bin bench_accuracy   # accuracy harness (LENS_BENCH_BACKEND=claude-pty, ANTHROPIC_API_KEY, or mock)
 cargo run --bin bench_recovery   # session-recovery head-to-head vs Context Mode
 cargo run --bin bench_report     # regenerate BENCHMARKS.md + BENCHMARKS_APPENDIX.md
 ```

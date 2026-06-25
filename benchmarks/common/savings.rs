@@ -14,10 +14,11 @@ use lens::index::Index;
 use lens::store::{compress, Store};
 use lens::tools::ExecuteRequest;
 
-/// Token estimate convention: bytes / 4. Same rough approximation `ctx_stats`
-/// uses; raw byte counts are reported alongside so nobody has to trust the /4.
-pub fn est_tokens(bytes: usize) -> usize {
-    bytes / 4
+/// Accurate token count via the offline o200k_base BPE (replaces the old bytes/4
+/// heuristic). Used where the actual text is in hand, so the savings table's token
+/// columns reflect real tokenization rather than a byte ratio.
+pub fn est_tokens(text: &str) -> usize {
+    lens::obs::count_tokens(text)
 }
 
 /// One row of the savings table.
@@ -31,6 +32,9 @@ pub struct SavingsRow {
     pub before_bytes: usize,
     /// Bytes lens actually returns to context.
     pub after_bytes: usize,
+    /// BPE tokens (o200k_base) of the before/after text, the accurate token figures.
+    pub before_tokens: usize,
+    pub after_tokens: usize,
     /// Savings percentage, rounded to a whole number.
     pub savings_pct: u32,
     /// What the "without lens" path concretely loads, and why a real session
@@ -41,11 +45,14 @@ pub struct SavingsRow {
 }
 
 impl SavingsRow {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         workload: &str,
         mechanism: &str,
         before_bytes: usize,
         after_bytes: usize,
+        before_tokens: usize,
+        after_tokens: usize,
         baseline: &str,
         detail: &str,
     ) -> Self {
@@ -60,6 +67,8 @@ impl SavingsRow {
             mechanism: mechanism.to_string(),
             before_bytes,
             after_bytes,
+            before_tokens,
+            after_tokens,
             savings_pct,
             baseline: baseline.to_string(),
             detail: detail.to_string(),
@@ -91,16 +100,24 @@ pub fn commas(n: usize) -> String {
 /// Used by both `run_savings` (stdout) and `generate_report` (BENCHMARKS.md).
 pub fn render_savings_markdown(rows: &[SavingsRow]) -> String {
     let mut s = String::new();
-    s.push_str("### Token savings (estimate = bytes / 4, matching `ctx_stats`)\n\n");
+    s.push_str("### Token savings (o200k_base BPE token counts)\n\n");
+    s.push_str("Token savings, not byte savings: lens's compact outputs (graph JSON, columnar payloads) are token-denser than raw source, so the token reduction is the honest figure and runs lower than the byte reduction in the raw-bytes table below.\n\n");
     s.push_str("| Workload | Before | After | Savings | Mechanism |\n");
     s.push_str("| --- | ---: | ---: | ---: | --- |\n");
     for r in rows {
+        let tok_pct = if r.before_tokens > 0 {
+            ((r.before_tokens.saturating_sub(r.after_tokens)) as f64 / r.before_tokens as f64
+                * 100.0)
+                .round() as u32
+        } else {
+            0
+        };
         s.push_str(&format!(
             "| {} | {} | {} | {}% | {} |\n",
             r.workload,
-            commas(est_tokens(r.before_bytes)),
-            commas(est_tokens(r.after_bytes)),
-            r.savings_pct,
+            commas(r.before_tokens),
+            commas(r.after_tokens),
+            tok_pct,
             r.mechanism,
         ));
     }
@@ -479,17 +496,6 @@ pub async fn compute_savings() -> anyhow::Result<Vec<SavingsRow>> {
     ])
 }
 
-/// Sum the byte length of every UTF-8 file under `dir`.
-fn sum_file_bytes(dir: &Path) -> usize {
-    walkdir::WalkDir::new(dir)
-        .into_iter()
-        .flatten()
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-        .map(|s| s.len())
-        .sum()
-}
-
 // --- Code search: mechanism = index -----------------------------------------
 //
 // Naive path: to answer "where / how is X used", an agent greps for the terms,
@@ -509,12 +515,15 @@ async fn code_search() -> anyhow::Result<SavingsRow> {
     index.index_path(&dir, true)?;
     // Realistic top-k per query (the lens_search default neighbourhood).
     let resp = index.search(&queries, 5)?;
-    let after = serde_json::to_string(&resp)?.len();
+    let after_str = serde_json::to_string(&resp)?;
+    let after = after_str.len();
+    let after_tokens = est_tokens(&after_str);
     let hits: usize = resp.results.iter().map(|r| r.hits.len()).sum();
 
     // "before" = every file containing at least one query term, read in full.
     let lqueries: Vec<String> = queries.iter().map(|q| q.to_ascii_lowercase()).collect();
     let mut before = 0usize;
+    let mut before_tokens = 0usize;
     let mut matched_files = 0usize;
     for entry in walkdir::WalkDir::new(&dir).into_iter().flatten() {
         if !entry.file_type().is_file() {
@@ -524,6 +533,7 @@ async fn code_search() -> anyhow::Result<SavingsRow> {
             let lc = content.to_ascii_lowercase();
             if lqueries.iter().any(|q| lc.contains(q)) {
                 before += content.len();
+                before_tokens += est_tokens(&content);
                 matched_files += 1;
             }
         }
@@ -534,6 +544,8 @@ async fn code_search() -> anyhow::Result<SavingsRow> {
         "index",
         before,
         after,
+        before_tokens,
+        after_tokens,
         "Agent greps for the terms, then opens every matched file in full to read context.",
         &format!(
             "{} queries, {} hits returned, {} matched files read by the naive path",
@@ -552,7 +564,9 @@ async fn code_search() -> anyhow::Result<SavingsRow> {
 async fn log_debug() -> anyhow::Result<SavingsRow> {
     let dir = bench_root().join("savings/workloads/log_debug");
     let log = dir.join("app.log");
-    let before = std::fs::read_to_string(&log)?.len();
+    let log_text = std::fs::read_to_string(&log)?;
+    let before = log_text.len();
+    let before_tokens = est_tokens(&log_text);
 
     let data = tempfile::tempdir()?;
     let store = Store::open(&data.path().join(".lens"))?;
@@ -566,12 +580,15 @@ async fn log_debug() -> anyhow::Result<SavingsRow> {
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     let after = resp.stdout.len() + resp.stderr.len();
+    let after_tokens = est_tokens(&resp.stdout) + est_tokens(&resp.stderr);
 
     Ok(SavingsRow::new(
         "Log debugging (buried root cause)",
         "darkroom",
         before,
         after,
+        before_tokens,
+        after_tokens,
         "Agent loads the entire log into context to locate the one FATAL line.",
         &format!(
             "grep over {} bytes -> {} bytes of matching lines (+context)",
@@ -591,15 +608,21 @@ async fn issue_triage() -> anyhow::Result<SavingsRow> {
     let file = bench_root().join("savings/workloads/issue_triage/issues.json");
     let raw = std::fs::read_to_string(&file)?;
     let value: serde_json::Value = serde_json::from_str(&raw)?;
-    let before = serde_json::to_string(&value)?.len();
+    let before_str = serde_json::to_string(&value)?;
+    let before = before_str.len();
+    let before_tokens = est_tokens(&before_str);
     let compact = compress::compact_json(&value);
-    let after = serde_json::to_string(&compact)?.len();
+    let after_str = serde_json::to_string(&compact)?;
+    let after = after_str.len();
+    let after_tokens = est_tokens(&after_str);
 
     Ok(SavingsRow::new(
         "Issue triage (structured payload)",
         "compression",
         before,
         after,
+        before_tokens,
+        after_tokens,
         "Agent loads the full structured triage payload (minified) into context.",
         &format!(
             "reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file {} bytes)",
@@ -615,7 +638,16 @@ async fn issue_triage() -> anyhow::Result<SavingsRow> {
 // then a lens_symbol returns just the relevant neighborhood.
 async fn codebase_explore() -> anyhow::Result<SavingsRow> {
     let dir = bench_root().join("savings/workloads/codebase_explore/repo");
-    let before = sum_file_bytes(&dir);
+    let mut before = 0usize;
+    let mut before_tokens = 0usize;
+    for entry in walkdir::WalkDir::new(&dir).into_iter().flatten() {
+        if entry.file_type().is_file() {
+            if let Ok(s) = std::fs::read_to_string(entry.path()) {
+                before += s.len();
+                before_tokens += est_tokens(&s);
+            }
+        }
+    }
 
     let outcome = discovery::discover(&dir, None)?;
     let summary = serde_json::to_string(&outcome.response)?;
@@ -623,12 +655,15 @@ async fn codebase_explore() -> anyhow::Result<SavingsRow> {
     let view = gquery::query(&outcome.graph, "handle", None, 20, &[]);
     let view_json = serde_json::to_string(&view)?;
     let after = summary.len() + view_json.len();
+    let after_tokens = est_tokens(&summary) + est_tokens(&view_json);
 
     Ok(SavingsRow::new(
         "Codebase exploration (subtree)",
         "discovery",
         before,
         after,
+        before_tokens,
+        after_tokens,
         "Agent reads every source file in the subtree to map its structure.",
         &format!(
             "discover summary ({} nodes, {} edges) + one scoped lens_symbol",

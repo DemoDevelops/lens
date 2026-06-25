@@ -2,20 +2,20 @@
   "groups": [
     {
       "cm_available": 4,
-      "cm_tokens": 5070,
+      "cm_tokens": 4622,
       "context_mode": 0.75,
       "lens": 1.0,
-      "lens_tokens": 202,
+      "lens_tokens": 205,
       "n": 4,
       "no_continuity": 0.0,
       "set": "file_task"
     },
     {
       "cm_available": 4,
-      "cm_tokens": 5136,
+      "cm_tokens": 4677,
       "context_mode": 0.75,
       "lens": 1.0,
-      "lens_tokens": 302,
+      "lens_tokens": 291,
       "n": 4,
       "no_continuity": 0.0,
       "set": "error_decision"
@@ -38,14 +38,14 @@
           "available": true,
           "context_bytes": 5120,
           "survived": false,
-          "tokens": 1280
+          "tokens": 1166
         },
         {
           "arm": "lens",
           "available": true,
           "context_bytes": 237,
           "survived": true,
-          "tokens": 59
+          "tokens": 62
         }
       ],
       "id": "ed_01_unresolved_error",
@@ -65,14 +65,14 @@
           "available": true,
           "context_bytes": 5147,
           "survived": true,
-          "tokens": 1286
+          "tokens": 1176
         },
         {
           "arm": "lens",
           "available": true,
           "context_bytes": 296,
           "survived": true,
-          "tokens": 74
+          "tokens": 75
         }
       ],
       "id": "ed_02_use_instead",
@@ -92,14 +92,14 @@
           "available": true,
           "context_bytes": 5152,
           "survived": true,
-          "tokens": 1288
+          "tokens": 1171
         },
         {
           "arm": "lens",
           "available": true,
           "context_bytes": 303,
           "survived": true,
-          "tokens": 75
+          "tokens": 70
         }
       ],
       "id": "ed_03_constraint",
@@ -119,14 +119,14 @@
           "available": true,
           "context_bytes": 5130,
           "survived": true,
-          "tokens": 1282
+          "tokens": 1164
         },
         {
           "arm": "lens",
           "available": true,
           "context_bytes": 377,
           "survived": true,
-          "tokens": 94
+          "tokens": 84
         }
       ],
       "id": "ed_04_blocker",
@@ -146,14 +146,14 @@
           "available": true,
           "context_bytes": 5135,
           "survived": true,
-          "tokens": 1283
+          "tokens": 1168
         },
         {
           "arm": "lens",
           "available": true,
           "context_bytes": 292,
           "survived": true,
-          "tokens": 73
+          "tokens": 69
         }
       ],
       "id": "ft_01_active_file",
@@ -173,7 +173,7 @@
           "available": true,
           "context_bytes": 5114,
           "survived": false,
-          "tokens": 1278
+          "tokens": 1164
         },
         {
           "arm": "lens",
@@ -200,14 +200,14 @@
           "available": true,
           "context_bytes": 4903,
           "survived": true,
-          "tokens": 1225
+          "tokens": 1118
         },
         {
           "arm": "lens",
           "available": true,
           "context_bytes": 122,
           "survived": true,
-          "tokens": 30
+          "tokens": 37
         }
       ],
       "id": "ft_03_last_file_of_many",
@@ -227,7 +227,7 @@
           "available": true,
           "context_bytes": 5139,
           "survived": true,
-          "tokens": 1284
+          "tokens": 1172
         },
         {
           "arm": "lens",

@@ -310,7 +310,7 @@ fn session_start(
             }
         }
         "startup" => {
-            // Fresh session = clean slate: clear prior live events for project.
+            // Fresh session = clean slate for the live event log.
             store.clear_project_events(project_str)?;
             store.ensure_session(session_id, project_str, ts)?;
             // Capture project rule files as P1 events (CLAUDE.md / AGENTS.md).
@@ -319,7 +319,11 @@ fn session_start(
                 let events = attribute(raws, session_id, project_str, ts, "SessionStart");
                 store.insert_events(&events)?;
             }
-            Ok(String::new())
+            // Re-inject durable project memory (decisions/constraints/rules captured in
+            // prior sessions) so a fresh session resumes with them despite the clear.
+            Ok(snapshot::render_project_memory(
+                &store.project_memory(project_str)?,
+            ))
         }
         _ => Ok(String::new()), // "clear" and unknown — no injection
     }

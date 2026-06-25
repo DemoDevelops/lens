@@ -501,6 +501,69 @@ impl Forge {
         Ok(Json(resp))
     }
 
+    /// A token-budgeted map of the repo's most important symbols.
+    #[tool(
+        description = "Get a token-budgeted overview of the repo: the most structurally important symbols (PageRank-ranked) with their callers/callees, as much as fits a token budget (default 2000). A high-signal map of a codebase at fixed cost instead of reading files."
+    )]
+    async fn lens_overview(
+        &self,
+        Parameters(req): Parameters<OverviewRequest>,
+    ) -> Result<Json<OverviewResponse>, ErrorData> {
+        let op = self.ops.start(
+            "lens_overview",
+            serde_json::json!({ "token_budget": req.token_budget }),
+        );
+        let graph = match self.load_graph() {
+            Ok(g) => g,
+            Err(e) => {
+                op.finish(0, 0, None, "error", "graph build failed", None);
+                return Err(e);
+            }
+        };
+        let overview = gquery::overview(&graph, req.token_budget);
+        let resp = OverviewResponse { overview };
+        let returned = obs::json_len(&resp);
+        let note = format!("{} bytes", resp.overview.len());
+        let explain = self.ops.explain(|| note.clone());
+        op.finish(returned, returned, None, "ok", note, explain);
+        Ok(Json(resp))
+    }
+
+    /// Structural (tree-sitter) search: run an AST query, get path:line matches.
+    #[tool(
+        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns path:line matches."
+    )]
+    async fn lens_grep_ast(
+        &self,
+        Parameters(req): Parameters<GrepAstRequest>,
+    ) -> Result<Json<GrepAstResponse>, ErrorData> {
+        let op = self.ops.start(
+            "lens_grep_ast",
+            serde_json::json!({ "path": req.path, "language": req.language, "limit": req.limit }),
+        );
+        let root = self.resolve_unescaped(&req.path);
+        match crate::discovery::structural::grep_ast(
+            &root,
+            &req.query,
+            req.language.as_deref(),
+            req.limit,
+        ) {
+            Ok(matches) => {
+                let truncated = matches.len() >= req.limit;
+                let resp = GrepAstResponse { matches, truncated };
+                let returned = obs::json_len(&resp);
+                let note = format!("{} matches", resp.matches.len());
+                let explain = self.ops.explain(|| note.clone());
+                op.finish(returned, returned, None, "ok", note, explain);
+                Ok(Json(resp))
+            }
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                Err(ErrorData::internal_error(e.to_string(), None))
+            }
+        }
+    }
+
     /// Report token-savings counters and index/graph sizes.
     #[tool(
         description = "Report darkroom usage, estimated tokens saved, and index/graph sizes for this repo's lens state."

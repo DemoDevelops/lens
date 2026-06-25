@@ -323,6 +323,33 @@ fn render(mut sections: Vec<Section>, budget: usize, compact_count: i64) -> Stri
     }
 }
 
+/// Render durable project memory (from [`super::store::SessionStore::project_memory`])
+/// as a standalone "Project Memory" guide for re-injection at a fresh SessionStart,
+/// so prior decisions/constraints/rules survive into a new session even though the
+/// live event log was cleared. Empty input yields an empty string.
+pub fn render_project_memory(items: &[(String, String)]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut by_cat: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (cat, text) in items {
+        by_cat.entry(cat.as_str()).or_default().push(cap(text, 200));
+    }
+    let mut out = String::from("# Project Memory (carried across sessions)\n");
+    for (cat, lines) in &by_cat {
+        let title = match *cat {
+            "decision" => "Key Decisions",
+            "constraint" => "Constraints",
+            "rejected-approach" => "Rejected Approaches",
+            "rule" => "Project Rules",
+            other => other,
+        };
+        out.push('\n');
+        out.push_str(&section(title, lines));
+    }
+    out
+}
+
 // ── aggregation helpers ──────────────────────────────────────────────────────
 
 fn section(title: &str, lines: &[String]) -> String {

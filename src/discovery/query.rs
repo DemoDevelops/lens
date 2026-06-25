@@ -23,10 +23,10 @@ fn edge_view(e: &Edge) -> EdgeView {
 }
 
 /// Find nodes by name substring (+ optional kind), returning each match plus its
-/// immediate (depth-1) connections as one combined subgraph. Matches defined in a
-/// file the current session recently touched (`recent_files`) are boosted to the
-/// front so the most relevant ones survive the `limit` cut; an empty slice leaves
-/// the ordering byte-for-byte unchanged.
+/// immediate (depth-1) connections as one combined subgraph. Matches are ranked
+/// recently-touched-file first (session proximity, when `recent_files` is given),
+/// then by structural importance (PageRank) so the central symbol outranks
+/// same-substring decoys, so the most relevant matches survive the `limit` cut.
 pub fn query(
     graph: &Graph,
     name: &str,
@@ -35,11 +35,20 @@ pub fn query(
     recent_files: &[String],
 ) -> GraphView {
     let mut matches = graph.find_by_name(name, kind);
-    // Stable partition: recent-file matches first, original (id-sorted) order kept
-    // within each group. A no-op when `recent_files` is empty.
-    if !recent_files.is_empty() {
-        matches.sort_by_key(|n| !is_recent(&n.file, recent_files));
-    }
+    // Rank: recent-file matches first (a no-op when `recent_files` is empty), then
+    // by importance (descending), then by id for a stable, deterministic tie-break.
+    let importance = graph.importance();
+    matches.sort_by(|a, b| {
+        let ra = is_recent(&a.file, recent_files);
+        let rb = is_recent(&b.file, recent_files);
+        rb.cmp(&ra)
+            .then_with(|| {
+                let ia = importance.get(&a.id).copied().unwrap_or(0.0);
+                let ib = importance.get(&b.id).copied().unwrap_or(0.0);
+                ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let mut node_ids: Vec<String> = Vec::new();
     for m in matches.into_iter().take(limit) {
         node_ids.push(m.id.clone());
@@ -260,12 +269,118 @@ fn subgraph(graph: &Graph, ids: &[String]) -> GraphView {
     }
 }
 
+/// A token-budgeted overview of the repo's most important symbols (an aider-style
+/// repomap): symbols ranked by structural importance, the largest prefix that fits
+/// `token_budget` selected by binary search, each rendered with its kind, location,
+/// top callers, and top callees. Gives an agent a high-signal map of a codebase at
+/// a fixed token cost instead of reading files.
+pub fn overview(graph: &Graph, token_budget: usize) -> String {
+    let importance = graph.importance();
+    let mut ranked: Vec<&Node> = graph
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind.as_str(), "module" | "import"))
+        .collect();
+    ranked.sort_by(|a, b| {
+        let ia = importance.get(&a.id).copied().unwrap_or(0.0);
+        let ib = importance.get(&b.id).copied().unwrap_or(0.0);
+        ib.partial_cmp(&ia)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let n = ranked.len();
+    let render = |k: usize| render_overview(graph, &ranked[..k]);
+    // Largest prefix that fits the budget (binary search); if it all fits, all of it.
+    if n == 0 || crate::obs::count_tokens(&render(n)) <= token_budget {
+        return render(n);
+    }
+    let mut lo = 0usize;
+    let mut hi = n;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if crate::obs::count_tokens(&render(mid)) <= token_budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    render(lo)
+}
+
+/// Render the given importance-ranked nodes as the overview body.
+fn render_overview(graph: &Graph, nodes: &[&Node]) -> String {
+    let name_of = |id: &str| graph.node(id).map(|n| n.name.clone());
+    let mut s = String::from("# Repo overview: most important symbols\n\n");
+    for n in nodes {
+        s.push_str(&format!("- `{}` ({}) {}:{}\n", n.name, n.kind, n.file, n.line));
+        let callers: Vec<String> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == "calls" && e.to == n.id)
+            .filter_map(|e| name_of(&e.from))
+            .collect();
+        if !callers.is_empty() {
+            s.push_str(&format!("    called by: {}\n", join_capped(&callers, 3)));
+        }
+        let calls: Vec<String> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == "calls" && e.from == n.id)
+            .filter_map(|e| name_of(&e.to))
+            .collect();
+        if !calls.is_empty() {
+            s.push_str(&format!("    calls: {}\n", join_capped(&calls, 3)));
+        }
+    }
+    s
+}
+
+/// Join up to `max` names, then "(+N more)".
+fn join_capped(names: &[String], max: usize) -> String {
+    let shown: Vec<&str> = names.iter().take(max).map(|s| s.as_str()).collect();
+    let mut out = shown.join(", ");
+    if names.len() > max {
+        out.push_str(&format!(" (+{} more)", names.len() - max));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::discovery::discover;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn overview_budget_keeps_important_drops_rest() {
+        // Two hubs called by many one-line workers. A tight budget must truncate to
+        // the top-importance symbols, and the hubs must survive.
+        let dir = tempdir().unwrap();
+        let mut src = String::from("pub fn hub_x() -> i32 { 1 }\npub fn hub_y() -> i32 { 2 }\n");
+        for i in 0..40 {
+            src.push_str(&format!("pub fn w{i}() -> i32 {{ hub_x() + hub_y() }}\n"));
+        }
+        fs::write(dir.path().join("r.rs"), src).unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let full = overview(&g, 100_000);
+        assert!(full.contains("`hub_x`") && full.contains("`w0`"), "full lists everything");
+
+        let tight = overview(&g, 80);
+        assert!(crate::obs::count_tokens(&tight) <= 80, "tight overview must fit the budget");
+        // The hubs survive (entries carry backticks; a name in a caller list does not).
+        assert!(
+            tight.contains("`hub_x`") && tight.contains("`hub_y`"),
+            "hubs survive truncation"
+        );
+        // Truncation happened: fewer symbol entries than the full overview.
+        let entries = |s: &str| s.matches("- `").count();
+        assert!(
+            entries(&tight) < entries(&full),
+            "tight overview drops low-importance symbols"
+        );
+    }
 
     fn rust_graph() -> Graph {
         let dir = tempdir().unwrap();

@@ -17,9 +17,11 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use lens::discovery::{self, query as gquery};
+use lens::index::Index;
 use lens::session::{snapshot, store::SessionStore, Event};
 use lens::store::compress;
 
@@ -116,25 +118,25 @@ fn c2_proximity() -> anyhow::Result<(String, bool)> {
     let q = best.0;
 
     let base = gquery::query(g, &q, None, 50, &[]);
-    // Focus on the file of the LAST match in the base order (so any lift is real,
-    // not an artifact of it already being first).
-    let focus_file = base
-        .nodes
-        .last()
-        .map(|n| n.file.clone())
-        .unwrap_or_default();
-    let before = base
-        .nodes
+    // Focus on the least-prominent file: the one whose first match ranks LATEST in
+    // the importance order, so a proximity boost has real room to lift it (and the
+    // lift isn't an artifact of the file already being near the top).
+    let mut first_pos: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (i, n) in base.nodes.iter().enumerate() {
+        first_pos.entry(n.file.clone()).or_insert(i);
+    }
+    let focus_file = first_pos
         .iter()
-        .position(|n| n.file.ends_with(focus_file.as_str()))
-        .map(|p| p + 1)
-        .unwrap_or(0);
+        .max_by_key(|(_, p)| **p)
+        .map(|(f, _)| f.clone())
+        .unwrap_or_default();
+    let before = first_pos.get(&focus_file).map(|p| p + 1).unwrap_or(0);
 
     let boosted = gquery::query(g, &q, None, 50, std::slice::from_ref(&focus_file));
     let after = boosted
         .nodes
         .iter()
-        .position(|n| n.file.ends_with(focus_file.as_str()))
+        .position(|n| n.file == focus_file)
         .map(|p| p + 1)
         .unwrap_or(0);
 
@@ -360,7 +362,568 @@ fn c4_recovery() -> anyhow::Result<(String, bool)> {
     Ok((s, pass))
 }
 
+// ===========================================================================
+// C5–C15: the benchmark-gated improvements of the 7-fix plan. Each gate is a
+// deterministic, offline before/after on a FIXED committed fixture under
+// `benchmarks/changes/fixtures/`. Relative gates read a baseline captured on the
+// pre-fix code (`bench_changes --update`, run once on master) from
+// `expected/baseline.json`; absolute gates need no baseline. Gates whose fix
+// introduces a new API (C11/C13/C15) are added alongside that task.
+// ===========================================================================
+
+/// Pre-fix baselines, captured on master with `bench_changes --update` and
+/// committed to `expected/baseline.json`. Relative gates (C5/C7) compare the live
+/// number to these; C8/C12 use the recall floor.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Baseline {
+    c5_mrr: f64,
+    c5_p_at_5: f64,
+    c7_mrr: f64,
+    c8_precision: f64,
+    c8_recall: f64,
+    c12_recall: f64,
+    c12_bytes: usize,
+}
+
+fn baseline_path() -> PathBuf {
+    bench_root().join("changes/expected/baseline.json")
+}
+
+fn load_baseline() -> Baseline {
+    std::fs::read_to_string(baseline_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn changes_fixture(name: &str) -> PathBuf {
+    bench_root().join("changes/fixtures").join(name)
+}
+
+// --- C5: BM25F field-weighted search ----------------------------------------
+
+/// (query, file that DEFINES the query term as a symbol). Each term is also
+/// repeated in a different file's prose, so content-only BM25 ranks the prose
+/// file first; the symbol-column weight must flip the definition to the top.
+const C5_CORPUS: [(&str, &str); 5] = [
+    ("tokenize", "parser.rs"),
+    ("checkout", "cart.rs"),
+    ("throttle", "limiter.rs"),
+    ("marshal", "codec.rs"),
+    ("reconcile", "ledger.rs"),
+];
+
+fn measure_c5() -> (f64, f64) {
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap();
+    index.index_path(&changes_fixture("search"), true).unwrap();
+    let mut rr = 0.0;
+    let mut hits5 = 0usize;
+    for (q, expect) in C5_CORPUS {
+        let resp = index.search(&[q.to_string()], 10).unwrap();
+        if let Some(pos) = resp.results[0].hits.iter().position(|h| h.path.ends_with(expect)) {
+            rr += 1.0 / (pos + 1) as f64;
+            if pos < 5 {
+                hits5 += 1;
+            }
+        }
+    }
+    let n = C5_CORPUS.len() as f64;
+    (rr / n, hits5 as f64 / n)
+}
+
+fn gate_c5(b: &Baseline) -> (String, bool) {
+    let (mrr, p5) = measure_c5();
+    let pass = mrr >= b.c5_mrr * 1.15 && p5 + 1e-9 >= b.c5_p_at_5;
+    let s = format!(
+        "## C5 - BM25F field-weighted search\n\nLabeled query→definition over `fixtures/search`: a term that is a *symbol* in the right file vs the same term repeated as prose in another file. Baseline (content-only BM25) MRR **{:.3}**, P@5 **{:.3}**; live MRR **{:.3}**, P@5 **{:.3}**. Gate: MRR ≥ baseline×1.15 and P@5 not regressed.\n",
+        b.c5_mrr, b.c5_p_at_5, mrr, p5
+    );
+    (s, pass)
+}
+
+// --- C6: punctuation / operator queries -------------------------------------
+
+fn measure_c6() -> Vec<(String, usize)> {
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap();
+    index.index_path(&changes_fixture("search"), true).unwrap();
+    ["std::fs", "->", "fn add"]
+        .iter()
+        .map(|q| {
+            let resp = index.search(&[q.to_string()], 5).unwrap();
+            (q.to_string(), resp.results[0].hits.len())
+        })
+        .collect()
+}
+
+fn gate_c6() -> (String, bool) {
+    let results = measure_c6();
+    let pass = results.iter().all(|(_, n)| *n >= 1);
+    let mut s = String::from(
+        "## C6 - punctuation / operator queries\n\nThe sanitizer strips `:`/`.`/`>` and the porter stemmer mangles identifiers, so structural queries return nothing. Each must return ≥1 hit against `fixtures/search`.\n\n| Query | Hits |\n| --- | ---: |\n",
+    );
+    for (q, n) in &results {
+        s.push_str(&format!("| `{q}` | {n} |\n"));
+    }
+    (s, pass)
+}
+
+// --- C7: graph importance ranking -------------------------------------------
+
+/// (query substring, the gold symbol = the high-degree hub among the matches).
+const C7_CORPUS: [(&str, &str); 4] = [
+    ("handle", "handle"),
+    ("load", "load"),
+    ("render", "render"),
+    ("parse", "parse"),
+];
+
+fn measure_c7() -> f64 {
+    let g = discovery::discover(&changes_fixture("rank"), None).unwrap().graph;
+    let mut rr = 0.0;
+    for (q, gold) in C7_CORPUS {
+        let view = gquery::query(&g, q, None, 20, &[]);
+        let rank = view
+            .nodes
+            .iter()
+            .filter(|n| n.name.to_ascii_lowercase().contains(q))
+            .position(|n| n.name == gold)
+            .map(|p| p + 1);
+        if let Some(r) = rank {
+            rr += 1.0 / r as f64;
+        }
+    }
+    rr / C7_CORPUS.len() as f64
+}
+
+fn gate_c7(b: &Baseline) -> (String, bool) {
+    let mrr = measure_c7();
+    let pass = mrr >= b.c7_mrr * 1.25;
+    let s = format!(
+        "## C7 - graph importance ranking (lens_symbol)\n\nFor each ambiguous query over `fixtures/rank`, the high-degree hub should rank first among same-substring matches. Baseline (id-sort) MRR **{:.3}**; live MRR **{:.3}**. Gate: MRR ≥ baseline×1.25.\n",
+        b.c7_mrr, mrr
+    );
+    (s, pass)
+}
+
+// --- C8: scope-aware call-edge precision/recall -----------------------------
+
+/// The hand-labeled true call graph of `fixtures/calls`:
+/// (caller, callee, file the callee is defined in).
+fn c8_truth() -> Vec<(String, String, String)> {
+    let mut t = Vec::new();
+    for (task, file) in [
+        ("task_a", "a.rs"),
+        ("task_b", "b.rs"),
+        ("task_c", "c.rs"),
+        ("task_d", "d.rs"),
+        ("task_e", "e.rs"),
+    ] {
+        t.push((task.into(), "check".into(), file.into()));
+        t.push((task.into(), "normalize".into(), "shared.rs".into()));
+    }
+    t
+}
+
+fn measure_c8() -> (f64, f64) {
+    let g = discovery::discover(&changes_fixture("calls"), None).unwrap().graph;
+    let info = |id: &str| g.node(id).map(|n| (n.name.clone(), n.file.clone()));
+    let extracted: Vec<(String, String, String)> = g
+        .edges
+        .iter()
+        .filter(|e| e.kind == "calls")
+        .filter_map(|e| {
+            let (from, _) = info(&e.from)?;
+            let (to, tofile) = info(&e.to)?;
+            Some((from, to, tofile))
+        })
+        .collect();
+    let truth = c8_truth();
+    let is_true = |x: &(String, String, String)| {
+        truth
+            .iter()
+            .any(|(c, ce, f)| *c == x.0 && *ce == x.1 && x.2.ends_with(f.as_str()))
+    };
+    let correct = extracted.iter().filter(|x| is_true(x)).count();
+    let precision = if extracted.is_empty() {
+        0.0
+    } else {
+        correct as f64 / extracted.len() as f64
+    };
+    let covered = truth
+        .iter()
+        .filter(|(c, ce, f)| {
+            extracted
+                .iter()
+                .any(|x| x.0 == *c && x.1 == *ce && x.2.ends_with(f.as_str()))
+        })
+        .count();
+    let recall = covered as f64 / truth.len() as f64;
+    (precision, recall)
+}
+
+fn gate_c8(b: &Baseline) -> (String, bool) {
+    let (precision, recall) = measure_c8();
+    let pass = precision >= 0.85 && recall + 1e-9 >= b.c8_recall;
+    let s = format!(
+        "## C8 - scope-aware call resolution\n\nName-only resolution links every `check()` call to all five same-named definitions; scope-aware resolution keeps only the same-file one. Baseline precision **{:.3}** / recall **{:.3}**; live precision **{:.3}** / recall **{:.3}**. Gate: precision ≥ 0.85, recall ≥ baseline.\n",
+        b.c8_precision, b.c8_recall, precision, recall
+    );
+    (s, pass)
+}
+
+// --- C9: multi-symbol import completeness -----------------------------------
+
+fn measure_c9() -> usize {
+    let g = discovery::discover(&changes_fixture("imports"), None).unwrap().graph;
+    let targets = ["Alpha", "Beta", "Gamma"];
+    g.edges
+        .iter()
+        .filter(|e| e.kind == "imports")
+        .filter(|e| {
+            g.node(&e.to)
+                .map(|n| targets.contains(&n.name.as_str()))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+fn gate_c9() -> (String, bool) {
+    let edges = measure_c9();
+    let pass = edges == 3;
+    let s = format!(
+        "## C9 - multi-symbol import completeness\n\n`use crate::shared::{{Alpha, Beta, Gamma}};` must emit one import edge per symbol, not just the last token. Import edges to {{Alpha, Beta, Gamma}}: **{edges}** (want 3).\n"
+    );
+    (s, pass)
+}
+
+// --- C10: trait-signature / const / type capture ----------------------------
+
+fn measure_c10() -> usize {
+    let g = discovery::discover(&changes_fixture("imports"), None).unwrap().graph;
+    let kinds = ["function_signature", "const", "type"];
+    g.nodes
+        .iter()
+        .filter(|n| kinds.contains(&n.kind.as_str()))
+        .count()
+}
+
+fn gate_c10() -> (String, bool) {
+    let n = measure_c10();
+    let pass = n > 0;
+    let s = format!(
+        "## C10 - trait-signature / const / type capture\n\nThe base Rust query misses trait method signatures, associated/free consts, and type aliases. Nodes of those kinds in `fixtures/imports`: **{n}** (want > 0).\n"
+    );
+    (s, pass)
+}
+
+// --- C12: recovery recall at the snapshot budget ----------------------------
+
+/// Distinctive substrings, one per optional snapshot section across the rank
+/// spectrum. The lowest-rank ones drop first when the budget is tight, so recall
+/// rises with the budget.
+const C12_EVIDENCE: [&str; 8] = [
+    "PCI scope minimal",
+    "vault access",
+    "billing_v2",
+    "double-entry",
+    "refactor-ledger",
+    "cargo test",
+    "issue-1234",
+    "regression-debug",
+];
+
+fn c12_ev(category: &str, priority: u8, payload: Value, ts: i64) -> Event {
+    Event {
+        session_id: "c12".into(),
+        project: "/bench".into(),
+        timestamp: ts,
+        category: category.into(),
+        priority,
+        payload,
+        source_hook: "PostToolUse".into(),
+    }
+}
+
+/// A long session: a small must-keep core plus many optional events spread
+/// across the section-rank spectrum, sized to overflow the 2048 budget.
+fn c12_events() -> Vec<Event> {
+    let mut evs = Vec::new();
+    let mut ts = 0i64;
+    let mut next = || {
+        ts += 1;
+        ts
+    };
+    evs.push(c12_ev(
+        "user-prompt",
+        1,
+        json!({"prompt": "implement the billing reconciliation service"}),
+        next(),
+    ));
+    for t in ["wire ledger schema", "add reconcile job", "backfill historical entries"] {
+        evs.push(c12_ev("task", 1, json!({"task": t, "status": "in_progress"}), next()));
+    }
+    for d in ["use append-only ledger", "settle in minor units"] {
+        evs.push(c12_ev("decision", 2, json!({"text": d}), next()));
+    }
+    for f in ["src/ledger.rs", "src/reconcile.rs"] {
+        evs.push(c12_ev("file", 1, json!({"action": "edit", "path": f}), next()));
+    }
+    // High-rank optionals (survive longest).
+    evs.push(c12_ev("constraint", 1, json!({"text": "keep PCI scope minimal across the service"}), next()));
+    evs.push(c12_ev("constraint", 1, json!({"text": "no PII in logs"}), next()));
+    evs.push(c12_ev("blocker", 1, json!({"text": "blocked on vault access for the signing key"}), next()));
+    evs.push(c12_ev("plan", 1, json!({"action": "exit", "plan": "stage rollout behind flag billing_v2"}), next()));
+    evs.push(c12_ev("rejected-approach", 1, json!({"text": "rejected synchronous double-entry writes"}), next()));
+    // Low-rank optionals (dropped first under a tight budget). refactor-ledger is
+    // the most recent commit so it survives the git section's recency cap.
+    for i in 0..7 {
+        evs.push(c12_ev("git", 2, json!({"op": "commit", "cmd": format!("git commit -m step-{i}")}), next()));
+    }
+    evs.push(c12_ev("git", 2, json!({"op": "commit", "cmd": "git commit -m refactor-ledger"}), next()));
+    for c in ["cargo test --workspace", "cargo clippy --all", "cargo fmt --check", "cargo build --release"] {
+        evs.push(c12_ev("environment", 3, json!({"cmd": c}), next()));
+    }
+    for i in 0..60 {
+        evs.push(c12_ev("mcp-tool", 3, json!({"tool": format!("mcp__svc__operation_{i}")}), next()));
+    }
+    evs.push(c12_ev("external-ref", 3, json!({"ref": "issue-1234"}), next()));
+    evs.push(c12_ev("intent", 4, json!({"intent": "regression-debug"}), next()));
+    evs
+}
+
+fn measure_c12(budget: usize) -> (f64, usize) {
+    let snap = snapshot::build_snapshot(&c12_events(), budget, 1);
+    let present = C12_EVIDENCE.iter().filter(|e| snap.contains(**e)).count();
+    (present as f64 / C12_EVIDENCE.len() as f64, snap.len())
+}
+
+fn gate_c12(b: &Baseline) -> (String, bool) {
+    let (recall, bytes) = measure_c12(lens::session::snapshot_budget());
+    let pass = recall + 1e-9 >= b.c12_recall && bytes <= 8192;
+    let s = format!(
+        "## C12 - recovery recall at the snapshot budget\n\nA long session's evidence spans optional sections; the lowest-rank ones drop under a tight budget. Baseline (2048) recall **{:.3}** ({} bytes); live (budget {}) recall **{:.3}** ({} bytes). Gate: recall ≥ baseline, bytes ≤ 8192.\n",
+        b.c12_recall,
+        b.c12_bytes,
+        lens::session::snapshot_budget(),
+        recall,
+        bytes
+    );
+    (s, pass)
+}
+
+// --- C11: token-budgeted overview (lens_overview) ---------------------------
+
+/// (fraction of the important hub symbols present in the overview, overview tokens).
+fn measure_c11() -> (f64, usize) {
+    let g = discovery::discover(&changes_fixture("overview"), None)
+        .unwrap()
+        .graph;
+    let overview = gquery::overview(&g, 2000);
+    let important = ["hub_a", "hub_b", "hub_c", "hub_d", "hub_e"];
+    let present = important
+        .iter()
+        .filter(|h| overview.contains(&format!("`{h}`")))
+        .count();
+    (
+        present as f64 / important.len() as f64,
+        lens::obs::count_tokens(&overview),
+    )
+}
+
+fn gate_c11() -> (String, bool) {
+    let (frac, tokens) = measure_c11();
+    let pass = frac >= 0.8 && tokens <= 2000;
+    let s = format!(
+        "## C11 - token-budgeted overview (lens_overview)\n\nThe overview of `fixtures/overview` (5 hubs + 100 workers, ranked by importance) is binary-searched down to a 2000-token budget. Important hub symbols present: **{:.0}%** in a **{}**-token map. Gate: ≥80% of important symbols within a 2000-token budget.\n",
+        frac * 100.0,
+        tokens
+    );
+    (s, pass)
+}
+
+// --- C13: cross-session project memory --------------------------------------
+
+/// Durable facts session A records; each is both the payload text and the
+/// evidence string a fresh session must recall.
+const C13_EVIDENCE: [&str; 3] = [
+    "argon2 over bcrypt",
+    "retry budget is three",
+    "secrets stay out of logs",
+];
+
+fn c13_recall(text: &str) -> f64 {
+    let present = C13_EVIDENCE.iter().filter(|e| text.contains(**e)).count();
+    present as f64 / C13_EVIDENCE.len() as f64
+}
+
+/// (recall without persisted memory, recall with it). Session A records durable
+/// decisions/constraints; a fresh session clears the live event log, then we
+/// recover from the cleared log (no memory) vs from persisted project memory.
+fn measure_c13() -> (f64, f64) {
+    let dir = std::env::temp_dir().join(format!("lens_bench_c13_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = SessionStore::open(&dir).unwrap();
+    let project = "/bench/c13";
+    let sid_a = "sessionA";
+    let cats = ["decision", "decision", "constraint"];
+    let evs: Vec<Event> = C13_EVIDENCE
+        .iter()
+        .enumerate()
+        .map(|(i, text)| Event {
+            session_id: sid_a.into(),
+            project: project.into(),
+            timestamp: i as i64 + 1,
+            category: cats[i].into(),
+            priority: 2,
+            payload: json!({ "text": text }),
+            source_hook: "UserPromptSubmit".into(),
+        })
+        .collect();
+    store.insert_events(&evs).unwrap();
+    // A fresh session clears the live event log.
+    store.clear_project_events(project).unwrap();
+    let remaining = store.events_for_session(sid_a).unwrap();
+    let without = snapshot::build_snapshot(&remaining, lens::session::snapshot_budget(), 0);
+    let with = snapshot::render_project_memory(&store.project_memory(project).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+    (c13_recall(&without), c13_recall(&with))
+}
+
+fn gate_c13() -> (String, bool) {
+    let (without, with) = measure_c13();
+    let pass = with >= 0.8;
+    let s = format!(
+        "## C13 - cross-session project memory\n\nSession A records durable decisions/constraints; a fresh session clears the live event log. Recall of the prior decisions WITHOUT persisted memory: **{without:.3}**; WITH project memory re-injected: **{with:.3}**. Gate: with-memory recall ≥ 0.8.\n"
+    );
+    (s, pass)
+}
+
+// --- C14: token-estimate accuracy -------------------------------------------
+
+/// Committed code + prose samples to measure the token estimator against. Real
+/// fixture files (code) plus a prose block, whose bytes-per-token ratios differ.
+fn c14_samples() -> Vec<String> {
+    let mut samples: Vec<String> = Vec::new();
+    for sub in ["search", "rank", "imports"] {
+        for entry in walkdir::WalkDir::new(changes_fixture(sub))
+            .into_iter()
+            .flatten()
+        {
+            if entry.file_type().is_file() {
+                if let Ok(s) = std::fs::read_to_string(entry.path()) {
+                    samples.push(s);
+                }
+            }
+        }
+    }
+    samples.push(
+        "The reconciliation service settles every ledger entry in minor units and \
+         keeps the audit trail append-only so a later dispute can be replayed exactly. "
+            .repeat(8),
+    );
+    samples
+}
+
+/// (mean abs % error of the old bytes/4 heuristic, of the new BPE estimator),
+/// each against the real o200k_base token count (ground truth).
+fn measure_c14() -> (f64, f64) {
+    let samples = c14_samples();
+    let mut old_sum = 0.0;
+    let mut new_sum = 0.0;
+    let mut n = 0.0;
+    for s in &samples {
+        let truth = lens::obs::count_tokens(s) as f64;
+        if truth == 0.0 {
+            continue;
+        }
+        let old = (s.len() / 4) as f64;
+        let new = lens::obs::count_tokens(s) as f64;
+        old_sum += (old - truth).abs() / truth;
+        new_sum += (new - truth).abs() / truth;
+        n += 1.0;
+    }
+    (old_sum / n * 100.0, new_sum / n * 100.0)
+}
+
+fn gate_c14() -> (String, bool) {
+    let (old_err, new_err) = measure_c14();
+    let pass = new_err <= 8.0;
+    let s = format!(
+        "## C14 - token-estimate accuracy\n\nMean absolute error vs the real o200k_base token count over committed code/prose samples. Old bytes/4 heuristic: **{old_err:.1}%**; new BPE estimator: **{new_err:.1}%**. Gate: new mean abs error ≤ 8%.\n"
+    );
+    (s, pass)
+}
+
+// --- C15: structural search (lens_grep_ast) ---------------------------------
+
+/// Returns (precision, recall) of an AST query for `.unwrap()` calls against the
+/// hand-labeled true call sites in `fixtures/structural` (lines 7, 12, 18).
+fn measure_c15() -> (f64, f64) {
+    let query = "(call_expression function: (field_expression field: (field_identifier) @method))";
+    let matches = lens::discovery::structural::grep_ast(
+        &changes_fixture("structural"),
+        query,
+        Some("rust"),
+        200,
+    )
+    .unwrap();
+    let found: std::collections::BTreeSet<usize> = matches
+        .iter()
+        .filter(|m| m.text == "unwrap")
+        .map(|m| m.line)
+        .collect();
+    let truth: std::collections::BTreeSet<usize> = [7, 12, 18].into_iter().collect();
+    let correct = found.intersection(&truth).count();
+    let precision = if found.is_empty() {
+        0.0
+    } else {
+        correct as f64 / found.len() as f64
+    };
+    let recall = correct as f64 / truth.len() as f64;
+    (precision, recall)
+}
+
+fn gate_c15() -> (String, bool) {
+    let (precision, recall) = measure_c15();
+    let pass = (precision - 1.0).abs() < 1e-9 && recall >= 0.95;
+    let s = format!(
+        "## C15 - structural search (lens_grep_ast)\n\nAn AST query for `.unwrap()` calls over `fixtures/structural` must hit only the real call sites, never the comment mentions a grep would over-match. Precision **{precision:.3}**, recall **{recall:.3}**. Gate: precision = 1.0, recall ≥ 0.95.\n"
+    );
+    (s, pass)
+}
+
+fn capture_baseline() -> Baseline {
+    let (c5_mrr, c5_p_at_5) = measure_c5();
+    let c7_mrr = measure_c7();
+    let (c8_precision, c8_recall) = measure_c8();
+    let (c12_recall, c12_bytes) = measure_c12(2048);
+    Baseline {
+        c5_mrr,
+        c5_p_at_5,
+        c7_mrr,
+        c8_precision,
+        c8_recall,
+        c12_recall,
+        c12_bytes,
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    // `--update` captures the pre-fix baselines and exits (run once on master).
+    if std::env::args().any(|a| a == "--update") {
+        let b = capture_baseline();
+        let path = baseline_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&b)? + "\n")?;
+        eprintln!("captured baseline: {}", path.display());
+        println!("{}", serde_json::to_string_pretty(&b)?);
+        return Ok(());
+    }
+
     println!("# lens - benchmark of this round's changes (deterministic, no model)\n");
 
     let (s1, c1_ok) = c1_toon();
@@ -372,16 +935,52 @@ fn main() -> anyhow::Result<()> {
     let (s4, c4_ok) = c4_recovery()?;
     println!("{s4}");
 
+    let b = load_baseline();
+    let (s5, c5_ok) = gate_c5(&b);
+    println!("{s5}");
+    let (s6, c6_ok) = gate_c6();
+    println!("{s6}");
+    let (s7, c7_ok) = gate_c7(&b);
+    println!("{s7}");
+    let (s8, c8_ok) = gate_c8(&b);
+    println!("{s8}");
+    let (s9, c9_ok) = gate_c9();
+    println!("{s9}");
+    let (s10, c10_ok) = gate_c10();
+    println!("{s10}");
+    let (s11, c11_ok) = gate_c11();
+    println!("{s11}");
+    let (s12, c12_ok) = gate_c12(&b);
+    println!("{s12}");
+    let (s13, c13_ok) = gate_c13();
+    println!("{s13}");
+    let (s14, c14_ok) = gate_c14();
+    println!("{s14}");
+    let (s15, c15_ok) = gate_c15();
+    println!("{s15}");
+
     println!("\n## Gates");
-    for (name, ok) in [
+    let gates = [
         ("C1 TOON lossless + smaller", c1_ok),
         ("C2 proximity lifts in-focus rank", c2_ok),
         ("C3 lens_find hit-rate", c3_ok),
         ("C4 contradiction resolved correctly", c4_ok),
-    ] {
+        ("C5 BM25F search MRR ≥ baseline×1.15", c5_ok),
+        ("C6 punctuation queries each ≥1 hit", c6_ok),
+        ("C7 importance ranking MRR ≥ baseline×1.25", c7_ok),
+        ("C8 scope-aware precision ≥0.85, recall ≥ baseline", c8_ok),
+        ("C9 multi-symbol import emits 3 edges", c9_ok),
+        ("C10 trait-sig / const / type captured", c10_ok),
+        ("C11 overview keeps ≥80% important within 2000 tokens", c11_ok),
+        ("C12 recovery recall ≥ baseline, bytes ≤8192", c12_ok),
+        ("C13 fresh-session memory recall ≥0.8", c13_ok),
+        ("C14 token-estimate mean abs error ≤8%", c14_ok),
+        ("C15 structural search precision 1.0, recall ≥0.95", c15_ok),
+    ];
+    for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });
     }
-    let all = c1_ok && c2_ok && c3_ok && c4_ok;
+    let all = gates.iter().all(|(_, ok)| *ok);
     println!(
         "\n{}",
         if all {

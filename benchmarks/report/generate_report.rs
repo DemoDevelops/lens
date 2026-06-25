@@ -50,7 +50,7 @@ and they are not the same kind of measurement.
 
 **Savings** is directly comparable to headroom's proof table: tokens entering
 context **without** lens (a realistic naive-agent path) vs **with** it.
-Token estimate = bytes / 4 (the same rough convention `ctx_stats` uses); raw
+Token counts are real o200k_base BPE (`obs::count_tokens`, offline); raw
 byte counts are shown alongside. Every row is segmented by the lens tool
 that produced the saving (`darkroom` / `index` / `compression` / `discovery`),
 because lens saves via different mechanisms than headroom — it mostly
@@ -69,9 +69,9 @@ scored against deterministic ground truth. The result we want to state honestly
 is **Δ acc ≈ 0 with a large token reduction**. A negative Δ on any mechanism is
 surfaced loudly: it means that mechanism is dropping load-bearing context.
 
-Without `ANTHROPIC_API_KEY` the accuracy harness runs in **mock mode** (a
-context-presence oracle that tests scoring/plumbing only) and the table below is
-marked pending a real-model run.
+With neither `LENS_BENCH_BACKEND=claude-pty` (plan quota) nor `ANTHROPIC_API_KEY`,
+the accuracy harness runs in **mock mode** (a context-presence oracle that tests
+scoring/plumbing only) and the table below is marked pending a real-model run.
 
 "#;
 
@@ -125,6 +125,8 @@ This is the proof the apparatus catches its own bad numbers; it is kept whole.
 The first real accuracy run, on `claude-haiku-4-5`, showed **discovery −33pp** (N = 3, so one task = 33pp). The generator's auto-warning fired — it flags *any* negative aggregate delta as "dropping load-bearing context". Per-task investigation showed the opposite. The one regressing task (`0008_reachable_path`, "can `handle_request` reach `connect_db`?") has a treatment context — the `lens_path` op — that returns the **correct** answer (`found:true`, full path `handle_request → fetch_user → connect_db`), *more* explicit than the raw-file control, yet Haiku still answered `reachable:false`. That is a weak-model reasoning slip on a correct context, **not** a lens context-drop.
 
 Re-running just the discovery set on `claude-sonnet-4-6` (same backend) confirmed it: discovery returns to **100% / 100% (+0pp)**, with `0008` answering `reachable:yes`. The slip disappears on the stronger model.
+
+A later run on `claude-opus-4-8` surfaced the same task's *other* form trap: `0008`'s `lens_path` treatment context carries `found:true`, which primes the model to answer the boolean `{"reachable": true}` rather than the string `"yes"` the prompt requests. The path is correct; only the form differs. The scorer now normalizes yes/no ↔ true/false (a reachability predicate means the same thing either way), so a correct boolean no longer masquerades as a −33pp context-drop.
 
 Lesson, encoded in `bench_report`: a negative aggregate delta is *necessary-not-sufficient* evidence of a context-drop. The ⚠️ on the aggregate is a heuristic; per-task plus cross-model checks separate a real regression from model noise before the table is trusted.
 

@@ -67,21 +67,28 @@ the same model:
 Both are scored against `ground_truth`; tokens consumed are recorded.
 
 ```sh
-cargo run --bin bench_accuracy             # real model if ANTHROPIC_API_KEY set, else mock
-LENS_BENCH_MODEL=claude-haiku-4-5 cargo run --bin bench_accuracy
+LENS_BENCH_BACKEND=claude-pty cargo run --bin bench_accuracy   # real model on plan quota (no API credit)
+cargo run --bin bench_accuracy                                 # ANTHROPIC_API_KEY if set, else mock
+LENS_BENCH_MODEL=claude-opus-4-8 LENS_BENCH_BACKEND=claude-pty cargo run --bin bench_accuracy
 ```
 
-- **Real mode** (key present): each arm's question is answered by the Anthropic
-  API (via `curl`, so no SDK dependency). Model id defaults to a current
-  small-but-capable model and is configurable via `LENS_BENCH_MODEL`.
+- **claude-pty backend** (`LENS_BENCH_BACKEND=claude-pty`, takes precedence over the
+  API key): each arm is answered by a real model driven through interactive Claude
+  Code on **plan quota** (no API credit), tools disabled so it answers only from the
+  given context. This is the path that produced the committed `BENCHMARKS.md`
+  numbers; set the model with `LENS_BENCH_MODEL` (the docs use `claude-opus-4-8`).
+- **Real mode** (`ANTHROPIC_API_KEY` set, no claude-pty): each arm's question is
+  answered by the Anthropic API (via `curl`, so no SDK dependency). Model id defaults
+  to a current small-but-capable model and is configurable via `LENS_BENCH_MODEL`.
 - **Mock mode** (no key): a **context-presence oracle** answers — it returns the
   ground truth iff the task's `evidence` tokens are present in the context. This
   exercises scoring + plumbing without spending API calls; it is **not** a
   substitute for the real-model run, and its output is marked pending. The
   mock-path self-test runs under `cargo test --bin bench_accuracy`.
 
-Results are written to `results/<mode>.json`. `results/mock.json` is committed as
-a sample; real runs are gitignored.
+Results are written to `results/<mode>.json`. Both are committed: `mock.json` as a
+sample, and `real.json` because it backs the published `BENCHMARKS.md` (which
+`bench_report` regenerates from it).
 
 ## `report/` — the report generator
 

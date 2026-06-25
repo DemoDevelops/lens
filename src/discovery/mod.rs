@@ -4,6 +4,7 @@
 pub mod extract;
 pub mod graph;
 pub mod query;
+pub mod structural;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -141,16 +142,61 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         }
     }
 
-    // Resolve calls by callee name within the repo.
+    // Resolve calls scope-aware. For each callee name, prefer a definition in the
+    // SAME file as the caller; only when there is none fall back to the repo-wide
+    // name index (an imported symbol or a same-name def elsewhere). Same-file
+    // narrowing drops the spurious cross-file edges a pure name index produces when
+    // a name is reused across files, without losing any real edge. The graph
+    // borrows are scoped so the resolved list can be added back mutably.
     let name_index = graph.name_index();
-    for (caller, callee) in pending_calls {
-        if let Some(targets) = name_index.get(&callee) {
-            for t in targets {
-                if *t != caller {
-                    graph.add_edge(&caller, t, "calls");
+    let resolved_calls: Vec<(String, String)> = {
+        // name -> node ids, scoped per file (built from the nodes already added).
+        let mut defs_by_file: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
+        for n in &graph.nodes {
+            defs_by_file
+                .entry(n.file.as_str())
+                .or_default()
+                .entry(n.name.as_str())
+                .or_default()
+                .push(n.id.as_str());
+        }
+        let caller_file: HashMap<&str, &str> = graph
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.file.as_str()))
+            .collect();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (caller, callee) in &pending_calls {
+            let file = match caller_file.get(caller.as_str()) {
+                Some(f) => *f,
+                None => continue,
+            };
+            let same_file: Vec<&str> = defs_by_file
+                .get(file)
+                .and_then(|m| m.get(callee.as_str()))
+                .map(|ids| {
+                    ids.iter()
+                        .copied()
+                        .filter(|id| *id != caller.as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !same_file.is_empty() {
+                for t in same_file {
+                    out.push((caller.clone(), t.to_string()));
+                }
+            } else if let Some(targets) = name_index.get(callee) {
+                for t in targets {
+                    if t != caller {
+                        out.push((caller.clone(), t.clone()));
+                    }
                 }
             }
         }
+        out
+    };
+    for (caller, t) in resolved_calls {
+        graph.add_edge(&caller, &t, "calls");
     }
 
     // Resolve imports: link to a matching repo symbol if present, else create an

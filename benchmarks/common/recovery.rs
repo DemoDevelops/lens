@@ -23,8 +23,10 @@ use serde_json::{json, Map, Value};
 
 use lens::session::{extract, snapshot, store::SessionStore};
 
-pub fn est_tokens(bytes: usize) -> usize {
-    bytes / 4
+/// Accurate token count via the offline o200k_base BPE (replaces the old bytes/4
+/// heuristic), so the recovered-context token figures reflect real tokenization.
+pub fn est_tokens(text: &str) -> usize {
+    lens::obs::count_tokens(text)
 }
 
 pub fn recovery_root() -> PathBuf {
@@ -298,7 +300,7 @@ pub fn run_scenario(scenario: &Scenario, model: &Model) -> anyhow::Result<Scenar
                     arm: arm.key().into(),
                     available: true,
                     survived,
-                    tokens: est_tokens(ctx.len()),
+                    tokens: est_tokens(&ctx),
                     context_bytes: ctx.len(),
                 }
             }

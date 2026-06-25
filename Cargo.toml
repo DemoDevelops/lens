@@ -1,6 +1,6 @@
 [package]
 name = "lens"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "Elastic-2.0"
 description = "A token-saving MCP server: darkroom execution, FTS5 search, tree-sitter code graph, reversible compression."

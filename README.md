@@ -31,50 +31,36 @@ Full methodology: [BENCHMARKS.md](BENCHMARKS.md)
 
 ## Install
 
-### Quick install (no Rust)
+lens is one binary. Get it onto your machine, then run `lens setup` to wire it into Claude Code.
 
-One line installs the prebuilt binary, the MCP tools, and the session hooks (continuity, dashboard, adoption nudges) at the safe `nudge` default:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh
-```
-
-Restart Claude Code and verify with the `lens_stats` tool. No Rust toolchain. The `nudge` default encourages the lens tools but never denies WebFetch or rewrites commands. For the aggressive routing (WebFetch and noisy commands redirected into the darkroom) plus RTK shell compression, add `--full`:
+**From a binary you were sent** (no GitHub access needed). Pick the file matching your platform (`uname -sm`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh -s -- --full
+chmod +x lens-aarch64-apple-darwin     # or x86_64-apple-darwin / x86_64-unknown-linux-gnu
+./lens-aarch64-apple-darwin setup --full
 ```
 
-Supported: macOS (arm64, x64), Linux (x64). The uninstall command is printed when it finishes.
+**As a collaborator** (repo access + `gh auth login`):
 
-### Build from source
+```sh
+# target: aarch64-apple-darwin | x86_64-apple-darwin | x86_64-unknown-linux-gnu
+gh release download --repo DemoDevelops/lens --pattern "lens-<target>" --output lens
+chmod +x lens && ./lens setup --full
+```
 
-**Prerequisites:** [Rust](https://rustup.rs) stable. Optional: `python3`, `node`/`npx`, `ruby`, `go` — only needed if you run those languages through `lens_run`.
+**From source** ([Rust](https://rustup.rs) stable; optional `python3`/`node`/`ruby`/`go`, only to run those languages through `lens_run`):
 
 ```sh
 git clone https://github.com/DemoDevelops/lens && cd lens
 cargo build --release
+./target/release/lens setup --full
 ```
 
-**MCP server** (token savings):
-```sh
-claude mcp add lens -- /absolute/path/to/target/release/lens
-```
-Restart Claude Code. Verify with `lens_stats`.
+`lens setup` copies the binary to `~/.local/bin`, registers the MCP server, installs the session hooks and the `/dashboard` command, installs RTK shell compression, sets the routing level, and prints a verification report. Restart Claude Code, then verify with the `lens_stats` tool.
 
-**Session continuity** (optional, replaces Context Mode):
-```sh
-# Uninstall Context Mode first if you have it:
-# /plugin uninstall context-mode
+Routing defaults to the safe `nudge` level (encourages the lens tools, never denies WebFetch or rewrites commands). `--full` turns on the aggressive routing (WebFetch and noisy commands redirected into the darkroom) plus RTK. Change it anytime with `lens setup --routing <off|nudge|steer|wrap|full>`.
 
-./target/release/lens session install
-```
-This registers lifecycle hooks and installs RTK for shell-command compression. Verify with `lens session status`.
-
-For multiple Claude accounts, target the right config:
-```sh
-lens session install --config-dir ~/.claude-personal
-```
+For multiple Claude accounts, target a config dir: `lens setup --config-dir ~/.claude-personal`. Supported: macOS (arm64, x64), Linux (x64).
 
 ## Tools
 

@@ -27,6 +27,12 @@ const EVENTS: [&str; 5] = [
 const MARKER: &str = "hook claude";
 const SELF_MARKER: &str = "lens";
 
+/// The `/dashboard` slash command, embedded at compile time so a sent binary can
+/// install it with no repo checkout. Written to `<config dir>/commands/dashboard.md`
+/// on install, removed on uninstall.
+const DASHBOARD_COMMAND: &str = include_str!("../../assets/commands/dashboard.md");
+const DASHBOARD_COMMAND_FILE: &str = "dashboard.md";
+
 /// CLI entry: `args` is everything after `session`.
 pub fn run_cli(args: &[String]) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
@@ -166,7 +172,28 @@ pub fn install(settings: &Path, bin: &str) -> Result<()> {
         }
     }
 
-    save(settings, &root)
+    save(settings, &root)?;
+    write_command(settings)
+}
+
+/// Write the bundled `/dashboard` slash command into `<config dir>/commands/`, where
+/// the config dir is the settings file's parent. Overwrites (idempotent).
+fn write_command(settings: &Path) -> Result<()> {
+    let Some(dir) = settings.parent() else {
+        return Ok(());
+    };
+    let cmd_dir = dir.join("commands");
+    std::fs::create_dir_all(&cmd_dir)
+        .with_context(|| format!("creating {}", cmd_dir.display()))?;
+    let path = cmd_dir.join(DASHBOARD_COMMAND_FILE);
+    std::fs::write(&path, DASHBOARD_COMMAND).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Remove the bundled `/dashboard` command file (best-effort).
+fn remove_command(settings: &Path) {
+    if let Some(dir) = settings.parent() {
+        let _ = std::fs::remove_file(dir.join("commands").join(DASHBOARD_COMMAND_FILE));
+    }
 }
 
 /// Remove only lens's hook entries. Returns how many groups were removed.
@@ -174,6 +201,7 @@ pub fn uninstall(settings: &Path) -> Result<usize> {
     let mut root = load(settings)?;
     let removed = strip_lens(&mut root);
     save(settings, &root)?;
+    remove_command(settings);
     Ok(removed)
 }
 
@@ -251,6 +279,72 @@ pub fn context_mode_present(root: &Value) -> bool {
         }
     }
     false
+}
+
+/// Remove Context Mode's wiring from `settings` so lens's hooks can install without
+/// double-firing on the same lifecycle events: drops any `enabledPlugins` /
+/// `enabled_plugins` entry whose key starts with `context-mode`, and any hook group
+/// whose command mentions `context-mode`. Idempotent (a no-op when absent). Returns
+/// how many entries were removed (plugin keys + hook groups). After this,
+/// [`context_mode_present`] reads false, so [`install`] no longer refuses.
+pub fn purge_context_mode(settings: &Path) -> Result<usize> {
+    let mut root = load(settings)?;
+    let removed = strip_context_mode(&mut root);
+    if removed > 0 {
+        save(settings, &root)?;
+    }
+    Ok(removed)
+}
+
+/// Strip Context Mode plugin entries + hook groups from `root` in place, pruning
+/// emptied hook events. Returns the count removed. See [`purge_context_mode`].
+fn strip_context_mode(root: &mut Value) -> usize {
+    let mut removed = 0;
+    for key in ["enabledPlugins", "enabled_plugins"] {
+        if let Some(map) = root.get_mut(key).and_then(|v| v.as_object_mut()) {
+            let keys: Vec<String> = map
+                .keys()
+                .filter(|k| k.starts_with("context-mode"))
+                .cloned()
+                .collect();
+            for k in keys {
+                map.remove(&k);
+                removed += 1;
+            }
+        }
+    }
+    if let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        let mut empty_events = Vec::new();
+        for (event, groups) in hooks.iter_mut() {
+            if let Some(arr) = groups.as_array_mut() {
+                let before = arr.len();
+                arr.retain(|g| !group_mentions_context_mode(g));
+                removed += before - arr.len();
+                if arr.is_empty() {
+                    empty_events.push(event.clone());
+                }
+            }
+        }
+        for e in empty_events {
+            hooks.remove(&e);
+        }
+    }
+    removed
+}
+
+fn group_mentions_context_mode(group: &Value) -> bool {
+    group
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .map(|hs| {
+            hs.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.contains("context-mode"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Result of a `session status` check.
@@ -418,5 +512,53 @@ mod tests {
         let s = status(&settings);
         assert_eq!(s.installed_events.len(), 5);
         assert!(!s.conflict);
+    }
+
+    #[test]
+    fn purge_context_mode_clears_plugin_and_hooks_then_install_succeeds() {
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        write(
+            &settings,
+            &json!({
+                "enabledPlugins": { "context-mode@context-mode": true, "other@x": true },
+                "hooks": {
+                    "SessionStart": [
+                        { "matcher": "", "hooks": [ { "type": "command", "command": "context-mode hook start" } ] }
+                    ]
+                }
+            }),
+        );
+        let removed = purge_context_mode(&settings).unwrap();
+        assert_eq!(removed, 2); // one plugin key + one hook group
+        let root = load(&settings).unwrap();
+        assert!(!context_mode_present(&root));
+        assert_eq!(root["enabledPlugins"]["other@x"], true); // unrelated plugin kept
+        // The emptied SessionStart event was pruned.
+        assert!(root["hooks"].get("SessionStart").is_none());
+        // install no longer refuses.
+        assert!(install(&settings, "/usr/bin/lens").is_ok());
+    }
+
+    #[test]
+    fn purge_context_mode_is_noop_when_absent() {
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        write(&settings, &json!({ "enabledPlugins": { "other@x": true } }));
+        assert_eq!(purge_context_mode(&settings).unwrap(), 0);
+    }
+
+    #[test]
+    fn install_writes_dashboard_command_and_uninstall_removes_it() {
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        install(&settings, "/usr/bin/lens").unwrap();
+        let cmd = dir.path().join("commands").join("dashboard.md");
+        assert!(cmd.is_file(), "/dashboard command should be installed");
+        let body = std::fs::read_to_string(&cmd).unwrap();
+        assert!(body.contains("Launch the lens live dashboard"));
+        assert!(body.contains("lens dashboard --port"));
+        uninstall(&settings).unwrap();
+        assert!(!cmd.exists(), "/dashboard command should be removed on uninstall");
     }
 }

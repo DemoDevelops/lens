@@ -5,6 +5,9 @@
 //!   * `lens hook <platform> <event>` → a short-lived session-continuity
 //!     lifecycle hook (stdin = hook payload, stdout = hook response).
 //!   * `lens session <install|uninstall|status>` → manage the hooks.
+//!   * `lens setup [--full]` → self-install for the current user: copy onto PATH,
+//!     register the MCP server, install hooks (clearing Context Mode) + RTK, set the
+//!     routing level, then verify.
 //!   * `lens warmup [path]` → build the code graph + FTS index for a repo up
 //!     front, so lens_symbol / lens_search work without the server's lazy first build.
 //!   * `lens stats [...]` / `lens verify [...]` → read-only observability
@@ -29,6 +32,7 @@ fn main() -> Result<()> {
     match args.get(1).map(|s| s.as_str()) {
         Some("hook") => return session::hook::run_cli(&args[2..]),
         Some("session") => return session::install::run_cli(&args[2..]),
+        Some("setup") => return lens::setup::run_cli(&args[2..]),
         Some("stats") => return obs::stats::run_cli(&args[2..]),
         Some("verify") => return obs::verify::run_cli(&args[2..]),
         Some("dashboard") => return obs::dashboard::run_cli(&args[2..]),

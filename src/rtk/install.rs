@@ -322,6 +322,58 @@ fn remove_hook_entry(settings_path: &Path, needle: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Marker identifying lens's own managed rtk hook script (vs a pre-existing rtk
+/// install's `rtk-rewrite.sh`, or an older `rtk hook` entry).
+const LENS_RTK_MARKER: &str = "lens-rtk-rewrite.sh";
+
+/// Count PreToolUse hook entries whose command mentions `rtk`. Drives `lens setup`'s
+/// verification that exactly one rtk hook remains.
+pub fn count_rtk_hooks(settings: &Path) -> usize {
+    let root = match read_settings(settings) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    root.get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|e| entry_command_contains(e, "rtk"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Reduce the rtk PreToolUse hooks to exactly one — lens's managed
+/// `lens-rtk-rewrite.sh` — by removing any other entry whose command mentions `rtk`
+/// (a pre-existing `rtk-rewrite.sh` from a manual `rtk init`, or an old `rtk hook`
+/// marker) so the Bash rewrite never double-fires. No-op when lens's managed hook
+/// isn't present, so a failed lens install never strips the user's only rtk hook.
+/// Non-rtk hooks are left untouched. Returns how many foreign entries were removed.
+pub fn dedup_rtk_hooks(settings: &Path) -> Result<usize> {
+    if !settings.is_file() {
+        return Ok(0);
+    }
+    let mut root = read_settings(settings)?;
+    let Some(arr) = root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("PreToolUse"))
+        .and_then(|p| p.as_array_mut())
+    else {
+        return Ok(0);
+    };
+    if !arr.iter().any(|e| entry_command_contains(e, LENS_RTK_MARKER)) {
+        return Ok(0);
+    }
+    let before = arr.len();
+    arr.retain(|e| !entry_command_contains(e, "rtk") || entry_command_contains(e, LENS_RTK_MARKER));
+    let removed = before - arr.len();
+    if removed > 0 {
+        write_settings(settings, &root)?;
+    }
+    Ok(removed)
+}
+
 fn read_settings(path: &Path) -> Result<serde_json::Value> {
     if !path.is_file() {
         return Ok(serde_json::json!({}));
@@ -626,5 +678,38 @@ mod tests {
         std::env::remove_var("LENS_RTK_TARGET");
         // Unset → a non-empty triple for the current platform (no panic).
         assert!(!target_triple().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dedup_keeps_lens_hook_removes_foreign_rtk_and_leaves_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let v = serde_json::json!({ "hooks": { "PreToolUse": [
+            { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/h/.claude/hooks/lens-rtk-rewrite.sh" } ] },
+            { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/h/.claude/hooks/rtk-rewrite.sh" } ] },
+            { "matcher": "", "hooks": [ { "type": "command", "command": "lens hook claude PreToolUse" } ] }
+        ] } });
+        std::fs::write(&settings, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        assert_eq!(dedup_rtk_hooks(&settings).unwrap(), 1);
+        assert_eq!(count_rtk_hooks(&settings), 1);
+        // lens's managed hook + the unrelated lens lifecycle hook both survive.
+        let root = read_settings(&settings).unwrap();
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr.iter().any(|e| entry_command_contains(e, LENS_RTK_MARKER)));
+    }
+
+    #[test]
+    fn dedup_is_noop_without_lens_managed_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let v = serde_json::json!({ "hooks": { "PreToolUse": [
+            { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/h/.claude/hooks/rtk-rewrite.sh" } ] }
+        ] } });
+        std::fs::write(&settings, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        // Leaves the user's only rtk hook in place rather than stripping it.
+        assert_eq!(dedup_rtk_hooks(&settings).unwrap(), 0);
+        assert_eq!(count_rtk_hooks(&settings), 1);
     }
 }

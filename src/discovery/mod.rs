@@ -142,13 +142,49 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         }
     }
 
-    // Resolve calls scope-aware. For each callee name, prefer a definition in the
-    // SAME file as the caller; only when there is none fall back to the repo-wide
-    // name index (an imported symbol or a same-name def elsewhere). Same-file
-    // narrowing drops the spurious cross-file edges a pure name index produces when
-    // a name is reused across files, without losing any real edge. The graph
-    // borrows are scoped so the resolved list can be added back mutably.
     let name_index = graph.name_index();
+
+    // Per-file, per-name imported source files. For a `use`/`import` that resolves
+    // to a real definition, record (importing_file, imported_name) -> the file that
+    // DEFINES it. Used by call resolution to prefer the imported definition's file
+    // before the repo-wide fallback. Built from the SAME name-index resolution the
+    // import edges use, so the preferred file is exactly the import target's file.
+    // BTreeSet keeps the per-key file set deterministic.
+    let module_file: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "module")
+        .map(|n| (n.id.as_str(), n.file.as_str()))
+        .collect();
+    let node_file: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.file.as_str()))
+        .collect();
+    let mut imported_src: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
+    for (module_id, seg, _line, _lang) in &pending_imports {
+        let resolved: Option<&String> = name_index
+            .get(seg)
+            .and_then(|ids| ids.iter().find(|id| **id != *module_id));
+        if let (Some(target), Some(imp_file)) =
+            (resolved, module_file.get(module_id.as_str()).copied())
+        {
+            if let Some(src_file) = node_file.get(target.as_str()).copied() {
+                imported_src
+                    .entry((imp_file.to_string(), seg.clone()))
+                    .or_default()
+                    .insert(src_file.to_string());
+            }
+        }
+    }
+
+    // Resolve calls scope-aware. For each callee name, prefer a definition in the
+    // SAME file as the caller; if none, prefer a definition in the file the caller
+    // IMPORTED that name from; only then fall back to the repo-wide name index.
+    // Same-file narrowing drops spurious cross-file edges from a reused name;
+    // import-file narrowing drops the spurious edges to OTHER files that happen to
+    // define the same name when the call is to an imported symbol. The graph borrows
+    // are scoped so the resolved list can be added back mutably.
     let resolved_calls: Vec<(String, String)> = {
         // name -> node ids, scoped per file (built from the nodes already added).
         let mut defs_by_file: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
@@ -184,6 +220,32 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
             if !same_file.is_empty() {
                 for t in same_file {
                     out.push((caller.clone(), t.to_string()));
+                }
+                continue;
+            }
+            // Prefer the file(s) the callee name was imported from in this file.
+            let import_scoped: Vec<&String> = match imported_src
+                .get(&(file.to_string(), callee.clone()))
+            {
+                Some(src_files) => name_index
+                    .get(callee)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter(|t| **t != *caller)
+                            .filter(|t| {
+                                node_file
+                                    .get(t.as_str())
+                                    .map(|f| src_files.contains(*f))
+                                    .unwrap_or(false)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            if !import_scoped.is_empty() {
+                for t in import_scoped {
+                    out.push((caller.clone(), t.clone()));
                 }
             } else if let Some(targets) = name_index.get(callee) {
                 for t in targets {
@@ -431,6 +493,64 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    /// Cross-file call precision: a call whose name matches a symbol IMPORTED from
+    /// one file must NOT also link to same-named definitions in unrelated files.
+    /// `main.rs::caller` calls `run`, imported from `helpers.rs`; `run` is also
+    /// defined in `unrelated.rs`. The only correct `calls` edge from `caller` is to
+    /// `helpers.rs::run`. Reported precision = correct / total caller->run edges.
+    #[test]
+    fn cross_file_call_precision() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("main.rs"),
+            "use crate::helpers::run;\n\npub fn caller() {\n    run();\n}\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("helpers.rs"), "pub fn run() {}\n").unwrap();
+        fs::write(
+            dir.path().join("unrelated.rs"),
+            "pub fn run() {}\npub fn other() { run(); }\n",
+        )
+        .unwrap();
+
+        let g = discover(dir.path(), None).unwrap().graph;
+        let info = |id: &str| g.node(id).map(|n| (n.name.clone(), n.file.clone()));
+        // All caller(main.rs) -> run edges.
+        let run_edges: Vec<(String, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.kind == "calls")
+            .filter_map(|e| {
+                let (fname, ffile) = info(&e.from)?;
+                let (tname, tfile) = info(&e.to)?;
+                if fname == "caller" && ffile == "main.rs" && tname == "run" {
+                    Some((fname, tfile))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let total = run_edges.len();
+        let correct = run_edges
+            .iter()
+            .filter(|(_, tfile)| tfile == "helpers.rs")
+            .count();
+        let precision = if total == 0 {
+            0.0
+        } else {
+            correct as f64 / total as f64
+        };
+        let recall: f64 = if correct >= 1 { 1.0 } else { 0.0 };
+        println!(
+            "[L15 cross-file] caller->run edges total={total} correct={correct} \
+             precision={precision:.3} recall={recall:.3}"
+        );
+        // After the fix: exactly one edge, to the imported source file.
+        assert_eq!(total, 1, "expected exactly one caller->run edge");
+        assert!((precision - 1.0).abs() < 1e-9, "precision must be 1.0");
+        assert!((recall - 1.0).abs() < 1e-9, "recall must be 1.0");
+    }
 
     #[test]
     fn discover_rust_repo_builds_graph() {

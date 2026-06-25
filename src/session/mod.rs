@@ -80,10 +80,13 @@ pub fn resolve_data_dir(project: &Path) -> PathBuf {
     }
 }
 
-/// Snapshot byte budget: `$LENS_SNAPSHOT_BUDGET` or 2048.
+/// Snapshot byte budget: `$LENS_SNAPSHOT_BUDGET` or 8192. The larger default lets
+/// the resume snapshot retain more of a long session's lower-priority context
+/// (git ops, environment, refs) that a 2048 budget dropped, raising recovery
+/// recall while staying small enough to re-inject cheaply at resume.
 pub fn snapshot_budget() -> usize {
     std::env::var("LENS_SNAPSHOT_BUDGET")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(2048)
+        .unwrap_or(8192)
 }

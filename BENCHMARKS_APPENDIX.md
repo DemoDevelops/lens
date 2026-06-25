@@ -10,7 +10,7 @@ and they are not the same kind of measurement.
 
 **Savings** is directly comparable to headroom's proof table: tokens entering
 context **without** lens (a realistic naive-agent path) vs **with** it.
-Token estimate = bytes / 4 (the same rough convention `ctx_stats` uses); raw
+Token counts are real o200k_base BPE (`obs::count_tokens`, offline); raw
 byte counts are shown alongside. Every row is segmented by the lens tool
 that produced the saving (`darkroom` / `index` / `compression` / `discovery`),
 because lens saves via different mechanisms than headroom — it mostly
@@ -29,29 +29,31 @@ scored against deterministic ground truth. The result we want to state honestly
 is **Δ acc ≈ 0 with a large token reduction**. A negative Δ on any mechanism is
 surfaced loudly: it means that mechanism is dropping load-bearing context.
 
-Without `ANTHROPIC_API_KEY` the accuracy harness runs in **mock mode** (a
-context-presence oracle that tests scoring/plumbing only) and the table below is
-marked pending a real-model run.
+With neither `LENS_BENCH_BACKEND=claude-pty` (plan quota) nor `ANTHROPIC_API_KEY`,
+the accuracy harness runs in **mock mode** (a context-presence oracle that tests
+scoring/plumbing only) and the table below is marked pending a real-model run.
 
 ## Savings (full)
 
-### Token savings (estimate = bytes / 4, matching `ctx_stats`)
+### Token savings (o200k_base BPE token counts)
+
+Token savings, not byte savings: lens's compact outputs (graph JSON, columnar payloads) are token-denser than raw source, so the token reduction is the honest figure and runs lower than the byte reduction in the raw-bytes table below.
 
 | Workload | Before | After | Savings | Mechanism |
 | --- | ---: | ---: | ---: | --- |
-| Code search (results across files) | 3,978 | 2,626 | 34% | index |
-| Log debugging (buried root cause) | 1,802 | 129 | 93% | darkroom |
-| Issue triage (structured payload) | 2,225 | 831 | 63% | compression |
-| Codebase exploration (subtree) | 651 | 523 | 20% | discovery |
+| Code search (results across files) | 3,681 | 2,965 | 19% | index |
+| Log debugging (buried root cause) | 2,853 | 181 | 94% | darkroom |
+| Issue triage (structured payload) | 1,953 | 1,190 | 39% | compression |
+| Codebase exploration (subtree) | 657 | 766 | 0% | discovery |
 
 ### Raw bytes and naive-agent baseline (no /4 to trust)
 
 | Workload | Before (bytes) | After (bytes) | Without lens, the agent… | Detail |
 | --- | ---: | ---: | --- | --- |
-| Code search (results across files) | 15,915 | 10,507 | Agent greps for the terms, then opens every matched file in full to read context. | 6 queries, 30 hits returned, 12 matched files read by the naive path |
+| Code search (results across files) | 15,915 | 10,517 | Agent greps for the terms, then opens every matched file in full to read context. | 6 queries, 30 hits returned, 12 matched files read by the naive path |
 | Log debugging (buried root cause) | 7,210 | 517 | Agent loads the entire log into context to locate the one FATAL line. | grep over 7210 bytes -> 517 bytes of matching lines (+context) |
 | Issue triage (structured payload) | 8,902 | 3,327 | Agent loads the full structured triage payload (minified) into context. | reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file 8903 bytes) |
-| Codebase exploration (subtree) | 2,606 | 2,094 | Agent reads every source file in the subtree to map its structure. | discover summary (30 nodes, 40 edges) + one scoped lens_symbol |
+| Codebase exploration (subtree) | 2,606 | 2,163 | Agent reads every source file in the subtree to map its structure. | discover summary (30 nodes, 41 edges) + one scoped lens_symbol |
 
 ### Scale curve (real path at 1× / 10× / 50× the committed fixture)
 
@@ -59,15 +61,15 @@ The §0.1 diagnostic: savings that *rise* with size mean the fixture was too sma
 
 | Workload | Mechanism | Scale | Before (bytes) | After (bytes) | Savings |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Code search | index | 1× | 15,915 | 9,997 | 37% |
-| Code search | index | 10× | 160,230 | 9,825 | 94% |
-| Code search | index | 50× | 802,110 | 9,867 | 99% |
+| Code search | index | 1× | 15,915 | 10,007 | 37% |
+| Code search | index | 10× | 160,230 | 9,775 | 94% |
+| Code search | index | 50× | 802,110 | 9,818 | 99% |
 | Issue triage | compression | 1× | 8,902 | 3,327 | 63% |
 | Issue triage | compression | 10× | 94,195 | 31,323 | 67% |
 | Issue triage | compression | 50× | 476,155 | 158,287 | 67% |
-| Codebase exploration | discovery | 1× | 2,606 | 2,076 | 20% |
-| Codebase exploration | discovery | 10× | 26,690 | 15,896 | 40% |
-| Codebase exploration | discovery | 50× | 134,010 | 268,573 | 0% |
+| Codebase exploration | discovery | 1× | 2,606 | 2,145 | 18% |
+| Codebase exploration | discovery | 10× | 26,690 | 14,609 | 45% |
+| Codebase exploration | discovery | 50× | 134,010 | 101,151 | 25% |
 
 **Classification.**
 - **Code search (index): artifact.** 37% → 94% → 99%. The mechanism returns a fixed set of capped snippets regardless of corpus size, so savings rise sharply as the naive "read every matched file" baseline grows. The original 33% was the 12-file fixture, not the path.
@@ -102,9 +104,9 @@ Model: `claude-opus-4-8 (via claude-pty)`
 
 | Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Darkroom tasks | 6 | 17% | 100% | +83pp | 1847 | 103 | -1744 |
-| Discovery tasks | 3 | 67% | 100% | +33pp | 987 | 467 | -520 |
-| Search tasks | 2 | 100% | 100% | +0pp | 432 | 314 | -118 |
+| Darkroom tasks | 6 | 33% | 100% | +67pp | 2999 | 111 | -2888 |
+| Discovery tasks | 3 | 100% | 100% | +0pp | 990 | 677 | -313 |
+| Search tasks | 2 | 100% | 100% | +0pp | 465 | 392 | -73 |
 
 > **Real run via `claude-pty`** (interactive Claude Code, plan quota — no API credit), tools disabled so each arm answers only from its given context, same isolation as a direct API call.
 >
@@ -117,6 +119,8 @@ This is the proof the apparatus catches its own bad numbers; it is kept whole.
 The first real accuracy run, on `claude-haiku-4-5`, showed **discovery −33pp** (N = 3, so one task = 33pp). The generator's auto-warning fired — it flags *any* negative aggregate delta as "dropping load-bearing context". Per-task investigation showed the opposite. The one regressing task (`0008_reachable_path`, "can `handle_request` reach `connect_db`?") has a treatment context — the `lens_path` op — that returns the **correct** answer (`found:true`, full path `handle_request → fetch_user → connect_db`), *more* explicit than the raw-file control, yet Haiku still answered `reachable:false`. That is a weak-model reasoning slip on a correct context, **not** a lens context-drop.
 
 Re-running just the discovery set on `claude-sonnet-4-6` (same backend) confirmed it: discovery returns to **100% / 100% (+0pp)**, with `0008` answering `reachable:yes`. The slip disappears on the stronger model.
+
+A later run on `claude-opus-4-8` surfaced the same task's *other* form trap: `0008`'s `lens_path` treatment context carries `found:true`, which primes the model to answer the boolean `{"reachable": true}` rather than the string `"yes"` the prompt requests. The path is correct; only the form differs. The scorer now normalizes yes/no ↔ true/false (a reachability predicate means the same thing either way), so a correct boolean no longer masquerades as a −33pp context-drop.
 
 Lesson, encoded in `bench_report`: a negative aggregate delta is *necessary-not-sufficient* evidence of a context-drop. The ⚠️ on the aggregate is a heuristic; per-task plus cross-model checks separate a real regression from model noise before the table is trusted.
 

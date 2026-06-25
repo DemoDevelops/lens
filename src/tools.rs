@@ -246,6 +246,69 @@ pub struct PathResponse {
     pub path: Vec<NodeView>,
 }
 
+// ---------------------------------------------------------------------------
+// lens_overview (token-budgeted repo map)
+// ---------------------------------------------------------------------------
+
+fn default_overview_budget() -> usize {
+    2000
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OverviewRequest {
+    /// Token budget for the overview (default 2000).
+    #[serde(default = "default_overview_budget")]
+    pub token_budget: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct OverviewResponse {
+    /// The importance-ranked, budget-limited symbol map (markdown).
+    pub overview: String,
+}
+
+// ---------------------------------------------------------------------------
+// lens_grep_ast (structural / tree-sitter search)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GrepAstRequest {
+    /// File or directory to search (default ".").
+    #[serde(default = "default_dot")]
+    pub path: String,
+    /// A tree-sitter query (S-expression). Node kinds are language-specific, e.g.
+    /// `(call_expression function: (field_expression field: (field_identifier) @m))`.
+    pub query: String,
+    /// Language the query targets (rust, python, javascript, typescript, go, swift).
+    /// When omitted, every file is matched against the query compiled for its own
+    /// grammar, skipping files whose grammar can't compile it.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Max matches to return (default 100).
+    #[serde(default = "default_grep_ast_limit")]
+    pub limit: usize,
+}
+
+fn default_grep_ast_limit() -> usize {
+    100
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AstMatch {
+    pub path: String,
+    /// 1-based line of the captured node.
+    pub line: usize,
+    /// The captured node's text (capped).
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GrepAstResponse {
+    pub matches: Vec<AstMatch>,
+    /// True if the result hit the `limit` cap.
+    pub truncated: bool,
+}
+
 /// Empty input for tools that take no parameters.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct EmptyRequest {}

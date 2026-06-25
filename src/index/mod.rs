@@ -4,9 +4,12 @@ pub mod schema;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use regex::Regex;
+use rusqlite::Connection;
 
 pub use schema::Index;
 
@@ -90,6 +93,7 @@ impl Index {
         // Delete chunks for removed files.
         for path in &deleted {
             tx.execute("DELETE FROM chunks WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM file_manifest WHERE path = ?1", [path])?;
         }
 
@@ -105,6 +109,7 @@ impl Index {
             };
 
             tx.execute("DELETE FROM chunks WHERE path = ?1", [path_str])?;
+            tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path_str])?;
 
             let chunks = chunk_file(file, &content);
             for (i, chunk) in chunks.iter().enumerate() {
@@ -112,8 +117,12 @@ impl Index {
                     continue;
                 }
                 let chunk_id = format!("{path_str}#{i}");
+                let symbols = chunk_symbols(chunk);
                 tx.prepare_cached(
-                    "INSERT INTO chunks (path, chunk_id, content) VALUES (?1, ?2, ?3)",
+                    "INSERT INTO chunks (path, chunk_id, symbols, content) VALUES (?1, ?2, ?3, ?4)",
+                )?.execute(rusqlite::params![path_str, chunk_id, symbols, chunk])?;
+                tx.prepare_cached(
+                    "INSERT INTO chunks_tri (path, chunk_id, content) VALUES (?1, ?2, ?3)",
                 )?.execute(rusqlite::params![path_str, chunk_id, chunk])?;
                 chunks_added += 1;
             }
@@ -173,6 +182,7 @@ impl Index {
         let mut removed = 0usize;
         for path in &stale {
             removed += tx.execute("DELETE FROM chunks WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path])?;
         }
         tx.commit()?;
         Ok(removed)
@@ -190,8 +200,15 @@ impl Index {
                 continue;
             }
             tx.execute("DELETE FROM chunks WHERE chunk_id = ?1", [chunk_id])?;
+            tx.execute("DELETE FROM chunks_tri WHERE chunk_id = ?1", [chunk_id])?;
+            // Session-continuity records carry no code symbols, so the symbols
+            // column is empty (they rank on content only).
             tx.execute(
-                "INSERT INTO chunks (path, chunk_id, content) VALUES (?1, ?2, ?3)",
+                "INSERT INTO chunks (path, chunk_id, symbols, content) VALUES (?1, ?2, '', ?3)",
+                rusqlite::params![path, chunk_id, content],
+            )?;
+            tx.execute(
+                "INSERT INTO chunks_tri (path, chunk_id, content) VALUES (?1, ?2, ?3)",
                 rusqlite::params![path, chunk_id, content],
             )?;
             added += 1;
@@ -200,38 +217,18 @@ impl Index {
         Ok(added)
     }
 
-    /// Run BM25-ranked FTS5 search for each query.
+    /// Run FTS5 search for each query. Alphanumeric queries take the BM25F-ranked
+    /// porter path; queries carrying structural punctuation (`std::fs`, `->`) route
+    /// to the trigram path for literal-substring matching.
     pub fn search(&self, queries: &[String], limit_per_query: usize) -> Result<SearchResponse> {
         let conn = self.conn()?;
         let mut results = Vec::new();
         for query in queries {
-            let match_expr = sanitize_query(query);
-            let mut hits = Vec::new();
-            if !match_expr.is_empty() {
-                // bm25() is more-negative-is-better; negate so higher = better.
-                let mut stmt = conn.prepare(
-                    "SELECT path, snippet(chunks, 2, '[', ']', ' … ', 24) AS snip, -bm25(chunks) AS score
-                     FROM chunks
-                     WHERE chunks MATCH ?1
-                     ORDER BY bm25(chunks)
-                     LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(
-                    rusqlite::params![match_expr, limit_per_query as i64],
-                    |row| {
-                        Ok(SearchHit {
-                            path: row.get(0)?,
-                            snippet: row.get(1)?,
-                            score: row.get(2)?,
-                        })
-                    },
-                );
-                if let Ok(mapped) = rows {
-                    for h in mapped.flatten() {
-                        hits.push(h);
-                    }
-                }
-            }
+            let hits = if is_structural(query) {
+                structural_search(&conn, query, limit_per_query)?
+            } else {
+                ranked_search(&conn, query, limit_per_query)?
+            };
             results.push(QueryResult {
                 query: query.clone(),
                 hits,
@@ -239,6 +236,96 @@ impl Index {
         }
         Ok(SearchResponse { results })
     }
+}
+
+/// BM25F-ranked search over the porter `chunks` table (the default path).
+fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    let match_expr = sanitize_query(query);
+    if match_expr.is_empty() {
+        return Ok(Vec::new());
+    }
+    // bm25() is more-negative-is-better; negate so higher = better. Column weights
+    // are (path, chunk_id, symbols, content): symbols is weighted 5x so a query
+    // naming a symbol ranks its defining file above files that only mention the
+    // term. snippet targets content (column 3).
+    let mut stmt = conn.prepare(
+        "SELECT path, snippet(chunks, 3, '[', ']', ' … ', 24) AS snip,
+                -bm25(chunks, 0.0, 0.0, 5.0, 1.0) AS score
+         FROM chunks
+         WHERE chunks MATCH ?1
+         ORDER BY bm25(chunks, 0.0, 0.0, 5.0, 1.0)
+         LIMIT ?2",
+    )?;
+    let mut hits = Vec::new();
+    let rows = stmt.query_map(rusqlite::params![match_expr, limit as i64], |row| {
+        Ok(SearchHit {
+            path: row.get(0)?,
+            snippet: row.get(1)?,
+            score: row.get(2)?,
+        })
+    });
+    if let Ok(mapped) = rows {
+        for h in mapped.flatten() {
+            hits.push(h);
+        }
+    }
+    Ok(hits)
+}
+
+/// Literal-substring search over the trigram `chunks_tri` table for structural /
+/// operator queries. Queries of at least 3 chars use the trigram index; shorter
+/// operators (`->`) fall back to a `LIKE` scan, which a trigram index can't serve.
+fn structural_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(String, String)> = if q.chars().count() >= 3 {
+        let phrase = format!("\"{}\"", q.replace('"', "\"\""));
+        let mut stmt =
+            conn.prepare("SELECT path, content FROM chunks_tri WHERE chunks_tri MATCH ?1 LIMIT ?2")?;
+        let mapped = stmt.query_map(rusqlite::params![phrase, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        mapped.flatten().collect()
+    } else {
+        let like = format!("%{q}%");
+        let mut stmt =
+            conn.prepare("SELECT path, content FROM chunks_tri WHERE content LIKE ?1 LIMIT ?2")?;
+        let mapped = stmt.query_map(rusqlite::params![like, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        mapped.flatten().collect()
+    };
+    Ok(rows
+        .into_iter()
+        .map(|(path, content)| SearchHit {
+            path,
+            snippet: structural_snippet(&content, q),
+            score: 0.0,
+        })
+        .collect())
+}
+
+/// The first line of `content` containing `needle`, trimmed and capped — the
+/// snippet for a structural hit (the match is a substring, not an FTS token).
+fn structural_snippet(content: &str, needle: &str) -> String {
+    content
+        .lines()
+        .find(|l| l.contains(needle))
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(120)
+        .collect()
+}
+
+/// True when a query carries structural punctuation the porter tokenizer would
+/// strip (`:`, `.`, `>`, `-`, ...), so it should route to the trigram path.
+fn is_structural(query: &str) -> bool {
+    query
+        .chars()
+        .any(|c| !c.is_alphanumeric() && !c.is_whitespace() && c != '_')
 }
 
 /// Split a file into chunks: markdown by headings, everything else by line windows.
@@ -289,6 +376,28 @@ fn mtime_ms(path: &Path) -> u64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Symbol names defined in a code chunk: the identifier following a definition
+/// keyword (`fn`, `struct`, `def`, `class`, ...). Joined into the FTS `symbols`
+/// column so a query that names a symbol is field-weighted toward the file that
+/// defines it. Regex-based and language-agnostic; markdown/prose chunks yield an
+/// empty string and rank on content alone.
+fn chunk_symbols(content: &str) -> String {
+    static SYMBOL_RE: OnceLock<Regex> = OnceLock::new();
+    let re = SYMBOL_RE.get_or_init(|| {
+        Regex::new(
+            r"\b(?:fn|func|def|struct|enum|trait|interface|class|type|const|impl|mod)\s+([A-Za-z_][A-Za-z0-9_]*)",
+        )
+        .expect("symbol regex")
+    });
+    let mut names: Vec<&str> = re
+        .captures_iter(content)
+        .filter_map(|c| c.get(1).map(|m| m.as_str()))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names.join(" ")
 }
 
 /// Turn an arbitrary query into a safe FTS5 MATCH expression: each whitespace

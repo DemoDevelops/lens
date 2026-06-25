@@ -109,6 +109,13 @@ impl SessionStore {
                 created_at  INTEGER NOT NULL,
                 consumed    INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (session_id, project)
+             );
+             CREATE TABLE IF NOT EXISTS project_memory (
+                project    TEXT NOT NULL,
+                category   TEXT NOT NULL,
+                text       TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (project, category, text)
              );",
         )?;
         Ok(())
@@ -148,6 +155,20 @@ impl SessionStore {
                     e.payload.to_string(),
                     e.source_hook,
                 ])?;
+            }
+        }
+        // Mirror durable items (decisions, constraints, rejected approaches, rules)
+        // into project_memory, which survives the fresh-session event clear so they
+        // can be re-injected on the next SessionStart.
+        {
+            let mut mstmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO project_memory (project, category, text, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for e in events {
+                if let Some((cat, text)) = memory_item(e) {
+                    mstmt.execute(rusqlite::params![e.project, cat, text, e.timestamp])?;
+                }
             }
         }
         tx.commit()?;
@@ -403,6 +424,36 @@ impl SessionStore {
             }
             None => Ok(None),
         }
+    }
+
+    /// Durable project memory (decisions, constraints, rejected approaches, rule
+    /// paths) accumulated across every session for `project`, oldest first. Unlike
+    /// `session_events` this is never cleared on a fresh-session start, so it can be
+    /// re-injected to carry prior decisions into a new session. Returns
+    /// `(category, text)` pairs.
+    pub fn project_memory(&self, project: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT category, text FROM project_memory WHERE project = ?1
+             ORDER BY created_at ASC, category ASC, text ASC",
+        )?;
+        let rows = stmt.query_map([project], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.flatten().collect())
+    }
+}
+
+/// Durable memory item for an event, or None if the category is not durable.
+/// Decisions/constraints/rejected approaches carry a `text`; rules carry a `path`.
+fn memory_item(e: &Event) -> Option<(&'static str, String)> {
+    let field = |k: &str| e.payload.get(k).and_then(|v| v.as_str()).map(String::from);
+    match e.category.as_str() {
+        "decision" => field("text").map(|t| ("decision", t)),
+        "constraint" => field("text").map(|t| ("constraint", t)),
+        "rejected-approach" => field("text").map(|t| ("rejected-approach", t)),
+        "rule" => field("path").map(|t| ("rule", t)),
+        _ => None,
     }
 }
 

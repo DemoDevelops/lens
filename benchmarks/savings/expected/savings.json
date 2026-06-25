@@ -3,7 +3,9 @@
     "workload": "Code search (results across files)",
     "mechanism": "index",
     "before_bytes": 15915,
-    "after_bytes": 10507,
+    "after_bytes": 10517,
+    "before_tokens": 3681,
+    "after_tokens": 2965,
     "savings_pct": 34,
     "baseline": "Agent greps for the terms, then opens every matched file in full to read context.",
     "detail": "6 queries, 30 hits returned, 12 matched files read by the naive path"
@@ -13,6 +15,8 @@
     "mechanism": "darkroom",
     "before_bytes": 7210,
     "after_bytes": 517,
+    "before_tokens": 2853,
+    "after_tokens": 181,
     "savings_pct": 93,
     "baseline": "Agent loads the entire log into context to locate the one FATAL line.",
     "detail": "grep over 7210 bytes -> 517 bytes of matching lines (+context)"
@@ -22,6 +26,8 @@
     "mechanism": "compression",
     "before_bytes": 8902,
     "after_bytes": 3327,
+    "before_tokens": 1953,
+    "after_tokens": 1190,
     "savings_pct": 63,
     "baseline": "Agent loads the full structured triage payload (minified) into context.",
     "detail": "reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file 8903 bytes)"
@@ -30,9 +36,11 @@
     "workload": "Codebase exploration (subtree)",
     "mechanism": "discovery",
     "before_bytes": 2606,
-    "after_bytes": 2094,
-    "savings_pct": 20,
+    "after_bytes": 2163,
+    "before_tokens": 657,
+    "after_tokens": 766,
+    "savings_pct": 17,
     "baseline": "Agent reads every source file in the subtree to map its structure.",
-    "detail": "discover summary (30 nodes, 40 edges) + one scoped lens_symbol"
+    "detail": "discover summary (30 nodes, 41 edges) + one scoped lens_symbol"
   }
 ]

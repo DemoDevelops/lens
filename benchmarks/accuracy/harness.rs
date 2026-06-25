@@ -185,6 +185,29 @@ mod tests {
     }
 
     #[test]
+    fn scoring_yes_no_bool_equivalence() {
+        // A yes/no prompt answered as a boolean is correct: `lens_path` returns
+        // `found:true`, which primes the model to answer `{"reachable": true}`
+        // instead of the string "yes" (0008_reachable_path).
+        let gt = json!({"reachable": "yes"});
+        assert!(score(&json!({"reachable": true}), &gt, "contains", None));
+        assert!(score(&json!({"reachable": "yes"}), &gt, "contains", None));
+        assert!(score(&json!({"reachable": true}), &gt, "exact_match", None));
+        // a wrong predicate is still wrong, either form
+        assert!(!score(&json!({"reachable": false}), &gt, "contains", None));
+        assert!(!score(&json!({"reachable": "no"}), &gt, "exact_match", None));
+        // non-predicate strings are unaffected: a bool answer to a file
+        // question stays wrong, and file-name contains still works.
+        assert!(!score(&json!({"file": true}), &json!({"file": "db.rs"}), "contains", None));
+        assert!(score(
+            &json!({"file": "src/db.rs"}),
+            &json!({"file": "db.rs"}),
+            "contains",
+            None
+        ));
+    }
+
+    #[test]
     fn mock_oracle_presence() {
         let gt = json!({"count": 12});
         // evidence present -> ground truth

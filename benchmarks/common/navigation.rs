@@ -61,6 +61,10 @@ pub struct NavRow {
     pub correct: bool,
     /// What the "without graph" path concretely does (the no-strawman note).
     pub baseline: String,
+    /// 1-based rank of the answer symbol among same-substring matches a
+    /// `lens_symbol` query returns (0 if absent). Records the order importance
+    /// ranking imposes, so a ranking change surfaces as a committed-JSON delta.
+    pub rank_position: usize,
 }
 
 /// The question corpus, authored from the fixture source.
@@ -184,6 +188,7 @@ fn eval(repo: &Path, g: &Graph, q: Q) -> anyhow::Result<NavRow> {
                 graph_round_trips: 1,
                 correct,
                 baseline: "grep the symbol, then open the defining file to read it".into(),
+                rank_position: rank_of(g, sym),
             })
         }
         Q::Callers { id, sym, expect } => {
@@ -226,6 +231,7 @@ fn eval(repo: &Path, g: &Graph, q: Q) -> anyhow::Result<NavRow> {
                 baseline:
                     "grep the symbol, then read each matched file to tell real calls from mentions"
                         .into(),
+                rank_position: rank_of(g, sym),
             })
         }
         Q::Path {
@@ -262,6 +268,7 @@ fn eval(repo: &Path, g: &Graph, q: Q) -> anyhow::Result<NavRow> {
                 graph_round_trips: 1,
                 correct,
                 baseline: "read the source subtree to trace call edges by hand".into(),
+                rank_position: rank_of(g, from),
             })
         }
     }
@@ -273,6 +280,20 @@ fn node_id(g: &Graph, sym: &str) -> Option<String> {
         .into_iter()
         .find(|n| n.name == sym)
         .map(|n| n.id.clone())
+}
+
+/// 1-based rank of the symbol named `name` among the name-matching nodes a
+/// `lens_symbol` query returns (0 if absent). With unique fixture names this is
+/// 1, but the field lets an importance-ranking change show up as a JSON delta.
+fn rank_of(g: &Graph, name: &str) -> usize {
+    let lname = name.to_ascii_lowercase();
+    gquery::query(g, name, None, 20, &[])
+        .nodes
+        .iter()
+        .filter(|n| n.name.to_ascii_lowercase().contains(&lname))
+        .position(|n| n.name == name)
+        .map(|p| p + 1)
+        .unwrap_or(0)
 }
 
 /// Files under `repo`, sorted for determinism.

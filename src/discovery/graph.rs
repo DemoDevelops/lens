@@ -128,6 +128,94 @@ impl Graph {
         idx
     }
 
+    /// PageRank-style importance over the reference graph (calls + imports), the
+    /// signal that ranks `lens_symbol` matches so the structurally central symbol
+    /// surfaces first instead of an id-sorted arbitrary one. Aider-style edge
+    /// weighting (RepoGraph / aider repomap): a reference to a symbol used across
+    /// more than five files, or to a private (`_`-prefixed) symbol, counts for
+    /// 0.1x — too-common and internal symbols are less useful to surface.
+    /// Deterministic: same graph -> same scores (iterates the node/edge Vecs in
+    /// order, never a HashMap).
+    pub fn importance(&self) -> HashMap<String, f64> {
+        let n = self.nodes.len();
+        if n == 0 {
+            return HashMap::new();
+        }
+        let is_ref = |kind: &str| kind == "calls" || kind == "imports";
+        let node_file: HashMap<&str, &str> = self
+            .nodes
+            .iter()
+            .map(|nd| (nd.id.as_str(), nd.file.as_str()))
+            .collect();
+        let node_name: HashMap<&str, &str> = self
+            .nodes
+            .iter()
+            .map(|nd| (nd.id.as_str(), nd.name.as_str()))
+            .collect();
+        // Distinct referencing files per target (the aider "used across N files" signal).
+        let mut target_files: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for e in &self.edges {
+            if is_ref(&e.kind) {
+                if let Some(f) = node_file.get(e.from.as_str()) {
+                    target_files.entry(e.to.as_str()).or_default().insert(*f);
+                }
+            }
+        }
+        let weight = |to: &str| -> f64 {
+            let mut w = 1.0;
+            if target_files.get(to).map(|s| s.len()).unwrap_or(0) > 5 {
+                w *= 0.1;
+            }
+            if node_name.get(to).map(|nm| nm.starts_with('_')).unwrap_or(false) {
+                w *= 0.1;
+            }
+            w
+        };
+        // Weighted out-adjacency over reference edges.
+        let mut out: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
+        for e in &self.edges {
+            if is_ref(&e.kind) {
+                out.entry(e.from.as_str())
+                    .or_default()
+                    .push((e.to.as_str(), weight(e.to.as_str())));
+            }
+        }
+        const DAMP: f64 = 0.85;
+        const ITERS: usize = 20;
+        let base = 1.0 / n as f64;
+        let mut rank: HashMap<&str, f64> =
+            self.nodes.iter().map(|nd| (nd.id.as_str(), base)).collect();
+        for _ in 0..ITERS {
+            let mut next: HashMap<&str, f64> = self
+                .nodes
+                .iter()
+                .map(|nd| (nd.id.as_str(), (1.0 - DAMP) * base))
+                .collect();
+            let mut dangling = 0.0;
+            for nd in &self.nodes {
+                let id = nd.id.as_str();
+                let r = rank[id];
+                let edges = out.get(id);
+                let total_w: f64 = edges.map(|es| es.iter().map(|(_, w)| *w).sum()).unwrap_or(0.0);
+                if total_w > 0.0 {
+                    for (to, w) in edges.unwrap() {
+                        if let Some(slot) = next.get_mut(to) {
+                            *slot += DAMP * r * (w / total_w);
+                        }
+                    }
+                } else {
+                    dangling += r;
+                }
+            }
+            let spread = DAMP * dangling / n as f64;
+            for v in next.values_mut() {
+                *v += spread;
+            }
+            rank = next;
+        }
+        rank.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+
     /// Edges incident to `id` in either direction.
     pub fn incident(&self, id: &str) -> Vec<&Edge> {
         self.edges

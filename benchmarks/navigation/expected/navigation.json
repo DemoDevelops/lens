@@ -8,7 +8,8 @@
     "naive_round_trips": 2,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "grep the symbol, then open the defining file to read it"
+    "baseline": "grep the symbol, then open the defining file to read it",
+    "rank_position": 1
   },
   {
     "id": "nav_define_rotate_keys",
@@ -19,7 +20,8 @@
     "naive_round_trips": 2,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "grep the symbol, then open the defining file to read it"
+    "baseline": "grep the symbol, then open the defining file to read it",
+    "rank_position": 1
   },
   {
     "id": "nav_define_authenticate",
@@ -30,7 +32,8 @@
     "naive_round_trips": 2,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "grep the symbol, then open the defining file to read it"
+    "baseline": "grep the symbol, then open the defining file to read it",
+    "rank_position": 1
   },
   {
     "id": "nav_define_connection",
@@ -41,7 +44,8 @@
     "naive_round_trips": 2,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "grep the symbol, then open the defining file to read it"
+    "baseline": "grep the symbol, then open the defining file to read it",
+    "rank_position": 1
   },
   {
     "id": "nav_callers_connect_db",
@@ -52,7 +56,8 @@
     "naive_round_trips": 2,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "grep the symbol, then read each matched file to tell real calls from mentions"
+    "baseline": "grep the symbol, then read each matched file to tell real calls from mentions",
+    "rank_position": 1
   },
   {
     "id": "nav_callers_fetch_user",
@@ -63,7 +68,8 @@
     "naive_round_trips": 3,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "grep the symbol, then read each matched file to tell real calls from mentions"
+    "baseline": "grep the symbol, then read each matched file to tell real calls from mentions",
+    "rank_position": 1
   },
   {
     "id": "nav_callers_authenticate",
@@ -74,7 +80,8 @@
     "naive_round_trips": 3,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "grep the symbol, then read each matched file to tell real calls from mentions"
+    "baseline": "grep the symbol, then read each matched file to tell real calls from mentions",
+    "rank_position": 1
   },
   {
     "id": "nav_path_handle_to_connect",
@@ -85,7 +92,8 @@
     "naive_round_trips": 5,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "read the source subtree to trace call edges by hand"
+    "baseline": "read the source subtree to trace call edges by hand",
+    "rank_position": 1
   },
   {
     "id": "nav_path_main_to_connect",
@@ -96,7 +104,8 @@
     "naive_round_trips": 5,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "read the source subtree to trace call edges by hand"
+    "baseline": "read the source subtree to trace call edges by hand",
+    "rank_position": 2
   },
   {
     "id": "nav_path_handle_to_rotate",
@@ -107,7 +116,8 @@
     "naive_round_trips": 5,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "read the source subtree to trace call edges by hand"
+    "baseline": "read the source subtree to trace call edges by hand",
+    "rank_position": 1
   },
   {
     "id": "nav_path_connect_to_rotate",
@@ -118,6 +128,7 @@
     "naive_round_trips": 5,
     "graph_round_trips": 1,
     "correct": true,
-    "baseline": "read the source subtree to trace call edges by hand"
+    "baseline": "read the source subtree to trace call edges by hand",
+    "rank_position": 1
   }
 ]

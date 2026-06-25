@@ -95,10 +95,13 @@ pub fn all_specs() -> Vec<LangSpec> {
             language: || tree_sitter_rust::LANGUAGE.into(),
             defs_query: r#"
                 (function_item name: (identifier) @function)
+                (function_signature_item name: (identifier) @function_signature)
                 (struct_item name: (type_identifier) @struct)
                 (enum_item name: (type_identifier) @enum)
                 (trait_item name: (type_identifier) @trait)
                 (mod_item name: (identifier) @mod)
+                (const_item name: (identifier) @const)
+                (type_item name: (type_identifier) @type)
             "#,
             calls_query: r#"
                 (call_expression function: (identifier) @call)
@@ -404,7 +407,7 @@ fn extract_from_tree(
         for cap in m.captures {
             let line = cap.node.start_position().row + 1;
             let text = node_text(&cap.node, src);
-            if let Some(seg) = import_target(&text) {
+            for seg in import_targets(&text) {
                 imports.push((seg, line));
             }
         }
@@ -449,6 +452,26 @@ fn last_segment(name: &str) -> String {
         .unwrap_or(name)
         .trim()
         .to_string()
+}
+
+/// Names a (possibly grouped) import statement brings into scope. A braced group
+/// (`use a::{b, c}`, `import { b, c }`) yields one name per member; everything
+/// else yields the single representative target [`import_target`] picks. This is
+/// what makes a multi-symbol `use` emit one import edge per symbol, not just the
+/// last token.
+fn import_targets(stmt: &str) -> Vec<String> {
+    if let (Some(open), Some(close)) = (stmt.find('{'), stmt.rfind('}')) {
+        if close > open {
+            let names: Vec<String> = stmt[open + 1..close]
+                .split(',')
+                .filter_map(import_target)
+                .collect();
+            if !names.is_empty() {
+                return names;
+            }
+        }
+    }
+    import_target(stmt).into_iter().collect()
 }
 
 /// Pull a representative target name out of an import statement's text.

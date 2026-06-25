@@ -95,18 +95,9 @@ fn tool_names() -> anyhow::Result<Vec<String>> {
     Ok(names.into_iter().collect())
 }
 
-/// Workloads excluded from the GATE (still reported). Their `after` value is a
-/// top-K FTS search-result serialization, whose tie-breaking follows file
-/// insertion order (filesystem walk order) and therefore differs between two
-/// physical copies of the same corpus (a git worktree vs the main checkout).
-/// Gating on them yields false FAILs in worktrees. The deterministic arms
-/// (darkroom, compression) plus the invariant gates keep the ratchet honest and
-/// portable. (Backlog L16: make search savings order-independent to re-gate it.)
-fn is_gated(workload: &str) -> bool {
-    !workload.contains("Code search")
-}
-
-/// Aggregate token savings (over GATED arms only) and per-workload savings (all).
+/// Aggregate token savings overall and per workload from the savings rows. All
+/// arms are now deterministic across checkouts (FTS search tie-breaks are stable,
+/// see src/index/mod.rs `ORDER BY ..., path, chunk_id`), so all are gated.
 fn savings_from_rows(rows: &[SavingsRow]) -> (f64, Vec<WorkloadSavings>) {
     let pct = |b: usize, a: usize| -> f64 {
         if b > 0 {
@@ -118,10 +109,8 @@ fn savings_from_rows(rows: &[SavingsRow]) -> (f64, Vec<WorkloadSavings>) {
     let (mut tot_b, mut tot_a) = (0usize, 0usize);
     let mut by: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for r in rows {
-        if is_gated(&r.workload) {
-            tot_b += r.before_tokens;
-            tot_a += r.after_tokens;
-        }
+        tot_b += r.before_tokens;
+        tot_a += r.after_tokens;
         let e = by.entry(r.workload.clone()).or_default();
         e.0 += r.before_tokens;
         e.1 += r.after_tokens;
@@ -187,28 +176,20 @@ async fn main() -> anyhow::Result<()> {
     let g1 = cur.overall_token_savings_pct + EPS >= base.overall_token_savings_pct;
     fail |= !g1;
     out.push_str(&format!(
-        "| overall token savings (gated arms) | {:.1}% | {:.1}% | {} |\n",
+        "| overall token savings | {:.1}% | {:.1}% | {} |\n",
         base.overall_token_savings_pct,
         cur.overall_token_savings_pct,
         verdict(g1)
     ));
 
-    // G1b: per-workload tripwire (1.0pp tolerance); a vanished gated workload
-    // fails. Non-gated (order-sensitive search) arms are reported, not gated.
+    // G1b: per-workload tripwire (1.0pp tolerance); a vanished workload fails.
     const TOL: f64 = 1.0;
     for bw in &base.per_workload {
         let cw = cur.per_workload.iter().find(|w| w.workload == bw.workload);
-        let cur_pct = cw.map(|w| w.token_savings_pct).unwrap_or(f64::NAN);
-        if !is_gated(&bw.workload) {
-            out.push_str(&format!(
-                "| savings: {} | {:.1}% | {:.1}% | INFO (not gated) |\n",
-                bw.workload, bw.token_savings_pct, cur_pct
-            ));
-            continue;
-        }
-        let ok = cw
-            .map(|w| w.token_savings_pct + TOL >= bw.token_savings_pct)
-            .unwrap_or(false);
+        let (ok, cur_pct) = match cw {
+            Some(w) => (w.token_savings_pct + TOL >= bw.token_savings_pct, w.token_savings_pct),
+            None => (false, f64::NAN),
+        };
         fail |= !ok;
         out.push_str(&format!(
             "| savings: {} | {:.1}% | {:.1}% | {} |\n",

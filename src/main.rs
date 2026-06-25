@@ -8,6 +8,8 @@
 //!   * `lens setup [--full]` → self-install for the current user: copy onto PATH,
 //!     register the MCP server, install hooks (clearing Context Mode) + RTK, set the
 //!     routing level, then verify.
+//!   * `lens update` → if a newer release exists, download the matching binary and
+//!     re-run `setup` with it (preserving routing level + install location).
 //!   * `lens warmup [path]` → build the code graph + FTS index for a repo up
 //!     front, so lens_symbol / lens_search work without the server's lazy first build.
 //!   * `lens stats [...]` / `lens verify [...]` → read-only observability
@@ -33,6 +35,7 @@ fn main() -> Result<()> {
         Some("hook") => return session::hook::run_cli(&args[2..]),
         Some("session") => return session::install::run_cli(&args[2..]),
         Some("setup") => return lens::setup::run_cli(&args[2..]),
+        Some("update") => return lens::setup::run_update_cli(&args[2..]),
         Some("stats") => return obs::stats::run_cli(&args[2..]),
         Some("verify") => return obs::verify::run_cli(&args[2..]),
         Some("dashboard") => return obs::dashboard::run_cli(&args[2..]),

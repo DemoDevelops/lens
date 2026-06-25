@@ -23,6 +23,10 @@ use crate::session;
 /// Routing levels accepted by `--routing` (mirrors `routing::Level::parse`).
 const ROUTING_LEVELS: [&str; 5] = ["off", "nudge", "steer", "wrap", "full"];
 
+/// Default release repo for `lens update` (override with `$LENS_REPO`). Matches
+/// `install.sh`'s `REPO`.
+const DEFAULT_REPO: &str = "DemoDevelops/lens";
+
 /// Parsed `lens setup` options.
 struct Opts {
     routing: String,
@@ -409,6 +413,177 @@ fn warn(msg: &str) {
     eprintln!("warning: {msg}");
 }
 
+// ── `lens update` ───────────────────────────────────────────────────────────
+
+/// CLI entry for `lens update`: if a newer release exists, download the matching
+/// binary and re-run `setup` with it (preserving routing level + install location).
+/// Needs `gh` (the repo is private); falls back to a clear message otherwise.
+pub fn run_update_cli(args: &[String]) -> Result<()> {
+    let config_dir = parse_config_dir(args);
+    if let Some(dir) = &config_dir {
+        std::env::set_var("CLAUDE_CONFIG_DIR", dir);
+    }
+
+    if !cmd_exists("gh") {
+        bail!("`lens update` needs the GitHub CLI to reach the private repo. Install gh (https://cli.github.com), run `gh auth login`, then retry — or re-run `lens setup` with a binary you were sent.");
+    }
+
+    let repo = repo();
+    let current = env!("CARGO_PKG_VERSION");
+    let tag = latest_tag(&repo)?;
+    if !is_newer(&tag, current) {
+        println!("lens is up to date (v{current}; latest release is {tag}).");
+        return Ok(());
+    }
+    say(&format!("Updating lens v{current} -> {tag}..."));
+
+    let target = lens_target()?;
+    let tmp = std::env::temp_dir().join(format!("lens-{target}.update"));
+    download_release(&repo, &tag, target, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("xattr")
+            .args(["-d", "com.apple.quarantine"])
+            .arg(&tmp)
+            .output();
+    }
+
+    // Re-apply install with the NEW binary so it copies itself onto PATH and
+    // refreshes the hooks + /dashboard command. Preserve the current routing level
+    // and the existing install location.
+    let settings = rtk::claude_settings_path()
+        .ok_or_else(|| anyhow!("cannot resolve Claude settings path"))?;
+    let routing = current_routing(&settings).unwrap_or_else(|| "nudge".to_string());
+
+    let mut cmd = Command::new(&tmp);
+    cmd.arg("setup").arg("--routing").arg(&routing);
+    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        cmd.arg("--bin-dir").arg(dir);
+    }
+    if let Some(dir) = &config_dir {
+        cmd.arg("--config-dir").arg(dir);
+    }
+    let status = cmd.status().context("running the new binary's `setup`")?;
+    let _ = std::fs::remove_file(&tmp);
+    if !status.success() {
+        bail!("the new binary's `setup` step failed (see output above)");
+    }
+    Ok(())
+}
+
+/// Release repo slug: `$LENS_REPO` or [`DEFAULT_REPO`].
+fn repo() -> String {
+    std::env::var("LENS_REPO")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_REPO.to_string())
+}
+
+/// The release asset target for this host (matches `.github/workflows/release.yml`).
+fn lens_target() -> Result<&'static str> {
+    Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        (os, arch) => bail!("no prebuilt lens binary for {os}/{arch}; build + `setup` from source"),
+    })
+}
+
+/// Latest published release tag via `gh release view`.
+fn latest_tag(repo: &str) -> Result<String> {
+    let out = Command::new("gh")
+        .args([
+            "release", "view", "--repo", repo, "--json", "tagName", "--jq", ".tagName",
+        ])
+        .output()
+        .context("running `gh release view` (is gh authenticated?)")?;
+    if !out.status.success() {
+        bail!(
+            "`gh release view` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if tag.is_empty() {
+        bail!("no releases found for {repo}");
+    }
+    Ok(tag)
+}
+
+/// Download `lens-<target>` from `tag` to `dest` via `gh release download`.
+fn download_release(repo: &str, tag: &str, target: &str, dest: &Path) -> Result<()> {
+    let out = Command::new("gh")
+        .args([
+            "release",
+            "download",
+            tag,
+            "--repo",
+            repo,
+            "--pattern",
+            &format!("lens-{target}"),
+            "--clobber",
+            "--output",
+        ])
+        .arg(dest)
+        .output()
+        .context("running `gh release download`")?;
+    if !out.status.success() {
+        bail!(
+            "downloading lens-{target} from {tag} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// The routing level currently recorded in `settings` (`env.LENS_ROUTING`), if any.
+fn current_routing(settings: &Path) -> Option<String> {
+    read_json(settings)
+        .ok()?
+        .get("env")?
+        .get("LENS_ROUTING")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Extract `--config-dir <dir>` from args, if present.
+fn parse_config_dir(args: &[String]) -> Option<PathBuf> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--config-dir" {
+            return args.get(i + 1).map(PathBuf::from);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse `x.y.z` (ignoring any `-rc`/`+build` suffix and a leading `v`) into a
+/// comparable tuple. `None` if it isn't three numeric components.
+fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+    let core = v.trim().trim_start_matches('v');
+    let core = core.split(['-', '+']).next().unwrap_or(core);
+    let mut parts = core.split('.');
+    let a = parts.next()?.parse().ok()?;
+    let b = parts.next()?.parse().ok()?;
+    let c = parts.next()?.parse().ok()?;
+    Some((a, b, c))
+}
+
+/// Is `latest` a newer version than `current`? Unparseable input reads as not-newer,
+/// so a malformed tag never triggers an automatic binary replacement.
+fn is_newer(latest: &str, current: &str) -> bool {
+    match (parse_version(latest), parse_version(current)) {
+        (Some(l), Some(c)) => l > c,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +654,18 @@ mod tests {
         assert_eq!(shell_profile().unwrap(), PathBuf::from("/home/x/.profile"));
         std::env::remove_var("SHELL");
         std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn version_compare_is_numeric_not_lexical() {
+        assert_eq!(parse_version("v1.2.3-rc1"), Some((1, 2, 3)));
+        assert_eq!(parse_version("0.1.2"), Some((0, 1, 2)));
+        assert_eq!(parse_version("garbage"), None);
+        assert!(is_newer("v0.1.3", "0.1.2"));
+        assert!(is_newer("0.2.0", "0.1.9"));
+        assert!(is_newer("0.1.10", "0.1.2")); // numeric, not string, compare
+        assert!(!is_newer("0.1.2", "0.1.2")); // equal
+        assert!(!is_newer("v0.1.1", "0.1.2")); // older
+        assert!(!is_newer("garbage", "0.1.2")); // unparseable never updates
     }
 }

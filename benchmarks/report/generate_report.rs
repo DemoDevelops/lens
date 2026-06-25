@@ -163,6 +163,9 @@ fn accuracy_real_note(groups: &[accuracy::Group], model_label: &str) -> String {
             negatives.join(", ")
         ));
     }
+    s.push_str(
+        ">\n> **Run-to-run variance (13-run repeat, `claude-opus-4-8`).** Treatment is deterministic: 100% in all 13 runs, every mechanism (std 0). Discovery and search control are likewise stable at 100%. Only darkroom control varies, spanning 17-67% (mean 42%, std 15.5), driven by three log-aggregation tasks (`0004`/`0005`/`0006`) that the truncated-context control answers about half the time. The treatment-over-control gap holds in every run; the precise control baseline does not, so read the darkroom control cell as one draw, not a rate.\n",
+    );
     s
 }
 
@@ -193,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
                 clean.push_str("\n> Run method: real model via `claude-pty`, tools disabled, context-only isolation — each arm answers only from its given context, exactly like a direct API call.\n");
             }
             clean.push_str(&format!(
-                ">\n> Samples are small (N = {}); these are directional confirmations consistent with the mechanism analysis, not statistically powered rates.\n",
+                ">\n> Samples are small (N = {}) and each task runs once. Re-running the suite 13 times on `claude-opus-4-8` found the treatment arm deterministic at 100% across every mechanism, while darkroom control alone swings 17-67% (mean ~42%): the treatment-over-control gap reproduces every run, but a single-run control figure is indicative, not a reproducible rate. Directional confirmations, not statistically powered rates.\n",
                 small_n(&ns)
             ));
 

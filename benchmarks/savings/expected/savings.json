@@ -3,10 +3,10 @@
     "workload": "Code search (results across files)",
     "mechanism": "index",
     "before_bytes": 15915,
-    "after_bytes": 10517,
+    "after_bytes": 8207,
     "before_tokens": 3681,
-    "after_tokens": 2965,
-    "savings_pct": 34,
+    "after_tokens": 2383,
+    "savings_pct": 48,
     "baseline": "Agent greps for the terms, then opens every matched file in full to read context.",
     "detail": "6 queries, 30 hits returned, 12 matched files read by the naive path"
   },

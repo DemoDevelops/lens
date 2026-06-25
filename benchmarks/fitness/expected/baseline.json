@@ -1,9 +1,9 @@
 {
-  "overall_token_savings_pct": 44.20384951881015,
+  "overall_token_savings_pct": 50.568678915135614,
   "per_workload": [
     {
       "workload": "Code search (results across files)",
-      "token_savings_pct": 19.45123607715295
+      "token_savings_pct": 35.262157022548216
     },
     {
       "workload": "Codebase exploration (subtree)",

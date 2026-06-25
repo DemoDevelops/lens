@@ -63,7 +63,7 @@ The §0.1 diagnostic: savings that *rise* with size mean the fixture was too sma
 | --- | --- | ---: | ---: | ---: | ---: |
 | Code search | index | 1× | 15,915 | 10,007 | 37% |
 | Code search | index | 10× | 160,230 | 9,775 | 94% |
-| Code search | index | 50× | 802,110 | 9,818 | 99% |
+| Code search | index | 50× | 802,110 | 9,816 | 99% |
 | Issue triage | compression | 1× | 8,902 | 3,327 | 63% |
 | Issue triage | compression | 10× | 94,195 | 31,323 | 67% |
 | Issue triage | compression | 50× | 476,155 | 158,287 | 67% |
@@ -111,6 +111,8 @@ Model: `claude-opus-4-8 (via claude-pty)`
 > **Real run via `claude-pty`** (interactive Claude Code, plan quota — no API credit), tools disabled so each arm answers only from its given context, same isolation as a direct API call.
 >
 > Every mechanism is **≥ control** on `claude-opus-4-8 (via claude-pty)` — no negative accuracy delta this run. The token reductions are the savings; accuracy is preserved.
+>
+> **Run-to-run variance (13-run repeat, `claude-opus-4-8`).** Treatment is deterministic: 100% in all 13 runs, every mechanism (std 0). Discovery and search control are likewise stable at 100%. Only darkroom control varies, spanning 17-67% (mean 42%, std 15.5), driven by three log-aggregation tasks (`0004`/`0005`/`0006`) that the truncated-context control answers about half the time. The treatment-over-control gap holds in every run; the precise control baseline does not, so read the darkroom control cell as one draw, not a rate.
 
 ## The discovery-regression investigation
 

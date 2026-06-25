@@ -253,7 +253,7 @@ fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Sea
                 -bm25(chunks, 0.0, 0.0, 5.0, 1.0) AS score
          FROM chunks
          WHERE chunks MATCH ?1
-         ORDER BY bm25(chunks, 0.0, 0.0, 5.0, 1.0)
+         ORDER BY bm25(chunks, 0.0, 0.0, 5.0, 1.0), path, chunk_id
          LIMIT ?2",
     )?;
     let mut hits = Vec::new();
@@ -283,7 +283,7 @@ fn structural_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec
     let rows: Vec<(String, String)> = if q.chars().count() >= 3 {
         let phrase = format!("\"{}\"", q.replace('"', "\"\""));
         let mut stmt =
-            conn.prepare("SELECT path, content FROM chunks_tri WHERE chunks_tri MATCH ?1 LIMIT ?2")?;
+            conn.prepare("SELECT path, content FROM chunks_tri WHERE chunks_tri MATCH ?1 ORDER BY path, chunk_id LIMIT ?2")?;
         let mapped = stmt.query_map(rusqlite::params![phrase, limit as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -291,7 +291,7 @@ fn structural_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec
     } else {
         let like = format!("%{q}%");
         let mut stmt =
-            conn.prepare("SELECT path, content FROM chunks_tri WHERE content LIKE ?1 LIMIT ?2")?;
+            conn.prepare("SELECT path, content FROM chunks_tri WHERE content LIKE ?1 ORDER BY path, chunk_id LIMIT ?2")?;
         let mapped = stmt.query_map(rusqlite::params![like, limit as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;

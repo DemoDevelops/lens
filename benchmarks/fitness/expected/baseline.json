@@ -35,6 +35,7 @@
     "lens_run",
     "lens_run_file",
     "lens_search",
+    "lens_skeleton",
     "lens_stats",
     "lens_symbol"
   ]

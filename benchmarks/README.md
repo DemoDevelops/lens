@@ -35,8 +35,8 @@ faithfully — matched to where lens actually sits in the agent loop.
 
 For each workload archetype, `run_savings` measures bytes entering context
 **without** lens (a realistic naive-agent path, documented per row) vs
-**with** it, and prints a table segmented by mechanism. Token estimate =
-bytes / 4 (stated explicitly; raw bytes shown too). Workloads:
+**with** it, and prints a table segmented by mechanism. Token counts use the
+offline o200k_base BPE tokenizer (raw bytes shown too). Workloads:
 
 | Workload | Mechanism | Without lens (baseline) | With lens |
 | --- | --- | --- | --- |
@@ -44,6 +44,7 @@ bytes / 4 (stated explicitly; raw bytes shown too). Workloads:
 | `log_debug` | darkroom | load the whole log | `lens_run` grep, stdout only |
 | `issue_triage` | compression | load the full JSON payload | `store::compress::compact_json` (reversible) |
 | `codebase_explore` | discovery | read every source file | `lens_map` summary + one `lens_symbol` |
+| `file_read` | skeleton | read each source file in full | tree-sitter skeleton (`discovery::skeleton`) + one reversible store handle; exposed as the `lens_skeleton` tool |
 
 ```sh
 cargo run --bin bench_savings              # print the table
@@ -89,6 +90,27 @@ LENS_BENCH_MODEL=claude-opus-4-8 LENS_BENCH_BACKEND=claude-pty cargo run --bin b
 Results are written to `results/<mode>.json`. Both are committed: `mock.json` as a
 sample, and `real.json` because it backs the published `BENCHMARKS.md` (which
 `bench_report` regenerates from it).
+
+## `fitness/` — the held-out improvement gate
+
+`bench_fitness` is the global ratchet for the self-improvement loop: it proves a
+change did not regress real token savings on the committed corpora and did not
+erode the lens invariants (no new runtime dependency, no silent change to the
+public MCP tool surface). Deterministic and offline.
+
+| Gate | What it checks |
+| --- | --- |
+| overall + per-workload savings | o200k token savings must not regress (per-workload tripwire; a vanished workload fails) |
+| dependency count | no new `[dependencies]` entry |
+| tool surface | the `lens_*` MCP tool set is unchanged |
+
+```sh
+cargo run --bin bench_fitness              # check against the frozen baseline
+cargo run --bin bench_fitness -- --update  # re-freeze (gate-keeper only, by hand)
+```
+
+`expected/baseline.json` is the frozen snapshot; `--update` is run by hand only,
+to accept an intentional change (a new measured arm, an approved tool/dependency).
 
 ## `report/` — the report generator
 

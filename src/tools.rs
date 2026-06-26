@@ -78,6 +78,27 @@ pub struct RetrieveResponse {
 }
 
 // ---------------------------------------------------------------------------
+// lens_skeleton (file structure view)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SkeletonRequest {
+    /// Path to the source file to skeletonize (relative to repo root, or absolute).
+    pub path: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SkeletonResponse {
+    /// The file's structure: signatures, types, and nesting with executable bodies
+    /// elided to `…`.
+    pub skeleton: String,
+    /// Detected language (e.g. "rust", "python").
+    pub language: String,
+    /// Ref to fetch the full file via `lens_recall` (any elided body is one call away).
+    pub retrieve_ref: String,
+}
+
+// ---------------------------------------------------------------------------
 // lens_index / lens_search (FTS5)
 // ---------------------------------------------------------------------------
 

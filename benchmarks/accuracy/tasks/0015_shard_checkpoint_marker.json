@@ -1,0 +1,20 @@
+{
+  "id": "0015_shard_checkpoint_marker",
+  "prompt": "What is the sealed marker value for the shard checkpoint barrier?",
+  "fixtures": [
+    "fixtures/recall_span"
+  ],
+  "ground_truth": {
+    "marker": "QUORUM_SEAL_4F2A"
+  },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "evidence": [
+    "QUORUM_SEAL_4F2A"
+  ],
+  "treatment": {
+    "queries": [
+      "shard checkpoint"
+    ]
+  }
+}

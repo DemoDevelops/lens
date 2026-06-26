@@ -18,6 +18,11 @@ use crate::tools::{IndexResponse, QueryResult, SearchHit, SearchResponse};
 /// Lines per chunk for non-markdown files.
 const CODE_WINDOW: usize = 100;
 
+/// Run FTS5 `optimize` after an `index_path` that (re)indexed at least this many files,
+/// collapsing the segment forest a bulk build leaves. Below this (small incremental
+/// edits) the one-time optimize cost would outweigh the read gain.
+const OPTIMIZE_AFTER_FILES: usize = 64;
+
 impl Index {
     /// Index a file or directory, respecting `.gitignore`. Re-indexing a path
     /// replaces its existing chunks (idempotent). Incremental: only files whose
@@ -136,6 +141,17 @@ impl Index {
         }
 
         tx.commit()?;
+
+        // After a bulk build (initial index or a large re-index), collapse the FTS5
+        // segment forest so later queries scan one segment instead of many
+        // (bench_tuning W3: ~9% faster reads for a one-time ~5ms cost). Skipped on
+        // small incremental edits, where the optimize cost would just add latency.
+        if files_read >= OPTIMIZE_AFTER_FILES {
+            conn.execute_batch(
+                "INSERT INTO chunks(chunks) VALUES('optimize');
+                 INSERT INTO chunks_tri(chunks_tri) VALUES('optimize');",
+            )?;
+        }
 
         Ok(IndexResponse {
             files_indexed,
@@ -606,5 +622,50 @@ mod tests {
         // Unchanged files still searchable.
         let math = idx.search(&["fn add".into()], 5).unwrap();
         assert!(!math.results[0].hits.is_empty(), "unchanged math.rs must still be searchable");
+    }
+
+    #[test]
+    fn bulk_build_optimizes_and_stays_correct() {
+        // A build over >= OPTIMIZE_AFTER_FILES files triggers FTS5 optimize; results
+        // must stay correct, and a later 1-file edit (below the threshold, no optimize)
+        // must still re-index correctly.
+        let data = tempdir().unwrap();
+        let src = tempdir().unwrap();
+        for i in 0..OPTIMIZE_AFTER_FILES + 5 {
+            fs::write(
+                src.path().join(format!("f{i}.rs")),
+                format!("fn func_{i}() {{ let marker_{i} = {i}; }}\n"),
+            )
+            .unwrap();
+        }
+        let idx = Index::open(data.path()).unwrap();
+        let res = idx.index_path(src.path(), true).unwrap();
+        assert!(
+            res.files_read >= OPTIMIZE_AFTER_FILES,
+            "bulk build should read every file and trigger optimize"
+        );
+        let out = idx.search(&["func_7".into()], 5).unwrap();
+        assert!(
+            out.results[0].hits.iter().any(|h| h.path.ends_with("f7.rs")),
+            "search must be correct after optimize"
+        );
+
+        // A 1-file edit (files_read < threshold, no optimize) must still re-index.
+        let edited = src.path().join("f7.rs");
+        fs::write(&edited, "fn changed_7() { let z = 1; }\n").unwrap();
+        let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        std::fs::File::options()
+            .write(true)
+            .open(&edited)
+            .unwrap()
+            .set_modified(newer)
+            .unwrap();
+        let res2 = idx.index_path(src.path(), true).unwrap();
+        assert_eq!(res2.files_read, 1, "only the edited file re-read");
+        let out2 = idx.search(&["changed_7".into()], 5).unwrap();
+        assert!(
+            out2.results[0].hits.iter().any(|h| h.path.ends_with("f7.rs")),
+            "edited content searchable without optimize"
+        );
     }
 }

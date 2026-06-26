@@ -240,6 +240,79 @@ impl Forge {
         }
     }
 
+    /// Skeletonize a source file: signatures + nesting, executable bodies elided,
+    /// the full text stored so any body is one `lens_recall` away.
+    #[tool(
+        description = "Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to `…`. Far fewer tokens than reading the whole file, and the full text is stored so any elided body is one lens_recall away (use the returned retrieve_ref). Use this when you need a file's API/shape; use Read when you must see or edit the bodies."
+    )]
+    async fn lens_skeleton(
+        &self,
+        Parameters(req): Parameters<SkeletonRequest>,
+    ) -> Result<Json<SkeletonResponse>, ErrorData> {
+        let op = self
+            .ops
+            .start("lens_skeleton", serde_json::json!({ "path": req.path }));
+        let p = self.resolve_unescaped(&req.path);
+        let content = match std::fs::read_to_string(&p) {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("read {}: {e}", p.display());
+                op.finish(0, 0, None, "error", msg.clone(), None);
+                return Err(ErrorData::internal_error(msg, None));
+            }
+        };
+        let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let Some(spec) = crate::discovery::extract::spec_for_extension(ext) else {
+            let msg = format!(
+                "no skeleton for {} (unsupported language '.{ext}'); use Read",
+                p.display()
+            );
+            op.finish(0, 0, None, "error", msg.clone(), None);
+            return Err(ErrorData::internal_error(msg, None));
+        };
+        let language = spec.name.to_string();
+        let Some(skeleton) = crate::discovery::skeleton::skeletonize(&content, &spec) else {
+            let msg = format!("could not parse {} for skeleton; use Read", p.display());
+            op.finish(0, 0, None, "error", msg.clone(), None);
+            return Err(ErrorData::internal_error(msg, None));
+        };
+        // Stash the full file so any elided body is recoverable; surface a cheap
+        // short handle (Store::get resolves prefixes) instead of the 64-char hash.
+        let reference = match self.store.put(&content) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("store {}: {e}", p.display());
+                op.finish(0, 0, None, "error", msg.clone(), None);
+                return Err(ErrorData::internal_error(msg, None));
+            }
+        };
+        let retrieve_ref = reference[..reference.len().min(12)].to_string();
+        let raw_in = content.len() as u64;
+        let returned = skeleton.len() as u64;
+        // The file bytes were processed but kept out of context; credit the savings
+        // counter lens_stats reads (mirrors lens_run_file's file-size credit).
+        let _ = self.store.bump_stat("raw_bytes_processed", raw_in as i64);
+        let explain = self.ops.explain(|| {
+            format!(
+                "skeletonized {} ({language}): {raw_in} -> {returned} bytes; full text at ref {retrieve_ref}",
+                p.display()
+            )
+        });
+        op.finish(
+            raw_in,
+            returned,
+            Some(retrieve_ref.clone()),
+            "ok",
+            "",
+            explain,
+        );
+        Ok(Json(SkeletonResponse {
+            skeleton,
+            language,
+            retrieve_ref,
+        }))
+    }
+
     /// Fetch a full blob previously offloaded to the reversible store.
     #[tool(
         description = "Retrieve the full content for a retrieve_ref returned by another tool (reverses any truncation/compression)."
@@ -621,8 +694,9 @@ impl ServerHandler for Forge {
              where a symbol lives) → lens_map once, then lens_symbol / lens_links / \
              lens_path on a scoped subgraph instead of reading many files. (2) where is X \
              mentioned → lens_index then lens_search(queries). (3) derive an answer FROM data \
-             or a file → lens_run / lens_run_file. (4) recover an offloaded result → \
-             lens_recall. (5) savings → lens_stats.\n\
+             or a file → lens_run / lens_run_file. (4) a source file's structure/API without its bodies → lens_skeleton (full text \
+             recoverable via lens_recall). (5) recover an offloaded result → lens_recall. \
+             (6) savings → lens_stats.\n\
              RULES: DO NOT use Read to analyze a file — use lens_run_file (Read is correct \
              only when you will Edit it). DO NOT use Grep/Bash to count, filter, or aggregate \
              — use lens_search, lens_symbol, or lens_run. DO NOT use WebFetch — fetch and \
@@ -1344,6 +1418,46 @@ mod tests {
                 .any(|h| h.path.contains("gone.rs")),
             "deleted file must be pruned from the index"
         );
+    }
+
+    #[tokio::test]
+    async fn skeleton_elides_bodies_and_recovers_full_file() {
+        let base = tempdir().unwrap();
+        let repo = base.path().to_path_buf();
+        let file = repo.join("widget.rs");
+        let full = "pub fn render(x: i32) -> String {\n    let y = compute(x);\n    format!(\"{y}\")\n}\n";
+        std::fs::write(&file, full).unwrap();
+        let f = Forge::with_paths(repo.clone(), base.path().join(".lens"), 8192).unwrap();
+
+        let resp = f
+            .lens_skeleton(Parameters(crate::tools::SkeletonRequest {
+                path: file.display().to_string(),
+            }))
+            .await
+            .unwrap()
+            .0;
+        // Signature survives, executable body is elided.
+        assert!(
+            resp.skeleton.contains("pub fn render"),
+            "skeleton dropped the signature: {}",
+            resp.skeleton
+        );
+        assert!(
+            !resp.skeleton.contains("compute(x)"),
+            "body leaked into skeleton: {}",
+            resp.skeleton
+        );
+        assert_eq!(resp.language, "rust");
+        // The cheap handle recovers the exact original file via lens_recall.
+        assert!(resp.retrieve_ref.len() <= 12, "ref not short: {}", resp.retrieve_ref);
+        let recalled = f
+            .lens_recall(Parameters(crate::tools::RetrieveRequest {
+                reference: resp.retrieve_ref.clone(),
+            }))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(recalled.content, full, "recall did not return the full file");
     }
 
     #[tokio::test]

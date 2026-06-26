@@ -8,7 +8,7 @@ Token savings at realistic session scale:
 
 | Workload | Mechanism | Tokens before | Tokens after | Saved |
 | --- | --- | ---: | ---: | ---: |
-| Code search | FTS5 index | 160,230 | 9,825 | **94–99%** |
+| Code search | FTS5 index | 160,230 | 9,775 | **94–99%** |
 | Log debugging | darkroom | 7,210 | 517 | **93%** |
 | Issue triage | compression | 94,195 | 31,323 | **~67%** |
 
@@ -70,9 +70,12 @@ Update later with `lens update`: it checks for a newer release, downloads the ma
 | :- | :- |
 | `lens_run` | Run a script in a darkroom; only stdout returns to context. Best for log parsing, data aggregation, large file analysis. |
 | `lens_run_file` | Same as `lens_run` but receives a file path as its first argument. |
+| `lens_skeleton` | Show a source file's structure: signatures + nesting, bodies elided to `…`. Full text recoverable via `lens_recall`. |
 | `lens_index` | Index a directory for full-text search. Run once per repo. |
 | `lens_search` | BM25-ranked search across the index. Answers "where is X mentioned". |
+| `lens_grep_ast` | Structural search via a tree-sitter query: matches syntax, not text (real `.unwrap()` calls, not comments). |
 | `lens_map` | Parse the repo into a symbol graph (functions, types, modules, relationships). Run once per repo. |
+| `lens_overview` | Token-budgeted, PageRank-ranked map of the repo's most important symbols (~2k tokens). |
 | `lens_symbol` | Find symbols by name and see their immediate connections. |
 | `lens_find` | Find symbols by natural-language description. |
 | `lens_links` | Expand a symbol's neighborhood N hops out. |

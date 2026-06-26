@@ -41,19 +41,21 @@ Token savings, not byte savings: lens's compact outputs (graph JSON, columnar pa
 
 | Workload | Before | After | Savings | Mechanism |
 | --- | ---: | ---: | ---: | --- |
-| Code search (results across files) | 3,681 | 2,965 | 19% | index |
+| Code search (results across files) | 3,681 | 2,383 | 35% | index |
 | Log debugging (buried root cause) | 2,853 | 181 | 94% | darkroom |
 | Issue triage (structured payload) | 1,953 | 1,190 | 39% | compression |
 | Codebase exploration (subtree) | 657 | 766 | 0% | discovery |
+| File read (skeleton + recall) | 3,681 | 1,591 | 57% | skeleton |
 
 ### Raw bytes and naive-agent baseline (no /4 to trust)
 
 | Workload | Before (bytes) | After (bytes) | Without lens, the agent… | Detail |
 | --- | ---: | ---: | --- | --- |
-| Code search (results across files) | 15,915 | 10,517 | Agent greps for the terms, then opens every matched file in full to read context. | 6 queries, 30 hits returned, 12 matched files read by the naive path |
+| Code search (results across files) | 15,915 | 8,207 | Agent greps for the terms, then opens every matched file in full to read context. | 6 queries, 30 hits returned, 12 matched files read by the naive path |
 | Log debugging (buried root cause) | 7,210 | 517 | Agent loads the entire log into context to locate the one FATAL line. | grep over 7210 bytes -> 517 bytes of matching lines (+context) |
 | Issue triage (structured payload) | 8,902 | 3,327 | Agent loads the full structured triage payload (minified) into context. | reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file 8903 bytes) |
 | Codebase exploration (subtree) | 2,606 | 2,163 | Agent reads every source file in the subtree to map its structure. | discover summary (30 nodes, 41 edges) + one scoped lens_symbol |
+| File read (skeleton + recall) | 15,915 | 5,785 | Agent reads each source file in full to understand its structure. | 12 files reduced to tree-sitter skeletons; full text recoverable via lens_recall (one ref/file) |
 
 ### Scale curve (real path at 1× / 10× / 50× the committed fixture)
 
@@ -63,18 +65,18 @@ The §0.1 diagnostic: savings that *rise* with size mean the fixture was too sma
 | --- | --- | ---: | ---: | ---: | ---: |
 | Code search | index | 1× | 15,915 | 10,007 | 37% |
 | Code search | index | 10× | 160,230 | 9,775 | 94% |
-| Code search | index | 50× | 802,110 | 9,816 | 99% |
+| Code search | index | 50× | 802,110 | 9,814 | 99% |
 | Issue triage | compression | 1× | 8,902 | 3,327 | 63% |
 | Issue triage | compression | 10× | 94,195 | 31,323 | 67% |
 | Issue triage | compression | 50× | 476,155 | 158,287 | 67% |
 | Codebase exploration | discovery | 1× | 2,606 | 2,145 | 18% |
-| Codebase exploration | discovery | 10× | 26,690 | 14,609 | 45% |
-| Codebase exploration | discovery | 50× | 134,010 | 101,151 | 25% |
+| Codebase exploration | discovery | 10× | 26,690 | 6,250 | 77% |
+| Codebase exploration | discovery | 50× | 134,010 | 16,617 | 88% |
 
 **Classification.**
 - **Code search (index): artifact.** 37% → 94% → 99%. The mechanism returns a fixed set of capped snippets regardless of corpus size, so savings rise sharply as the naive "read every matched file" baseline grows. The original 33% was the 12-file fixture, not the path.
-- **Issue triage (compression): real weakness, now fixed.** Was flat at 33–37% across scale — the compactor was a naive value-dictionary that still repeated every field name on every row. After faithfully porting SmartCrusher's columnar schema-extraction (`DECISIONS.md`), it is 56% at 1× and 56→61% across scale. The 61% residual is unique prose issue *bodies*, which no deterministic codec compresses — reported honestly rather than forced higher.
-- **Codebase exploration (discovery): small-fixture artifact.** 1× = 20% because the 2.6 KB / 7-file fixture is a toy, not a real "explore a codebase" session. The scaled figures use a duplicate-symbol replication whose repo-wide call resolver builds an O(N²) cross-copy edge hairball a real (distinct-symbol) repo never has, so they are a pessimistic lower bound, not a realistic number. The production fat-subgraph case is bounded by `Forge::maybe_compact`, which now inherits the columnar win — that is why 10× recovered from 0% to 18% with no discovery-path change.
+- **Issue triage (compression): real weakness, now fixed.** Was flat at 33–37% across scale — the compactor was a naive value-dictionary that still repeated every field name on every row. After faithfully porting SmartCrusher's columnar schema-extraction (`DECISIONS.md`), it is 63% at 1× and 63→67% across scale. The ~33% residual is unique prose issue *bodies*, which no deterministic codec compresses — reported honestly rather than forced higher.
+- **Codebase exploration (discovery): small-fixture artifact at 1×, realistic at scale.** 1× = 18% because the 2.6 KB / 7-file fixture is a toy, not a real "explore a codebase" session. The scaled figures (77% at 10×, 88% at 50×) are now realistic rather than a pessimistic bound: L15's scope-aware per-file (file,name) call resolution no longer links each call to all N replicated copies, so the old O(N²) cross-copy edge hairball is gone and the scoped subgraph stays proportional to the corpus. The production fat-subgraph case is additionally bounded by `Forge::maybe_compact`.
 
 ### Context Mode isolation + head-to-head
 

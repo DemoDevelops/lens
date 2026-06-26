@@ -33,6 +33,54 @@ type GraphCache = Arc<RwLock<Option<(BTreeMap<String, u64>, Graph)>>>;
 /// the single-threaded `ensure_graph` rebuild path.
 type ParseCache = Arc<RwLock<discovery::ParseCache>>;
 
+/// Production default for the per-query staleness-walk debounce window, in ms. Overridable
+/// with `LENS_WALK_DEBOUNCE_MS` (0 disables, restoring a walk on every call).
+const DEFAULT_WALK_DEBOUNCE_MS: u64 = 1000;
+
+/// Wall-clock debounce for the per-query staleness walk (`file_manifest` /
+/// `source_manifest`, run by `ensure_index` / `load_graph`). Within `ttl` of the last
+/// walk a caller skips the walk and treats the index/graph as fresh, so a burst of
+/// queries does one walk instead of N. This bounds staleness: a file changed less than
+/// `ttl` ago may not be reflected until the window passes; after it, the next call walks
+/// and re-indexes as before. `ttl == 0` disables it (walk every call) -- `with_paths`
+/// (and thus every test) uses 0 to keep the strict "an edit is reflected on the very next
+/// call" behavior; `Forge::new` sets the production value from `LENS_WALK_DEBOUNCE_MS`.
+/// The window is shared across `Forge` clones via `Arc`, so it is per-process, not
+/// per-clone.
+#[derive(Clone)]
+pub struct WalkDebounce {
+    ttl: std::time::Duration,
+    last: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+}
+
+impl WalkDebounce {
+    pub fn new(ttl: std::time::Duration) -> Self {
+        Self {
+            ttl,
+            last: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// True if a walk happened within `ttl` (the caller may skip walking). Always false
+    /// when `ttl` is zero.
+    pub fn fresh(&self) -> bool {
+        if self.ttl.is_zero() {
+            return false;
+        }
+        self.last
+            .lock()
+            .map(|g| g.map(|t| t.elapsed() < self.ttl).unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    /// Record that a walk just happened, (re)starting the debounce window.
+    pub fn mark(&self) {
+        if let Ok(mut g) = self.last.lock() {
+            *g = Some(std::time::Instant::now());
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Forge {
     /// Working dir the darkroom and walkers operate in (the repo root).
@@ -54,6 +102,12 @@ pub struct Forge {
     /// skips the mtime-stable case entirely; this one makes the rebuild itself
     /// cheap by re-parsing only changed files.
     parse_cache: ParseCache,
+    /// Debounce for the FTS index's per-query staleness walk (`ensure_index`).
+    index_walk: WalkDebounce,
+    /// Debounce for the code graph's per-query staleness walk (`load_graph`). Separate
+    /// from `index_walk` so an index re-walk doesn't suppress a graph re-walk (and vice
+    /// versa); each tracks its own freshness.
+    graph_walk: WalkDebounce,
 }
 
 impl Forge {
@@ -68,7 +122,15 @@ impl Forge {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(DEFAULT_MAX_INLINE);
-        Self::with_paths(repo_dir, data_dir, max_inline)
+        let walk_ttl = std::env::var("LENS_WALK_DEBOUNCE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_WALK_DEBOUNCE_MS);
+        let mut forge = Self::with_paths(repo_dir, data_dir, max_inline)?;
+        let ttl = std::time::Duration::from_millis(walk_ttl);
+        forge.index_walk = WalkDebounce::new(ttl);
+        forge.graph_walk = WalkDebounce::new(ttl);
+        Ok(forge)
     }
 
     /// Build a handler with explicit paths (used by tests).
@@ -89,6 +151,11 @@ impl Forge {
             ops,
             graph_cache: Arc::new(RwLock::new(None)),
             parse_cache: Arc::new(RwLock::new(discovery::ParseCache::new())),
+            // Disabled by default: tests (and any with_paths caller) keep the strict
+            // "an edit is reflected on the very next call" behavior. Production opts in
+            // via Forge::new.
+            index_walk: WalkDebounce::new(std::time::Duration::ZERO),
+            graph_walk: WalkDebounce::new(std::time::Duration::ZERO),
         })
     }
 }
@@ -817,9 +884,21 @@ impl Forge {
     /// the freshly walked `current`, and `finish_discovery` empties the cache on every
     /// rebuild, so a query after a rebuild never sees stale data.
     fn load_graph(&self) -> Result<Graph, ErrorData> {
-        // The cheap per-query staleness walk (stat-only). Kept by design; a
-        // generation counter to skip even this is deliberately deferred.
+        // Debounce: within the walk window of the last staleness check, skip the
+        // gitignore walk and serve the cached graph (staleness bounded to the TTL).
+        // Falls through to a full walk when the cache is empty or the debounce is off.
+        if self.graph_walk.fresh() {
+            let guard = match self.graph_cache.read() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if let Some((_, graph)) = guard.as_ref() {
+                return Ok(graph.clone());
+            }
+        }
+        // The per-query staleness walk (stat-only): the change detector for the graph.
         let current = discovery::source_manifest(&self.repo_dir);
+        self.graph_walk.mark();
 
         // Check under the read lock, then DROP it before doing anything else.
         if let Some(g) = self.cache_hit(&current) {
@@ -1063,10 +1142,16 @@ impl Forge {
     /// chunks for deleted files internally (a separate prune walk is redundant), and
     /// leaves unchanged files untouched.
     fn ensure_index(&self) -> Result<(), ErrorData> {
+        // Debounce: within the walk window of the last staleness check, skip the
+        // gitignore walk and assume the index is fresh (staleness bounded to the TTL).
+        if self.index_walk.fresh() {
+            return Ok(());
+        }
         let current = crate::index::file_manifest(&self.repo_dir);
         if self.store.get_stat("index_chunks").unwrap_or(0) > 0
             && read_manifest(&self.index_manifest_file()).as_ref() == Some(&current)
         {
+            self.index_walk.mark();
             return Ok(());
         }
         let op = self
@@ -1078,6 +1163,7 @@ impl Forge {
                     let _ = self.store.set_stat("index_chunks", total);
                 }
                 write_manifest(&self.index_manifest_file(), &current);
+                self.index_walk.mark();
                 let returned = obs::json_len(&resp);
                 let note = format!(
                     "auto-indexed {} files, {} chunks",
@@ -1417,6 +1503,72 @@ mod tests {
                 .iter()
                 .any(|h| h.path.contains("gone.rs")),
             "deleted file must be pruned from the index"
+        );
+    }
+
+    #[test]
+    fn walk_debounce_fresh_and_disabled_semantics() {
+        // ttl=0 is always-walk (never fresh); a positive ttl reports fresh only after a
+        // mark and only within the window.
+        let off = WalkDebounce::new(std::time::Duration::ZERO);
+        off.mark();
+        assert!(!off.fresh(), "ttl=0 must never report fresh");
+        let on = WalkDebounce::new(std::time::Duration::from_secs(60));
+        assert!(!on.fresh(), "no walk yet => not fresh");
+        on.mark();
+        assert!(on.fresh(), "within window after a walk => fresh");
+    }
+
+    #[tokio::test]
+    async fn walk_debounce_bounds_staleness_then_refreshes() {
+        // With a short walk-debounce window, a file added inside the window is not yet
+        // reflected (the walk is skipped), but after the window the next search walks,
+        // re-indexes, and reflects it. Proves bounded staleness, not lost updates.
+        let (mut f, dir) = forge_with_source();
+        f.index_walk = WalkDebounce::new(std::time::Duration::from_millis(150));
+
+        // First search walks, indexes, and opens the debounce window.
+        f.lens_search(Parameters(SearchRequest {
+            queries: vec!["helper".into()],
+            limit_per_query: 5,
+        }))
+        .await
+        .unwrap();
+
+        std::fs::write(
+            dir.path().join("late.md"),
+            "# T\nzzz_unique_token lives here\n",
+        )
+        .unwrap();
+
+        // Inside the window: the walk is skipped, so the new file is not yet searchable.
+        let within = f
+            .lens_search(Parameters(SearchRequest {
+                queries: vec!["zzz_unique_token".into()],
+                limit_per_query: 5,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            within.0.results[0].hits.is_empty(),
+            "inside the debounce window the new file is not yet indexed (bounded staleness)"
+        );
+
+        // After the window: the next search walks and reflects the change.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let after = f
+            .lens_search(Parameters(SearchRequest {
+                queries: vec!["zzz_unique_token".into()],
+                limit_per_query: 5,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            after.0.results[0]
+                .hits
+                .iter()
+                .any(|h| h.path.contains("late.md")),
+            "after the window the change must be reflected"
         );
     }
 

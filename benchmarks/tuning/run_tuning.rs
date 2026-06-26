@@ -487,6 +487,55 @@ fn end_to_end(corpus: &Path, idx: &Index, all_s: &[String]) -> (Stat, Stat) {
     (stat(iso), stat(h))
 }
 
+/// T5: the through-handler walk debounce. The current handler walks every call
+/// (`without`); the debounced handler skips the walk while the window is fresh (`with`).
+/// The delta is the per-call walk cost T5 removes on a warm window. Uses the real public
+/// `lens::server::WalkDebounce` so the skip logic is production code, not a replica.
+fn t5_debounce(corpus: &Path, idx: &Index, all_s: &[String]) -> (Stat, Stat) {
+    use lens::server::WalkDebounce;
+    let stored = file_manifest(corpus);
+    for _ in 0..WARMUP {
+        let w = file_manifest(corpus);
+        let _ = w == stored;
+        let r = idx.search(all_s, LIMIT).unwrap();
+        black_box(serde_json::to_string(&r).unwrap());
+    }
+    let mut without = Vec::new();
+    for _ in 0..ITERS {
+        let t = Instant::now();
+        let w = file_manifest(corpus);
+        let _ = w == stored;
+        let r = idx.search(all_s, LIMIT).unwrap();
+        let s = serde_json::to_string(&r).unwrap();
+        without.push(t.elapsed().as_secs_f64() * 1e6);
+        black_box((w, r, s));
+    }
+
+    let deb = WalkDebounce::new(Duration::from_secs(3600));
+    deb.mark(); // a prior walk already opened the window, so every timed call skips it
+    for _ in 0..WARMUP {
+        if !deb.fresh() {
+            black_box(file_manifest(corpus));
+            deb.mark();
+        }
+        let r = idx.search(all_s, LIMIT).unwrap();
+        black_box(serde_json::to_string(&r).unwrap());
+    }
+    let mut with = Vec::new();
+    for _ in 0..ITERS {
+        let t = Instant::now();
+        if !deb.fresh() {
+            black_box(file_manifest(corpus));
+            deb.mark();
+        }
+        let r = idx.search(all_s, LIMIT).unwrap();
+        let s = serde_json::to_string(&r).unwrap();
+        with.push(t.elapsed().as_secs_f64() * 1e6);
+        black_box((r, s));
+    }
+    (stat(without), stat(with))
+}
+
 fn read_matrix(db: &Path, all: &[&str]) -> Vec<(String, Stat)> {
     READ_CONFIGS
         .iter()
@@ -929,6 +978,20 @@ fn main() {
         line("isolated Index::search", &iso);
         line("through-handler (walk+search+ser)", &handler);
 
+        // T5 walk-debounce effect through the handler body.
+        let (t5_without, t5_with) = t5_debounce(&b.corpus_path, &b.idx, &all_s);
+        let t5_saved = t5_without.median - t5_with.median;
+        let t5_pct = if t5_without.median > 0.0 {
+            t5_saved / t5_without.median * 100.0
+        } else {
+            0.0
+        };
+        println!("\n### T5 walk debounce (through-handler; warm window skips the walk)\n");
+        stat_head();
+        line("without debounce (walk every call)", &t5_without);
+        line("with debounce (skip walk, warm)", &t5_with);
+        println!("  -> debounce saves {t5_saved:.2}us/call ({t5_pct:.1}%) = the removed per-call walk");
+
         // Read config matrix.
         let matrix = read_matrix(&b.db, &all);
         let base_med = matrix[0].1.median;
@@ -977,6 +1040,9 @@ fn main() {
                 "attribution_us": attr_json,
                 "isolated_search": stat_json(&iso),
                 "through_handler": stat_json(&handler),
+                "t5_debounce_without_us": stat_json(&t5_without),
+                "t5_debounce_with_us": stat_json(&t5_with),
+                "t5_saved_us": round2(t5_saved),
                 "read_config_matrix": matrix_json,
                 "noise_floor_us": round2(floor),
                 "noise_a_median_us": round2(nfa.median),

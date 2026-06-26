@@ -269,11 +269,22 @@ fn subgraph(graph: &Graph, ids: &[String]) -> GraphView {
     }
 }
 
+/// Header every overview starts with.
+const OVERVIEW_HEADER: &str = "# Repo overview: most important symbols\n\n";
+
+/// Upper bound on the knapsack DP table size (`n * capacity` cells, each an `f64`);
+/// above it we fall back to the cheaper prefix heuristic to cap memory (~64 MB).
+const KNAPSACK_MAX_CELLS: usize = 8_000_000;
+
 /// A token-budgeted overview of the repo's most important symbols (an aider-style
-/// repomap): symbols ranked by structural importance, the largest prefix that fits
-/// `token_budget` selected by binary search, each rendered with its kind, location,
-/// top callers, and top callees. Gives an agent a high-signal map of a codebase at
-/// a fixed token cost instead of reading files.
+/// repomap): symbols ranked by structural importance, then the value(importance)-
+/// maximising subset that fits `token_budget` chosen by a 0/1 knapsack over each
+/// node's render-token weight, each rendered with its kind, location, top callers,
+/// and top callees. Skipping a token-heavy hub to pack many cheaper important ones
+/// keeps more important-symbol mass than the largest fitting prefix would. Falls
+/// back to a binary-searched prefix when the DP table would be too large. Gives an
+/// agent a high-signal map of a codebase at a fixed token cost instead of reading
+/// files.
 pub fn overview(graph: &Graph, token_budget: usize) -> String {
     let importance = graph.importance();
     let mut ranked: Vec<&Node> = graph
@@ -289,13 +300,44 @@ pub fn overview(graph: &Graph, token_budget: usize) -> String {
             .then_with(|| a.id.cmp(&b.id))
     });
     let n = ranked.len();
-    let render = |k: usize| render_overview(graph, &ranked[..k]);
-    // Largest prefix that fits the budget (binary search); if it all fits, all of it.
-    if n == 0 || crate::obs::count_tokens(&render(n)) <= token_budget {
-        return render(n);
+    if n == 0 {
+        return render_overview(graph, &[]);
     }
+    // Everything fits: emit the whole map in importance order.
+    let full = render_overview(graph, &ranked);
+    if crate::obs::count_tokens(&full) <= token_budget {
+        return full;
+    }
+    // Budget the per-node entries against what's left after the header. Token count
+    // is subadditive (`count_tokens(a ++ b) <= count_tokens(a) + count_tokens(b)`),
+    // so a subset whose per-entry weights sum within `capacity` is guaranteed to
+    // render within `token_budget` once concatenated with the header.
+    let capacity = token_budget.saturating_sub(crate::obs::count_tokens(OVERVIEW_HEADER));
+    // Memory guard: very large graphs fall back to the prefix heuristic.
+    if n.saturating_mul(capacity) > KNAPSACK_MAX_CELLS {
+        return fit_prefix(graph, &ranked, token_budget);
+    }
+    let weights: Vec<usize> = ranked
+        .iter()
+        .map(|node| crate::obs::count_tokens(&render_entry(graph, node)))
+        .collect();
+    let values: Vec<f64> = ranked
+        .iter()
+        .map(|node| importance.get(&node.id).copied().unwrap_or(0.0))
+        .collect();
+    let picked: Vec<&Node> = knapsack(&weights, &values, capacity)
+        .into_iter()
+        .map(|i| ranked[i])
+        .collect();
+    render_overview(graph, &picked)
+}
+
+/// Largest importance-ranked PREFIX whose render fits `token_budget` (binary
+/// search). The knapsack memory fallback.
+fn fit_prefix(graph: &Graph, ranked: &[&Node], token_budget: usize) -> String {
+    let render = |k: usize| render_overview(graph, &ranked[..k]);
     let mut lo = 0usize;
-    let mut hi = n;
+    let mut hi = ranked.len();
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
         if crate::obs::count_tokens(&render(mid)) <= token_budget {
@@ -307,30 +349,70 @@ pub fn overview(graph: &Graph, token_budget: usize) -> String {
     render(lo)
 }
 
+/// 0/1 knapsack: pick the `values`-maximising subset of items whose `weights` sum
+/// is within `capacity`. Returns the chosen indices in ascending order (preserving
+/// the input's importance ranking). Classic `(n+1) x (capacity+1)` DP table.
+fn knapsack(weights: &[usize], values: &[f64], capacity: usize) -> Vec<usize> {
+    let n = weights.len();
+    let mut dp = vec![vec![0f64; capacity + 1]; n + 1];
+    for i in 1..=n {
+        let (wi, vi) = (weights[i - 1], values[i - 1]);
+        for w in 0..=capacity {
+            let without = dp[i - 1][w];
+            dp[i][w] = if wi <= w {
+                without.max(dp[i - 1][w - wi] + vi)
+            } else {
+                without
+            };
+        }
+    }
+    // Reconstruct: item `i` was taken iff including it reproduces this cell's value.
+    // The comparison is bit-exact because the cell was assigned that same float
+    // expression when the `max` chose the "with" branch.
+    let mut chosen = Vec::new();
+    let mut w = capacity;
+    for i in (1..=n).rev() {
+        let (wi, vi) = (weights[i - 1], values[i - 1]);
+        if wi <= w && dp[i][w] == dp[i - 1][w - wi] + vi {
+            chosen.push(i - 1);
+            w -= wi;
+        }
+    }
+    chosen.reverse();
+    chosen
+}
+
 /// Render the given importance-ranked nodes as the overview body.
 fn render_overview(graph: &Graph, nodes: &[&Node]) -> String {
-    let name_of = |id: &str| graph.node(id).map(|n| n.name.clone());
-    let mut s = String::from("# Repo overview: most important symbols\n\n");
+    let mut s = String::from(OVERVIEW_HEADER);
     for n in nodes {
-        s.push_str(&format!("- `{}` ({}) {}:{}\n", n.name, n.kind, n.file, n.line));
-        let callers: Vec<String> = graph
-            .edges
-            .iter()
-            .filter(|e| e.kind == "calls" && e.to == n.id)
-            .filter_map(|e| name_of(&e.from))
-            .collect();
-        if !callers.is_empty() {
-            s.push_str(&format!("    called by: {}\n", join_capped(&callers, 3)));
-        }
-        let calls: Vec<String> = graph
-            .edges
-            .iter()
-            .filter(|e| e.kind == "calls" && e.from == n.id)
-            .filter_map(|e| name_of(&e.to))
-            .collect();
-        if !calls.is_empty() {
-            s.push_str(&format!("    calls: {}\n", join_capped(&calls, 3)));
-        }
+        s.push_str(&render_entry(graph, n));
+    }
+    s
+}
+
+/// Render one node's overview entry: its markdown line plus capped caller/callee
+/// lines. This is the unit the knapsack weighs.
+fn render_entry(graph: &Graph, n: &Node) -> String {
+    let name_of = |id: &str| graph.node(id).map(|n| n.name.clone());
+    let mut s = format!("- `{}` ({}) {}:{}\n", n.name, n.kind, n.file, n.line);
+    let callers: Vec<String> = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind == "calls" && e.to == n.id)
+        .filter_map(|e| name_of(&e.from))
+        .collect();
+    if !callers.is_empty() {
+        s.push_str(&format!("    called by: {}\n", join_capped(&callers, 3)));
+    }
+    let calls: Vec<String> = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind == "calls" && e.from == n.id)
+        .filter_map(|e| name_of(&e.to))
+        .collect();
+    if !calls.is_empty() {
+        s.push_str(&format!("    calls: {}\n", join_capped(&calls, 3)));
     }
     s
 }

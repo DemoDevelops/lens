@@ -2,7 +2,9 @@
 //!
 //! Each language is described by a [`LangSpec`]: the grammar plus three queries
 //! (definitions, calls, imports) and the AST node kinds that count as a callable
-//! scope. Adding a language is a single `LangSpec` entry (see DECISIONS.md).
+//! scope. The 6 hand-written specs here stay byte-for-byte stable; most NEW
+//! languages are added via the generic tags adapter ([`super::tags_adapter`]):
+//! a Cargo dep plus a one-line registry entry, no query authoring. See SUPPORTED.md.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

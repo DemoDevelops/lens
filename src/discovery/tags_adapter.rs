@@ -57,6 +57,14 @@ impl AnySpec {
         }
     }
 
+    /// The tree-sitter grammar, for callers that compile their own query (grep_ast).
+    pub fn language(&self) -> Language {
+        match self {
+            AnySpec::Hand(s) => (s.language)(),
+            AnySpec::Tags(s) => (s.language)(),
+        }
+    }
+
     pub fn extract_file(&self, path: &str, source: &str) -> Option<FileExtract> {
         match self {
             AnySpec::Hand(s) => super::extract::extract_file(path, source, s),
@@ -105,6 +113,19 @@ pub fn any_spec_for_extension(ext: &str) -> Option<AnySpec> {
 /// Tags spec for an extension, if one is registered.
 pub fn tags_spec_for_extension(ext: &str) -> Option<TagsLangSpec> {
     tags_registry().into_iter().find(|s| s.extensions.contains(&ext))
+}
+
+/// Resolve a language NAME to an extractor: hand-written first, then tags. Used by
+/// grep_ast so its `language:` filter spans every graph language, not just the 6.
+pub fn any_spec_for_language(name: &str) -> Option<AnySpec> {
+    if let Some(s) = super::extract::spec_for_language(name) {
+        return Some(AnySpec::Hand(s));
+    }
+    let lname = name.to_ascii_lowercase();
+    tags_registry()
+        .into_iter()
+        .find(|s| s.name == lname)
+        .map(AnySpec::Tags)
 }
 
 /// The tags-based language registry. New languages are added here (plus a

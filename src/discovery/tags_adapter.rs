@@ -180,6 +180,18 @@ pub fn tags_registry() -> Vec<TagsLangSpec> {
             tags_query: tree_sitter_lua::TAGS_QUERY,
             imports_query: None,
         },
+        // Bash: no tags.scm; lens hand-authors a tags-shaped query. Every command is
+        // a reference; only those resolving to a defined function become call edges.
+        TagsLangSpec {
+            name: "bash",
+            extensions: &["sh", "bash"],
+            language: || tree_sitter_bash::LANGUAGE.into(),
+            tags_query: r#"
+                (function_definition name: (word) @name) @definition.function
+                (command name: (command_name (word) @name)) @reference.call
+            "#,
+            imports_query: None,
+        },
         // --- Wave 2 / T7: Roku ---
         // --- Wave 2 / T8: config that maps ---
     ]
@@ -673,6 +685,13 @@ fn helper() {}
             "class Widget {\n  def render(): Int = helper()\n  def helper(): Int = 1\n}\n",
         );
         assert!(has_def(&fx, "render") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
+        assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
+    }
+
+    #[test]
+    fn bash_extraction() {
+        let fx = extracts("sh", "helper() { echo hi; }\nmain() { helper; ls; }\n");
+        assert!(has_def(&fx, "helper") && has_def(&fx, "main"), "defs: {:?}", def_names(&fx));
         assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
     }
 }

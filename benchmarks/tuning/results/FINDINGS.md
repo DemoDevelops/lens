@@ -53,15 +53,37 @@ at scale and over-represent scan cost; see caveats.
 
 ## Ranking by measured, attributable, robust end-to-end headroom
 
-### 1. T5 - debounce the per-query repo walk. PROMOTE (the real win).
+### 1. T5 - debounce the per-query repo walk. #1 BY HEADROOM, but BLOCKED on a safe impl. NOT SHIPPED.
 
 `repo_walk` is run on **every** `lens_search` / graph call via `ensure_index` /
 `load_graph`, even when nothing changed. As a share of the handler call it is **12% (1x),
 15% (10x), 26% (50x)** and **rises with repo size** (real repos have thousands of files;
 600 files already costs ~1.4ms). The real `ensure_index` also reads a manifest file + a
-store stat that this walk-only number excludes, so debouncing saves **at least** these
-figures on every steady-state call. Lowest risk-to-payoff; the only care item is
-invalidation (a changed/added/deleted file must still re-index).
+store stat that this walk-only number excludes, so debouncing would save **at least**
+these figures on every steady-state call. By headroom this is the biggest win.
+
+**Why it is not shipped (implementation blocker, surfaced for a decision):**
+1. The maintainers **already deliberately deferred exactly this**: `load_graph`
+   (`src/server.rs:820`) reads *"The cheap per-query staleness walk (stat-only). Kept by
+   design; a generation counter to skip even this is deliberately deferred."*
+2. The walk **is** the change-detector. There is no cheap, portable, *correct* signal for
+   an in-place content edit (it bumps the file mtime but no directory mtime), so any
+   skip/debounce trades the "edit then immediately search reflects it" guarantee for a
+   staleness window.
+3. That weakened guarantee **breaks 3 existing handler tests** that write/delete a file
+   then immediately assert it is reflected (`index_refreshes_when_a_file_is_added`,
+   `index_prunes_deleted_files`, `graph_refreshes_when_a_file_is_added`), so the T5
+   predicate's "existing tests pass" cannot hold for a default-on debounce.
+
+A short-TTL debounce (e.g. 250-500ms) would be near-invisible in real agent usage (the
+edit-to-search gap is seconds, not microseconds) but is a genuine product decision the
+maintainers made the other way. Options, for the user to choose:
+(a) accept bounded staleness: short-TTL debounce + an injected clock so the freshness
+tests assert "reflected within TTL" instead of "immediately"; (b) leave the walk as-is
+(the maintainers' choice; correctness over a sub-2ms walk); (c) a correctness-preserving
+*speedup* of the walk (parallel stats / cheaper traversal), a different change with
+uncertain payoff, not in this plan. Recommendation: (b)/(c) over (a) given lens's
+correctness-first ethos; do not silently weaken edit-search freshness.
 
 ### 2. T3 - `synchronous=NORMAL` on the write path. PROMOTE. `temp_store=MEMORY` REJECT.
 
@@ -152,8 +174,22 @@ large monorepos, adding `cache_size=-8000` to `configure_conn` is a cheap, safe 
 - Replicated `code_search` fixtures over-represent duplicate trigrams -> 10x/50x cache and
   index-size numbers are an upper bound, not representative of diverse real code.
 
-## Verdict for the waves
+## Implementation outcome
 
-- **Wave 3:** T5 (promote, #1) + T3 (`synchronous=NORMAL` only).
-- **Wave 4:** T6 (promote, low priority). **T4 skipped with evidence** (conn-open
-  negligible; reuse is sub-ms, concurrency-neutral, and risk-heavy).
+- **T3 SHIPPED** (`src/obs/mod.rs`): `configure_conn` now sets `synchronous=NORMAL`. The
+  bench's production-config check prints `journal_mode=wal, synchronous=1`; W2 confirms
+  FULL->NORMAL is ~-13.6%/commit. 291 tests + bench_fitness green. `temp_store=MEMORY`
+  left off (measured net-neutral).
+- **T6 SHIPPED** (`src/index/mod.rs`): `index_path` runs FTS5 `optimize` after a bulk
+  build (`files_read >= 64`); small edits skip it. After T6 the cold-bulk read median
+  drops ~9% (1188 -> 1086us) and the bench's manual re-optimize collapses to ~0 delta /
+  ~0.5ms, proving the build auto-optimized. New test
+  `bulk_build_optimizes_and_stays_correct`; 291 tests + bench_fitness green.
+- **T4 SKIPPED with evidence** (conn-open negligible; reuse is sub-ms, scale-shrinking,
+  concurrency-neutral, and `thread_local`-across-async risk-heavy).
+- **T5 NOT SHIPPED, surfaced for a decision** (#1 by headroom but a correct default-on
+  debounce is blocked: it weakens edit-search freshness, breaks 3 existing tests, and was
+  already deliberately deferred by the maintainers). See the T5 section above.
+
+Net shipped: T3 + T6, both with measured, attributable, above-noise-floor wins, output
+byte-identical, fitness gate green.

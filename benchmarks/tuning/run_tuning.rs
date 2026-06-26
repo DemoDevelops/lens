@@ -93,13 +93,14 @@ const READ_CONFIGS: &[Cfg] = &[
 ];
 
 // Write path: synchronous=NORMAL is the headline candidate (fewer fsyncs per commit
-// under WAL). temp_store=MEMORY affects large temp-btree spills.
+// under WAL). synchronous is set EXPLICITLY here (not left to the configure_conn
+// default) so the FULL-vs-NORMAL comparison stays valid after T3 makes NORMAL the
+// default. temp_store=MEMORY affects large temp-btree spills.
 const WRITE_CONFIGS: &[Cfg] = &[
-    Cfg { name: "baseline (WAL, synchronous=FULL default)", extra: &[] },
-    Cfg { name: "+synchronous=NORMAL", extra: &["PRAGMA synchronous=NORMAL;"] },
-    Cfg { name: "+temp_store=MEMORY", extra: &["PRAGMA temp_store=MEMORY;"] },
+    Cfg { name: "synchronous=FULL (pre-T3 default)", extra: &["PRAGMA synchronous=FULL;"] },
+    Cfg { name: "synchronous=NORMAL (T3 default)", extra: &["PRAGMA synchronous=NORMAL;"] },
     Cfg {
-        name: "+synchronous=NORMAL +temp_store=MEMORY",
+        name: "synchronous=NORMAL +temp_store=MEMORY",
         extra: &["PRAGMA synchronous=NORMAL;", "PRAGMA temp_store=MEMORY;"],
     },
 ];
@@ -802,6 +803,25 @@ fn w3_optimize(all: &[&str]) -> (Stat, Stat, f64) {
     (before, after, opt_ms)
 }
 
+/// T6's actual trigger scenario: a COLD bulk build (one big index_path, no incremental
+/// fragmentation). Does optimizing the segments a from-scratch build leaves help reads,
+/// or is one transaction already compact? Decides whether T6 is a win or a no-op.
+fn w3_cold_optimize(all: &[&str]) -> (Stat, Stat, f64) {
+    let b = build_index(W2_SCALE);
+    let before = stat(time_read_mix(&open_cfg(&b.db, &[]), all, ITERS, WARMUP));
+    let t = Instant::now();
+    {
+        let oc = open_cfg(&b.db, &[]);
+        oc.execute_batch(
+            "INSERT INTO chunks(chunks) VALUES('optimize'); INSERT INTO chunks_tri(chunks_tri) VALUES('optimize');",
+        )
+        .unwrap();
+    }
+    let opt_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let after = stat(time_read_mix(&open_cfg(&b.db, &[]), all, ITERS, WARMUP));
+    (before, after, opt_ms)
+}
+
 // ── Reporting helpers ─────────────────────────────────────────────────────────
 fn machine_info() -> Value {
     let cpus = std::thread::available_parallelism()
@@ -860,6 +880,17 @@ fn main() {
     println!("  - W2 write matrix disables wal_autocheckpoint so a stray checkpoint can't");
     println!("    inflate one config; durability of synchronous=NORMAL discussed in FINDINGS.");
     println!("  - gating is within-run A/B vs the A-vs-A noise floor, never absolute ms.\n");
+
+    // Prove what the REAL production configure_conn applies (T3 verification).
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = Index::open(tmp.path()).unwrap();
+        let c = Connection::open(tmp.path().join("index.db")).unwrap();
+        configure_conn(&c).unwrap();
+        let jmode: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let sync: i64 = c.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
+        println!("production configure_conn => journal_mode={jmode}, synchronous={sync} (2=FULL, 1=NORMAL, 0=OFF)\n");
+    }
 
     let all = all_queries();
     let all_s: Vec<String> = all.iter().map(|s| s.to_string()).collect();
@@ -989,6 +1020,13 @@ fn main() {
         "fragmented ({FRAG_ROUNDS} small writes) read median {:.2}us -> after optimize {:.2}us  (delta {:+.2}us, {:+.1}%); optimize cost {:.1}ms",
         before.median, after.median, qd, qpct, opt_ms
     );
+    let (cb_before, cb_after, cb_opt_ms) = w3_cold_optimize(&all);
+    let cbd = cb_before.median - cb_after.median;
+    let cbpct = if cb_before.median > 0.0 { cbd / cb_before.median * 100.0 } else { 0.0 };
+    println!(
+        "cold bulk build (T6 trigger) read median {:.2}us -> after optimize {:.2}us  (delta {:+.2}us, {:+.1}%); optimize cost {:.1}ms",
+        cb_before.median, cb_after.median, cbd, cbpct, cb_opt_ms
+    );
 
     // ── Optional report-only real corpus (never gated) ───────────────────────
     let real_corpus_json = if let Ok(p) = std::env::var("LENS_BENCH_CORPUS") {
@@ -1031,6 +1069,9 @@ fn main() {
         "w3_fragmented_read_us": stat_json(&before),
         "w3_optimized_read_us": stat_json(&after),
         "w3_optimize_cost_ms": round2(opt_ms),
+        "w3_cold_bulk_read_us": stat_json(&cb_before),
+        "w3_cold_bulk_optimized_read_us": stat_json(&cb_after),
+        "w3_cold_bulk_optimize_cost_ms": round2(cb_opt_ms),
         "real_corpus": real_corpus_json,
         "correctness_pass": correctness_ok,
         "correctness_notes": correctness_notes,

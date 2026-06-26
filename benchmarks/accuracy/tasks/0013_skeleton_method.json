@@ -1,0 +1,10 @@
+{
+  "id": "0013_skeleton_method",
+  "prompt": "In this file, what is the name of the method defined on the Ledger type?",
+  "fixtures": ["fixtures/skeleton/service.rs"],
+  "ground_truth": { "method": "close_period" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "evidence": ["impl Ledger", "close_period"],
+  "treatment": { "skeleton": "fixtures/skeleton/service.rs" }
+}

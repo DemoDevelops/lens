@@ -258,7 +258,11 @@ mod tests {
         );
 
         let groups = aggregate(&results);
-        assert_eq!(groups.len(), 3, "expected darkroom/discovery/search groups");
+        assert_eq!(
+            groups.len(),
+            4,
+            "expected darkroom/discovery/search/skeleton groups"
+        );
         for g in &groups {
             assert!(
                 g.treatment_acc >= g.control_acc,

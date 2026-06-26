@@ -19,6 +19,7 @@ Accuracy on real tasks (`claude-opus-4-8`):
 | Darkroom (data analysis) | 33% | **100%** |
 | Discovery (code structure) | 100% | 100% |
 | Search | 100% | 100% |
+| File skeleton (read a file's API) | 0% | **100%** |
 
 Session recovery vs Context Mode:
 

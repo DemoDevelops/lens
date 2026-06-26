@@ -387,7 +387,7 @@ fn chunk_symbols(content: &str) -> String {
     static SYMBOL_RE: OnceLock<Regex> = OnceLock::new();
     let re = SYMBOL_RE.get_or_init(|| {
         Regex::new(
-            r"\b(?:fn|func|def|struct|enum|trait|interface|class|type|const|impl|mod)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\b(?:fn|func|function|def|struct|enum|trait|interface|class|type|const|let|var|impl|mod)\s+([A-Za-z_][A-Za-z0-9_]*)",
         )
         .expect("symbol regex")
     });
@@ -397,7 +397,67 @@ fn chunk_symbols(content: &str) -> String {
         .collect();
     names.sort_unstable();
     names.dedup();
-    names.join(" ")
+
+    // Append camelCase/PascalCase subwords of each captured identifier so a query
+    // that is a subword of a compound identifier (`Subscription` inside
+    // `ConfirmSubscriptionScreen`) matches. `names` is the deduped capture set;
+    // `out` preserves capture order with subwords following, then a final dedup.
+    let mut out: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    for name in &names {
+        out.extend(split_subwords(name));
+    }
+    let mut seen = HashSet::new();
+    out.retain(|s| seen.insert(s.clone()));
+    out.join(" ")
+}
+
+/// Split a camelCase/PascalCase identifier into its subwords for FTS expansion.
+///
+/// Returns an empty vec for identifiers with no camel/acronym signal (pure
+/// snake_case or single-case, which the porter tokenizer already splits on
+/// underscores). Boundaries: lower/digit→Upper, an acronym run ending where the
+/// last uppercase begins a lowercase word (`HTTPServer` → `HTTP`, `Server`), and
+/// letter↔digit. Fragments of length <= 1 are dropped. Lookaround-free (a
+/// forward `next` char is inspected inline), allocation-light, no new dependency.
+fn split_subwords(ident: &str) -> Vec<String> {
+    let chars: Vec<char> = ident.chars().collect();
+
+    // Gate: only expand on a camel/acronym signal — a lower→Upper transition or an
+    // Upper-Upper-lower run. Pure snake_case / single-case yields nothing.
+    let has_signal = chars.windows(2).any(|w| w[0].is_lowercase() && w[1].is_uppercase())
+        || chars.windows(3).any(|w| {
+            w[0].is_uppercase() && w[1].is_uppercase() && w[2].is_lowercase()
+        });
+    if !has_signal {
+        return Vec::new();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if i > 0 {
+            let prev = chars[i - 1];
+            let next = chars.get(i + 1).copied();
+            let lower_or_digit_to_upper =
+                (prev.is_lowercase() || prev.is_ascii_digit()) && c.is_uppercase();
+            let acronym_end = prev.is_uppercase()
+                && c.is_uppercase()
+                && next.map(|n| n.is_lowercase()).unwrap_or(false);
+            let alpha_digit_boundary = prev.is_alphabetic() && c.is_ascii_digit()
+                || prev.is_ascii_digit() && c.is_alphabetic();
+            if (lower_or_digit_to_upper || acronym_end || alpha_digit_boundary)
+                && !cur.is_empty()
+            {
+                parts.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push(c);
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    parts.retain(|p| p.chars().count() > 1);
+    parts
 }
 
 /// Turn an arbitrary query into a safe FTS5 MATCH expression: each whitespace
@@ -480,6 +540,23 @@ mod tests {
         )
         .unwrap();
         dir
+    }
+
+    #[test]
+    fn split_subwords_locked_contract() {
+        assert_eq!(
+            split_subwords("ConfirmSubscriptionScreen"),
+            ["Confirm", "Subscription", "Screen"]
+        );
+        assert_eq!(split_subwords("HTTPServer"), ["HTTP", "Server"]);
+        assert_eq!(split_subwords("HTMLParser"), ["HTML", "Parser"]);
+        assert_eq!(split_subwords("IOError"), ["IO", "Error"]);
+        assert_eq!(split_subwords("getUserID"), ["get", "User", "ID"]);
+        assert_eq!(split_subwords("OAuth2Token"), ["Auth", "Token"]);
+        assert!(split_subwords("parse_json_value").is_empty());
+        assert!(split_subwords("MAX_SIZE").is_empty());
+        // Hard rule: never fabricate a token (no "HTTPS" out of "HTTPServer").
+        assert!(!split_subwords("HTTPServer").iter().any(|s| s == "HTTPS"));
     }
 
     #[test]

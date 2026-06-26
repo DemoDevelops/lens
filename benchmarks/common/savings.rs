@@ -514,7 +514,18 @@ async fn code_search() -> anyhow::Result<SavingsRow> {
     let index = Index::open(data.path())?;
     index.index_path(&dir, true)?;
     // Realistic top-k per query (the lens_search default neighbourhood).
-    let resp = index.search(&queries, 5)?;
+    let mut resp = index.search(&queries, 5)?;
+    // Measure the content reaching context, not the absolute-path prefix:
+    // index_path stores absolute paths, which are longer inside a git worktree
+    // than in the main checkout, so leaving them in would make this savings
+    // figure non-portable across checkouts. Relativize hit paths to the corpus.
+    for r in &mut resp.results {
+        for h in &mut r.hits {
+            if let Ok(rel) = std::path::Path::new(&h.path).strip_prefix(&dir) {
+                h.path = rel.to_string_lossy().into_owned();
+            }
+        }
+    }
     let after_str = serde_json::to_string(&resp)?;
     let after = after_str.len();
     let after_tokens = est_tokens(&after_str);

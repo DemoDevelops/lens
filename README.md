@@ -170,4 +170,4 @@ cargo run --bin bench_report     # regenerate BENCHMARKS.md + BENCHMARKS_APPENDI
 
 ## License
 
-Elastic License 2.0 (ELv2). See [LICENSE](LICENSE).
+MIT License. See [LICENSE](LICENSE).

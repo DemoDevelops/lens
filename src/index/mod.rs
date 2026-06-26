@@ -2,6 +2,7 @@
 
 pub mod schema;
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -254,38 +255,152 @@ impl Index {
     }
 }
 
-/// BM25F-ranked search over the porter `chunks` table (the default path).
+/// Proximity boost weight: added to the negated BM25F score of a multi-term hit,
+/// scaled by `1 / span` where `span` is the tightest token-position window
+/// covering every query term in the chunk. Adjacent terms (span 1) get the full
+/// weight; terms scattered far apart decay toward zero. Sized so an adjacent-terms
+/// chunk overtakes a higher-TF but scattered chunk without disturbing the
+/// single-term / unrelated-query orderings the BM25F gates depend on.
+const PROX_WEIGHT: f64 = 4.0;
+
+/// Over-fetch factor and cap for the proximity re-rank. The BM25F candidate pool is
+/// fetched `requested_limit * OVERFETCH_K` deep (bounded by `OVERFETCH_CAP`),
+/// re-ranked by the combined BM25F + proximity score, then truncated to the caller's
+/// limit. This lets an adjacent-terms chunk that BM25F alone ranks just OUTSIDE the
+/// top-L be lifted INTO the final top-L, so proximity is a recall win, not merely a
+/// reorder of the already-returned set. A query with no proximity boost (single-term,
+/// or terms that never co-occur) re-ranks to the identical BM25F order, so truncating
+/// the deeper pool to L yields byte-for-byte the same top-L as a plain `LIMIT L`.
+const OVERFETCH_K: usize = 8;
+const OVERFETCH_CAP: usize = 200;
+
+/// BM25F-ranked search over the porter `chunks` table (the default path), with a
+/// deterministic term-proximity (min-window span) re-rank on top of `bm25()`.
+/// Over-fetches a deeper BM25F pool (see `OVERFETCH_K`), re-ranks by the combined
+/// score, then truncates to `limit`, so proximity can lift an adjacent-terms chunk
+/// INTO the final top-L rather than only reordering the top-L BM25F already returned.
 fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
     let match_expr = sanitize_query(query);
     if match_expr.is_empty() {
         return Ok(Vec::new());
     }
+    // Over-fetch a deeper BM25F pool than the caller asked for, so the proximity
+    // re-rank below can pull a tight-span chunk ranked beyond L into the final top-L.
+    let fetch = limit.saturating_mul(OVERFETCH_K).min(OVERFETCH_CAP);
     // bm25() is more-negative-is-better; negate so higher = better. Column weights
     // are (path, chunk_id, symbols, content): symbols is weighted 5x so a query
     // naming a symbol ranks its defining file above files that only mention the
     // term. snippet targets content (column 3).
     let mut stmt = conn.prepare(
-        "SELECT path, snippet(chunks, 3, '[', ']', ' … ', 24) AS snip,
+        "SELECT path, chunk_id, snippet(chunks, 3, '[', ']', ' … ', 24) AS snip, content,
                 -bm25(chunks, 0.0, 0.0, 5.0, 1.0) AS score
          FROM chunks
          WHERE chunks MATCH ?1
          ORDER BY bm25(chunks, 0.0, 0.0, 5.0, 1.0), path, chunk_id
          LIMIT ?2",
     )?;
-    let mut hits = Vec::new();
-    let rows = stmt.query_map(rusqlite::params![match_expr, limit as i64], |row| {
-        Ok(SearchHit {
-            path: row.get(0)?,
-            snippet: row.get(1)?,
-            score: row.get(2)?,
-        })
+    // Distinct query terms for proximity. Porter stems the index, so an inflected
+    // query term won't position-match an unstemmed surface form; we match on exact
+    // lowercased tokens, which is conservative — it can only miss a boost, never add
+    // a spurious one. Single-term queries have no span, so the pass is a no-op and
+    // the order matches the SQL `ORDER BY` exactly.
+    let terms = proximity_terms(query);
+    // (path, chunk_id, snippet, combined_score)
+    let mut rows: Vec<(String, String, String, f64)> = Vec::new();
+    let mapped = stmt.query_map(rusqlite::params![match_expr, fetch as i64], |row| {
+        let path: String = row.get(0)?;
+        let chunk_id: String = row.get(1)?;
+        let snippet: String = row.get(2)?;
+        let content: String = row.get(3)?;
+        let mut score: f64 = row.get(4)?;
+        if terms.len() >= 2 {
+            if let Some(span) = min_cover_span(&content, &terms) {
+                score += PROX_WEIGHT / span.max(1) as f64;
+            }
+        }
+        Ok((path, chunk_id, snippet, score))
     });
-    if let Ok(mapped) = rows {
-        for h in mapped.flatten() {
-            hits.push(h);
+    if let Ok(mapped) = mapped {
+        for r in mapped.flatten() {
+            rows.push(r);
         }
     }
-    Ok(hits)
+    // Re-rank: higher combined score first, then the SQL tiebreak (path, chunk_id).
+    // With no proximity boost this reproduces the SQL order byte-for-byte, so the
+    // truncation below leaves the unboosted top-L identical to a plain `LIMIT L`.
+    rows.sort_by(|a, b| {
+        b.3.partial_cmp(&a.3)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    // Truncate the over-fetched, re-ranked pool back to the caller's limit.
+    Ok(rows
+        .into_iter()
+        .take(limit)
+        .map(|(path, _chunk_id, snippet, score)| SearchHit {
+            path,
+            snippet,
+            score,
+        })
+        .collect())
+}
+
+/// Lowercased alphanumeric tokens of `text`, in order. Matches the FTS5 porter
+/// tokenizer's word boundaries (split on non-alphanumeric) minus stemming, applied
+/// identically to query and chunk so positions align.
+fn proximity_tokens(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+}
+
+/// Distinct query terms (lowercased, order-preserving) for the proximity pass.
+fn proximity_terms(query: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for t in proximity_tokens(query) {
+        if !terms.contains(&t) {
+            terms.push(t);
+        }
+    }
+    terms
+}
+
+/// Tightest token-position window covering at least one occurrence of every term
+/// in `terms` within `content`, expressed as `max_pos - min_pos` (adjacent terms
+/// give 1). `None` when some term never appears, so no proximity boost applies.
+fn min_cover_span(content: &str, terms: &[String]) -> Option<usize> {
+    let k = terms.len();
+    // Occurrences of any query term, as (token_position, term_index), in position
+    // order (enumerate is monotonic, so `occ` is already sorted).
+    let occ: Vec<(usize, usize)> = proximity_tokens(content)
+        .enumerate()
+        .filter_map(|(pos, tok)| terms.iter().position(|t| *t == tok).map(|ti| (pos, ti)))
+        .collect();
+    if occ.is_empty() {
+        return None;
+    }
+    // Sliding window: smallest range covering all k distinct terms.
+    let mut counts = vec![0usize; k];
+    let mut have = 0usize;
+    let mut left = 0usize;
+    let mut best: Option<usize> = None;
+    for right in 0..occ.len() {
+        if counts[occ[right].1] == 0 {
+            have += 1;
+        }
+        counts[occ[right].1] += 1;
+        while have == k {
+            let span = occ[right].0 - occ[left].0;
+            best = Some(best.map_or(span, |b| b.min(span)));
+            counts[occ[left].1] -= 1;
+            if counts[occ[left].1] == 0 {
+                have -= 1;
+            }
+            left += 1;
+        }
+    }
+    best
 }
 
 /// Literal-substring search over the trigram `chunks_tri` table for structural /
@@ -627,6 +742,32 @@ mod tests {
         assert!(hits.len() >= 2);
         assert!(hits[0].path.ends_with("strong.txt"));
         assert!(hits[0].score >= hits[1].score);
+    }
+
+    #[test]
+    fn single_term_overfetch_top_l_is_prefix_stable() {
+        // Over-fetch invariant: a single-term query carries no proximity boost, so the
+        // re-rank collapses to the plain BM25F order. Truncating a deeper over-fetched
+        // pool to L must therefore yield exactly the first L of any larger limit — the
+        // top-L stays byte-identical to a plain `LIMIT L`. 12 matching chunks saturate
+        // the over-fetch (3*8 and 12*8 both exceed 12), so only the truncation differs.
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        for i in 0..12 {
+            fs::write(dir.path().join(format!("f{i:02}.rs")), vec!["widget"; i + 1].join(" ")).unwrap();
+        }
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+
+        let small = &idx.search(&["widget".into()], 3).unwrap().results[0].hits;
+        let large = &idx.search(&["widget".into()], 12).unwrap().results[0].hits;
+        assert_eq!(small.len(), 3, "small query returns exactly L");
+        assert!(large.len() >= 3);
+        for k in 0..3 {
+            assert_eq!(small[k].path, large[k].path, "path differs at {k}");
+            assert_eq!(small[k].snippet, large[k].snippet, "snippet differs at {k}");
+            assert_eq!(small[k].score, large[k].score, "score differs at {k}");
+        }
     }
 
     #[test]

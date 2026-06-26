@@ -14,6 +14,8 @@
 
 pub mod dashboard;
 pub mod stats;
+pub mod tui;
+pub mod value_model;
 pub mod verify;
 
 use std::fs::OpenOptions;

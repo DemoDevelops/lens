@@ -107,6 +107,10 @@ tree-sitter-java = "0.23"
 tree-sitter-ruby = "0.23"
 tree-sitter-php = "0.24"
 tree-sitter-lua = "0.5"
+# vendor-tags: these ship queries/tags.scm but do not const-export it; lens
+# include_str!s a committed copy (see src/discovery/vendored/).
+tree-sitter-kotlin-sg = "0.4"
+tree-sitter-scala = "0.26"
 foldhash = "0.1"
 rayon = "1"
 # Offline BPE tokenizer (vocab embedded in the crate; no network) for accurate

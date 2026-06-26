@@ -39,6 +39,12 @@ fn main() -> Result<()> {
         Some("stats") => return obs::stats::run_cli(&args[2..]),
         Some("verify") => return obs::verify::run_cli(&args[2..]),
         Some("dashboard") => return obs::dashboard::run_cli(&args[2..]),
+        Some("top") => {
+            // Ergonomic alias: `lens top` == `lens dashboard --tui`.
+            let mut a = vec!["--tui".to_string()];
+            a.extend_from_slice(&args[2..]);
+            return obs::dashboard::run_cli(&a);
+        }
         Some("wrap") => return lens::wrap::run_cli(&args[2..]),
         Some("rtk") => return lens::rtk::run_cli(&args[2..]),
         Some("warmup") => return lens::warmup::run_cli(&args[2..]),

@@ -42,5 +42,16 @@
     "savings_pct": 17,
     "baseline": "Agent reads every source file in the subtree to map its structure.",
     "detail": "discover summary (30 nodes, 41 edges) + one scoped lens_symbol"
+  },
+  {
+    "workload": "File read (skeleton + recall)",
+    "mechanism": "skeleton",
+    "before_bytes": 15915,
+    "after_bytes": 5785,
+    "before_tokens": 3681,
+    "after_tokens": 1591,
+    "savings_pct": 64,
+    "baseline": "Agent reads each source file in full to understand its structure.",
+    "detail": "12 files reduced to tree-sitter skeletons; full text recoverable via lens_recall (one ref/file)"
   }
 ]

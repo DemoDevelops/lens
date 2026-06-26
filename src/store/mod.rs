@@ -63,11 +63,22 @@ impl Store {
         Ok(hash)
     }
 
-    /// Fetch a blob by its ref. Returns `None` if the ref is unknown.
+    /// Fetch a blob by its ref. Accepts the full blake3 hash or a unique short
+    /// prefix of it (git-style), so callers can surface a cheap truncated ref and
+    /// still recover the full blob. Returns `None` if the ref is empty or unknown.
     pub fn get(&self, reference: &str) -> Result<Option<String>> {
+        if reference.is_empty() {
+            return Ok(None);
+        }
         let conn = self.conn()?;
-        let mut stmt = conn.prepare("SELECT content FROM blobs WHERE hash = ?1")?;
-        let mut rows = stmt.query([reference])?;
+        // Hashes are lowercase hex, so every hash starting with `reference` lies
+        // in the range [reference, reference + 'g'). This is a prefix scan over
+        // the PRIMARY KEY index; the full-hash case resolves to exactly itself.
+        let upper = format!("{reference}g");
+        let mut stmt = conn.prepare(
+            "SELECT content FROM blobs WHERE hash >= ?1 AND hash < ?2 ORDER BY hash LIMIT 1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![reference, upper])?;
         match rows.next()? {
             Some(row) => {
                 let bytes: Vec<u8> = row.get(0)?;
@@ -148,6 +159,19 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         assert!(store.get("deadbeef").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_by_short_prefix() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let content = "fn x() { /* body */ }\n".repeat(20);
+        let full = store.put(&content).unwrap();
+        // A cheap 12-char prefix recovers the full blob, and so does the full hash.
+        assert_eq!(store.get(&full[..12]).unwrap().unwrap(), content);
+        assert_eq!(store.get(&full).unwrap().unwrap(), content);
+        // An empty ref never resolves to a blob.
+        assert!(store.get("").unwrap().is_none());
     }
 
     #[test]

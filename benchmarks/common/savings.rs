@@ -493,6 +493,7 @@ pub async fn compute_savings() -> anyhow::Result<Vec<SavingsRow>> {
         log_debug().await?,
         issue_triage().await?,
         codebase_explore().await?,
+        file_read().await?,
     ])
 }
 
@@ -679,6 +680,81 @@ async fn codebase_explore() -> anyhow::Result<SavingsRow> {
         &format!(
             "discover summary ({} nodes, {} edges) + one scoped lens_symbol",
             outcome.response.nodes, outcome.response.edges
+        ),
+    ))
+}
+
+// --- File read: mechanism = skeleton ----------------------------------------
+//
+// Naive path: to understand a source file an agent reads it in full. With lens:
+// the file is reduced to its tree-sitter skeleton (signatures + nesting, bodies
+// elided to `…`) via discovery::skeleton, and the full text is stashed in the
+// reversible store so any elided body is one lens_recall away. "before" is every
+// supported source file read whole; "after" is each file's skeleton plus one
+// per-file recall ref. Reversible: store.get(ref) returns the exact original.
+async fn file_read() -> anyhow::Result<SavingsRow> {
+    let dir = bench_root().join("savings/workloads/code_search");
+    let data = tempfile::tempdir()?;
+    let store = Store::open(&data.path().join(".lens"))?;
+
+    let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(&dir)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .collect();
+    paths.sort();
+
+    let (mut before, mut after) = (0usize, 0usize);
+    let (mut before_tokens, mut after_tokens) = (0usize, 0usize);
+    let mut files = 0usize;
+    let mut sample: Option<(String, String)> = None;
+    for path in &paths {
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let Some(spec) = discovery::extract::spec_for_extension(ext) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Some(skel) = discovery::skeleton::skeletonize(&content, &spec) else {
+            continue;
+        };
+        let reference = store.put(&content)?;
+        // One per-file recall pointer. The handle is a cheap 12-char prefix of the
+        // blake3 ref (Store::get resolves prefixes), not the full 64-char hash, so
+        // the recall pointer costs a few tokens instead of ~40.
+        let handle = reference[..12].to_string();
+        let recall = format!("// full file: lens_recall {handle}\n");
+        before += content.len();
+        before_tokens += est_tokens(&content);
+        after += skel.len() + recall.len();
+        after_tokens += est_tokens(&skel) + est_tokens(&recall);
+        files += 1;
+        if sample.is_none() {
+            sample = Some((handle, content));
+        }
+    }
+
+    // Reversibility invariant: the stash recovers the exact original, so the
+    // skeleton "after" is lossless (the full file is always one lens_recall away).
+    if let Some((reference, content)) = sample {
+        anyhow::ensure!(
+            store.get(&reference)?.as_deref() == Some(content.as_str()),
+            "file_read: store did not round-trip the original file"
+        );
+    }
+
+    Ok(SavingsRow::new(
+        "File read (skeleton + recall)",
+        "skeleton",
+        before,
+        after,
+        before_tokens,
+        after_tokens,
+        "Agent reads each source file in full to understand its structure.",
+        &format!(
+            "{files} files reduced to tree-sitter skeletons; full text recoverable via lens_recall (one ref/file)"
         ),
     ))
 }

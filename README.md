@@ -73,10 +73,10 @@ Update later with `lens update`: it checks for a newer release, downloads the ma
 | `lens_run_file` | Same as `lens_run` but receives a file path as its first argument. |
 | `lens_skeleton` | Show a source file's structure: signatures + nesting, bodies elided to `…`. Full text recoverable via `lens_recall`. |
 | `lens_index` | Index a directory for full-text search. Run once per repo. |
-| `lens_search` | BM25-ranked search across the index. Answers "where is X mentioned". |
+| `lens_search` | BM25F search with a proximity rerank: chunks whose query terms sit close together rank higher. Answers "where is X mentioned". |
 | `lens_grep_ast` | Structural search via a tree-sitter query: matches syntax, not text (real `.unwrap()` calls, not comments). |
 | `lens_map` | Parse the repo into a symbol graph (functions, types, modules, relationships). Run once per repo. |
-| `lens_overview` | Token-budgeted, PageRank-ranked map of the repo's most important symbols (~2k tokens). |
+| `lens_overview` | Token-budgeted map (~2k tokens) of the repo's symbols: a knapsack packs the highest-importance subset that fits the budget, so load-bearing hubs survive. |
 | `lens_symbol` | Find symbols by name and see their immediate connections. |
 | `lens_find` | Find symbols by natural-language description. |
 | `lens_links` | Expand a symbol's neighborhood N hops out. |
@@ -138,7 +138,7 @@ lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio
 
 **Darkroom (`lens_run` / `lens_run_file`).** Your script runs in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly.
 
-**Search (`lens_index` / `lens_search`).** `lens_index` builds a SQLite FTS5 full-text index over the repo. `lens_search` runs BM25-ranked queries and returns the top snippets with `path:line`, not whole files. Batch several questions in one call to save round-trips.
+**Search (`lens_index` / `lens_search`).** `lens_index` builds a SQLite FTS5 full-text index over the repo. `lens_search` ranks with BM25F, then over-fetches a deeper candidate pool and re-ranks it by term proximity (a chunk where the query terms sit in a tight window outranks one where they are scattered) before returning the top snippets with `path:line`, not whole files. Batch several questions in one call to save round-trips.
 
 **Graph (`lens_map` / `lens_symbol` / `lens_find` / `lens_links` / `lens_path`).** `lens_map` parses [supported files](SUPPORTED.md) with tree-sitter and builds a deterministic structural graph (functions, types, modules, and their calls/imports/contains edges) in `.lens/graph.json`. The query tools walk that graph, so "who calls X" or "how does A reach B" is a graph lookup instead of a pile of file reads.
 

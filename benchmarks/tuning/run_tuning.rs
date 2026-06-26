@@ -35,6 +35,10 @@
 //! report+JSON only; CI gating is by within-run A/B vs the A-vs-A noise floor, never
 //! absolute ms.
 
+// rustc 1.95 tightened these doc-comment list lints; the module doc above uses
+// intentional column alignment, so allow them for this internal bench bin.
+#![allow(clippy::doc_overindented_list_items, clippy::doc_lazy_continuation)]
+
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};

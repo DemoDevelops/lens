@@ -132,6 +132,32 @@ lens_recall(ref="<retrieve_ref from a truncated result>")   # full content, loss
 lens_stats()                                    # tokens saved + index/graph sizes this session
 ```
 
+## Dashboard
+
+A local, read-only view of what lens is saving you: the op log, token savings, applied value, and session activity, rendered live. Two front-ends over the same snapshot.
+
+**In Claude Code:** `/dashboard` launches the web view for the current repo as a background process and prints its URL. It reads `<cwd>/.lens`, so run it from the repo whose savings you want to see.
+
+**Web** (`lens dashboard`): serves on `http://127.0.0.1:7878` (`--port` to change). Live `$` saved and tokens, throughput sparklines, a per-tool table, by-mechanism and RTK shell savings, an applied-value panel (benchmark rates × your live ops → estimated tokens and time saved), and session activity. Header controls, all remembered in the browser:
+
+- **time window**: live, last 15m/1h/3h, today, since a clock time, or all
+- **scope**: this repo, or all repos (every repo + launch profile)
+- **theme**: dark (default) or retro 70s
+- **mini / full**: a compact pane vs the expansive charts
+
+**Terminal** (`lens dashboard --tui`, alias `lens top`): the same snapshot in the terminal, no browser or socket. Zero-dependency ANSI (box panels, block sparklines, `NO_COLOR`-aware), auto mini/full by width.
+
+```sh
+lens top                       # this repo, auto layout
+lens dashboard --tui --global  # every repo + launch profile
+lens top --today               # scope to since local midnight
+lens top --since 1h            # ...or a sliding window (15m|1h|3h|2d|all)
+lens top --theme 70s           # retro palette (dark is the default)
+lens top --full --interval 2   # framed layout, refresh every 2s
+```
+
+The `$` headline prices the measured tokens-saved at the model input rate (`--rate <$/M>` or `--model opus|sonnet|haiku`). Applied-value figures (tokens plus time, at `--rt-seconds` per avoided round-trip, default 4s) are estimates and never enter that headline.
+
 ## How it works
 
 lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio server** (the `lens_*` tools, `src/server.rs`) and as **hook handlers** the same binary runs on Claude Code's PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, and SessionStart events. Per-repo state lives in `.lens/` (the symbol graph, the FTS index, and the reversible blob store); the managed RTK binary lives in `~/.lens/bin`.

@@ -254,6 +254,20 @@ fn store_index_graph(dir: &Path) -> (u64, i64, i64, i64) {
     )
 }
 
+/// The top-level snapshot keys that name a display panel/dimension. Both renderers
+/// (web `INDEX_HTML`, terminal `tui::render_snapshot`) must surface every one; the
+/// parity tripwire test in `dashboard.rs` scans both for each key. Adding a panel =
+/// add its key here, then both renderers (or the tripwire fails).
+pub const SNAPSHOT_DIMENSIONS: &[&str] = &[
+    "tokens_saved_mcp",
+    "by_tool",
+    "by_mechanism",
+    "applied_value",
+    "rtk",
+    "activity",
+    "store_size",
+];
+
 /// Aggregate `ops.log` (optionally scoped to a session) into a JSON snapshot —
 /// the shape the web dashboard polls. Cumulative; rate/throughput is the client's
 /// job (it diffs successive snapshots), keeping this stateless.
@@ -308,6 +322,16 @@ pub fn snapshot_json_since(
     // grand-total `tokens_saved_est` still includes them (the ledger reconciles).
     let rtk_shell_saved: i64 = t.by_tool.get("rtk_shell").map(|a| a.saved).unwrap_or(0);
     let tokens_saved_mcp = t.tokens_saved_est - rtk_shell_saved;
+
+    // Applied-value plane: benchmark per-op rates × this scope's live op counts, so the
+    // dashboard accumulates the counterfactual value (tokens, round-trips) the
+    // byte-delta ledger scores as zero. Estimates only (`estimate: true`); they never
+    // enter `tokens_saved_est`/`tokens_saved_mcp` or the `$` headline. Rates are
+    // drift-guarded against the committed benchmark JSONs in value_model.
+    let applied_value = super::value_model::applied_value_json(
+        |tool| t.by_tool.get(tool).map(|a| a.count).unwrap_or(0),
+        tokens_saved_mcp,
+    );
 
     // The "first plane": built-in tool activity captured by the session hooks.
     let activity = SessionStore::open(dir)
@@ -392,6 +416,7 @@ pub fn snapshot_json_since(
         "offloaded_bytes": t.offloaded_bytes,
         "by_tool": by_tool,
         "by_mechanism": by_mechanism,
+        "applied_value": applied_value,
         "rtk": rtk_snapshot(),
         "store_size": store_size,
         "index_chunks": index_chunks,
@@ -555,7 +580,7 @@ fn db_size(dir: &Path, name: &str) -> u64 {
     total
 }
 
-fn human_bytes(n: u64) -> String {
+pub(crate) fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = n as f64;
     let mut u = 0;
@@ -570,7 +595,7 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-fn human_count(n: u64) -> String {
+pub(crate) fn human_count(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
@@ -763,5 +788,63 @@ esac
             snapshot_json_since(dir.path(), None, Some(0))["ops"],
             json!(1)
         );
+    }
+
+    #[test]
+    fn snapshot_exposes_applied_value() {
+        let dir = tempdir().unwrap();
+        let log = OpLog::open(dir.path());
+        // Seed one op each across measured + counterfactual dimensions.
+        log.start("lens_run", json!({}))
+            .finish(8000, 100, Some("a".into()), "ok", "", None);
+        log.start("lens_search", json!({}))
+            .finish(50, 50, None, "ok", "", None);
+        log.start("lens_symbol", json!({}))
+            .finish(40, 40, None, "ok", "", None);
+        log.start("lens_recall", json!({}))
+            .finish(20, 20, None, "ok", "", None);
+
+        let snap = snapshot_json(dir.path(), None);
+        let av = &snap["applied_value"];
+        assert_eq!(av["model"], json!(crate::obs::value_model::VALUE_MODEL_MODEL));
+        assert_eq!(av["note"], json!(crate::obs::value_model::VALUE_MODEL_NOTE));
+        assert_eq!(av["estimate"], json!(true));
+        // The measured plane is the session's real savings; estimates sit beside it.
+        assert_eq!(av["measured_tokens"], snap["tokens_saved_mcp"]);
+        let est = av["est_counterfactual_tokens"].as_i64().unwrap();
+        assert!(est > 0, "search + recall contribute counterfactual tokens");
+        assert_eq!(
+            av["est_total_tokens"].as_i64().unwrap(),
+            av["measured_tokens"].as_i64().unwrap() + est
+        );
+        assert!(av["round_trips_avoided"].as_f64().unwrap() > 0.0);
+
+        let rows = av["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 5, "one row per value dimension");
+        let nav = rows.iter().find(|r| r["dimension"] == json!("navigation")).unwrap();
+        assert_eq!(nav["ops"], json!(1));
+        assert!(nav["round_trips"].as_f64().unwrap() > 1.0, "nav avoids >1 round-trip/op");
+        let rec = rows.iter().find(|r| r["dimension"] == json!("recovery")).unwrap();
+        assert_eq!(rec["ops"], json!(1));
+        assert!(rec["est_tokens"].as_i64().unwrap() > 0, "recall saves counterfactual tokens");
+
+        // The applied-value block must NOT perturb the measured savings ledger.
+        let t = aggregate(&read_records(dir.path(), None));
+        assert_eq!(snap["tokens_saved_est"], json!(t.tokens_saved_est));
+        assert_eq!(snap["tokens_saved_mcp"], json!(t.tokens_saved_est)); // no rtk_shell op here
+    }
+
+    #[test]
+    fn applied_value_rows_exist_with_zero_ops() {
+        let dir = tempdir().unwrap();
+        let snap = snapshot_json(dir.path(), None);
+        let av = &snap["applied_value"];
+        assert_eq!(av["rows"].as_array().unwrap().len(), 5, "rows exist with no live ops");
+        assert_eq!(av["round_trips_avoided"], json!(0.0));
+        assert_eq!(av["est_total_tokens"], json!(0));
+        // Every SNAPSHOT_DIMENSIONS key is actually present in a real snapshot.
+        for key in SNAPSHOT_DIMENSIONS {
+            assert!(snap.get(*key).is_some(), "snapshot missing dimension key '{key}'");
+        }
     }
 }

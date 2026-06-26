@@ -5,7 +5,7 @@
 //! `pub const TAGS_QUERY`. Its captures follow a fixed shape:
 //!   - `@name`            the identifier node naming the symbol (defs AND refs)
 //!   - `@definition.<k>`  marks the enclosing node as a definition of kind `<k>`
-//!   - `@reference.call`  marks a call site
+//!   - `@reference.call` / `@reference.send`  marks a call / method-send site
 //! This adapter consumes that shape to produce the same [`FileExtract`] the
 //! hand-written specs produce, so adding a language is a [`TagsLangSpec`] registry
 //! entry plus a `Cargo.toml` dependency, nothing more.
@@ -113,6 +113,27 @@ pub fn tags_spec_for_extension(ext: &str) -> Option<TagsLangSpec> {
 pub fn tags_registry() -> Vec<TagsLangSpec> {
     vec![
         // --- Wave 2 / T4: C-family ---
+        TagsLangSpec {
+            name: "c",
+            extensions: &["c"],
+            language: || tree_sitter_c::LANGUAGE.into(),
+            tags_query: tree_sitter_c::TAGS_QUERY,
+            imports_query: None,
+        },
+        TagsLangSpec {
+            name: "cpp",
+            extensions: &["cpp", "cc", "cxx", "hpp", "hh", "h"],
+            language: || tree_sitter_cpp::LANGUAGE.into(),
+            tags_query: tree_sitter_cpp::TAGS_QUERY,
+            imports_query: None,
+        },
+        TagsLangSpec {
+            name: "csharp",
+            extensions: &["cs"],
+            language: || tree_sitter_c_sharp::LANGUAGE.into(),
+            tags_query: tree_sitter_c_sharp::TAGS_QUERY,
+            imports_query: None,
+        },
         // --- Wave 2 / T5: JVM ---
         // --- Wave 2 / T6: scripting ---
         // --- Wave 2 / T7: Roku ---
@@ -279,7 +300,9 @@ fn extract_tags_from_tree(
             let cn = cap_names[c.index as usize];
             if cn == "name" {
                 name_node = Some(c.node);
-            } else if cn == "reference.call" {
+            } else if cn == "reference.call" || cn == "reference.send" {
+                // .call = function call (Rust/Python/C); .send = method/message send
+                // (Ruby/C#/Objective-C). Both are invocations -> a `calls` edge.
                 is_call = true;
             }
         }
@@ -490,5 +513,59 @@ fn helper() {}
                 );
             }
         }
+    }
+
+    // --- Per-language fixtures: each proves the registered grammar extracts a named
+    // def and a call edge through the generic adapter (the real T4-T8 predicate). ---
+
+    fn extracts(ext: &str, src: &str) -> FileExtract {
+        let spec = tags_spec_for_extension(ext).unwrap_or_else(|| panic!("no tags spec for .{ext}"));
+        extract_tags_file(&format!("fixture.{ext}"), src, &spec)
+            .unwrap_or_else(|| panic!(".{ext} failed to parse/extract"))
+    }
+    fn def_names(fx: &FileExtract) -> Vec<&str> {
+        fx.defs.iter().map(|n| n.name.as_str()).collect()
+    }
+    fn has_def(fx: &FileExtract, name: &str) -> bool {
+        fx.defs.iter().any(|n| n.name == name)
+    }
+    fn has_call(fx: &FileExtract, name: &str) -> bool {
+        fx.calls.iter().any(|(_, c)| c == name)
+    }
+
+    #[test]
+    fn c_extraction() {
+        // C tags.scm captures definitions only (no @reference.call); calls stay empty.
+        let fx = extracts(
+            "c",
+            "int helper(int x) { return x + 1; }\nint add(int a, int b) { return helper(a) + b; }\n",
+        );
+        assert!(has_def(&fx, "add") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
+    }
+
+    #[test]
+    fn cpp_extraction() {
+        // C++ tags.scm captures definitions only (no references); calls stay empty.
+        let fx = extracts(
+            "cpp",
+            "int helper() { return 1; }\nclass Widget { public: int render() { return helper(); } };\n",
+        );
+        assert!(
+            has_def(&fx, "helper") && has_def(&fx, "render") && has_def(&fx, "Widget"),
+            "defs: {:?}",
+            def_names(&fx)
+        );
+    }
+
+    #[test]
+    fn csharp_extraction() {
+        // C# tags.scm captures method sends on member access (this.Helper()) via
+        // @reference.send; a bare Helper() is not a tagged reference.
+        let fx = extracts(
+            "cs",
+            "class Widget { int Render() { return this.Helper(); } int Helper() { return 1; } }\n",
+        );
+        assert!(has_def(&fx, "Render") && has_def(&fx, "Helper"), "defs: {:?}", def_names(&fx));
+        assert!(has_call(&fx, "Helper"), "calls: {:?}", fx.calls);
     }
 }

@@ -109,6 +109,7 @@ Model: `claude-opus-4-8 (via claude-pty)`
 | Darkroom tasks | 6 | 33% | 100% | +67pp | 2999 | 111 | -2888 |
 | Discovery tasks | 3 | 100% | 100% | +0pp | 990 | 677 | -313 |
 | Search tasks | 2 | 100% | 100% | +0pp | 465 | 392 | -73 |
+| Skeleton tasks | 2 | 0% | 100% | +100pp | 980 | 920 | -60 |
 
 > **Real run via `claude-pty`** (interactive Claude Code, plan quota — no API credit), tools disabled so each arm answers only from its given context, same isolation as a direct API call.
 >

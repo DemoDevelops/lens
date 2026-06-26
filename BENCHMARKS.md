@@ -28,10 +28,11 @@ Model: `claude-opus-4-8 (via claude-pty)`
 | Darkroom tasks | 6 | 33% | 100% | +67pp | 2999 | 111 | -2888 |
 | Discovery tasks | 3 | 100% | 100% | +0pp | 990 | 677 | -313 |
 | Search tasks | 2 | 100% | 100% | +0pp | 465 | 392 | -73 |
+| Skeleton tasks | 2 | 0% | 100% | +100pp | 980 | 920 | -60 |
 
 > Run method: real model via `claude-pty`, tools disabled, context-only isolation — each arm answers only from its given context, exactly like a direct API call.
 >
-> Samples are small (N = 6 / 3 / 2) and each task runs once. Re-running the suite 13 times on `claude-opus-4-8` found the treatment arm deterministic at 100% across every mechanism, while darkroom control alone swings 17-67% (mean ~42%): the treatment-over-control gap reproduces every run, but a single-run control figure is indicative, not a reproducible rate. Directional confirmations, not statistically powered rates.
+> Samples are small (N = 6 / 3 / 2 / 2) and each task runs once. Re-running the suite 13 times on `claude-opus-4-8` found the treatment arm deterministic at 100% across every mechanism, while darkroom control alone swings 17-67% (mean ~42%): the treatment-over-control gap reproduces every run, but a single-run control figure is indicative, not a reproducible rate. Directional confirmations, not statistically powered rates.
 
 ## Session recovery
 

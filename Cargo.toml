@@ -60,6 +60,10 @@ path = "benchmarks/hotpaths/run_hotpaths.rs"
 name = "bench_fitness"
 path = "benchmarks/fitness/run_fitness.rs"
 
+[[bin]]
+name = "bench_tuning"
+path = "benchmarks/tuning/run_tuning.rs"
+
 [dependencies]
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync"] }

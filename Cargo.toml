@@ -49,10 +49,6 @@ name = "bench_changes"
 path = "benchmarks/changes/run_changes.rs"
 
 [[bin]]
-name = "bench_subword"
-path = "benchmarks/changes/run_subword.rs"
-
-[[bin]]
 name = "bench_routing"
 path = "benchmarks/routing/run_routing.rs"
 

@@ -300,7 +300,9 @@ pub struct GrepAstRequest {
     /// A tree-sitter query (S-expression). Node kinds are language-specific, e.g.
     /// `(call_expression function: (field_expression field: (field_identifier) @m))`.
     pub query: String,
-    /// Language the query targets (rust, python, javascript, typescript, go, swift).
+    /// Language the query targets: any graph-supported language (the 6 hand-written
+    /// rust, python, javascript, typescript, go, swift, plus the tags-adapter set
+    /// c, cpp, csharp, java, kotlin, scala, ruby, php, lua, bash; see SUPPORTED.md).
     /// When omitted, every file is matched against the query compiled for its own
     /// grammar, skipping files whose grammar can't compile it.
     #[serde(default)]

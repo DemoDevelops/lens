@@ -894,6 +894,119 @@ fn gate_c15() -> (String, bool) {
     (s, pass)
 }
 
+// --- C16: subword-recall search (L28 camelCase expansion) -------------------
+
+/// (query, ground-truth file, snakeCovered). snakeCovered = a snake_case sibling
+/// already exposes the subword to the porter tokenizer today, so L28 is not the
+/// only way that file could match the query. The pure-Pascal subset (snakeCovered
+/// = false) is the 8 queries L28 is solely responsible for.
+const C16_CORPUS: [(&str, &str, bool); 10] = [
+    ("Subscription", "confirm_screen.tsx", false),
+    ("Canceled", "confirm_screen.tsx", false),
+    ("Billing", "billing.tsx", false),
+    ("Portal", "billing.tsx", false),
+    ("Selector", "payment.rs", false),
+    ("Payment", "payment.rs", true),
+    ("Socket", "websocket.rs", false),
+    ("Connection", "websocket.rs", false),
+    ("Validator", "auth.ts", false),
+    ("Token", "auth.ts", true),
+];
+
+/// True when any path in `paths` ends with the ground-truth file at a path-component
+/// boundary. The corpus is indexed by absolute path, so compare by suffix.
+fn c16_hit(paths: &[String], gt: &str) -> bool {
+    paths.iter().any(|p| {
+        let p = p.replace('\\', "/");
+        p == gt || p.ends_with(&format!("/{gt}"))
+    })
+}
+
+/// Per-query outcome: the labeled inputs plus the two arms' HIT booleans.
+struct C16Row {
+    query: &'static str,
+    gt: &'static str,
+    snake_covered: bool,
+    search_hit: bool,
+    symbol_hit: bool,
+}
+
+/// Run both arms over `fixtures/subword` and return per-query rows plus the three
+/// aggregate fractions (search_overall, search_pure_pascal, symbol_overall).
+///
+/// lens_search: open a temp `Index`, index the corpus, `search(&[q], 5)`; HIT = a
+/// top-5 hit path ends with the GT file. This is the arm L28 moves. lens_symbol:
+/// build the graph via `discovery::discover`, run the same substring-over-symbol-
+/// names path the `lens_symbol` tool uses; HIT = the GT file among the matched
+/// nodes. The symbol arm does not touch `chunk_symbols`, so it is an informational
+/// control independent of L28.
+fn measure_c16() -> (Vec<C16Row>, f64, f64, f64) {
+    let corpus = changes_fixture("subword");
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap();
+    index.index_path(&corpus, true).unwrap();
+    let g = discovery::discover(&corpus, None).unwrap().graph;
+
+    let mut rows = Vec::new();
+    for (query, gt, snake_covered) in C16_CORPUS {
+        let resp = index.search(&[query.to_string()], 5).unwrap();
+        let s_paths: Vec<String> = resp.results[0].hits.iter().map(|h| h.path.clone()).collect();
+        let view = gquery::query(&g, query, None, 5, &[]);
+        let lq = query.to_ascii_lowercase();
+        let y_paths: Vec<String> = view
+            .nodes
+            .iter()
+            .filter(|n| n.name.to_ascii_lowercase().contains(&lq))
+            .map(|n| n.file.clone())
+            .collect();
+        rows.push(C16Row {
+            query,
+            gt,
+            snake_covered,
+            search_hit: c16_hit(&s_paths, gt),
+            symbol_hit: c16_hit(&y_paths, gt),
+        });
+    }
+
+    let n = rows.len() as f64;
+    let search_hits = rows.iter().filter(|r| r.search_hit).count();
+    let symbol_hits = rows.iter().filter(|r| r.symbol_hit).count();
+    let pp: Vec<&C16Row> = rows.iter().filter(|r| !r.snake_covered).collect();
+    let pp_hits = pp.iter().filter(|r| r.search_hit).count();
+    let search_pp = if pp.is_empty() {
+        0.0
+    } else {
+        pp_hits as f64 / pp.len() as f64
+    };
+    (rows, search_hits as f64 / n, search_pp, symbol_hits as f64 / n)
+}
+
+fn gate_c16() -> (String, bool) {
+    let (rows, search_overall, search_pp, symbol_overall) = measure_c16();
+    let n = rows.len();
+    let search_hits = rows.iter().filter(|r| r.search_hit).count();
+    let symbol_hits = rows.iter().filter(|r| r.symbol_hit).count();
+    let pp_total = rows.iter().filter(|r| !r.snake_covered).count();
+    let pp_hits = rows.iter().filter(|r| !r.snake_covered && r.search_hit).count();
+
+    let mut s = String::new();
+    s.push_str("## C16 - subword search recall (L28 camelCase expansion)\n\n");
+    s.push_str("Each labeled query is a Pascal/camel subword of a compound identifier defined in exactly one `fixtures/subword` file. lens_search expands subwords in `chunk_symbols`, so a subword query reaches the defining file. The `search` column is what L28 moves; `symbol` is an INFORMATIONAL CONTROL that does not use `chunk_symbols` and is NOT part of the pass condition.\n\n");
+    s.push_str("| query | GT | snakeCovered | search | symbol |\n");
+    s.push_str("| --- | --- | :---: | :---: | :---: |\n");
+    for r in &rows {
+        s.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            r.query, r.gt, r.snake_covered, r.search_hit, r.symbol_hit
+        ));
+    }
+    s.push_str(&format!(
+        "\nlens_search overall: **{search_hits}/{n}** = {search_overall:.3}; pure-Pascal (snakeCovered=false): **{pp_hits}/{pp_total}** = {search_pp:.3}. lens_symbol overall (control): **{symbol_hits}/{n}** = {symbol_overall:.3}. Gate: search pure-Pascal = 1.0 (8/8) and search overall = 1.0 (10/10).\n"
+    ));
+    let pass = search_pp >= 1.0 - 1e-9 && search_overall >= 1.0 - 1e-9;
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -958,6 +1071,8 @@ fn main() -> anyhow::Result<()> {
     println!("{s14}");
     let (s15, c15_ok) = gate_c15();
     println!("{s15}");
+    let (s16, c16_ok) = gate_c16();
+    println!("{s16}");
 
     println!("\n## Gates");
     let gates = [
@@ -976,6 +1091,7 @@ fn main() -> anyhow::Result<()> {
         ("C13 fresh-session memory recall ≥0.8", c13_ok),
         ("C14 token-estimate mean abs error ≤8%", c14_ok),
         ("C15 structural search precision 1.0, recall ≥0.95", c15_ok),
+        ("C16 subword search recall 10/10 (pure-Pascal 8/8)", c16_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });

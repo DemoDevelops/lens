@@ -1,9 +1,9 @@
 {
-  "overall_token_savings_pct": 52.35087719298246,
+  "overall_token_savings_pct": 52.397660818713454,
   "per_workload": [
     {
       "workload": "Code search (results across files)",
-      "token_savings_pct": 35.262157022548216
+      "token_savings_pct": 35.42515620755229
     },
     {
       "workload": "Codebase exploration (subtree)",
@@ -22,7 +22,7 @@
       "token_savings_pct": 93.65580091132142
     }
   ],
-  "dep_count": 28,
+  "dep_count": 38,
   "tools": [
     "lens_find",
     "lens_grep_ast",

@@ -1,0 +1,38 @@
+{
+  "rust": {
+    "repo": "https://github.com/dtolnay/anyhow",
+    "sha": "5bdb0e24db3994be119d42f18fe2d655e1f68f4a",
+    "min_parse_rate": 0.9,
+    "min_defs": 50
+  },
+  "python": {
+    "repo": "https://github.com/psf/requests",
+    "sha": "4ed3d1b3204caa6806a36125a39589044a02e807",
+    "min_parse_rate": 0.9,
+    "min_defs": 50
+  },
+  "javascript": {
+    "repo": "https://github.com/expressjs/express",
+    "sha": "18e5985b8a9d5e8423db0a9121f22bdaecd5b120",
+    "min_parse_rate": 0.9,
+    "min_defs": 50
+  },
+  "typescript": {
+    "repo": "https://github.com/colinhacks/zod",
+    "sha": "912f0f51b0ced654d0069741e7160834dca742ee",
+    "min_parse_rate": 0.9,
+    "min_defs": 50
+  },
+  "go": {
+    "repo": "https://github.com/gorilla/mux",
+    "sha": "db9d1d0073d27a0a2d9a8c1bc52aa0af4374d265",
+    "min_parse_rate": 0.9,
+    "min_defs": 50
+  },
+  "swift": {
+    "repo": "https://github.com/apple/swift-argument-parser",
+    "sha": "8122bc5941426c9494c78ff5ad01951e81c02f53",
+    "min_parse_rate": 0.9,
+    "min_defs": 50
+  }
+}

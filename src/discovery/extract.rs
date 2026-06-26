@@ -281,7 +281,7 @@ pub fn reparse_incremental(
 /// localized edit; for scattered edits it spans a larger region, which is still
 /// correct (tree-sitter just re-scans more). Byte offsets and row/column Points
 /// are both filled in, as `Tree::edit` requires.
-fn input_edit(old: &str, new: &str) -> InputEdit {
+pub(super) fn input_edit(old: &str, new: &str) -> InputEdit {
     let ob = old.as_bytes();
     let nb = new.as_bytes();
 
@@ -422,13 +422,13 @@ fn extract_from_tree(
     })
 }
 
-fn node_text(node: &TsNode, src: &[u8]) -> String {
+pub(super) fn node_text(node: &TsNode, src: &[u8]) -> String {
     node.utf8_text(src).unwrap_or("").to_string()
 }
 
 /// Walk up from `node` to the nearest enclosing callable scope present in
 /// `scope_map`, returning its graph node id.
-fn enclosing_scope(
+pub(super) fn enclosing_scope(
     node: &TsNode,
     scope_map: &HashMap<usize, String>,
     scope_kinds: &[&str],
@@ -446,7 +446,7 @@ fn enclosing_scope(
 }
 
 /// Last identifier segment of a (possibly qualified) call name.
-fn last_segment(name: &str) -> String {
+pub(super) fn last_segment(name: &str) -> String {
     name.rsplit(['.', ':'])
         .find(|s| !s.is_empty())
         .unwrap_or(name)
@@ -459,7 +459,7 @@ fn last_segment(name: &str) -> String {
 /// else yields the single representative target [`import_target`] picks. This is
 /// what makes a multi-symbol `use` emit one import edge per symbol, not just the
 /// last token.
-fn import_targets(stmt: &str) -> Vec<String> {
+pub(super) fn import_targets(stmt: &str) -> Vec<String> {
     if let (Some(open), Some(close)) = (stmt.find('{'), stmt.rfind('}')) {
         if close > open {
             let names: Vec<String> = stmt[open + 1..close]

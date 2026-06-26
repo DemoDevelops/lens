@@ -1,0 +1,54 @@
+{
+  "langs": [
+    {
+      "language": "python",
+      "files": 1,
+      "hand_defs": 9,
+      "tags_defs": 11,
+      "shared_defs": 9,
+      "def_recall": 1.0,
+      "def_precision": 0.8182,
+      "hand_calls": 8,
+      "tags_calls": 8,
+      "shared_calls": 8,
+      "call_recall": 1.0,
+      "hand_imports": 2,
+      "tags_imports": 0,
+      "hand_only_sample": [],
+      "tags_only_sample": [
+        "DEFAULT_NAME",
+        "MAX_RETRIES"
+      ]
+    },
+    {
+      "language": "rust",
+      "files": 37,
+      "hand_defs": 961,
+      "tags_defs": 899,
+      "shared_defs": 899,
+      "def_recall": 0.9355,
+      "def_precision": 1.0,
+      "hand_calls": 2401,
+      "tags_calls": 1999,
+      "shared_calls": 1999,
+      "call_recall": 0.8326,
+      "hand_imports": 350,
+      "tags_imports": 0,
+      "hand_only_sample": [
+        "AGENT_INJECT_REASON",
+        "BASH_NUDGE",
+        "BLOCKER_COUNT",
+        "BLOCK_HEAD",
+        "BLOCK_TAIL",
+        "BOUNDED",
+        "BUCKETS",
+        "BUILD_REDIRECT_REASON",
+        "BULLET_BASH",
+        "BULLET_READ",
+        "BULLET_SEARCH",
+        "BULLET_WEBFETCH"
+      ],
+      "tags_only_sample": []
+    }
+  ]
+}

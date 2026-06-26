@@ -10,7 +10,7 @@ use ignore::WalkBuilder;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-use super::extract::{spec_for_extension, spec_for_language};
+use super::tags_adapter::{any_spec_for_extension, any_spec_for_language};
 use crate::tools::AstMatch;
 
 /// Run tree-sitter `query` over the supported source files under `root`, returning
@@ -31,9 +31,9 @@ pub fn grep_ast(
     // If a language is named, validate the query up front so a malformed query
     // errors clearly instead of silently matching nothing.
     if let Some(lang) = language {
-        let spec =
-            spec_for_language(lang).with_context(|| format!("unsupported language '{lang}'"))?;
-        Query::new(&(spec.language)(), query)
+        let spec = any_spec_for_language(lang)
+            .with_context(|| format!("unsupported language '{lang}'"))?;
+        Query::new(&spec.language(), query)
             .map_err(|e| anyhow::anyhow!("invalid query for {lang}: {e}"))?;
     }
     let want = language.map(|l| l.to_ascii_lowercase());
@@ -65,12 +65,12 @@ pub fn grep_ast(
             Some(e) => e,
             None => continue,
         };
-        let spec = match spec_for_extension(ext) {
+        let spec = match any_spec_for_extension(ext) {
             Some(s) => s,
             None => continue,
         };
         if let Some(w) = &want {
-            if spec.name != w {
+            if spec.name() != w {
                 continue;
             }
         }
@@ -81,7 +81,7 @@ pub fn grep_ast(
             },
             Err(_) => continue,
         };
-        let lang = (spec.language)();
+        let lang = spec.language();
         // Skip files whose grammar can't compile this query (only happens when no
         // language was named and the query is grammar-specific).
         let q = match Query::new(&lang, query) {
@@ -150,5 +150,21 @@ mod tests {
         fs::write(dir.path().join("a.rs"), "fn f() {}\n").unwrap();
         let res = grep_ast(dir.path(), "(not_a_real_node) @x", Some("rust"), 100);
         assert!(res.is_err(), "an invalid query must error when a language is named");
+    }
+
+    #[test]
+    fn grep_ast_supports_tags_languages() {
+        // grep_ast resolves the grammar for tags-adapter languages too (not just the
+        // 6 hand-written), so a C query works.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.c"), "int add(int a, int b) { return a + b; }\n").unwrap();
+        let hits = grep_ast(
+            dir.path(),
+            "(function_declarator declarator: (identifier) @name)",
+            Some("c"),
+            100,
+        )
+        .unwrap();
+        assert!(hits.iter().any(|m| m.text == "add"), "expected C function `add`, got {hits:?}");
     }
 }

@@ -6,6 +6,7 @@ pub mod graph;
 pub mod query;
 pub mod skeleton;
 pub mod structural;
+pub mod tags_adapter;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -57,9 +58,9 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
         .par_iter()
         .filter_map(|file| {
             let ext = file.extension().and_then(|e| e.to_str())?;
-            let spec = extract::spec_for_extension(ext)?;
+            let spec = tags_adapter::any_spec_for_extension(ext)?;
             if let Some(filter) = &lang_filter {
-                if !filter.contains(spec.name) {
+                if !filter.contains(spec.name()) {
                     return None;
                 }
             }
@@ -75,10 +76,10 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
                 },
                 Err(e) => return Some(Err(format!("{rel}: read error: {e}"))),
             };
-            match extract::extract_file(&rel, &source, &spec) {
+            match spec.extract_file(&rel, &source) {
                 Some(fx) => Some(Ok(FileResult {
                     rel,
-                    lang_name: spec.name.to_string(),
+                    lang_name: spec.name().to_string(),
                     fx,
                 })),
                 None => Some(Err(format!("{rel}: failed to parse, skipped"))),
@@ -317,7 +318,7 @@ pub fn source_manifest(root: &Path) -> BTreeMap<String, u64> {
             Some(e) => e,
             None => continue,
         };
-        if extract::spec_for_extension(ext).is_none() {
+        if tags_adapter::any_spec_for_extension(ext).is_none() {
             continue;
         }
         let rel = path
@@ -408,12 +409,12 @@ pub fn discover_incremental(
             Some(e) => e,
             None => continue,
         };
-        let spec = match extract::spec_for_extension(ext) {
+        let spec = match tags_adapter::any_spec_for_extension(ext) {
             Some(s) => s,
             None => continue,
         };
         if let Some(filter) = &lang_filter {
-            if !filter.contains(spec.name) {
+            if !filter.contains(spec.name()) {
                 continue;
             }
         }
@@ -440,7 +441,7 @@ pub fn discover_incremental(
             if cached.hash == hash {
                 file_results.push(FileResult {
                     rel,
-                    lang_name: spec.name.to_string(),
+                    lang_name: spec.name().to_string(),
                     fx: cached.extract.clone(),
                 });
                 continue;
@@ -451,9 +452,9 @@ pub fn discover_incremental(
         // source + tree; new file → fresh parse.
         let parsed = match cache.remove(&rel) {
             Some(prev) => {
-                extract::reparse_incremental(&rel, &prev.source, &source, prev.tree, &spec)
+                spec.reparse_incremental(&rel, &prev.source, &source, prev.tree)
             }
-            None => extract::extract_file_with_tree(&rel, &source, &spec),
+            None => spec.extract_file_with_tree(&rel, &source),
         };
         match parsed {
             Some((fx, tree)) => {
@@ -469,7 +470,7 @@ pub fn discover_incremental(
                 );
                 file_results.push(FileResult {
                     rel,
-                    lang_name: spec.name.to_string(),
+                    lang_name: spec.name().to_string(),
                     fx,
                 });
             }

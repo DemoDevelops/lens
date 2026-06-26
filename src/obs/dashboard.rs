@@ -21,11 +21,21 @@ use super::stats::snapshot_json_since;
 const DEFAULT_PORT: u16 = 7878;
 const DEFAULT_HOST: &str = "127.0.0.1";
 
-/// CLI entry: `args` is everything after `dashboard`.
+/// CLI entry: `args` is everything after `dashboard`. With `--tui` this renders the
+/// terminal dashboard (no socket opened); otherwise it serves the web view.
 pub fn run_cli(args: &[String]) -> Result<()> {
     let mut port = DEFAULT_PORT;
     let mut host = DEFAULT_HOST.to_string();
     let mut session: Option<String> = None;
+    let mut tui = false;
+    let mut scope_global = false;
+    let mut all = false;
+    let mut interval: u64 = 1;
+    let mut rate: f64 = 5.0; // Opus 4.8 input @ $5/M — the web's default cost basis
+    let mut rt_seconds: f64 = crate::obs::value_model::ROUND_TRIP_SECONDS; // applied-value time basis
+    let mut window = crate::obs::tui::Window::All; // TUI time scope (--today / --since)
+    let mut theme = crate::obs::tui::ThemeKind::Dark; // TUI palette (--theme dark|70s)
+    let mut force_view: Option<bool> = None; // Some(true)=full, Some(false)=mini, None=auto
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -44,9 +54,65 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                 session = args.get(i + 1).cloned();
                 i += 1;
             }
+            "--tui" => tui = true,
+            "--global" => scope_global = true,
+            "--all" => all = true,
+            "--interval" => {
+                interval = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse().ok())
+                    .context("--interval expects seconds")?;
+                i += 1;
+            }
+            "--rate" => {
+                rate = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse().ok())
+                    .context("--rate expects $/M tokens")?;
+                i += 1;
+            }
+            "--model" => {
+                let m = args.get(i + 1).cloned().unwrap_or_default();
+                rate = match m.to_lowercase().as_str() {
+                    "opus" => 5.0,
+                    "sonnet" => 3.0,
+                    "haiku" => 1.0,
+                    other => {
+                        eprintln!("lens dashboard: unknown --model '{other}' (opus|sonnet|haiku)");
+                        std::process::exit(2);
+                    }
+                };
+                i += 1;
+            }
+            "--rt-seconds" => {
+                rt_seconds = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse().ok())
+                    .context("--rt-seconds expects seconds per round-trip")?;
+                i += 1;
+            }
+            "--theme" => {
+                let t = args.get(i + 1).cloned().unwrap_or_default();
+                theme = crate::obs::tui::ThemeKind::parse(&t)
+                    .with_context(|| format!("--theme: unknown '{t}' (dark|70s)"))?;
+                i += 1;
+            }
+            "--today" => window = crate::obs::tui::Window::Today,
+            "--since" => {
+                let spec = args.get(i + 1).cloned().unwrap_or_default();
+                window = crate::obs::tui::Window::parse(&spec)
+                    .with_context(|| format!("--since: bad window '{spec}' (today|all|15m|1h|3h|2d)"))?;
+                i += 1;
+            }
+            "--mini" => force_view = Some(false),
+            "--full" => force_view = Some(true),
             other => {
                 eprintln!("lens dashboard: unknown flag '{other}'");
                 eprintln!("usage: lens dashboard [--port <n>] [--host <addr>] [--session <id>]");
+                eprintln!("       lens dashboard --tui [--global] [--all] [--today | --since <today|all|15m|1h|3h|2d>]");
+                eprintln!(
+                    "            [--interval <s>] [--rate <$/M> | --model opus|sonnet|haiku] [--rt-seconds <s>] [--theme dark|70s] [--mini|--full]"
+                );
                 std::process::exit(2);
             }
         }
@@ -54,6 +120,18 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     }
 
     let dir = data_dir();
+
+    // One dashboard, two renderers: --tui branches to the terminal view before any
+    // socket is opened. The shared snapshot keeps web and TUI in feature parity.
+    if tui {
+        // --all clears any --session filter (show every session); the window is
+        // all-time, matching the web dashboard's default window.
+        let session = if all { None } else { session };
+        return crate::obs::tui::run(
+            dir, session, scope_global, interval, window, rate, rt_seconds, theme, force_view,
+        );
+    }
+
     let listener = TcpListener::bind((host.as_str(), port))
         .with_context(|| format!("binding {host}:{port}"))?;
     println!("lens dashboard serving on http://{host}:{port}  (Ctrl-C to stop)");
@@ -176,9 +254,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lens dashboard</title>
 <style>
-  :root{
+  :root{ /* default theme — the original dark palette */
     --bg:#0b0d10; --panel:#14181d; --line:#222a31; --ink:#e6edf3;
     --dim:#8b97a3; --accent:#4cc4b0; --warn:#e0a458; --bad:#e06c75;
+  }
+  body.t70{ /* retro 70s — opt in via the header theme toggle (remembered) */
+    --bg:#1a1410; --panel:#241c15; --line:#3a2c1c; --ink:#f0e2c4;
+    --dim:#b09a72; --accent:#e0a93c; --warn:#cc6a2a; --bad:#b0431c;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
@@ -197,7 +279,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
   button#scope{background:var(--panel);color:var(--dim);border:1px solid var(--line);
     border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 6px;cursor:pointer}
   button#scope.on{color:var(--accent);border-color:var(--accent)}
-  button#view{background:var(--panel);color:var(--dim);border:1px solid var(--line);
+  button#view,button#theme{background:var(--panel);color:var(--dim);border:1px solid var(--line);
     border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 6px;cursor:pointer}
   body.full button#view{color:var(--accent);border-color:var(--accent)}
   #fullcharts{display:none}
@@ -242,6 +324,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .mech span{color:var(--dim)}
   .mech b{color:var(--ink)}
   .dim2{color:var(--dim)}
+  .av{display:flex;flex-direction:column;gap:3px}
+  .avtot{display:flex;flex-wrap:wrap;gap:3px 18px;align-items:baseline;margin-bottom:4px}
+  .avtot .k{color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.4px;margin-right:4px}
+  .avtot .v{font-size:13px;font-weight:600}
+  .avtot .v.big{color:var(--accent);font-size:15px}
+  .avtot .basis{color:var(--dim);font-size:9px}
+  .avrow{display:grid;grid-template-columns:96px 1fr;align-items:baseline;gap:9px;font-size:10px}
+  .avrow .d{color:var(--accent)}
+  .avrow .x{color:var(--ink)}
+  .avrow.z{opacity:.4}
   .actline{display:flex;flex-wrap:wrap;gap:3px 20px;align-items:baseline}
   .actline i{color:var(--dim);font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.4px;margin-right:4px}
   .actline b{font-size:13px;font-weight:600}
@@ -266,6 +358,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
   <input id="winAt" type="text" placeholder="2pm" size="6" title="custom start time, e.g. 2pm or 14:30 — Enter to apply">
   <button id="scope" title="toggle global view: total tokens across every repo and launch profile">this repo</button>
   <button id="view" title="toggle mini view for a narrow pane (cmux); full view uses the whole window">mini</button>
+  <button id="theme" title="color theme — click to switch (dark / 70s)">dark</button>
   <div class="grow"></div>
   <div class="cost" id="cost" title="estimated $ saved — click to switch model rate"><span class="dollars" id="dollars">$—</span><span class="basis" id="basis">@ —</span></div>
   <div class="saved-top" id="savedTop">— saved</div>
@@ -286,6 +379,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <div class="panel"><h2>by mechanism</h2><div class="mech" id="byMech"></div></div>
     <div class="panel"><h2>RTK shell savings</h2><div class="mech" id="rtkCards"></div></div>
   </div>
+  <div class="seclabel">applied value &middot; benchmark rates &times; your live ops &middot; <span id="avNote">estimated, not measured this session</span></div>
+  <div class="panel"><div class="av" id="appliedValue"></div></div>
   <div class="seclabel">session activity &middot; built-in tools (Read / Edit / Bash) via hooks &middot; not token savings</div>
   <div class="panel">
     <div class="actline" id="actLine"></div>
@@ -441,6 +536,16 @@ function humanCount(n){
   if(n>=1e3) return (n/1e3).toFixed(1)+'K';
   return ''+n;
 }
+// Seconds per avoided agent round-trip (tool call + model turn). Matches the TUI's
+// ROUND_TRIP_SECONDS default; the figure is shown so the assumption is visible.
+const RT_SECONDS=4;
+function humanTime(s){
+  if(s<90) return '~'+Math.round(s)+'s';
+  if(s<5400) return '~'+(s/60).toFixed(1)+' min';
+  return '~'+(s/3600).toFixed(1)+' h';
+}
+// Current value of a CSS custom property off <body>, so canvas colors track the theme.
+function cssVar(n){return getComputedStyle(document.body).getPropertyValue(n).trim()||'#4cc4b0';}
 function spark(id,series,color,fromZero){
   const c=document.getElementById(id); if(!c.clientWidth) return; const dpr=window.devicePixelRatio||1;
   const w=c.clientWidth, h=c.clientHeight;
@@ -504,8 +609,9 @@ async function tick(){
     stat('offloaded',d.offloaded_ops+' ('+humanBytes(d.offloaded_bytes)+')')+
     stat('lock',d.lock_wait_ms+' ms');
 
-  spark('savedChart',diffs(sB),'#4cc4b0');
-  spark('bytesChart',diffs(bB),'#4cc4b0');
+  const cAccent=cssVar('--accent'), cWarn=cssVar('--warn');
+  spark('savedChart',diffs(sB),cAccent);
+  spark('bytesChart',diffs(bB),cAccent);
   document.getElementById('savedRate').textContent=humanCount(Math.round((sB.at(-1)||0)/winMin))+' tok/min';
   document.getElementById('bytesRate').textContent=humanBytes(Math.round((bB.at(-1)||0)/winMin))+'/min';
 
@@ -557,13 +663,35 @@ async function tick(){
     savedTotal=savedMcp; renderCost();
   }
 
+  // Applied value — benchmark per-op rates × your live op counts. Estimates only;
+  // never folded into savedTotal / the $ headline. Time = round-trips × RT_SECONDS.
+  const av=d.applied_value||{rows:[],measured_tokens:0,est_counterfactual_tokens:0,est_total_tokens:0,round_trips_avoided:0,note:'',model:''};
+  const rts=av.round_trips_avoided||0;
+  document.getElementById('appliedValue').innerHTML=
+    `<div class="avtot">`+
+      `<span><i class="k">measured saved</i><b class="v">${humanCount(av.measured_tokens||0)} tok</b></span>`+
+      `<span><i class="k">est. counterfactual</i><b class="v">+${humanCount(av.est_counterfactual_tokens||0)} tok</b></span>`+
+      `<span><i class="k">est. total avoided</i><b class="v big">${humanCount(av.est_total_tokens||0)} tok</b></span>`+
+      `<span><i class="k">round-trips avoided</i><b class="v">~${Math.round(rts)}</b></span>`+
+      `<span><i class="k">time saved</i><b class="v big">${humanTime(rts*RT_SECONDS)}</b> <span class="basis">@ ${RT_SECONDS}s/round-trip</span></span>`+
+    `</div>`+
+    (av.rows||[]).map(r=>{
+      const parts=[];
+      if(r.est_tokens>0) parts.push(`~${humanCount(r.est_tokens)} tok`);
+      if(r.round_trips>0) parts.push(`~${r.round_trips.toFixed(1)} rt`);
+      if(r.dimension==='darkroom'||r.dimension==='skeleton') parts.push('tok measured live');
+      const txt=parts.length?parts.join(', '):'—';
+      return `<div class="avrow${r.ops?'':' z'}" title="source ${r.source||'modeling floor'}"><span class="d">${r.dimension} <span class="dim2">×${r.ops}</span></span><span class="x">${txt}</span></div>`;
+    }).join('');
+  document.getElementById('avNote').textContent=(av.note||'')+(av.model?(' · '+av.model):'');
+
   // session activity (built-in tools via hooks)
   const a=d.activity||{total_events:0,sessions:0,by_category:[],last_ts:null};
   document.getElementById('actLine').innerHTML=
     `<span class="st"><i>events</i><b>${(a.total_events||0).toLocaleString()}</b></span>`+
     `<span class="st"><i>sessions</i><b>${a.sessions||0}</b></span>`+
     `<span class="st"><i>last</i><b>${a.last_ts?new Date(a.last_ts*1000).toLocaleTimeString():'—'}</b></span>`;
-  spark('actChart',diffs(eB),'#e0a458');
+  spark('actChart',diffs(eB),cWarn);
   document.getElementById('actRate').textContent=Math.round((eB.at(-1)||0)/winMin)+' ev/min';
   document.getElementById('byCat').innerHTML=a.by_category.map(c=>
     `<span>${c.category} <b>${c.count}</b></span>`
@@ -576,7 +704,7 @@ async function tick(){
   // Expansive full-view charts (computed always; CSS shows them only in full mode).
   // Cumulative uses the server-bucketed timeline so it reflects the whole selected
   // window, not just samples taken since the page opened.
-  spark('cumChart', d.saved_buckets||[], '#4cc4b0', false);
+  spark('cumChart', d.saved_buckets||[], cAccent, false);
   const tt=d.by_tool;
   const bySaved=tt.filter(t=>t.saved>0).sort((a,b)=>b.saved-a.saved).slice(0,12);
   const maxSaved=Math.max(1,...bySaved.map(t=>t.saved));
@@ -594,6 +722,15 @@ function applyView(){document.body.classList.toggle('full',view==='full');viewBt
 try{const v=localStorage.getItem('lens_view');if(v==='full')view='full';}catch(e){}
 applyView();
 viewBtn.addEventListener('click',function(){view=view==='full'?'mini':'full';try{localStorage.setItem('lens_view',view);}catch(e){}applyView();tick();});
+// Color theme — dark (the :root default) or retro 70s (body.t70), toggled here and
+// remembered. Sparklines read --accent/--warn at draw time, so they follow with no extra wiring.
+const THEMES=['dark','seventies'];
+let theme='dark';
+try{const t=localStorage.getItem('lens_theme');if(THEMES.includes(t))theme=t;}catch(e){}
+const themeBtn=document.getElementById('theme');
+function applyTheme(){document.body.classList.toggle('t70',theme==='seventies');themeBtn.textContent=theme==='seventies'?'70s':'dark';}
+applyTheme();
+themeBtn.addEventListener('click',function(){theme=theme==='dark'?'seventies':'dark';try{localStorage.setItem('lens_theme',theme);}catch(e){}applyTheme();tick();});
 // Instant styled tooltip for tool descriptions (native title is delayed + clipped by the panel).
 (function(){
   const tip=document.createElement('div'); tip.className='tip'; document.body.appendChild(tip);
@@ -671,6 +808,16 @@ mod tests {
             v["rtk"]["installed"].is_boolean(),
             "rtk.installed is a bool"
         );
+        // The applied-value plane: 5 dimension rows + estimated totals, flagged as an
+        // estimate (never folded into the $ ledger).
+        assert_eq!(v["applied_value"]["rows"].as_array().unwrap().len(), 5);
+        assert_eq!(v["applied_value"]["estimate"], json!(true));
+        assert!(v["applied_value"]["round_trips_avoided"].is_number());
+        assert_eq!(v["applied_value"]["measured_tokens"], v["tokens_saved_mcp"]);
+        assert!(v["applied_value"]["model"]
+            .as_str()
+            .unwrap()
+            .contains("claude-opus-4-8"));
 
         let (s2, ct2, body2) = route("/", dir.path(), None);
         assert_eq!(s2, 200);
@@ -684,6 +831,15 @@ mod tests {
         assert!(body2.contains("tool adoption"));
         assert!(body2.contains("ADOPTION_TOOLS"));
         assert!(body2.contains("lens_links"));
+        // The applied-value panel + its data binding are baked into the page.
+        assert!(body2.contains("applied value"));
+        assert!(body2.contains("d.applied_value"));
+        assert!(body2.contains("id=\"appliedValue\""));
+        // Both color themes ship: dark is the restored :root default, 70s is the opt-in
+        // body.t70 override, and the header carries the persisted toggle.
+        assert!(body2.contains("--accent:#4cc4b0"), "default dark palette must be present");
+        assert!(body2.contains("body.t70"), "70s theme override must be present");
+        assert!(body2.contains("id=\"theme\""), "theme toggle button must be in the page");
 
         let (s3, _, _) = route("/nope", dir.path(), None);
         assert_eq!(s3, 404);
@@ -714,5 +870,25 @@ mod tests {
         assert!(resp.contains("200 OK"), "got: {resp}");
         assert!(resp.contains("application/json"));
         assert!(resp.contains("\"ops\":1"));
+    }
+
+    /// Parity tripwire: both renderers must reference every snapshot display
+    /// dimension, and every dimension must exist in a real snapshot. Coarse by design
+    /// (proves mention, not correctness) — the shared snapshot is the real guarantee.
+    /// Catches "added a panel to the web, forgot the TUI" (or vice versa).
+    #[test]
+    fn both_renderers_reference_every_snapshot_dimension() {
+        use crate::obs::stats::{snapshot_json, SNAPSHOT_DIMENSIONS};
+        let tui_src = include_str!("tui.rs");
+        for key in SNAPSHOT_DIMENSIONS {
+            assert!(INDEX_HTML.contains(key), "web INDEX_HTML omits snapshot key '{key}'");
+            assert!(tui_src.contains(key), "tui.rs omits snapshot key '{key}'");
+        }
+        // Each key is a live snapshot key, not a stale name.
+        let dir = tempdir().unwrap();
+        let snap = snapshot_json(dir.path(), None);
+        for key in SNAPSHOT_DIMENSIONS {
+            assert!(snap.get(*key).is_some(), "snapshot missing dimension key '{key}'");
+        }
     }
 }

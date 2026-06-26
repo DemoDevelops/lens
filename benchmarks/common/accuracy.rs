@@ -270,6 +270,8 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
                 );
                 serde_json::to_string_pretty(&resp)?
             }
+            // The token-budgeted repomap; budget matches the lens_overview tool default.
+            "overview" => gquery::overview(&outcome.graph, 2000),
             other => return Err(anyhow::anyhow!("unknown graph_op '{other}'")),
         };
         return Ok(json);

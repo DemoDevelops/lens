@@ -1007,6 +1007,50 @@ fn gate_c16() -> (String, bool) {
     (s, pass)
 }
 
+// --- C17: 0/1-knapsack token-budget packing (lens_overview) -----------------
+
+/// Important-hub mass `lens_overview` keeps within a fixed 2000-token budget on
+/// the `fixtures/knapsack` corpus, plus the overview's token count. The corpus has
+/// two token-HEAVY hubs (the top-2 by graph importance, each rendering to >1k
+/// tokens via an extremely long name) and 60 token-CHEAP hubs of slightly lower
+/// importance. The current importance-ranked binary-search-on-prefix must emit the
+/// two heaviest first; together they overflow the budget, so the largest fitting
+/// PREFIX reaches AT MOST one important hub and never any cheap one. A
+/// value(importance)/weight(render-tokens) 0/1-knapsack skips a heavy hub and
+/// packs the cheap important hubs, keeping far more important-symbol mass.
+///
+/// Returns (important hubs present, total important hubs, overview tokens). HIT =
+/// the hub's own entry (`- \`name\` ...`) is present, detected by its back-ticked
+/// name; the two heavy hubs are matched by their `heavy_hub_{0,1}_` prefix.
+fn measure_c17() -> (usize, usize, usize) {
+    let g = discovery::discover(&changes_fixture("knapsack"), None)
+        .unwrap()
+        .graph;
+    let overview = gquery::overview(&g, 2000);
+    let mut present = 0usize;
+    if overview.contains("`heavy_hub_0_") {
+        present += 1;
+    }
+    if overview.contains("`heavy_hub_1_") {
+        present += 1;
+    }
+    for i in 0..60 {
+        if overview.contains(&format!("`c{i:02}`")) {
+            present += 1;
+        }
+    }
+    (present, 62, lens::obs::count_tokens(&overview))
+}
+
+fn gate_c17() -> (String, bool) {
+    let (present, total, tokens) = measure_c17();
+    let pass = present >= 30 && tokens <= 2000;
+    let s = format!(
+        "## C17 - 0/1-knapsack token-budget packing (lens_overview)\n\nThe overview of `fixtures/knapsack` (two token-HEAVY hubs that are the top-2 by importance + 60 token-CHEAP, slightly-lower-importance hubs) is fit to a 2000-token budget. The two heavy hubs together overflow the budget, so the importance-ranked prefix is forced to emit one of them and can never reach a cheap hub; a value/weight 0/1-knapsack skips a heavy hub and packs the cheap ones. Important hubs kept within budget: **{present}/{total}** in a **{tokens}**-token map. Gate: \u{2265}30 important hubs within a 2000-token budget.\n"
+    );
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -1073,6 +1117,8 @@ fn main() -> anyhow::Result<()> {
     println!("{s15}");
     let (s16, c16_ok) = gate_c16();
     println!("{s16}");
+    let (s17, c17_ok) = gate_c17();
+    println!("{s17}");
 
     println!("\n## Gates");
     let gates = [
@@ -1092,6 +1138,7 @@ fn main() -> anyhow::Result<()> {
         ("C14 token-estimate mean abs error ≤8%", c14_ok),
         ("C15 structural search precision 1.0, recall ≥0.95", c15_ok),
         ("C16 subword search recall 10/10 (pure-Pascal 8/8)", c16_ok),
+        ("C17 knapsack overview keeps ≥30 important hubs within 2000 tokens", c17_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });

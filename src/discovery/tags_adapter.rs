@@ -142,6 +142,22 @@ pub fn tags_registry() -> Vec<TagsLangSpec> {
             tags_query: tree_sitter_java::TAGS_QUERY,
             imports_query: None,
         },
+        // Kotlin/Scala ship tags.scm but do not const-export it; lens vendors the
+        // crate's own query (src/discovery/vendored/) and feeds it to the adapter.
+        TagsLangSpec {
+            name: "kotlin",
+            extensions: &["kt", "kts"],
+            language: || tree_sitter_kotlin_sg::LANGUAGE.into(),
+            tags_query: include_str!("vendored/kotlin-tags.scm"),
+            imports_query: None,
+        },
+        TagsLangSpec {
+            name: "scala",
+            extensions: &["scala", "sc"],
+            language: || tree_sitter_scala::LANGUAGE.into(),
+            tags_query: include_str!("vendored/scala-tags.scm"),
+            imports_query: None,
+        },
         // --- Wave 2 / T6: scripting ---
         TagsLangSpec {
             name: "ruby",
@@ -637,6 +653,26 @@ fn helper() {}
             "function helper()\n  return 1\nend\nfunction add(a, b)\n  return helper() + b\nend\n",
         );
         assert!(has_def(&fx, "add") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
+        assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
+    }
+
+    #[test]
+    fn kotlin_extraction() {
+        let fx = extracts(
+            "kt",
+            "class Widget {\n  fun render(): Int { return helper() }\n  fun helper(): Int { return 1 }\n}\n",
+        );
+        assert!(has_def(&fx, "render") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
+        assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
+    }
+
+    #[test]
+    fn scala_extraction() {
+        let fx = extracts(
+            "scala",
+            "class Widget {\n  def render(): Int = helper()\n  def helper(): Int = 1\n}\n",
+        );
+        assert!(has_def(&fx, "render") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
         assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
     }
 }

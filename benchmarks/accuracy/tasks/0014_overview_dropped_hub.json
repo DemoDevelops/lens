@@ -1,0 +1,10 @@
+{
+  "id": "0014",
+  "prompt": "From the repository overview, list every function that calls `ledger_commit`.",
+  "fixtures": ["fixtures/overview_knapsack"],
+  "ground_truth": { "callers": "route_request" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["ledger_commit", "route_request"],
+  "treatment": { "graph_op": "overview" }
+}

@@ -1,0 +1,10 @@
+{
+  "id": "0012_skeleton_return_type",
+  "prompt": "What is the full return type of the function named reconcile_ledger?",
+  "fixtures": ["fixtures/skeleton/service.rs"],
+  "ground_truth": { "return_type": "Result<Summary, LedgerError>" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "evidence": ["reconcile_ledger", "Result<Summary, LedgerError>"],
+  "treatment": { "skeleton": "fixtures/skeleton/service.rs" }
+}

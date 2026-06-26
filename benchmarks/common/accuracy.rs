@@ -57,6 +57,8 @@ pub struct Treatment {
     pub kind: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    /// Skeleton: path to a source file to reduce to signatures + nesting.
+    pub skeleton: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,6 +273,17 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
             other => return Err(anyhow::anyhow!("unknown graph_op '{other}'")),
         };
         return Ok(json);
+    }
+    // Skeleton: signatures + nesting of one file, bodies elided.
+    if let Some(path) = &t.skeleton {
+        let p = accuracy_root().join(path);
+        let content = std::fs::read_to_string(&p)?;
+        let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let spec = discovery::extract::spec_for_extension(ext)
+            .ok_or_else(|| anyhow::anyhow!("no language spec for {}", p.display()))?;
+        let skel = discovery::skeleton::skeletonize(&content, &spec)
+            .ok_or_else(|| anyhow::anyhow!("could not skeletonize {}", p.display()))?;
+        return Ok(skel);
     }
     Err(anyhow::anyhow!("task {} has no treatment spec", task.id))
 }
@@ -596,7 +609,7 @@ pub struct Group {
 
 /// Aggregate per-task results into per-mechanism groups (fixed order).
 pub fn aggregate(results: &[TaskResult]) -> Vec<Group> {
-    let order = ["darkroom", "discovery", "search"];
+    let order = ["darkroom", "discovery", "search", "skeleton"];
     let mut groups = Vec::new();
     for mech in order {
         let rows: Vec<&TaskResult> = results.iter().filter(|r| r.mechanism == mech).collect();

@@ -135,7 +135,35 @@ pub fn tags_registry() -> Vec<TagsLangSpec> {
             imports_query: None,
         },
         // --- Wave 2 / T5: JVM ---
+        TagsLangSpec {
+            name: "java",
+            extensions: &["java"],
+            language: || tree_sitter_java::LANGUAGE.into(),
+            tags_query: tree_sitter_java::TAGS_QUERY,
+            imports_query: None,
+        },
         // --- Wave 2 / T6: scripting ---
+        TagsLangSpec {
+            name: "ruby",
+            extensions: &["rb"],
+            language: || tree_sitter_ruby::LANGUAGE.into(),
+            tags_query: tree_sitter_ruby::TAGS_QUERY,
+            imports_query: None,
+        },
+        TagsLangSpec {
+            name: "php",
+            extensions: &["php"],
+            language: || tree_sitter_php::LANGUAGE_PHP.into(),
+            tags_query: tree_sitter_php::TAGS_QUERY,
+            imports_query: None,
+        },
+        TagsLangSpec {
+            name: "lua",
+            extensions: &["lua"],
+            language: || tree_sitter_lua::LANGUAGE.into(),
+            tags_query: tree_sitter_lua::TAGS_QUERY,
+            imports_query: None,
+        },
         // --- Wave 2 / T7: Roku ---
         // --- Wave 2 / T8: config that maps ---
     ]
@@ -567,5 +595,48 @@ fn helper() {}
         );
         assert!(has_def(&fx, "Render") && has_def(&fx, "Helper"), "defs: {:?}", def_names(&fx));
         assert!(has_call(&fx, "Helper"), "calls: {:?}", fx.calls);
+    }
+
+    #[test]
+    fn java_extraction() {
+        let fx = extracts(
+            "java",
+            "class Widget { int render() { return helper(); } int helper() { return 1; } }\n",
+        );
+        assert!(has_def(&fx, "render") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
+        assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
+    }
+
+    #[test]
+    fn ruby_extraction() {
+        let fx = extracts(
+            "rb",
+            "class Widget\n  def render\n    helper()\n  end\n  def helper\n    1\n  end\nend\n",
+        );
+        assert!(has_def(&fx, "render") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
+        assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
+    }
+
+    #[test]
+    fn php_extraction() {
+        // PHP tags.scm tags member/scoped/qualified calls; a bare helper() (plain
+        // `name`, not `qualified_name`) is not captured, so the fixture uses a method
+        // call ($this->helper()).
+        let fx = extracts(
+            "php",
+            "<?php\nclass Widget {\n  function render() { return $this->helper(); }\n  function helper() { return 1; }\n}\n",
+        );
+        assert!(has_def(&fx, "render") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
+        assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
+    }
+
+    #[test]
+    fn lua_extraction() {
+        let fx = extracts(
+            "lua",
+            "function helper()\n  return 1\nend\nfunction add(a, b)\n  return helper() + b\nend\n",
+        );
+        assert!(has_def(&fx, "add") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
+        assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
     }
 }

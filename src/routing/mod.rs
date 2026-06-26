@@ -216,7 +216,7 @@ pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Grep results may 
 
 /// Contextual guidance steering analysis-reads into the darkroom, and
 /// navigational code-reads toward the graph.
-pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from one file? Use lens_run_file(path, language, code) — the bytes stay in the darkroom and only what your code prints enters your conversation.\n    Reading code to see how it connects — who calls this, what it calls, where a symbol is defined, how A reaches B? Don't read file after file; query the graph with lens_symbol / lens_links / lens_path (run lens_map once if it's empty).\n  </tip>\n</context_guidance>";
+pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from one file? Use lens_run_file(path, language, code) — the bytes stay in the darkroom and only what your code prints enters your conversation.\n    Reading one file to see its API (signatures, types, what's defined) without the bodies? Use lens_skeleton(path): signatures + nesting at a fraction of the tokens, the full file one lens_recall away.\n    Reading code to see how it connects — who calls this, what it calls, where a symbol is defined, how A reaches B? Don't read file after file; query the graph with lens_symbol / lens_links / lens_path (run lens_map once if it's empty).\n  </tip>\n</context_guidance>";
 
 /// Contextual guidance emitted AFTER a Grep whose result set floods context. A
 /// result this large is exactly where lens_search (ranked top-K, flat with corpus
@@ -1380,6 +1380,33 @@ mod tests {
         assert_eq!(
             route("Read", &ti, &rc(Level::Wrap, true, d2.path())),
             Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn read_nudge_offers_skeleton_at_every_nudging_level() {
+        // lens_skeleton must be surfaced on file reads at all nudging levels
+        // (nudge/steer/full), not just full, and never when routing is off.
+        assert!(
+            READ_NUDGE.contains("lens_skeleton"),
+            "the read nudge must name lens_skeleton"
+        );
+        let ti = json!({"file_path": "README.md"});
+        for level in [Level::Nudge, Level::Steer, Level::Full] {
+            let d = tempdir().unwrap();
+            match route("Read", &ti, &rc(level, true, d.path())) {
+                Decision::Context(c) => assert!(
+                    c.contains("lens_skeleton"),
+                    "{level:?}: read nudge should offer lens_skeleton"
+                ),
+                other => panic!("{level:?}: expected a read nudge, got {other:?}"),
+            }
+        }
+        let d = tempdir().unwrap();
+        assert_eq!(
+            route("Read", &ti, &rc(Level::Off, true, d.path())),
+            Decision::Passthrough,
+            "off: no nudge"
         );
     }
 

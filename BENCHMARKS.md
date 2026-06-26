@@ -10,7 +10,7 @@ Headline savings are at **realistic session scale**, not the 1× diagnostic fixt
 
 | Workload | Mechanism | Before (bytes) | After (bytes) | Savings |
 | --- | --- | ---: | ---: | ---: |
-| Code search | index | 160,230 | 9,775 | **94–99%** |
+| Code search | index | 160,230 | 9,780 | **94–99%** |
 | Log debugging | darkroom | 7,210 | 517 | **93%** |
 | Issue triage | compression | 94,195 | 31,323 | **~67%** |
 | Codebase exploration | discovery | 2,606 | 2,163 | see note |
@@ -25,8 +25,8 @@ Model: `claude-opus-4-8 (via claude-pty)`
 
 | Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Darkroom tasks | 6 | 33% | 100% | +67pp | 2999 | 111 | -2888 |
-| Discovery tasks | 3 | 100% | 100% | +0pp | 990 | 677 | -313 |
+| Darkroom tasks | 6 | 67% | 100% | +33pp | 2999 | 111 | -2888 |
+| Discovery tasks | 3 | 67% | 100% | +33pp | 990 | 677 | -313 |
 | Search tasks | 2 | 100% | 100% | +0pp | 465 | 392 | -73 |
 | Skeleton tasks | 2 | 0% | 100% | +100pp | 980 | 920 | -60 |
 

@@ -58,7 +58,7 @@ number beyond tolerance, or if any workload stops saving.
 ## `accuracy/` — the accuracy harness
 
 `tasks/*.json` are task specs with deterministic, checkable ground truth, spread
-across mechanisms (6 darkroom, 3 discovery, 2 search). Each runs two arms with
+across mechanisms (6 darkroom, 3 discovery, 2 search, 2 skeleton). Each runs two arms with
 the same model:
 
 - **control** — raw fixture bytes, capped at a naive context budget (where real

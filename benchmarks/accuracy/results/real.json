@@ -1,7 +1,7 @@
 {
   "groups": [
     {
-      "control_acc": 0.3333333333333333,
+      "control_acc": 0.6666666666666666,
       "control_tokens": 2999,
       "mechanism": "darkroom",
       "n": 6,
@@ -9,7 +9,7 @@
       "treatment_tokens": 111
     },
     {
-      "control_acc": 1.0,
+      "control_acc": 0.6666666666666666,
       "control_tokens": 990,
       "mechanism": "discovery",
       "n": 3,
@@ -101,10 +101,10 @@
     {
       "control": {
         "answer": {
-          "total_requests": 3261
+          "total_requests": 2719
         },
         "context_bytes": 764,
-        "correct": false,
+        "correct": true,
         "tokens": 383
       },
       "id": "0004_total_requests",
@@ -141,10 +141,10 @@
     {
       "control": {
         "answer": {
-          "endpoint": "/api/items"
+          "endpoint": "/healthz"
         },
         "context_bytes": 764,
-        "correct": false,
+        "correct": true,
         "tokens": 383
       },
       "id": "0006_busiest_endpoint",
@@ -161,10 +161,10 @@
     {
       "control": {
         "answer": {
-          "file": "db.rs"
+          "file": "crypto.rs"
         },
         "context_bytes": 1316,
-        "correct": true,
+        "correct": false,
         "tokens": 330
       },
       "id": "0007_defines_connect_db",

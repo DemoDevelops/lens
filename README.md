@@ -8,7 +8,7 @@ Token savings at realistic session scale:
 
 | Workload | Mechanism | Tokens before | Tokens after | Saved |
 | --- | --- | ---: | ---: | ---: |
-| Code search | FTS5 index | 160,230 | 9,775 | **94–99%** |
+| Code search | FTS5 index | 160,230 | 9,780 | **94–99%** |
 | Log debugging | darkroom | 7,210 | 517 | **93%** |
 | Issue triage | compression | 94,195 | 31,323 | **~67%** |
 
@@ -16,8 +16,8 @@ Accuracy on real tasks (`claude-opus-4-8`):
 
 | Task type | Without lens | With lens |
 | --- | ---: | ---: |
-| Darkroom (data analysis) | 33% | **100%** |
-| Discovery (code structure) | 100% | 100% |
+| Darkroom (data analysis) | 67% | **100%** |
+| Discovery (code structure) | 67% | 100% |
 | Search | 100% | 100% |
 | File skeleton (read a file's API) | 0% | **100%** |
 
@@ -140,7 +140,7 @@ lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio
 
 **Search (`lens_index` / `lens_search`).** `lens_index` builds a SQLite FTS5 full-text index over the repo. `lens_search` runs BM25-ranked queries and returns the top snippets with `path:line`, not whole files. Batch several questions in one call to save round-trips.
 
-**Graph (`lens_map` / `lens_symbol` / `lens_find` / `lens_links` / `lens_path`).** `lens_map` parses supported files with tree-sitter and builds a deterministic structural graph (functions, types, modules, and their calls/imports/contains edges) in `.lens/graph.json`. The query tools walk that graph, so "who calls X" or "how does A reach B" is a graph lookup instead of a pile of file reads.
+**Graph (`lens_map` / `lens_symbol` / `lens_find` / `lens_links` / `lens_path`).** `lens_map` parses [supported files](SUPPORTED.md) with tree-sitter and builds a deterministic structural graph (functions, types, modules, and their calls/imports/contains edges) in `.lens/graph.json`. The query tools walk that graph, so "who calls X" or "how does A reach B" is a graph lookup instead of a pile of file reads.
 
 **Session continuity.** The lifecycle hooks capture events into a store, each tagged priority 1 (critical) to 4 (low). At `PreCompact`, lens builds a priority-tiered resume snapshot within a small byte budget; at `SessionStart` it re-injects a Session Guide. This survives compaction at a fraction of the Context Mode plugin's token cost.
 

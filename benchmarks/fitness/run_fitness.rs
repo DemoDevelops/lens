@@ -95,7 +95,9 @@ fn tool_names() -> anyhow::Result<Vec<String>> {
     Ok(names.into_iter().collect())
 }
 
-/// Aggregate token savings overall and per workload from the savings rows.
+/// Aggregate token savings overall and per workload from the savings rows. All
+/// arms are now deterministic across checkouts (FTS search tie-breaks are stable,
+/// see src/index/mod.rs `ORDER BY ..., path, chunk_id`), so all are gated.
 fn savings_from_rows(rows: &[SavingsRow]) -> (f64, Vec<WorkloadSavings>) {
     let pct = |b: usize, a: usize| -> f64 {
         if b > 0 {

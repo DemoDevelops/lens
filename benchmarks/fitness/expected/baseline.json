@@ -1,5 +1,5 @@
 {
-  "overall_token_savings_pct": 50.568678915135614,
+  "overall_token_savings_pct": 52.35087719298246,
   "per_workload": [
     {
       "workload": "Code search (results across files)",
@@ -8,6 +8,10 @@
     {
       "workload": "Codebase exploration (subtree)",
       "token_savings_pct": 0.0
+    },
+    {
+      "workload": "File read (skeleton + recall)",
+      "token_savings_pct": 56.77804944308612
     },
     {
       "workload": "Issue triage (structured payload)",

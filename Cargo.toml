@@ -111,6 +111,8 @@ tree-sitter-lua = "0.5"
 # include_str!s a committed copy (see src/discovery/vendored/).
 tree-sitter-kotlin-sg = "0.4"
 tree-sitter-scala = "0.26"
+# hand-query: no tags.scm shipped; lens authors a small tags-shaped def/call query.
+tree-sitter-bash = "0.25"
 foldhash = "0.1"
 rayon = "1"
 # Offline BPE tokenizer (vocab embedded in the crate; no network) for accurate

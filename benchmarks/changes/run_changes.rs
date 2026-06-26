@@ -1007,6 +1007,51 @@ fn gate_c16() -> (String, bool) {
     (s, pass)
 }
 
+// --- C18: BM25 term-proximity (span) re-ranking (L33) -----------------------
+
+/// The labeled multi-term query and the two files that both contain every term.
+/// `frame_reader.rs` has the terms ADJACENT (`parse header`, span 1); `codec_notes.rs`
+/// repeats both terms more often but clustered far apart (large min-window span).
+const C18_QUERY: &str = "parse header";
+const C18_TARGET: &str = "frame_reader.rs";
+const C18_DISTRACTOR: &str = "codec_notes.rs";
+
+/// 1-based rank of the first hit whose path ends with `file`, or 0 if absent.
+fn c18_rank(hits: &[lens::tools::SearchHit], file: &str) -> usize {
+    hits.iter()
+        .position(|h| {
+            let p = h.path.replace('\\', "/");
+            p == file || p.ends_with(&format!("/{file}"))
+        })
+        .map(|p| p + 1)
+        .unwrap_or(0)
+}
+
+/// (target rank, distractor rank) for the labeled span query over
+/// `fixtures/proximity_span`. Noise files keep BM25 IDF positive, so the
+/// distractor's higher term frequency genuinely outranks the adjacent target
+/// under field BM25F alone — the gap a proximity (min-window span) term closes.
+fn measure_c18() -> (usize, usize) {
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap();
+    index.index_path(&changes_fixture("proximity_span"), true).unwrap();
+    let resp = index.search(&[C18_QUERY.to_string()], 10).unwrap();
+    let hits = &resp.results[0].hits;
+    (c18_rank(hits, C18_TARGET), c18_rank(hits, C18_DISTRACTOR))
+}
+
+fn gate_c18() -> (String, bool) {
+    let (target_rank, distractor_rank) = measure_c18();
+    // ABSOLUTE: the adjacent-terms file must be rank 1 (MRR for the query = 1.0).
+    // Field BM25F alone ranks the scattered, higher-TF distractor first, so this
+    // is RED until a min-window proximity term lifts the in-span target.
+    let pass = target_rank == 1;
+    let s = format!(
+        "## C18 - BM25 term-proximity (span) re-ranking (L33)\n\nQuery `\"{C18_QUERY}\"` over `fixtures/proximity_span`: both `{C18_TARGET}` (terms ADJACENT, span 1) and `{C18_DISTRACTOR}` (terms repeated more often but FAR APART) match. Under field BM25F alone the higher-frequency distractor outranks the adjacent target. Target `{C18_TARGET}` rank **{target_rank}** (1 = top); distractor `{C18_DISTRACTOR}` rank **{distractor_rank}**. Gate (absolute): proximity re-ranking puts the adjacent-terms target at rank 1.\n"
+    );
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -1073,6 +1118,8 @@ fn main() -> anyhow::Result<()> {
     println!("{s15}");
     let (s16, c16_ok) = gate_c16();
     println!("{s16}");
+    let (s18, c18_ok) = gate_c18();
+    println!("{s18}");
 
     println!("\n## Gates");
     let gates = [
@@ -1092,6 +1139,7 @@ fn main() -> anyhow::Result<()> {
         ("C14 token-estimate mean abs error ≤8%", c14_ok),
         ("C15 structural search precision 1.0, recall ≥0.95", c15_ok),
         ("C16 subword search recall 10/10 (pure-Pascal 8/8)", c16_ok),
+        ("C18 proximity span lifts adjacent-terms target to rank 1", c18_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });

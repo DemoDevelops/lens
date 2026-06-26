@@ -334,8 +334,14 @@ impl OpHandle {
 /// locked", while accumulating waited time into [`LOCK_WAIT_MS`].
 pub fn configure_conn(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.busy_handler(Some(busy_handler))?;
-    // execute_batch tolerates the row PRAGMA journal_mode returns.
-    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    // WAL keeps concurrent readers from blocking the single writer. synchronous=NORMAL
+    // under WAL fsyncs on checkpoint instead of on every commit (bench_tuning W2:
+    // ~12-18% faster per-commit re-index); the only cost is losing the LAST committed
+    // transaction on power loss, which cannot corrupt the DB. Every lens DB is a
+    // rebuildable cache (index_path / discover rebuild from source), so that trade is
+    // acceptable. temp_store is left at default: MEMORY measured net-neutral (W2), not
+    // worth pinning. execute_batch tolerates the row PRAGMA journal_mode returns.
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
     Ok(())
 }
 

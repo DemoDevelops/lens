@@ -6,6 +6,7 @@
 //!   - `@name`            the identifier node naming the symbol (defs AND refs)
 //!   - `@definition.<k>`  marks the enclosing node as a definition of kind `<k>`
 //!   - `@reference.call` / `@reference.send`  marks a call / method-send site
+//!
 //! This adapter consumes that shape to produce the same [`FileExtract`] the
 //! hand-written specs produce, so adding a language is a [`TagsLangSpec`] registry
 //! entry plus a `Cargo.toml` dependency, nothing more.
@@ -437,11 +438,14 @@ fn tag_kind_priority(kind: &str) -> u8 {
     }
 }
 
+/// Negative-caching store of compiled tree-sitter queries, keyed by language name.
+type QueryCache = OnceLock<Mutex<HashMap<&'static str, Option<Arc<Query>>>>>;
+
 /// Process-wide cache of compiled tags queries, keyed by language name. A failed
 /// compile is negative-cached (`None`) so a broken grammar is not recompiled per
 /// file. `Query` is Send + Sync, so the cache is safe across the parallel walk.
 fn cached_tags_query(spec: &TagsLangSpec) -> Option<Arc<Query>> {
-    static CACHE: OnceLock<Mutex<HashMap<&'static str, Option<Arc<Query>>>>> = OnceLock::new();
+    static CACHE: QueryCache = QueryCache::new();
     compile_cached(
         CACHE.get_or_init(|| Mutex::new(HashMap::new())),
         spec.name,
@@ -457,7 +461,7 @@ fn cached_imports_query(
     language: fn() -> Language,
     src: &'static str,
 ) -> Option<Arc<Query>> {
-    static CACHE: OnceLock<Mutex<HashMap<&'static str, Option<Arc<Query>>>>> = OnceLock::new();
+    static CACHE: QueryCache = QueryCache::new();
     compile_cached(
         CACHE.get_or_init(|| Mutex::new(HashMap::new())),
         name,

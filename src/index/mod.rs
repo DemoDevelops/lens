@@ -263,13 +263,30 @@ impl Index {
 /// single-term / unrelated-query orderings the BM25F gates depend on.
 const PROX_WEIGHT: f64 = 4.0;
 
+/// Over-fetch factor and cap for the proximity re-rank. The BM25F candidate pool is
+/// fetched `requested_limit * OVERFETCH_K` deep (bounded by `OVERFETCH_CAP`),
+/// re-ranked by the combined BM25F + proximity score, then truncated to the caller's
+/// limit. This lets an adjacent-terms chunk that BM25F alone ranks just OUTSIDE the
+/// top-L be lifted INTO the final top-L, so proximity is a recall win, not merely a
+/// reorder of the already-returned set. A query with no proximity boost (single-term,
+/// or terms that never co-occur) re-ranks to the identical BM25F order, so truncating
+/// the deeper pool to L yields byte-for-byte the same top-L as a plain `LIMIT L`.
+const OVERFETCH_K: usize = 8;
+const OVERFETCH_CAP: usize = 200;
+
 /// BM25F-ranked search over the porter `chunks` table (the default path), with a
 /// deterministic term-proximity (min-window span) re-rank on top of `bm25()`.
+/// Over-fetches a deeper BM25F pool (see `OVERFETCH_K`), re-ranks by the combined
+/// score, then truncates to `limit`, so proximity can lift an adjacent-terms chunk
+/// INTO the final top-L rather than only reordering the top-L BM25F already returned.
 fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
     let match_expr = sanitize_query(query);
     if match_expr.is_empty() {
         return Ok(Vec::new());
     }
+    // Over-fetch a deeper BM25F pool than the caller asked for, so the proximity
+    // re-rank below can pull a tight-span chunk ranked beyond L into the final top-L.
+    let fetch = limit.saturating_mul(OVERFETCH_K).min(OVERFETCH_CAP);
     // bm25() is more-negative-is-better; negate so higher = better. Column weights
     // are (path, chunk_id, symbols, content): symbols is weighted 5x so a query
     // naming a symbol ranks its defining file above files that only mention the
@@ -290,7 +307,7 @@ fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Sea
     let terms = proximity_terms(query);
     // (path, chunk_id, snippet, combined_score)
     let mut rows: Vec<(String, String, String, f64)> = Vec::new();
-    let mapped = stmt.query_map(rusqlite::params![match_expr, limit as i64], |row| {
+    let mapped = stmt.query_map(rusqlite::params![match_expr, fetch as i64], |row| {
         let path: String = row.get(0)?;
         let chunk_id: String = row.get(1)?;
         let snippet: String = row.get(2)?;
@@ -309,15 +326,18 @@ fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Sea
         }
     }
     // Re-rank: higher combined score first, then the SQL tiebreak (path, chunk_id).
-    // With no proximity boost this reproduces the SQL order byte-for-byte.
+    // With no proximity boost this reproduces the SQL order byte-for-byte, so the
+    // truncation below leaves the unboosted top-L identical to a plain `LIMIT L`.
     rows.sort_by(|a, b| {
         b.3.partial_cmp(&a.3)
             .unwrap_or(Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
             .then_with(|| a.1.cmp(&b.1))
     });
+    // Truncate the over-fetched, re-ranked pool back to the caller's limit.
     Ok(rows
         .into_iter()
+        .take(limit)
         .map(|(path, _chunk_id, snippet, score)| SearchHit {
             path,
             snippet,
@@ -722,6 +742,32 @@ mod tests {
         assert!(hits.len() >= 2);
         assert!(hits[0].path.ends_with("strong.txt"));
         assert!(hits[0].score >= hits[1].score);
+    }
+
+    #[test]
+    fn single_term_overfetch_top_l_is_prefix_stable() {
+        // Over-fetch invariant: a single-term query carries no proximity boost, so the
+        // re-rank collapses to the plain BM25F order. Truncating a deeper over-fetched
+        // pool to L must therefore yield exactly the first L of any larger limit — the
+        // top-L stays byte-identical to a plain `LIMIT L`. 12 matching chunks saturate
+        // the over-fetch (3*8 and 12*8 both exceed 12), so only the truncation differs.
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        for i in 0..12 {
+            fs::write(dir.path().join(format!("f{i:02}.rs")), vec!["widget"; i + 1].join(" ")).unwrap();
+        }
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+
+        let small = &idx.search(&["widget".into()], 3).unwrap().results[0].hits;
+        let large = &idx.search(&["widget".into()], 12).unwrap().results[0].hits;
+        assert_eq!(small.len(), 3, "small query returns exactly L");
+        assert!(large.len() >= 3);
+        for k in 0..3 {
+            assert_eq!(small[k].path, large[k].path, "path differs at {k}");
+            assert_eq!(small[k].snippet, large[k].snippet, "snippet differs at {k}");
+            assert_eq!(small[k].score, large[k].score, "score differs at {k}");
+        }
     }
 
     #[test]

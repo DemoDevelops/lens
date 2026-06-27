@@ -498,6 +498,8 @@ fn call_claude_headless(model: &str, system: &str, user: &str) -> Result<String,
 /// portable 120s wall-clock bound (headless has no `--timeout`, macOS no `timeout`).
 fn claude_headless_attempt(prompt: &str, model: &str) -> Result<String, String> {
     let workdir = env!("CARGO_MANIFEST_DIR"); // trusted; tools are off regardless
+    // Reasoning effort, default low (short JSON answers); override with LENS_BENCH_EFFORT.
+    let effort = std::env::var("LENS_BENCH_EFFORT").unwrap_or_else(|_| "low".to_string());
     let mut cmd = Command::new("perl");
     cmd.current_dir(workdir)
         .args(["-e", "alarm shift; exec @ARGV", "120"])
@@ -506,7 +508,7 @@ fn claude_headless_attempt(prompt: &str, model: &str) -> Result<String, String> 
         .arg(prompt)
         .args(["--output-format", "json"])
         .args(["--allowedTools", ""]) // disable all tools — answer from prompt only
-        .args(["--effort", "low"]);
+        .args(["--effort", effort.as_str()]);
     if !model.is_empty() {
         cmd.args(["--model", model]);
     }

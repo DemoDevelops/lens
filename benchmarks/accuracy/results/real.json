@@ -9,20 +9,20 @@
       "treatment_tokens": 111
     },
     {
-      "control_acc": 0.6666666666666666,
-      "control_tokens": 990,
+      "control_acc": 0.75,
+      "control_tokens": 1708,
       "mechanism": "discovery",
-      "n": 3,
+      "n": 4,
       "treatment_acc": 1.0,
-      "treatment_tokens": 677
+      "treatment_tokens": 2418
     },
     {
-      "control_acc": 1.0,
-      "control_tokens": 465,
+      "control_acc": 0.6666666666666666,
+      "control_tokens": 828,
       "mechanism": "search",
-      "n": 2,
+      "n": 3,
       "treatment_acc": 1.0,
-      "treatment_tokens": 392
+      "treatment_tokens": 1160
     },
     {
       "control_acc": 0.0,
@@ -34,7 +34,7 @@
     }
   ],
   "mode": "real",
-  "model": "claude-opus-4-8 (via claude-pty)",
+  "model": "claude-opus-4-8 (via claude-headless)",
   "tasks": [
     {
       "control": {
@@ -161,10 +161,10 @@
     {
       "control": {
         "answer": {
-          "file": "crypto.rs"
+          "file": "db.rs"
         },
         "context_bytes": 1316,
-        "correct": false,
+        "correct": true,
         "tokens": 330
       },
       "id": "0007_defines_connect_db",
@@ -231,11 +231,11 @@
       "mechanism": "search",
       "treatment": {
         "answer": {
-          "file": "benchmarks/accuracy/fixtures/repo/crypto.rs"
+          "file": "/Users/gene/Documents/AI Stuff/lens/benchmarks/accuracy/fixtures/repo/crypto.rs"
         },
-        "context_bytes": 438,
+        "context_bytes": 1251,
         "correct": true,
-        "tokens": 134
+        "tokens": 372
       }
     },
     {
@@ -253,9 +253,9 @@
         "answer": {
           "port": 8080
         },
-        "context_bytes": 809,
+        "context_bytes": 815,
         "correct": true,
-        "tokens": 258
+        "tokens": 260
       }
     },
     {
@@ -296,6 +296,50 @@
         "context_bytes": 1982,
         "correct": true,
         "tokens": 460
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "callers": []
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 718
+      },
+      "id": "0014",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "callers": [
+            "route_request",
+            "dispatch_event",
+            "handle_signal"
+          ]
+        },
+        "context_bytes": 4889,
+        "correct": true,
+        "tokens": 1741
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "marker": null
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 363
+      },
+      "id": "0015_shard_checkpoint_marker",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "marker": "QUORUM_SEAL_4F2A"
+        },
+        "context_bytes": 1925,
+        "correct": true,
+        "tokens": 528
       }
     }
   ]

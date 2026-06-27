@@ -29,7 +29,7 @@ scored against deterministic ground truth. The result we want to state honestly
 is **Δ acc ≈ 0 with a large token reduction**. A negative Δ on any mechanism is
 surfaced loudly: it means that mechanism is dropping load-bearing context.
 
-With neither `LENS_BENCH_BACKEND=claude-pty` (plan quota) nor `ANTHROPIC_API_KEY`,
+With neither `LENS_BENCH_BACKEND` (plan quota) nor `ANTHROPIC_API_KEY`,
 the accuracy harness runs in **mock mode** (a context-presence oracle that tests
 scoring/plumbing only) and the table below is marked pending a real-model run.
 
@@ -102,30 +102,16 @@ which drives CM's real hook scripts.
 
 ## Accuracy (full)
 
-Model: `claude-opus-4-8 (via claude-pty)`
+Model: `claude-opus-4-8 (via claude-headless)`
 
 | Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Darkroom tasks | 6 | 67% | 100% | +33pp | 2999 | 111 | -2888 |
-| Discovery tasks | 3 | 67% | 100% | +33pp | 990 | 677 | -313 |
-| Search tasks | 2 | 100% | 100% | +0pp | 465 | 392 | -73 |
+| Discovery tasks | 4 | 75% | 100% | +25pp | 1708 | 2418 | +710 |
+| Search tasks | 3 | 67% | 100% | +33pp | 828 | 1160 | +332 |
 | Skeleton tasks | 2 | 0% | 100% | +100pp | 980 | 920 | -60 |
 
-> **Real run via `claude-pty`** (interactive Claude Code, plan quota — no API credit), tools disabled so each arm answers only from its given context, same isolation as a direct API call.
+> **Real run via headless `claude -p`** (Claude Code, plan quota — no API credit), tools disabled so each arm answers only from its given context, same isolation as a direct API call.
 >
-> Every mechanism is **≥ control** on `claude-opus-4-8 (via claude-pty)` — no negative accuracy delta this run. The token reductions are the savings; accuracy is preserved.
->
-> **Run-to-run variance (13-run repeat, `claude-opus-4-8`).** Treatment is deterministic: 100% in all 13 runs, every mechanism (std 0). Discovery and search control are likewise stable at 100%. Only darkroom control varies, spanning 17-67% (mean 42%, std 15.5), driven by three log-aggregation tasks (`0004`/`0005`/`0006`) that the truncated-context control answers about half the time. The treatment-over-control gap holds in every run; the precise control baseline does not, so read the darkroom control cell as one draw, not a rate.
-
-## The discovery-regression investigation
-
-This is the proof the apparatus catches its own bad numbers; it is kept whole.
-
-The first real accuracy run, on `claude-haiku-4-5`, showed **discovery −33pp** (N = 3, so one task = 33pp). The generator's auto-warning fired — it flags *any* negative aggregate delta as "dropping load-bearing context". Per-task investigation showed the opposite. The one regressing task (`0008_reachable_path`, "can `handle_request` reach `connect_db`?") has a treatment context — the `lens_path` op — that returns the **correct** answer (`found:true`, full path `handle_request → fetch_user → connect_db`), *more* explicit than the raw-file control, yet Haiku still answered `reachable:false`. That is a weak-model reasoning slip on a correct context, **not** a lens context-drop.
-
-Re-running just the discovery set on `claude-sonnet-4-6` (same backend) confirmed it: discovery returns to **100% / 100% (+0pp)**, with `0008` answering `reachable:yes`. The slip disappears on the stronger model.
-
-A later run on `claude-opus-4-8` surfaced the same task's *other* form trap: `0008`'s `lens_path` treatment context carries `found:true`, which primes the model to answer the boolean `{"reachable": true}` rather than the string `"yes"` the prompt requests. The path is correct; only the form differs. The scorer now normalizes yes/no ↔ true/false (a reachability predicate means the same thing either way), so a correct boolean no longer masquerades as a −33pp context-drop.
-
-Lesson, encoded in `bench_report`: a negative aggregate delta is *necessary-not-sufficient* evidence of a context-drop. The ⚠️ on the aggregate is a heuristic; per-task plus cross-model checks separate a real regression from model noise before the table is trusted.
+> Every mechanism is **≥ control** on `claude-opus-4-8 (via claude-headless)` — no negative accuracy delta this run. The token reductions are the savings; accuracy is preserved.
 

@@ -260,3 +260,59 @@ async fn lens_run_file_credits_the_file_bytes() {
 
     client.cancel().await.ok();
 }
+
+/// T3 (Bug B, permission stall): read-only tools must declare `readOnlyHint=true` in
+/// list_tools so Claude Code can auto-approve them and an unattended agent never stalls
+/// on a permission prompt. Tools with side effects (run code, write the index/graph)
+/// must NOT be marked read-only.
+#[tokio::test]
+async fn read_only_tools_declare_annotation() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("lib.rs"), "fn helper() {}\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_lens");
+    let repo_path = repo.path().to_path_buf();
+    let data_path = data.path().to_path_buf();
+    let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
+        cmd.current_dir(&repo_path).env("LENS_DIR", &data_path);
+    }))
+    .unwrap();
+    let client = ().serve(transport).await.expect("handshake");
+
+    let tools = client.list_tools(Default::default()).await.unwrap();
+
+    // The read-only tools (no code execution, no index/graph writes).
+    const READ_ONLY: [&str; 10] = [
+        "lens_search",
+        "lens_overview",
+        "lens_recall",
+        "lens_symbol",
+        "lens_links",
+        "lens_path",
+        "lens_skeleton",
+        "lens_stats",
+        "lens_find",
+        "lens_grep_ast",
+    ];
+    for t in &tools.tools {
+        let read_only = t.annotations.as_ref().and_then(|a| a.read_only_hint);
+        if READ_ONLY.contains(&t.name.as_ref()) {
+            assert_eq!(
+                read_only,
+                Some(true),
+                "{} must declare readOnlyHint=true",
+                t.name
+            );
+        } else {
+            assert_ne!(
+                read_only,
+                Some(true),
+                "{} has side effects and must not be marked read-only",
+                t.name
+            );
+        }
+    }
+
+    client.cancel().await.ok();
+}

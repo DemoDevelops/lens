@@ -24,6 +24,15 @@ const CODE_WINDOW: usize = 100;
 /// edits) the one-time optimize cost would outweigh the read gain.
 const OPTIMIZE_AFTER_FILES: usize = 64;
 
+/// Commit the in-flight index transaction every this many file operations so the
+/// `index.db` write lock is released periodically during a large walk, letting a
+/// concurrent writer (the MCP server's auto-index, another `lens index`) interleave
+/// instead of spinning on the busy handler to SQLITE_BUSY (Bug A). A fresh full-repo
+/// index marks every file "changed", so without batching the lock is held for the
+/// entire walk. Each committed batch is durable, so an interrupted index resumes from
+/// the manifest on the next run.
+const COMMIT_BATCH: usize = 150;
+
 impl Index {
     /// Index a file or directory, respecting `.gitignore`. Re-indexing a path
     /// replaces its existing chunks (idempotent). Incremental: only files whose
@@ -98,54 +107,78 @@ impl Index {
         let mut chunks_added = 0usize;
         let mut files_read = 0usize;
 
-        let tx = conn.transaction()?;
+        // Write in COMMIT_BATCH-file batches so the index.db write lock is held only
+        // briefly (Bug A). Two properties make a concurrent writer succeed:
+        //   * IMMEDIATE, not the default DEFERRED. This connection just ran the
+        //     manifest SELECT (a read). A deferred tx whose first statement is a write
+        //     tries to upgrade that read while another writer holds the lock, and
+        //     SQLite returns SQLITE_BUSY *without* invoking the busy handler (deadlock
+        //     avoidance) — the other writer would fail instantly. Taking the write
+        //     lock up front keeps the busy handler in play so it retries.
+        //   * read+chunk each batch OFF the lock, then write it under one short
+        //     IMMEDIATE tx. The lock-free read phase is the gap a retrying writer
+        //     acquires in. Re-acquiring IMMEDIATE right after each commit instead
+        //     would leave a sub-millisecond gap the other writer could never catch.
+        type FileRows = (String, i64, Vec<(String, String, String)>);
 
-        // Delete chunks for removed files.
-        for path in &deleted {
-            tx.execute("DELETE FROM chunks WHERE path = ?1", [path])?;
-            tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path])?;
-            tx.execute("DELETE FROM file_manifest WHERE path = ?1", [path])?;
+        // Delete chunks for removed files, batched under IMMEDIATE transactions.
+        for batch in deleted.chunks(COMMIT_BATCH) {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            for &path in batch {
+                tx.execute("DELETE FROM chunks WHERE path = ?1", [path])?;
+                tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path])?;
+                tx.execute("DELETE FROM file_manifest WHERE path = ?1", [path])?;
+            }
+            tx.commit()?;
         }
 
         // Re-index changed or new files.
-        for path_str in &changed {
-            let file = std::path::Path::new(path_str.as_str());
-            let content = match std::fs::read(file) {
-                Ok(bytes) => match String::from_utf8(bytes) {
-                    Ok(s) => s,
-                    Err(_) => continue, // skip binary/non-utf8
-                },
-                Err(_) => continue,
-            };
-
-            tx.execute("DELETE FROM chunks WHERE path = ?1", [path_str])?;
-            tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path_str])?;
-
-            let chunks = chunk_file(file, &content);
-            for (i, chunk) in chunks.iter().enumerate() {
-                if chunk.trim().is_empty() {
-                    continue;
+        for batch in changed.chunks(COMMIT_BATCH) {
+            // Phase 1: read + chunk off-lock (the gap a concurrent writer acquires in).
+            let mut prepared: Vec<FileRows> = Vec::with_capacity(batch.len());
+            for &path_str in batch {
+                let file = std::path::Path::new(path_str.as_str());
+                let content = match std::fs::read(file) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(s) => s,
+                        Err(_) => continue, // skip binary/non-utf8
+                    },
+                    Err(_) => continue,
+                };
+                let mut rows = Vec::new();
+                for (i, chunk) in chunk_file(file, &content).iter().enumerate() {
+                    if chunk.trim().is_empty() {
+                        continue;
+                    }
+                    rows.push((format!("{path_str}#{i}"), chunk_symbols(chunk), chunk.clone()));
                 }
-                let chunk_id = format!("{path_str}#{i}");
-                let symbols = chunk_symbols(chunk);
-                tx.prepare_cached(
-                    "INSERT INTO chunks (path, chunk_id, symbols, content) VALUES (?1, ?2, ?3, ?4)",
-                )?.execute(rusqlite::params![path_str, chunk_id, symbols, chunk])?;
-                tx.prepare_cached(
-                    "INSERT INTO chunks_tri (path, chunk_id, content) VALUES (?1, ?2, ?3)",
-                )?.execute(rusqlite::params![path_str, chunk_id, chunk])?;
-                chunks_added += 1;
+                prepared.push((path_str.clone(), current[path_str] as i64, rows));
             }
 
-            let mtime = current[*path_str] as i64;
-            tx.prepare_cached(
-                "INSERT OR REPLACE INTO file_manifest (path, mtime) VALUES (?1, ?2)",
-            )?.execute(rusqlite::params![path_str, mtime])?;
-
-            files_read += 1;
+            // Phase 2: write the batch under one short IMMEDIATE transaction.
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            for (path_str, mtime, rows) in &prepared {
+                tx.execute("DELETE FROM chunks WHERE path = ?1", [path_str])?;
+                tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path_str])?;
+                for (chunk_id, symbols, content) in rows {
+                    tx.prepare_cached(
+                        "INSERT INTO chunks (path, chunk_id, symbols, content) VALUES (?1, ?2, ?3, ?4)",
+                    )?
+                    .execute(rusqlite::params![path_str, chunk_id, symbols, content])?;
+                    tx.prepare_cached(
+                        "INSERT INTO chunks_tri (path, chunk_id, content) VALUES (?1, ?2, ?3)",
+                    )?
+                    .execute(rusqlite::params![path_str, chunk_id, content])?;
+                    chunks_added += 1;
+                }
+                tx.prepare_cached(
+                    "INSERT OR REPLACE INTO file_manifest (path, mtime) VALUES (?1, ?2)",
+                )?
+                .execute(rusqlite::params![path_str, mtime])?;
+                files_read += 1;
+            }
+            tx.commit()?;
         }
-
-        tx.commit()?;
 
         // After a bulk build (initial index or a large re-index), collapse the FTS5
         // segment forest so later queries scan one segment instead of many

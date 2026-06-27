@@ -6,8 +6,7 @@
 //!     `Bash` / `Grep` / `Read` (structurally-bounded commands are skipped); a
 //!     periodic nudge for external (non-lens) MCP tools; inject the tool-selection
 //!     guide into every sub-agent (`Agent`/`Task`) prompt and at `SessionStart`.
-//!     Never denies, redirects, or rewrites a call. (Ports of context-mode's
-//!     `hooks/core/routing.mjs`.)
+//!     Never denies, redirects, or rewrites a call.
 //!   * **steer** — nudge, plus deny `WebFetch` and redirect curl/wget/build/
 //!     inline-HTTP `Bash` commands into `lens_run`.
 //!   * **wrap** — transparently rewrite a read-only, high-output `Bash` command
@@ -204,19 +203,18 @@ pub const BUILD_REDIRECT_REASON: &str = "lens routing: redirected a build comman
 /// Shown when the tool-selection guide is injected into a sub-agent prompt.
 pub const AGENT_INJECT_REASON: &str = "lens routing: injected the tool-selection guide into the sub-agent prompt so it reaches for lens tools.";
 
-// Per-tool `<context_guidance>` injected on PreToolUse (prose adapted from
-// context-mode's routing-block factory functions; tool names mapped to lens).
+// Per-tool `<context_guidance>` injected on PreToolUse (tool names mapped to lens).
 // Re-injected periodically (see `throttle_periodic`), not once per session.
 
 /// Contextual guidance when a read-only/high-output Bash command is observed.
-pub const BASH_NUDGE: &str = "<context_guidance>\n  <tip>\n    When you intend to PROCESS the output (filter, count, parse, aggregate), use lens_run(language: \"shell\", code: \"...\") — the raw output stays in the darkroom and only what you print enters your conversation. Bash stays the right surface when you intend to OBSERVE a short fixed output or when you are mutating state (git, mkdir, rm, mv, navigation).\n  </tip>\n</context_guidance>";
+pub const BASH_NUDGE: &str = "<context_guidance>\n  <tip>\n    About to take this command's output and count, filter, or reshape it? Run it through lens_run(language: \"shell\", code: \"...\") instead — it executes in the darkroom and only what you print comes back. A plain Bash call is the right tool when you just need to see a short result or you're changing state (git, file moves, and the like).\n  </tip>\n</context_guidance>";
 
 /// Contextual guidance steering Grep toward indexed search / the graph.
-pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Grep results may be larger than you expect. When you intend to count, filter, or aggregate matches (not just spot-check one), run the search through lens_run(language: \"shell\", code: \"...\") — the raw match list stays in the darkroom and only your derived answer enters your conversation. For \"where is X\" or \"who calls X\", prefer lens_search (after lens_index) or lens_symbol over scanning files.\n  </tip>\n</context_guidance>";
+pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    A grep can return many more lines than you're after. If you plan to tally, filter, or work over the matches rather than eyeball one, run it inside lens_run(language: \"shell\", code: \"...\") so the match list stays in the darkroom and only your result returns. For \"where does X live\" or \"what calls X\", lens_search (after lens_index) or lens_symbol beats grepping across files.\n  </tip>\n</context_guidance>";
 
 /// Contextual guidance steering analysis-reads into the darkroom, and
 /// navigational code-reads toward the graph.
-pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from one file? Use lens_run_file(path, language, code) — the bytes stay in the darkroom and only what your code prints enters your conversation.\n    Reading one file to see its API (signatures, types, what's defined) without the bodies? Use lens_skeleton(path): signatures + nesting at a fraction of the tokens, the full file one lens_recall away.\n    Reading code to see how it connects — who calls this, what it calls, where a symbol is defined, how A reaches B? Don't read file after file; query the graph with lens_symbol / lens_links / lens_path (run lens_map once if it's empty).\n  </tip>\n</context_guidance>";
+pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading this file to Edit it? Stay with Read — Edit has to match the exact bytes you're holding. Reading it to understand, summarize, or extract a few facts? Send it through lens_run_file(path, language, code) and return only what you derived. To see a file's API — signatures and structure without the bodies — use lens_skeleton(path), with the full text a lens_recall away. And when you're tracing how code connects (callers, callees, where a symbol is defined, how A reaches B), don't read file after file — query the graph with lens_symbol / lens_links / lens_path (run lens_map once if it's empty).\n  </tip>\n</context_guidance>";
 
 /// Contextual guidance emitted AFTER a Grep whose result set floods context. A
 /// result this large is exactly where lens_search (ranked top-K, flat with corpus
@@ -226,16 +224,14 @@ pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading to Edit t
 pub const SEARCH_NUDGE: &str = "<context_guidance>\n  <tip>\n    That grep returned a large match set — more than lens_search would. For a result set this size, lens_search (after lens_index) returns the ranked top hits and keeps the rest out of your context; re-run the search through lens_search if you need more than the matches already shown.\n  </tip>\n</context_guidance>";
 
 /// Periodic guidance for external (non-lens) MCP tools whose payloads flood
-/// context (port of context-mode's `createExternalMcpGuidance`, tools mapped to
-/// lens's).
-pub const EXTERNAL_MCP_NUDGE: &str = "<context_guidance>\n  <tip>\n    External MCP tools commonly return large payloads (channel history, file content, search results) that enter your conversation in full. When you intend to filter, count, or aggregate that data, pipe it through lens_run(language, code) — the raw payload stays in the darkroom and only the derived answer enters your conversation. For content you'll query later, lens_index it then lens_search(queries).\n  </tip>\n</context_guidance>";
+/// context.
+pub const EXTERNAL_MCP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Other MCP tools tend to hand back large results — message history, file contents, search hits — and all of it lands in the transcript whole. When you mean to filter, count, or summarize that, route it through lens_run(language, code) and keep only the answer. If it's something you'll want to search later, lens_index it and query with lens_search.\n  </tip>\n</context_guidance>";
 
-/// Port of context-mode's `mcpRedirect` (core/routing.mjs #230): a decision that
-/// redirects the agent to an MCP-backed tool (deny WebFetch, rewrite curl/build into
-/// `lens_run`) is only safe to emit when the server is reachable — otherwise the
-/// agent is told to use a tool that isn't there and stalls. So gate ONLY these on
-/// `mcp_ready`; nudges and sub-agent injection are NOT gated (they fire regardless,
-/// matching context-mode, which never wraps `guidanceOnce`/Agent in `mcpRedirect`).
+/// A decision that redirects the agent to an MCP-backed tool (deny WebFetch, rewrite
+/// curl/build into `lens_run`) is only safe to emit when the server is reachable —
+/// otherwise the agent is told to use a tool that isn't there and stalls. So gate
+/// ONLY these on `mcp_ready`; nudges and sub-agent injection are never wrapped in
+/// `mcp_redirect` and fire regardless.
 fn mcp_redirect(ctx: &RouteCtx, d: Decision) -> Decision {
     if ctx.mcp_ready {
         d
@@ -247,7 +243,7 @@ fn mcp_redirect(ctx: &RouteCtx, d: Decision) -> Decision {
 /// Route one PreToolUse call to a [`Decision`].
 ///
 /// `Off` short-circuits to [`Decision::Passthrough`]. There is NO blanket
-/// `!mcp_ready` gate (that was a divergence from context-mode): readiness gates
+/// `!mcp_ready` gate: readiness gates
 /// only the MCP-redirect decisions via [`mcp_redirect`], so nudges and sub-agent
 /// injection keep firing even before the server's heartbeat lands.
 pub fn route(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
@@ -315,8 +311,8 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
         }
         // External (non-lens) MCP tools return large payloads (channel history,
         // file content, search results). Periodically nudge toward lens_run — a
-        // single one-shot nudge gets lost in long MCP-heavy sessions (port of
-        // context-mode's #529/#567 periodic external-MCP guidance).
+        // single one-shot nudge gets lost in long MCP-heavy sessions (periodic
+        // external-MCP guidance).
         other if ctx.level.nudges() && is_external_mcp_tool(other) => {
             if throttle_periodic(ctx, "external-mcp", EXTERNAL_MCP_PERIOD) {
                 Decision::Context(EXTERNAL_MCP_NUDGE.to_string())
@@ -349,14 +345,13 @@ pub fn post_route(tool: &str, tool_response: &str, ctx: &RouteCtx) -> Decision {
     }
 }
 
-/// Inject the lens tool-selection guide into a sub-agent's prompt. Port of
-/// context-mode's PreToolUse `Agent` branch (`hooks/core/routing.mjs`). No
+/// Inject the lens tool-selection guide into a sub-agent's prompt. No
 /// throttle: each sub-agent is a fresh context that needs its own copy, including
 /// the block's ToolSearch bootstrap so the deferred ctx_* tools are loadable
 /// inside the sub-agent (which doesn't inherit the parent's loaded schemas).
 fn agent_inject(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     // The Agent tool carries the sub-agent instructions under one of these keys
-    // (Claude uses `prompt`; the rest mirror context-mode's field list).
+    // (Claude uses `prompt`; the rest are common Agent tool field names).
     const FIELDS: &[&str] = &[
         "prompt",
         "request",
@@ -474,8 +469,8 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if is_stateful_segs(cmd, &segs) {
         return Decision::Passthrough;
     }
-    // Network/build/inline-HTTP → hard redirect into lens_run (port of
-    // context-mode's Bash redirects). Steering only; under wrap-only these fall
+    // Network/build/inline-HTTP → hard redirect into lens_run. Steering only;
+    // under wrap-only these fall
     // through to the generic output-wrap below. Gated on `mcp_ready` via
     // `mcp_redirect` (these point at lens_run); when the server is down the
     // command passes through untouched rather than redirecting into a dead tool.
@@ -486,7 +481,7 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     }
     // Structurally-bounded commands (git status, ls, --version probes, …) produce
     // little output — nudging or wrapping them is noise that trains the agent to
-    // ignore the advisory. Skip both (port of context-mode #463).
+    // ignore the advisory. Skip both.
     if classify::classify(cmd) == classify::Risk::Safe {
         return Decision::Passthrough;
     }
@@ -509,9 +504,8 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     }
 }
 
-/// Port of context-mode's curl/wget/build/inline-HTTP Bash redirects
-/// (`hooks/core/routing.mjs`): replace a context-flooding network or build command
-/// with an `echo` that tells the model to run it through `lens_run` instead, so
+/// Redirect a context-flooding network or build command: replace it with an `echo`
+/// that tells the model to run it through `lens_run` instead, so
 /// the raw output stays in the darkroom. `None` for commands that don't match.
 /// Accepts pre-computed `segs` from the caller to avoid a redundant allocation.
 fn bash_redirect_segs(cmd: &str, segs: &[String]) -> Option<Decision> {
@@ -775,7 +769,7 @@ fn segment_allowlisted(seg: &str) -> bool {
     classify::is_safe_command(prog)
 }
 
-/// Port of context-mode's `isExternalMcpTool` (#529): a non-lens MCP tool, whose
+/// A non-lens MCP tool, whose
 /// large payloads we nudge (periodically) toward `lens_run`. Claude's wire shape is
 /// `mcp__<server>__<tool>`; lens's own server is excluded (its tools have dedicated
 /// handling / are the redirect target).
@@ -814,7 +808,7 @@ fn is_wrappable_segs(segs: &[String]) -> bool {
 }
 
 /// External-MCP nudge cadence: fire on the 1st, then every `EXTERNAL_MCP_PERIOD`-th
-/// matching call. context-mode's default (`EXTERNAL_MCP_NUDGE_DEFAULT`) is 10 — keeps
+/// matching call. The default is 10 — keeps
 /// the guidance fresh across an MCP-heavy run (50+ calls) without flooding context.
 /// Bash/Grep use [`nudge_once`] (one shot); Read mixes a one-shot general tip
 /// with a periodic graph escalation (see [`read_decision`]); external MCP repeats.
@@ -868,8 +862,7 @@ pub fn mcp_ready(data_dir: &Path) -> bool {
 }
 
 /// The authoritative tool-selection directive injected at `SessionStart` while
-/// steering is active. context-mode's `<context_window_protection>` pattern
-/// (prose adapted from `hooks/routing-block.mjs`, tool names mapped to lens): the
+/// steering is active. The `<context_window_protection>` block: the
 /// *why*, a hierarchy that puts the code graph first, a nuanced when-NOT-to-use,
 /// and a deferred-tool ToolSearch bootstrap. `_level` is unused (the block is
 /// level-agnostic; the caller already gates injection on `level.nudges()`). The
@@ -905,38 +898,35 @@ fn session_block_with(bash: bool, file: bool) -> String {
     s
 }
 
-/// `<context_window_protection>` through the open `<when_not_to_use>` tag.
+/// `<context_window_protection>` through the open `<when_plain_tools_win>` tag.
 const BLOCK_HEAD: &str = r##"<context_window_protection>
-  <priority_instructions>
-    Every byte a tool returns enters your conversation memory and costs reasoning capacity for the rest of the session. The lens tools let you do the work in a darkroom and surface only the derived answer — the raw bytes stay out. Think-in-Code: program the analysis, do not compute it by reading raw data into your conversation.
-  </priority_instructions>
-  <deferred_tool_bootstrap>
-    The lens tools may be DEFERRED in your harness — their schemas are not loaded yet, so calling them directly fails ("tool not found" / InputValidationError). Load them ONCE before your first ctx_*/graph_* call:
+  <why>
+    Raw tool results sit in the transcript and get re-read on every later turn, so one large dump keeps taxing the model long after it was useful. lens exists to avoid that: it runs the work in a subprocess (the "darkroom") and hands back only the finished answer. The habit to build: compute over data in code, rather than pulling the data into the conversation to read it.
+  </why>
+  <loading_lens_tools>
+    lens's tools may start out unregistered in this harness — their schemas aren't loaded, so a direct call errors ("tool not found" or a validation error). Register them once, before your first lens_* call:
     ToolSearch(query: "select:lens_run,lens_run_file,lens_search,lens_index,lens_map,lens_symbol,lens_links,lens_path,lens_recall")
-    After that they are callable. If any ctx_*/graph_* call fails as not-found, ToolSearch it and retry — do NOT fall back to Bash/Read/Grep just because the schema was not loaded yet.
-  </deferred_tool_bootstrap>
-  <tool_selection_hierarchy>
-    1. STRUCTURE: lens_map (once per repo), then lens_symbol / lens_links / lens_path.
-       - Who-calls-what, imports, how A reaches B, where a symbol lives: query a scoped subgraph instead of reading many files. Expand any compacted node with lens_recall.
-    2. SEARCH: lens_index, then lens_search(queries: ["q1", "q2", ...]).
-       - "Where is X mentioned" across code and notes. Batch related questions in one array; ranked snippets return, not whole files.
-    3. PROCESSING: lens_run(language, code) | lens_run_file(path, language, code).
-       - Derive answers FROM data: filter, count, aggregate, parse, transform. Only what you print() enters your conversation; the raw bytes stay in the darkroom.
-    4. RECOVER: lens_recall(ref) — pull back the full version of an offloaded result only when you actually need it.
-  </tool_selection_hierarchy>
-  <when_not_to_use>"##;
+    If a lens_* call later comes back not-found, re-run that ToolSearch and retry instead of falling back to Bash/Read/Grep.
+  </loading_lens_tools>
+  <which_tool>
+    - How the code fits together (callers, callees, where a symbol is defined, how one part reaches another, imports): run lens_map once, then walk it with lens_symbol / lens_links / lens_path instead of opening file after file. lens_recall expands anything returned compacted.
+    - Where a string or idea appears across the tree: lens_index once, then lens_search(queries: [...]) — batch several questions into the array and get ranked snippets, not whole files.
+    - Turning data into an answer (filter, count, parse, reshape, summarize): lens_run(language, code) or lens_run_file(path, language, code). Only what you print returns; the inputs stay in the darkroom.
+    - Recovering something offloaded or truncated: lens_recall(ref).
+  </which_tool>
+  <when_plain_tools_win>"##;
 
-const BULLET_BASH: &str = "\n    - You intend to PROCESS the output (filter, count, parse, aggregate) → use lens_run. Bash stays correct when you intend to OBSERVE a short fixed output (git status on a clean tree, whoami, pwd) or when you are mutating state (git, mkdir, rm, mv, navigation).";
+const BULLET_BASH: &str = "\n    - Bash: keep it for commands that change something, or whose output is short and you just want to glance at it (pwd, a clean git status, moving a file). The moment you'd pipe that output onward to count, grep, or reshape it, give it to lens_run instead so the bulk never lands in the transcript.";
 
-const BULLET_READ: &str = "\n    - You want to analyze, summarize, or extract from a file → use lens_run_file. Read stays correct when you intend to Edit the file (Edit needs the exact bytes in your conversation to match against).";
+const BULLET_READ: &str = "\n    - Read: right when you're about to Edit a file, since Edit has to match the exact bytes you're holding. If you only need to understand it, summarize it, or pull a few facts out, send it through lens_run_file and return just those; for a file's shape (signatures, no bodies) use lens_skeleton.";
 
-const BULLET_SEARCH: &str = "\n    - You want to find where something is, or who calls it → use lens_search or lens_symbol, not repeated Read/Grep over many files.";
+const BULLET_SEARCH: &str = "\n    - Finding where something lives or what touches it: reach for lens_search or lens_symbol first — hand-scanning many files with Read/Grep is exactly what these replace.";
 
-const BULLET_WEBFETCH: &str = "\n    - WebFetch is denied — fetch and reduce a URL with lens_run (python): fetch in the darkroom and print only what you need; the full response stays out of context and is recoverable via lens_recall.";
+const BULLET_WEBFETCH: &str = "\n    - WebFetch is off here: pull a URL with lens_run (python), keep only the part of the response you need, and print that. The full page stays in the darkroom, retrievable via lens_recall.";
 
-/// Close `</when_not_to_use>` through `</context_window_protection>`.
+/// Close `</when_plain_tools_win>` through `</context_window_protection>`.
 const BLOCK_TAIL: &str = r##"
-  </when_not_to_use>
+  </when_plain_tools_win>
   <session_continuity>
     Skills, roles, and directives set during this session remain active until the user revokes them. Do not drop these behavioral directives as context grows.
   </session_continuity>
@@ -1169,7 +1159,7 @@ mod tests {
 
     #[test]
     fn mcp_not_ready_gates_only_redirects_not_nudges() {
-        // Port of context-mode's mcpRedirect (#230): when the server is unreachable,
+        // When the server is unreachable,
         // ONLY the MCP-redirect decisions passthrough (so the agent isn't sent to a
         // dead tool). Nudges, wrap, and sub-agent injection still fire — they don't
         // depend on the MCP server. (Old behavior blanket-passed everything; that was
@@ -1368,7 +1358,7 @@ mod tests {
         assert_eq!(
             route("Read", &ti, &ctx),
             Decision::Context(READ_NUDGE.to_string()),
-            "Read nudges at steer (context-mode nudges Read whenever routing is active)"
+            "Read nudges at steer (Read is nudged whenever routing is active)"
         );
         assert_eq!(
             route("Read", &ti, &ctx),
@@ -1754,12 +1744,12 @@ mod tests {
             "lens_links",
             "lens_path",
             "lens_recall",
-            "tool_selection_hierarchy",
-            "WebFetch is denied",
+            "which_tool",
+            "WebFetch is off",
             // the highest-impact additions over the old soft nudge:
-            "ToolSearch",      // deferred-tool bootstrap
-            "Think-in-Code",   // authoritative framing
-            "when_not_to_use", // nuanced credibility
+            "ToolSearch",                // deferred-tool bootstrap
+            "compute over data in code", // authoritative framing
+            "when_plain_tools_win",      // nuanced credibility
         ] {
             assert!(b.contains(needle), "session_block missing {needle:?}");
         }

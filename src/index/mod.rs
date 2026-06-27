@@ -39,6 +39,10 @@ impl Index {
         if !root.exists() {
             anyhow::bail!("index root does not exist: {}", root.display());
         }
+        // Canonicalize so `.`/`..` components and symlinks collapse to one spelling.
+        // Without this, `lens_index(path=".")` stores a second `/./`-keyed copy of
+        // every chunk and search returns each file twice (mirrors warmup's canonicalize).
+        let root = &std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
         // Single walk: collect current files with their mtimes.
         let mut current: HashMap<String, u64> = HashMap::new();
@@ -274,6 +278,13 @@ const PROX_WEIGHT: f64 = 4.0;
 const OVERFETCH_K: usize = 8;
 const OVERFETCH_CAP: usize = 200;
 
+/// Multiplicative rank penalty for documentation chunks (`.md`/`.markdown`), applied
+/// to the BM25F base before the proximity boost. BM25 length-normalization otherwise
+/// floats a short markdown chunk (e.g. the README's own example queries) above the
+/// real code; the penalty lets equally-relevant code win. Uniform, so a doc-only
+/// result set keeps its order. 0.7 flips the observed README-over-code cases.
+const DOC_RANK_PENALTY: f64 = 0.7;
+
 /// BM25F-ranked search over the porter `chunks` table (the default path), with a
 /// deterministic term-proximity (min-window span) re-rank on top of `bm25()`.
 /// Over-fetches a deeper BM25F pool (see `OVERFETCH_K`), re-ranks by the combined
@@ -313,6 +324,9 @@ fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Sea
         let snippet: String = row.get(2)?;
         let content: String = row.get(3)?;
         let mut score: f64 = row.get(4)?;
+        if is_doc_path(&path) {
+            score *= DOC_RANK_PENALTY;
+        }
         if terms.len() >= 2 {
             if let Some(span) = min_cover_span(&content, &terms) {
                 score += PROX_WEIGHT / span.max(1) as f64;
@@ -411,11 +425,15 @@ fn structural_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec
     if q.is_empty() {
         return Ok(Vec::new());
     }
+    // Over-fetch like ranked_search, then rank by literal-occurrence count below, so
+    // the chunk that mentions the identifier most (typically its definition) leads
+    // instead of returning a hardcoded zero score in arbitrary path order.
+    let fetch = limit.saturating_mul(OVERFETCH_K).min(OVERFETCH_CAP);
     let rows: Vec<(String, String)> = if q.chars().count() >= 3 {
         let phrase = format!("\"{}\"", q.replace('"', "\"\""));
         let mut stmt =
             conn.prepare("SELECT path, content FROM chunks_tri WHERE chunks_tri MATCH ?1 ORDER BY path, chunk_id LIMIT ?2")?;
-        let mapped = stmt.query_map(rusqlite::params![phrase, limit as i64], |row| {
+        let mapped = stmt.query_map(rusqlite::params![phrase, fetch as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         mapped.flatten().collect()
@@ -423,19 +441,34 @@ fn structural_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec
         let like = format!("%{q}%");
         let mut stmt =
             conn.prepare("SELECT path, content FROM chunks_tri WHERE content LIKE ?1 ORDER BY path, chunk_id LIMIT ?2")?;
-        let mapped = stmt.query_map(rusqlite::params![like, limit as i64], |row| {
+        let mapped = stmt.query_map(rusqlite::params![like, fetch as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         mapped.flatten().collect()
     };
-    Ok(rows
+    // Score each hit by case-insensitive occurrence count of the literal query, sort
+    // descending with a stable path tiebreak (the SQL already ordered by path,
+    // chunk_id, and the sort is stable), then truncate to the caller's limit.
+    let needle = q.to_lowercase();
+    let mut hits: Vec<SearchHit> = rows
         .into_iter()
-        .map(|(path, content)| SearchHit {
-            path,
-            snippet: structural_snippet(&content, q),
-            score: 0.0,
+        .map(|(path, content)| {
+            let score = content.to_lowercase().matches(&needle).count() as f64;
+            SearchHit {
+                path,
+                snippet: structural_snippet(&content, q),
+                score,
+            }
         })
-        .collect())
+        .collect();
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    hits.truncate(limit);
+    Ok(hits)
 }
 
 /// The first line of `content` containing `needle`, trimmed and capped — the
@@ -451,12 +484,22 @@ fn structural_snippet(content: &str, needle: &str) -> String {
         .collect()
 }
 
-/// True when a query carries structural punctuation the porter tokenizer would
-/// strip (`:`, `.`, `>`, `-`, ...), so it should route to the trigram path.
+/// True when a query is a single whitespace-free token carrying structural
+/// punctuation the porter tokenizer would strip (`std::fs`, `->`, `Level::parse`),
+/// so it routes to the trigram path for literal matching. A multi-word query goes to
+/// the porter/BM25F path even if it contains a hyphen, since it is prose, not a literal
+/// symbol (otherwise "a read-only bash command" would be phrase-matched and miss).
 fn is_structural(query: &str) -> bool {
-    query
-        .chars()
-        .any(|c| !c.is_alphanumeric() && !c.is_whitespace() && c != '_')
+    let q = query.trim();
+    !q.is_empty()
+        && !q.contains(char::is_whitespace)
+        && q.chars().any(|c| !c.is_alphanumeric() && c != '_')
+}
+
+/// True for documentation chunks (markdown), which get [`DOC_RANK_PENALTY`] so
+/// equally relevant code outranks them.
+fn is_doc_path(path: &str) -> bool {
+    path.ends_with(".md") || path.ends_with(".markdown")
 }
 
 /// Split a file into chunks: markdown by headings, everything else by line windows.
@@ -591,23 +634,19 @@ fn split_subwords(ident: &str) -> Vec<String> {
     parts
 }
 
-/// Turn an arbitrary query into a safe FTS5 MATCH expression: each whitespace
-/// token becomes a quoted term, which avoids syntax errors from punctuation
-/// while keeping implicit-AND semantics.
+/// Turn an arbitrary query into a safe FTS5 MATCH expression. The query is split on
+/// non-alphanumeric runs into the same word tokens the porter tokenizer indexed (so
+/// `read-only` becomes `read` + `only`, not the never-indexed `readonly`), and the
+/// tokens are OR-joined. OR rather than implicit AND is what makes multi-word natural
+/// queries work: a relevant chunk rarely contains every term, and BM25F plus the
+/// proximity re-rank already float the densest matches to the top.
 fn sanitize_query(query: &str) -> String {
     query
-        .split_whitespace()
-        .map(|tok| {
-            let cleaned: String = tok
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            cleaned
-        })
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" OR ")
 }
 
 /// Open an index at the given data dir.
@@ -884,6 +923,107 @@ mod tests {
         assert!(
             out2.results[0].hits.iter().any(|h| h.path.ends_with("f7.rs")),
             "edited content searchable without optimize"
+        );
+    }
+
+    // ── lens_search defect guards (each reproduces a fixed bug) ──────────────
+
+    #[test]
+    fn sanitize_query_splits_punctuation_and_or_joins() {
+        // DEFECT 3 locked contract: split on non-alphanumeric into the indexed word
+        // tokens and OR-join, never a fused "readonly" or implicit AND.
+        assert_eq!(
+            sanitize_query("read-only blob"),
+            "\"read\" OR \"only\" OR \"blob\""
+        );
+    }
+
+    #[test]
+    fn search_recalls_multiword_hyphenated_query() {
+        // DEFECT 3: a natural multi-word query with a hyphenated term must recall.
+        // Pre-fix, terms were AND-ed and "read-only" fused to the never-indexed
+        // "readonly", so the query returned zero hits.
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("wrap.rs"),
+            "fn wrap() {\n    // rewrite a read-only bash command to offload its output losslessly\n}\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("other.rs"), "fn unrelated() {}\n").unwrap();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+        let hits = &idx
+            .search(&["wrap a read-only bash command to offload output".into()], 5)
+            .unwrap()
+            .results[0]
+            .hits;
+        assert!(!hits.is_empty(), "hyphenated multi-word query must recall");
+        assert!(hits[0].path.ends_with("wrap.rs"));
+    }
+
+    #[test]
+    fn structural_query_scores_nonzero_and_ranks_by_mentions() {
+        // DEFECT 2: identifier queries (with ::) route to the trigram path. Pre-fix
+        // every hit scored a hardcoded 0 in path order; now they rank by occurrence
+        // count, so the file mentioning the identifier most leads with score > 0.
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("def.rs"),
+            "impl Level {}\n// Level::parse Level::parse Level::parse\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("use.rs"), "let x = Level::parse();\n").unwrap();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+        let hits = &idx.search(&["Level::parse".into()], 5).unwrap().results[0].hits;
+        assert!(!hits.is_empty());
+        assert!(hits[0].score > 0.0, "structural hit must score > 0");
+        assert!(hits[0].path.ends_with("def.rs"), "most-mentions file leads");
+    }
+
+    #[test]
+    fn doc_penalty_ranks_code_above_identical_markdown() {
+        // DEFECT 4: identical content in a .md and a .rs differs only by the doc
+        // penalty. The .md is named to win the path tiebreak, so only the penalty can
+        // demote it below the code.
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        let body = "the routing level is parsed in this module\n";
+        fs::write(dir.path().join("a_doc.md"), body).unwrap();
+        fs::write(dir.path().join("z_code.rs"), body).unwrap();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+        let hits = &idx
+            .search(&["routing level parsed".into()], 5)
+            .unwrap()
+            .results[0]
+            .hits;
+        assert!(hits.len() >= 2);
+        assert!(
+            hits[0].path.ends_with("z_code.rs"),
+            "doc penalty must rank code above the identical .md, got {}",
+            hits[0].path
+        );
+    }
+
+    #[test]
+    fn dot_path_index_has_no_duplicate_hits() {
+        // DEFECT 1: indexing both the canonical path and its "/./" spelling must
+        // collapse to one canonical entry, not return the file twice.
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("auth.rs"), "fn authenticate() {}\n").unwrap();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+        idx.index_path(&dir.path().join("."), true).unwrap();
+        let hits = &idx.search(&["authenticate".into()], 5).unwrap().results[0].hits;
+        assert_eq!(hits.len(), 1, "two path spellings must collapse to one hit");
+        assert!(
+            !hits[0].path.contains("/./"),
+            "no /./ in stored path: {}",
+            hits[0].path
         );
     }
 }

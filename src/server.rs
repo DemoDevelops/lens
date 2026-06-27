@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use rmcp::handler::server::wrapper::{Json, Parameters};
+use rmcp::model::{Content, IntoContents};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::darkroom;
@@ -17,6 +18,82 @@ use crate::tools::*;
 
 /// Default inline stdout limit (bytes) before offloading to the store.
 const DEFAULT_MAX_INLINE: usize = 8 * 1024;
+
+/// The lens tools that only read: no code execution, no index/graph writes. They get a
+/// `readOnlyHint` annotation in `list_tools` so Claude Code can auto-approve them (an
+/// unattended agent otherwise stalls on a permission prompt), and `lens setup`
+/// pre-approves them in the permission allowlist. Shared with [`crate::setup`] so the
+/// two never drift. The write tools (lens_run, lens_run_file, lens_index, lens_map) are
+/// intentionally absent.
+pub const READ_ONLY_TOOLS: [&str; 10] = [
+    "lens_search",
+    "lens_overview",
+    "lens_recall",
+    "lens_symbol",
+    "lens_links",
+    "lens_path",
+    "lens_skeleton",
+    "lens_stats",
+    "lens_find",
+    "lens_grep_ast",
+];
+
+/// Appended to the `lens_search`/`lens_overview` descriptions so the model knows the
+/// recovery path before it ever hits a transient index/graph lock (Bug B).
+const SEARCH_FALLBACK_HINT: &str = " If a call returns is_error (usually a transient \
+    index lock), fall back to grep/Read for this query and continue; do not kill the \
+    lens server.";
+
+/// A tool failure delivered to the model as readable `is_error` content rather than a
+/// JSON-RPC protocol error (Bug B). rmcp serializes an `Err(ErrorData)` returned from a
+/// tool handler as a `-32603` protocol error, which the model never sees, so it cannot
+/// fall back. A handler that returns `Err(ToolFailure)` instead produces a
+/// `CallToolResult{is_error: true}` whose text carries the cause and what to do next:
+/// rmcp's `IntoCallToolResult for Result<T, E>` flips `is_error` to true whenever the
+/// error type's own `into_call_tool_result` returns `Ok` (which it does here, via the
+/// blanket `IntoContents` impl). Success paths keep returning `Ok(Json(..))` unchanged.
+#[derive(Debug)]
+pub struct ToolFailure {
+    message: String,
+}
+
+impl ToolFailure {
+    /// A recoverable failure (a transient index/graph lock, or an auto-index/auto-build
+    /// that errored): the cause plus an explicit instruction to fall back and not to
+    /// kill the server, so the model recovers within the same turn instead of stalling.
+    fn recoverable(cause: impl std::fmt::Display) -> Self {
+        ToolFailure {
+            message: format!(
+                "lens tool failed: {cause}\n\
+                 This is usually a transient index/graph lock, not a crash. Fall back to \
+                 grep/Read for this query and continue. Do NOT kill the lens MCP server or \
+                 other lens processes; the lock clears on its own."
+            ),
+        }
+    }
+
+    /// A failure whose cause is the caller's to fix (e.g. a bad argument), delivered as
+    /// readable `is_error` content with no fallback instruction.
+    fn plain(message: impl Into<String>) -> Self {
+        ToolFailure {
+            message: message.into(),
+        }
+    }
+}
+
+/// Any internal `ErrorData` (from the index/graph helpers) becomes a recoverable
+/// failure, so `?` at a handler boundary delivers it as content the model can act on.
+impl From<ErrorData> for ToolFailure {
+    fn from(e: ErrorData) -> Self {
+        ToolFailure::recoverable(e.message)
+    }
+}
+
+impl IntoContents for ToolFailure {
+    fn into_contents(self) -> Vec<Content> {
+        vec![Content::text(self.message)]
+    }
+}
 
 /// In-memory parsed-graph cache: the `source_manifest` mtime map the graph was
 /// built from, paired with the graph itself. A cached entry is served only while
@@ -171,7 +248,7 @@ impl Forge {
     async fn lens_run(
         &self,
         Parameters(req): Parameters<ExecuteRequest>,
-    ) -> Result<Json<ExecuteResponse>, ErrorData> {
+    ) -> Result<Json<ExecuteResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_run",
             serde_json::json!({ "language": req.language, "code_bytes": req.code.len() }),
@@ -220,7 +297,7 @@ impl Forge {
             }
             Err(e) => {
                 op.finish(0, 0, None, "error", e.clone(), None);
-                Err(ErrorData::internal_error(e, None))
+                Err(ToolFailure::recoverable(e))
             }
         }
     }
@@ -234,7 +311,7 @@ impl Forge {
     async fn lens_run_file(
         &self,
         Parameters(req): Parameters<ExecuteFileRequest>,
-    ) -> Result<Json<ExecuteResponse>, ErrorData> {
+    ) -> Result<Json<ExecuteResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_run_file",
             serde_json::json!({ "language": req.language, "path": req.path, "code_bytes": req.code.len() }),
@@ -302,7 +379,7 @@ impl Forge {
             }
             Err(e) => {
                 op.finish(0, 0, None, "error", e.clone(), None);
-                Err(ErrorData::internal_error(e, None))
+                Err(ToolFailure::recoverable(e))
             }
         }
     }
@@ -315,7 +392,7 @@ impl Forge {
     async fn lens_skeleton(
         &self,
         Parameters(req): Parameters<SkeletonRequest>,
-    ) -> Result<Json<SkeletonResponse>, ErrorData> {
+    ) -> Result<Json<SkeletonResponse>, ToolFailure> {
         let op = self
             .ops
             .start("lens_skeleton", serde_json::json!({ "path": req.path }));
@@ -325,7 +402,7 @@ impl Forge {
             Err(e) => {
                 let msg = format!("read {}: {e}", p.display());
                 op.finish(0, 0, None, "error", msg.clone(), None);
-                return Err(ErrorData::internal_error(msg, None));
+                return Err(ToolFailure::recoverable(msg));
             }
         };
         let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -335,13 +412,13 @@ impl Forge {
                 p.display()
             );
             op.finish(0, 0, None, "error", msg.clone(), None);
-            return Err(ErrorData::internal_error(msg, None));
+            return Err(ToolFailure::recoverable(msg));
         };
         let language = spec.name.to_string();
         let Some(skeleton) = crate::discovery::skeleton::skeletonize(&content, &spec) else {
             let msg = format!("could not parse {} for skeleton; use Read", p.display());
             op.finish(0, 0, None, "error", msg.clone(), None);
-            return Err(ErrorData::internal_error(msg, None));
+            return Err(ToolFailure::recoverable(msg));
         };
         // Stash the full file so any elided body is recoverable; surface a cheap
         // short handle (Store::get resolves prefixes) instead of the 64-char hash.
@@ -350,7 +427,7 @@ impl Forge {
             Err(e) => {
                 let msg = format!("store {}: {e}", p.display());
                 op.finish(0, 0, None, "error", msg.clone(), None);
-                return Err(ErrorData::internal_error(msg, None));
+                return Err(ToolFailure::recoverable(msg));
             }
         };
         let retrieve_ref = reference[..reference.len().min(12)].to_string();
@@ -387,7 +464,7 @@ impl Forge {
     async fn lens_recall(
         &self,
         Parameters(req): Parameters<RetrieveRequest>,
-    ) -> Result<Json<RetrieveResponse>, ErrorData> {
+    ) -> Result<Json<RetrieveResponse>, ToolFailure> {
         let op = self
             .ops
             .start("lens_recall", serde_json::json!({ "ref": req.reference }));
@@ -418,14 +495,14 @@ impl Forge {
                     "unknown ref",
                     None,
                 );
-                Err(ErrorData::invalid_params(
-                    format!("unknown ref '{}'", req.reference),
-                    None,
-                ))
+                Err(ToolFailure::plain(format!(
+                    "unknown ref '{}'",
+                    req.reference
+                )))
             }
             Err(e) => {
                 op.finish(0, 0, None, "error", e.to_string(), None);
-                Err(ErrorData::internal_error(e.to_string(), None))
+                Err(ToolFailure::recoverable(e.to_string()))
             }
         }
     }
@@ -437,7 +514,7 @@ impl Forge {
     async fn lens_index(
         &self,
         Parameters(req): Parameters<IndexRequest>,
-    ) -> Result<Json<IndexResponse>, ErrorData> {
+    ) -> Result<Json<IndexResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_index",
             serde_json::json!({ "path": req.path, "recursive": req.recursive }),
@@ -469,7 +546,7 @@ impl Forge {
             }
             Err(e) => {
                 op.finish(0, 0, None, "error", e.to_string(), None);
-                Err(ErrorData::internal_error(e.to_string(), None))
+                Err(ToolFailure::recoverable(e.to_string()))
             }
         }
     }
@@ -481,14 +558,14 @@ impl Forge {
     async fn lens_search(
         &self,
         Parameters(req): Parameters<SearchRequest>,
-    ) -> Result<Json<SearchResponse>, ErrorData> {
+    ) -> Result<Json<SearchResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_search",
             serde_json::json!({ "queries": req.queries.len(), "limit_per_query": req.limit_per_query }),
         );
         if let Err(e) = self.ensure_index() {
             op.finish(0, 0, None, "error", "auto-index failed", None);
-            return Err(e);
+            return Err(e.into());
         }
         match self.index.search(&req.queries, req.limit_per_query) {
             Ok(resp) => {
@@ -501,7 +578,7 @@ impl Forge {
             }
             Err(e) => {
                 op.finish(0, 0, None, "error", e.to_string(), None);
-                Err(ErrorData::internal_error(e.to_string(), None))
+                Err(ToolFailure::recoverable(e.to_string()))
             }
         }
     }
@@ -513,7 +590,7 @@ impl Forge {
     async fn lens_map(
         &self,
         Parameters(req): Parameters<DiscoverRequest>,
-    ) -> Result<Json<DiscoverResponse>, ErrorData> {
+    ) -> Result<Json<DiscoverResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_map",
             serde_json::json!({ "path": req.path, "languages": req.languages }),
@@ -524,7 +601,7 @@ impl Forge {
             Ok(o) => o,
             Err(e) => {
                 op.finish(0, 0, None, "error", e.to_string(), None);
-                return Err(ErrorData::internal_error(e.to_string(), None));
+                return Err(ToolFailure::recoverable(e.to_string()));
             }
         };
         // The graph is persisted to graph.json, not returned to context; only the
@@ -540,7 +617,7 @@ impl Forge {
     async fn lens_symbol(
         &self,
         Parameters(req): Parameters<GraphQueryRequest>,
-    ) -> Result<Json<GraphView>, ErrorData> {
+    ) -> Result<Json<GraphView>, ToolFailure> {
         let op = self.ops.start(
             "lens_symbol",
             serde_json::json!({ "name": req.name, "kind": req.kind, "limit": req.limit }),
@@ -549,7 +626,7 @@ impl Forge {
             Ok(g) => g,
             Err(e) => {
                 op.finish(0, 0, None, "error", "graph build failed", None);
-                return Err(e);
+                return Err(e.into());
             }
         };
         // Session-proximity boost: symbols defined in files the user recently
@@ -569,7 +646,7 @@ impl Forge {
     async fn lens_find(
         &self,
         Parameters(req): Parameters<GraphFindRequest>,
-    ) -> Result<Json<GraphView>, ErrorData> {
+    ) -> Result<Json<GraphView>, ToolFailure> {
         let op = self.ops.start(
             "lens_find",
             serde_json::json!({ "query": req.query, "limit": req.limit }),
@@ -578,7 +655,7 @@ impl Forge {
             Ok(g) => g,
             Err(e) => {
                 op.finish(0, 0, None, "error", "graph build failed", None);
-                return Err(e);
+                return Err(e.into());
             }
         };
         let view = gquery::find(&graph, &req.query, req.limit);
@@ -595,7 +672,7 @@ impl Forge {
     async fn lens_links(
         &self,
         Parameters(req): Parameters<GraphNeighborsRequest>,
-    ) -> Result<Json<GraphView>, ErrorData> {
+    ) -> Result<Json<GraphView>, ToolFailure> {
         let op = self.ops.start(
             "lens_links",
             serde_json::json!({ "node_id": req.node_id, "depth": req.depth }),
@@ -604,7 +681,7 @@ impl Forge {
             Ok(g) => g,
             Err(e) => {
                 op.finish(0, 0, None, "error", "graph build failed", None);
-                return Err(e);
+                return Err(e.into());
             }
         };
         let view = gquery::neighbors(&graph, &req.node_id, req.depth);
@@ -621,7 +698,7 @@ impl Forge {
     async fn lens_path(
         &self,
         Parameters(req): Parameters<GraphPathRequest>,
-    ) -> Result<Json<PathResponse>, ErrorData> {
+    ) -> Result<Json<PathResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_path",
             serde_json::json!({ "from": req.from, "to": req.to }),
@@ -630,7 +707,7 @@ impl Forge {
             Ok(g) => g,
             Err(e) => {
                 op.finish(0, 0, None, "error", "graph build failed", None);
-                return Err(e);
+                return Err(e.into());
             }
         };
         let resp = gquery::path(&graph, &req.from, &req.to);
@@ -648,7 +725,7 @@ impl Forge {
     async fn lens_overview(
         &self,
         Parameters(req): Parameters<OverviewRequest>,
-    ) -> Result<Json<OverviewResponse>, ErrorData> {
+    ) -> Result<Json<OverviewResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_overview",
             serde_json::json!({ "token_budget": req.token_budget }),
@@ -657,7 +734,7 @@ impl Forge {
             Ok(g) => g,
             Err(e) => {
                 op.finish(0, 0, None, "error", "graph build failed", None);
-                return Err(e);
+                return Err(e.into());
             }
         };
         let overview = gquery::overview(&graph, req.token_budget);
@@ -676,7 +753,7 @@ impl Forge {
     async fn lens_grep_ast(
         &self,
         Parameters(req): Parameters<GrepAstRequest>,
-    ) -> Result<Json<GrepAstResponse>, ErrorData> {
+    ) -> Result<Json<GrepAstResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_grep_ast",
             serde_json::json!({ "path": req.path, "language": req.language, "limit": req.limit }),
@@ -699,7 +776,7 @@ impl Forge {
             }
             Err(e) => {
                 op.finish(0, 0, None, "error", e.to_string(), None);
-                Err(ErrorData::internal_error(e.to_string(), None))
+                Err(ToolFailure::recoverable(e.to_string()))
             }
         }
     }
@@ -711,7 +788,7 @@ impl Forge {
     async fn lens_stats(
         &self,
         Parameters(_): Parameters<EmptyRequest>,
-    ) -> Result<Json<StatsResponse>, ErrorData> {
+    ) -> Result<Json<StatsResponse>, ToolFailure> {
         let op = self.ops.start("lens_stats", serde_json::json!({}));
         let s = &self.store;
         let read = |k: &str| s.get_stat(k).unwrap_or(0);
@@ -793,6 +870,20 @@ impl ServerHandler for Forge {
                 serde_json::Value::Bool(true),
             );
             tool.meta = Some(meta);
+            // Read-only tools carry `readOnlyHint` so Claude Code can auto-approve them;
+            // without it an unattended agent stalls on a permission prompt even for a
+            // pure-read call like lens_overview (Bug B).
+            if READ_ONLY_TOOLS.contains(&tool.name.as_ref()) {
+                let ann = tool.annotations.take().unwrap_or_default().read_only(true);
+                tool.annotations = Some(ann);
+            }
+            // Prime the search tools with the recovery path up front, so the model knows
+            // what to do if a call comes back is_error (a transient lock).
+            if tool.name.as_ref() == "lens_search" || tool.name.as_ref() == "lens_overview" {
+                if let Some(desc) = tool.description.take() {
+                    tool.description = Some(format!("{desc}{SEARCH_FALLBACK_HINT}").into());
+                }
+            }
         }
         Ok(rmcp::model::ListToolsResult {
             tools,

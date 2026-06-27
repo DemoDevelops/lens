@@ -18,6 +18,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
 use crate::rtk;
+use crate::server::READ_ONLY_TOOLS;
 use crate::session;
 
 /// Routing levels accepted by `--routing` (mirrors `routing::Level::parse`).
@@ -102,6 +103,11 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     // 5. Routing level.
     set_routing(&settings, &opts.routing).context("setting routing level")?;
     say(&format!("Set routing level: {}", opts.routing));
+
+    // 5b. Pre-approve the read-only lens tools so an unattended agent is never blocked
+    //     on a permission prompt for a pure-read call.
+    allow_readonly_tools(&settings).context("allow-listing read-only tools")?;
+    say("Allow-listed read-only lens tools.");
 
     // 6. PATH — so `lens` works as a bare command in new shells.
     let path_added = ensure_on_path(&opts.bin_dir);
@@ -271,6 +277,39 @@ fn set_routing(settings: &Path, level: &str) -> Result<()> {
     env.as_object_mut()
         .unwrap()
         .insert("LENS_ROUTING".to_string(), json!(level));
+    write_json(settings, &root)
+}
+
+/// Merge `permissions.allow` entries `mcp__lens__<tool>` for the read-only lens tools
+/// into `settings`, preserving existing entries (idempotent, no duplicates). Claude
+/// Code then auto-runs a read-only lens call instead of prompting, so an unattended
+/// agent never stalls on a permission dialog (Bug B). The tool list is
+/// [`READ_ONLY_TOOLS`], shared with the server's `list_tools` annotations.
+fn allow_readonly_tools(settings: &Path) -> Result<()> {
+    let mut root = read_json(settings)?;
+    if !root.is_object() {
+        root = json!({});
+    }
+    let obj = root.as_object_mut().unwrap();
+    let perms = obj.entry("permissions").or_insert_with(|| json!({}));
+    if !perms.is_object() {
+        *perms = json!({});
+    }
+    let allow = perms
+        .as_object_mut()
+        .unwrap()
+        .entry("allow")
+        .or_insert_with(|| json!([]));
+    if !allow.is_array() {
+        *allow = json!([]);
+    }
+    let arr = allow.as_array_mut().unwrap();
+    for tool in READ_ONLY_TOOLS {
+        let entry = Value::from(format!("mcp__lens__{tool}"));
+        if !arr.contains(&entry) {
+            arr.push(entry);
+        }
+    }
     write_json(settings, &root)
 }
 
@@ -629,6 +668,38 @@ mod tests {
         set_routing(&settings, "nudge").unwrap();
         let root = read_json(&settings).unwrap();
         assert_eq!(root["env"]["LENS_ROUTING"], "nudge");
+    }
+
+    #[test]
+    fn allow_readonly_tools_merges_and_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            serde_json::to_string_pretty(&json!({ "env": { "EXISTING": "1" } })).unwrap(),
+        )
+        .unwrap();
+
+        allow_readonly_tools(&settings).unwrap();
+        let root = read_json(&settings).unwrap();
+        let allow = root["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            allow.iter().any(|v| v == "mcp__lens__lens_search"),
+            "read-only search tool must be allow-listed"
+        );
+        assert!(allow.iter().any(|v| v == "mcp__lens__lens_overview"));
+        assert_eq!(root["env"]["EXISTING"], "1", "other keys preserved");
+
+        // Re-running must not duplicate entries.
+        allow_readonly_tools(&settings).unwrap();
+        let root2 = read_json(&settings).unwrap();
+        let count = root2["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| *v == "mcp__lens__lens_search")
+            .count();
+        assert_eq!(count, 1, "re-run must not duplicate allow entries");
     }
 
     #[test]

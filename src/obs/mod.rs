@@ -330,11 +330,29 @@ impl OpHandle {
 // SQLite concurrency plumbing (shared by every lens DB)
 // ---------------------------------------------------------------------------
 
+/// Default busy-handler retry ceiling (~10 s at 1 ms/retry), matching the previous
+/// `busy_timeout`. A fresh multi-repo `lens index` can hold the write lock for the
+/// whole walk; overriding this via `LENS_BUSY_MS` lets a starved second writer fail
+/// fast instead of blocking ~10 s on the busy handler.
+const DEFAULT_BUSY_CEILING: u64 = 10_000;
+
+/// Busy-handler retry ceiling, in ~1 ms units (so effectively a millisecond budget).
+/// Process-global because rusqlite's busy handler is a bare `fn` that cannot capture
+/// state; re-seeded from `LENS_BUSY_MS` (or the default) on every [`configure_conn`].
+pub static BUSY_CEILING_MS: AtomicU64 = AtomicU64::new(DEFAULT_BUSY_CEILING);
+
 /// Configure a freshly-opened lens SQLite connection for safe concurrent
 /// use: WAL journaling (concurrent readers don't block the single writer) plus a
 /// busy handler that retries on contention instead of erroring with "database is
 /// locked", while accumulating waited time into [`LOCK_WAIT_MS`].
 pub fn configure_conn(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    // Cap how long a writer retries on a locked DB before giving up (default ~10 s).
+    // Read here, once per connection, rather than on every 1 ms retry in the handler.
+    let ceiling = std::env::var("LENS_BUSY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_BUSY_CEILING);
+    BUSY_CEILING_MS.store(ceiling, Ordering::Relaxed);
     conn.busy_handler(Some(busy_handler))?;
     // WAL keeps concurrent readers from blocking the single writer. synchronous=NORMAL
     // under WAL fsyncs on checkpoint instead of on every commit (bench_tuning W2:
@@ -347,11 +365,12 @@ pub fn configure_conn(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Busy handler: sleep ~1 ms per retry (≈10 s ceiling, matching the previous
-/// busy_timeout) and record the wait. `count` is the number of prior retries for
-/// this lock event. Returning `false` gives up (surfaces SQLITE_BUSY).
+/// Busy handler: sleep ~1 ms per retry and record the wait, giving up once retries
+/// pass [`BUSY_CEILING_MS`] (so the total wait is ~that many ms). `count` is the
+/// number of prior retries for this lock event. Returning `false` gives up
+/// (surfaces SQLITE_BUSY).
 fn busy_handler(count: i32) -> bool {
-    if count > 10_000 {
+    if count as u64 > BUSY_CEILING_MS.load(Ordering::Relaxed) {
         return false;
     }
     std::thread::sleep(Duration::from_millis(1));

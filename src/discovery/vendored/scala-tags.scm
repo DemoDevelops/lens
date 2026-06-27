@@ -1,3 +1,6 @@
+; Vendored verbatim from tree-sitter/tree-sitter-scala (queries/tags.scm).
+; MIT License, Copyright (c) 2018 Max Brunsfeld and GitHub. See THIRD-PARTY-LICENSES.md.
+
 ; Definitions
 
 (package_clause

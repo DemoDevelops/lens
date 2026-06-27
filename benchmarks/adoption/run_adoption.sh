@@ -24,7 +24,7 @@
 #   benchmarks/adoption/run_adoption.sh --runs 3     # N runs per feature
 set -uo pipefail
 
-REPO="/Users/gene/Documents/AI Stuff/lens"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="$REPO/target/release/lens"
 LIVE_CFG="$HOME/.claude-personal"
 OPSLOG="$REPO/.lens/ops.log"

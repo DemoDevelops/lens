@@ -747,30 +747,29 @@ impl ServerHandler for Forge {
         info.capabilities = rmcp::model::ServerCapabilities::builder()
             .enable_tools()
             .build();
-        // Imperative tool-selection guidance (adapted from context-mode's CLAUDE.md
-        // prose; tool names mapped to lens). The MCP `instructions` ship on every
+        // Imperative tool-selection guidance. The MCP `instructions` ship on every
         // session handshake regardless of routing, so this is the always-on layer.
         info.instructions = Some(
-            "Raw tool output floods your context window and costs reasoning capacity for \
-             the rest of the session. Keep raw data in the lens darkroom and surface \
-             only the derived answer.\n\
-             THINK IN CODE: to analyze, count, filter, search, parse, or transform data, \
-             write a script via lens_run(language, code) and print only the answer — do \
-             NOT read raw data into context. One script replaces many tool calls.\n\
-             TOOL SELECTION: (1) code structure (who-calls-what, imports, how A reaches B, \
-             where a symbol lives) → lens_map once, then lens_symbol / lens_links / \
-             lens_path on a scoped subgraph instead of reading many files. (2) where is X \
-             mentioned → lens_index then lens_search(queries). (3) derive an answer FROM data \
-             or a file → lens_run / lens_run_file. (4) a source file's structure/API without its bodies → lens_skeleton (full text \
-             recoverable via lens_recall). (5) recover an offloaded result → lens_recall. \
-             (6) savings → lens_stats.\n\
-             RULES: DO NOT use Read to analyze a file — use lens_run_file (Read is correct \
-             only when you will Edit it). DO NOT use Grep/Bash to count, filter, or aggregate \
-             — use lens_search, lens_symbol, or lens_run. DO NOT use WebFetch — fetch and \
-             reduce the URL with lens_run. If a ctx_*/graph_* tool is reported not-found, \
-             it is deferred: load it with ToolSearch and retry — do not fall back to raw \
-             tools. Bash/Read stay correct for short fixed output or mutating state \
-             (git, mkdir, rm, mv, navigation)."
+            "lens keeps large tool output out of the model's context so it doesn't keep \
+             costing tokens on every later turn. Work over data in code and return only \
+             the result.\n\
+             WRITE A SCRIPT INSTEAD OF READING THE DATA: to count, filter, search, parse, \
+             reshape, or summarize anything, do it inside lens_run(language, code) and print \
+             just the answer rather than pulling the raw input into context. One lens_run \
+             usually stands in for a pile of Read/Grep/Bash calls.\n\
+             PICKING A TOOL: (1) code structure (who calls what, imports, where a symbol is \
+             defined, how A reaches B) → lens_map once, then lens_symbol / lens_links / \
+             lens_path over the subgraph. (2) where X appears → lens_index, then \
+             lens_search(queries). (3) an answer derived from data or a file → lens_run / \
+             lens_run_file. (4) a file's structure/API without the bodies → lens_skeleton \
+             (full text via lens_recall). (5) getting back something offloaded → lens_recall. \
+             (6) savings so far → lens_stats.\n\
+             WHEN PLAIN TOOLS ARE STILL RIGHT: use lens_run_file rather than Read to analyze a \
+             file (Read is for when you'll Edit it); use lens_run rather than Grep/Bash when \
+             you'll count or aggregate; fetch URLs through lens_run, not WebFetch. If a lens_* \
+             tool reports not-found its schema isn't loaded — register it with ToolSearch and \
+             retry. Plain Bash and Read stay correct for short output you just want to see, or \
+             for changing state."
                 .into(),
         );
         info

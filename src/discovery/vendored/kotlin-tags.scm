@@ -1,3 +1,6 @@
+; Vendored verbatim from fwcd/tree-sitter-kotlin (queries/tags.scm).
+; MIT License, Copyright (c) 2019 fwcd. See THIRD-PARTY-LICENSES.md.
+
 ; Classes
 (class_declaration
   (type_identifier) @name) @definition.class

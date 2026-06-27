@@ -84,9 +84,9 @@ pub fn run_cli(args: &[String]) -> Result<()> {
 }
 
 /// `--config-dir <dir>` -> `<dir>/settings.json`; `--settings <file>` -> that
-/// file. Lets you target a specific account's config (e.g. `~/.claude-personal`
-/// vs the work `~/.claude`) without relying on ambient env. Flags follow the
-/// subcommand: `lens session install --config-dir ~/.claude-personal`.
+/// file. Lets you point at a specific config dir explicitly instead of relying
+/// on ambient `$CLAUDE_CONFIG_DIR`. Flags follow the subcommand:
+/// `lens session install --config-dir <dir>`.
 fn settings_override(args: &[String]) -> Option<PathBuf> {
     let mut i = 0;
     while i < args.len() {
@@ -102,7 +102,7 @@ fn settings_override(args: &[String]) -> Option<PathBuf> {
 
 /// Resolve the settings.json to write, by precedence: an explicit CLI override
 /// (`--config-dir`/`--settings`), then `LENS_SETTINGS`, then the dir THIS Claude
-/// Code reads (`$CLAUDE_CONFIG_DIR` if set, e.g. `~/.claude-personal`, else
+/// Code reads (`$CLAUDE_CONFIG_DIR` if set, else
 /// `~/.claude`). Mirrors the RTK side (`rtk::claude_settings_path`) so session +
 /// rtk hooks land in the same settings.json.
 fn settings_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
@@ -421,8 +421,8 @@ mod tests {
     fn settings_override_parses_config_dir_and_settings() {
         let s = |a: &[&str]| super::settings_override(&a.iter().map(|x| x.to_string()).collect::<Vec<_>>());
         assert_eq!(
-            s(&["install", "--config-dir", "/x/.claude-personal"]),
-            Some(PathBuf::from("/x/.claude-personal/settings.json"))
+            s(&["install", "--config-dir", "/x/cfg"]),
+            Some(PathBuf::from("/x/cfg/settings.json"))
         );
         assert_eq!(
             s(&["install", "--settings", "/x/custom.json"]),

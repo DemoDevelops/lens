@@ -21,11 +21,14 @@ use accuracy::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Backend precedence: explicit `LENS_BENCH_BACKEND=claude-pty` (bills to
-    // plan quota via interactive Claude Code) > Anthropic API key > mock.
+    // Backend precedence: explicit `LENS_BENCH_BACKEND=claude-headless|claude-pty`
+    // (both bill plan quota via Claude Code) > Anthropic API key > mock.
     let backend = std::env::var("LENS_BENCH_BACKEND").unwrap_or_default();
     let has_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
-    let (model, pending, mode) = if backend == "claude-pty" {
+    let (model, pending, mode) = if backend == "claude-headless" || backend == "headless" {
+        eprintln!("running accuracy harness via headless claude -p (plan quota, tools disabled)");
+        (Model::ClaudeHeadless(default_model()), false, "real")
+    } else if backend == "claude-pty" || backend == "pty" {
         eprintln!("running accuracy harness via claude-pty (plan quota, tools disabled)");
         (Model::ClaudePty(default_model()), false, "real")
     } else if has_key {

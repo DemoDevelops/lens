@@ -113,6 +113,11 @@ pub enum Model {
     /// (the control/treatment context), exactly like the API arm. The string is
     /// the `--model` passed to `claude-pty` (empty = the session default).
     ClaudePty(String),
+    /// Real model driven through headless `claude -p --output-format json`. Same
+    /// plan-quota billing and tools-off isolation as `ClaudePty`, but the answer
+    /// arrives as structured JSON (`.result`) instead of a PTY screen scrape. The
+    /// string is the `--model` passed to `claude` (empty = the session default).
+    ClaudeHeadless(String),
 }
 
 impl Model {
@@ -122,6 +127,8 @@ impl Model {
             Model::Anthropic(m) => m.clone(),
             Model::ClaudePty(m) if m.is_empty() => "claude-pty".to_string(),
             Model::ClaudePty(m) => format!("{m} (via claude-pty)"),
+            Model::ClaudeHeadless(m) if m.is_empty() => "claude-headless".to_string(),
+            Model::ClaudeHeadless(m) => format!("{m} (via claude-headless)"),
         }
     }
 }
@@ -173,6 +180,12 @@ fn run_arm(task: &Task, model: &Model, context: &str) -> anyhow::Result<ArmResul
             let user = format_user(context, &task.prompt, &task.ground_truth);
             let raw = call_claude_pty(model, SYSTEM_PROMPT, &user)
                 .map_err(|e| anyhow::anyhow!("claude-pty call failed: {e}"))?;
+            extract_json(&raw)
+        }
+        Model::ClaudeHeadless(model) => {
+            let user = format_user(context, &task.prompt, &task.ground_truth);
+            let raw = call_claude_headless(model, SYSTEM_PROMPT, &user)
+                .map_err(|e| anyhow::anyhow!("claude headless call failed: {e}"))?;
             extract_json(&raw)
         }
     };
@@ -457,6 +470,77 @@ fn claude_pty_attempt(prompt: &str, model: &str) -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr)
         )),
     }
+}
+
+/// Drive a real model through headless `claude -p --output-format json`. Same
+/// plan-quota billing and tools-off isolation as `call_claude_pty`, but the
+/// answer comes back as structured JSON, so no screen scrape.
+fn call_claude_headless(model: &str, system: &str, user: &str) -> Result<String, String> {
+    let prompt = format!("{system}\n\n{user}");
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        match claude_headless_attempt(&prompt, model) {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                eprintln!("  claude headless attempt {} failed: {e}", attempt + 1);
+                last_err = e;
+            }
+        }
+    }
+    Err(last_err)
+}
+
+/// One headless call. `--output-format json` returns an envelope whose `.result`
+/// is the model's final text (carrying the answer JSON). `perl alarm` is a
+/// portable 120s wall-clock bound (headless has no `--timeout`, macOS no `timeout`).
+fn claude_headless_attempt(prompt: &str, model: &str) -> Result<String, String> {
+    let workdir = env!("CARGO_MANIFEST_DIR"); // trusted; tools are off regardless
+    let mut cmd = Command::new("perl");
+    cmd.current_dir(workdir)
+        .args(["-e", "alarm shift; exec @ARGV", "120"])
+        .arg("claude")
+        .arg("-p")
+        .arg(prompt)
+        .args(["--output-format", "json"])
+        .args(["--allowedTools", ""]) // disable all tools — answer from prompt only
+        .args(["--effort", "low"]);
+    if !model.is_empty() {
+        cmd.args(["--model", model]);
+    }
+    let out = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawning claude: {e}"))?
+        .wait_with_output()
+        .map_err(|e| format!("waiting on claude: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let resp: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+        format!(
+            "claude headless non-JSON stdout (status {}, err {e}, stderr: {})",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })?;
+    if resp.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(format!(
+            "claude headless is_error: {}",
+            resp.get("result").and_then(Value::as_str).unwrap_or("?")
+        ));
+    }
+    resp.get("result")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "claude headless missing .result: {}",
+                stdout.chars().take(300).collect::<String>()
+            )
+        })
 }
 
 /// Extract the last balanced `{...}` object from `s` by scanning back from the

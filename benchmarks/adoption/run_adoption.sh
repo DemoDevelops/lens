@@ -15,19 +15,26 @@
 # (lens_search/index), graph (graph_*/discovery). Compression and wrap fire
 # automatically (not an agent choice); recovery is bench_recovery.
 #
-# CONFIG: runs under your live CLAUDE_CONFIG_DIR (~/.claude-personal) so auth + trust
-# work. Completion via --completion-file. Firing measured from ops.log filtered to the
-# run's --session-id (the PostToolUse hook stamps it).
+# CONFIG: runs under your live CLAUDE_CONFIG_DIR so auth + trust
+# work. Completion: headless reads the answer from claude -p's JSON; pty uses
+# --completion-file. Firing measured from ops.log filtered to the run's
+# --session-id (the PostToolUse hook stamps it).
 #
 # Usage:
 #   benchmarks/adoption/run_adoption.sh --validate   # 1 run per feature, verbose
 #   benchmarks/adoption/run_adoption.sh --runs 3     # N runs per feature
+#   LENS_BENCH_BACKEND=pty ... --validate            # use claude-pty instead of headless
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="$REPO/target/release/lens"
-LIVE_CFG="$HOME/.claude-personal"
+LIVE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"   # your local Claude config (auth + plan quota)
 OPSLOG="$REPO/.lens/ops.log"
+# headless (claude -p, structured JSON) | pty (claude-pty). Accept either spelling.
+case "${LENS_BENCH_BACKEND:-headless}" in
+  pty|claude-pty) BACKEND=pty ;;
+  *)              BACKEND=headless ;;
+esac
 
 ALLOWED="Read,Grep,Glob,Bash,Write,ToolSearch,mcp__lens__lens_symbol,mcp__lens__lens_links,mcp__lens__lens_path,mcp__lens__lens_search,mcp__lens__lens_index,mcp__lens__lens_map,mcp__lens__lens_run,mcp__lens__lens_run_file,mcp__lens__lens_recall"
 
@@ -49,7 +56,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-command -v claude-pty >/dev/null || { echo "claude-pty not on PATH"; exit 1; }
+if [ "$BACKEND" = pty ]; then
+  command -v claude-pty >/dev/null || { echo "claude-pty not on PATH"; exit 1; }
+else
+  command -v claude >/dev/null || { echo "claude not on PATH"; exit 1; }
+  command -v jq >/dev/null || { echo "jq not on PATH"; exit 1; }
+fi
 [ -f "$BIN" ] || { echo "binary missing: $BIN (cargo build --release)"; exit 1; }
 
 OUT=$(mktemp -d)
@@ -90,30 +102,45 @@ PY
 
 run_one() {
   local feature="$1" mech="$2" task="$3" tag="$4"
-  local uuid comp full_task
+  local uuid comp
   uuid=$(python3 -c 'import uuid; print(uuid.uuid4())')
   comp="$OUT/$tag.done"
-  full_task="$task
+  if [ "$VALIDATE" = 1 ]; then
+    { echo "  feature=$feature expected=$mech session=$uuid backend=$BACKEND"; } >&2
+  fi
+  if [ "$BACKEND" = pty ]; then
+    local full_task="$task
 
 When finished, write your full final answer to the file $comp, and make its very last line exactly: DONE"
-  if [ "$VALIDATE" = 1 ]; then
-    { echo "  feature=$feature expected=$mech session=$uuid"; } >&2
+    echo "$full_task" | \
+      CLAUDE_CONFIG_DIR="$LIVE_CFG" \
+      LENS_ROUTING="full" \
+      claude-pty \
+        --working-dir "$REPO" \
+        --session-id "$uuid" \
+        --allowed-tools "$ALLOWED" \
+        --dangerously-skip-permissions \
+        --completion-file "$comp" \
+        --completion-marker "DONE" \
+        --max-tool-calls 40 \
+        --timeout 360 \
+        > "$OUT/$tag.stdout.txt" 2> "$OUT/$tag.err.txt"
+    sleep 1
+    [ -f "$comp" ] && sed '/^DONE$/d' "$comp" > "$OUT/$tag.answer.txt"
+  else
+    # headless: claude -p returns the final answer as JSON on stdout, so no
+    # completion-file dance. perl alarm = portable 360s wall-clock bound (no
+    # coreutils timeout on macOS). cd into REPO so MCP/hooks/.lens resolve.
+    ( cd "$REPO" && perl -e 'alarm shift; exec @ARGV' 360 \
+        env CLAUDE_CONFIG_DIR="$LIVE_CFG" LENS_ROUTING="full" \
+        claude -p "$task" \
+          --output-format json \
+          --allowedTools ${ALLOWED//,/ } \
+          --session-id "$uuid" \
+          --dangerously-skip-permissions \
+    ) > "$OUT/$tag.json" 2> "$OUT/$tag.err.txt"
+    jq -r '.result // empty' "$OUT/$tag.json" > "$OUT/$tag.answer.txt" 2>/dev/null
   fi
-  echo "$full_task" | \
-    CLAUDE_CONFIG_DIR="$LIVE_CFG" \
-    LENS_ROUTING="full" \
-    claude-pty \
-      --working-dir "$REPO" \
-      --session-id "$uuid" \
-      --allowed-tools "$ALLOWED" \
-      --dangerously-skip-permissions \
-      --completion-file "$comp" \
-      --completion-marker "DONE" \
-      --max-tool-calls 40 \
-      --timeout 360 \
-      > "$OUT/$tag.stdout.txt" 2> "$OUT/$tag.err.txt"
-  sleep 1
-  [ -f "$comp" ] && sed '/^DONE$/d' "$comp" > "$OUT/$tag.answer.txt"
   read -r fired tools <<< "$(count_fired "$uuid" "$mech")"
   printf '%s\t%s\t%s\n' "$feature" "$fired" "$tools" >> "$TSV"
   echo "$fired $tools"

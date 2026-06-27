@@ -61,7 +61,7 @@ cargo build --release
 
 Routing defaults to the safe `nudge` level (encourages the lens tools, never denies WebFetch or rewrites commands). `--full` turns on the aggressive routing (WebFetch and noisy commands redirected into the darkroom) plus RTK. Change it anytime with `lens setup --routing <off|nudge|steer|wrap|full>`.
 
-For multiple Claude accounts, target a config dir: `lens setup --config-dir ~/.claude-personal`. Supported: macOS (arm64, x64), Linux (x64).
+Target a specific config dir: `lens setup --config-dir <dir>`. Supported: macOS (arm64, x64), Linux (x64).
 
 Update later with `lens update`: it checks for a newer release, downloads the matching binary, and re-applies setup (preserving your routing level). It uses `gh` for the private repo, so run `gh auth login` once. Without `gh`, re-run `setup` with a newer binary instead.
 

@@ -63,9 +63,9 @@ The §0.1 diagnostic: savings that *rise* with size mean the fixture was too sma
 
 | Workload | Mechanism | Scale | Before (bytes) | After (bytes) | Savings |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Code search | index | 1× | 15,915 | 9,996 | 37% |
-| Code search | index | 10× | 160,230 | 9,780 | 94% |
-| Code search | index | 50× | 802,110 | 9,812 | 99% |
+| Code search | index | 1× | 15,915 | 10,236 | 36% |
+| Code search | index | 10× | 160,230 | 10,020 | 94% |
+| Code search | index | 50× | 802,110 | 10,052 | 99% |
 | Issue triage | compression | 1× | 8,902 | 3,327 | 63% |
 | Issue triage | compression | 10× | 94,195 | 31,323 | 67% |
 | Issue triage | compression | 50× | 476,155 | 158,287 | 67% |

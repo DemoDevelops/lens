@@ -251,6 +251,10 @@ pub enum Model {
     /// disabled so the model answers only from the recovered context. The string
     /// is the `--model` passed to `claude-pty` (empty = session default).
     ClaudePty(String),
+    /// Real model via headless `claude -p --output-format json`. Same plan-quota
+    /// billing and tools-off isolation as `ClaudePty`; the answer arrives as
+    /// structured JSON (`.result`). The string is the `--model` (empty = default).
+    ClaudeHeadless(String),
 }
 
 impl Model {
@@ -260,6 +264,8 @@ impl Model {
             Model::Anthropic(m) => m.clone(),
             Model::ClaudePty(m) if m.is_empty() => "claude-pty".into(),
             Model::ClaudePty(m) => format!("{m} (via claude-pty)"),
+            Model::ClaudeHeadless(m) if m.is_empty() => "claude-headless".into(),
+            Model::ClaudeHeadless(m) => format!("{m} (via claude-headless)"),
         }
     }
 }
@@ -333,6 +339,16 @@ fn answer(model: &Model, ctx: &str, scenario: &Scenario) -> Value {
                 Ok(obj) => extract_json(&obj),
                 Err(e) => {
                     eprintln!("claude-pty call failed: {e}");
+                    json!({})
+                }
+            }
+        }
+        Model::ClaudeHeadless(m) => {
+            let user = format_user(ctx, &scenario.followup, &scenario.ground_truth);
+            match call_claude_headless(m, SYSTEM_PROMPT, &user) {
+                Ok(obj) => extract_json(&obj),
+                Err(e) => {
+                    eprintln!("claude headless call failed: {e}");
                     json!({})
                 }
             }
@@ -458,6 +474,58 @@ fn call_claude_pty(model: &str, system: &str, user: &str) -> Result<String, Stri
             String::from_utf8_lossy(&out.stderr)
         )
     })
+}
+
+/// Drive a real model through headless `claude -p --output-format json`. Same
+/// plan-quota billing and tools-off isolation as `call_claude_pty`; the answer
+/// comes back as structured JSON (`.result`), so no screen scrape. `perl alarm`
+/// is a portable 120s bound (headless has no `--timeout`, macOS no `timeout`).
+fn call_claude_headless(model: &str, system: &str, user: &str) -> Result<String, String> {
+    let prompt = format!("{system}\n\n{user}");
+    let workdir = env!("CARGO_MANIFEST_DIR");
+    let mut cmd = Command::new("perl");
+    cmd.current_dir(workdir)
+        .args(["-e", "alarm shift; exec @ARGV", "120"])
+        .arg("claude")
+        .arg("-p")
+        .arg(&prompt)
+        .args(["--output-format", "json"])
+        .args(["--allowedTools", ""])
+        .args(["--effort", "low"]);
+    if !model.is_empty() {
+        cmd.args(["--model", model]);
+    }
+    let out = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawning claude: {e}"))?
+        .wait_with_output()
+        .map_err(|e| format!("waiting on claude: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let resp: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+        format!(
+            "claude headless non-JSON stdout (status {}, err {e}, stderr: {})",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })?;
+    if resp.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(format!(
+            "claude headless is_error: {}",
+            resp.get("result").and_then(Value::as_str).unwrap_or("?")
+        ));
+    }
+    resp.get("result")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "claude headless missing .result: {}",
+                stdout.chars().take(300).collect::<String>()
+            )
+        })
 }
 
 /// Extract the last balanced `{...}` object from `s` (robust to the prompt echo

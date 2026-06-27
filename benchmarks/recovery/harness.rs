@@ -23,11 +23,14 @@ use recovery::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // `LENS_BENCH_BACKEND=claude-pty` bills to plan quota via interactive
-    // Claude Code; otherwise Anthropic API key > mock.
+    // `LENS_BENCH_BACKEND=claude-headless|claude-pty` bills plan quota via Claude
+    // Code; otherwise Anthropic API key > mock.
     let backend = std::env::var("LENS_BENCH_BACKEND").unwrap_or_default();
     let has_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
-    let (model, pending, mode) = if backend == "claude-pty" {
+    let (model, pending, mode) = if backend == "claude-headless" || backend == "headless" {
+        eprintln!("running recovery harness via headless claude -p (plan quota, tools disabled)");
+        (Model::ClaudeHeadless(default_model()), false, "real")
+    } else if backend == "claude-pty" || backend == "pty" {
         eprintln!("running recovery harness via claude-pty (plan quota, tools disabled)");
         (Model::ClaudePty(default_model()), false, "real")
     } else if has_key {

@@ -148,7 +148,7 @@ pub fn run_rtk(args: &[&str]) -> Result<std::process::Output> {
 ///
 /// NB: `rtk init --global` (v0.28.2) ignores `$CLAUDE_CONFIG_DIR` and always writes
 /// to `dirs::home_dir()/.claude` (see [`rtk_default_hook_script`]). So when
-/// `$CLAUDE_CONFIG_DIR` differs (e.g. this machine's `~/.claude-personal`), lens
+/// `$CLAUDE_CONFIG_DIR` differs from `~/.claude`, lens
 /// patches the config-dir settings itself rather than relying on `rtk init`'s patch.
 pub fn claude_config_dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("CLAUDE_CONFIG_DIR") {

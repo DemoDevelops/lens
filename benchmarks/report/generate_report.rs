@@ -4,7 +4,7 @@
 //!     accuracy, recovery, small-N caveats, a short honesty footer, appendix link).
 //!   * `BENCHMARKS_APPENDIX.md` — the full audit trail (methodology, the
 //!     1×/10×/50× scale curve + classification, the Context Mode `n/a` reasoning,
-//!     the discovery-regression investigation, raw-bytes baselines).
+//!     raw-bytes baselines).
 //!
 //!   cargo run --bin bench_report
 //!
@@ -69,7 +69,7 @@ scored against deterministic ground truth. The result we want to state honestly
 is **Δ acc ≈ 0 with a large token reduction**. A negative Δ on any mechanism is
 surfaced loudly: it means that mechanism is dropping load-bearing context.
 
-With neither `LENS_BENCH_BACKEND=claude-pty` (plan quota) nor `ANTHROPIC_API_KEY`,
+With neither `LENS_BENCH_BACKEND` (plan quota) nor `ANTHROPIC_API_KEY`,
 the accuracy harness runs in **mock mode** (a context-presence oracle that tests
 scoring/plumbing only) and the table below is marked pending a real-model run.
 
@@ -103,7 +103,7 @@ which drives CM's real hook scripts.
 /// methodology essay (that lives in the appendix).
 const INTRO: &str = r#"lens is an MCP tool provider that keeps work **out** of the agent's context window: it indexes, darkroomes, compresses, and graphs data so the bytes a naive agent would read never enter context. The tables below are the measured results.
 
-_Full scale curves, mechanism classifications, the discovery-regression investigation, and methodology are in [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md)._
+_Full scale curves, mechanism classifications, and methodology are in [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md)._
 
 "#;
 
@@ -113,23 +113,7 @@ const RECOVERY_INTRO: &str = "Proves the Context Mode replacement: each scenario
 
 /// Short two-sentence honesty footer for the clean doc (§2.5).
 const HONESTY_FOOTER: &str = r#"- Context Mode has no JSON-compactor or code-graph equivalent, so three of the four savings workloads have no faithful Context Mode head-to-head (full per-cell reasoning in the appendix); the one faithful Context Mode comparison is **session recovery**, above.
-- The real-model runs were obtained via `claude-pty` on plan quota; the supported path for reproduction is a direct `ANTHROPIC_API_KEY` run (see the appendix and [benchmarks/README.md](benchmarks/README.md)).
-"#;
-
-/// The discovery-regression investigation — the apparatus catching its own bad
-/// number. Same trail recorded in DECISIONS.md, kept whole in the appendix.
-const DISCOVERY_INVESTIGATION: &str = r#"## The discovery-regression investigation
-
-This is the proof the apparatus catches its own bad numbers; it is kept whole.
-
-The first real accuracy run, on `claude-haiku-4-5`, showed **discovery −33pp** (N = 3, so one task = 33pp). The generator's auto-warning fired — it flags *any* negative aggregate delta as "dropping load-bearing context". Per-task investigation showed the opposite. The one regressing task (`0008_reachable_path`, "can `handle_request` reach `connect_db`?") has a treatment context — the `lens_path` op — that returns the **correct** answer (`found:true`, full path `handle_request → fetch_user → connect_db`), *more* explicit than the raw-file control, yet Haiku still answered `reachable:false`. That is a weak-model reasoning slip on a correct context, **not** a lens context-drop.
-
-Re-running just the discovery set on `claude-sonnet-4-6` (same backend) confirmed it: discovery returns to **100% / 100% (+0pp)**, with `0008` answering `reachable:yes`. The slip disappears on the stronger model.
-
-A later run on `claude-opus-4-8` surfaced the same task's *other* form trap: `0008`'s `lens_path` treatment context carries `found:true`, which primes the model to answer the boolean `{"reachable": true}` rather than the string `"yes"` the prompt requests. The path is correct; only the form differs. The scorer now normalizes yes/no ↔ true/false (a reachability predicate means the same thing either way), so a correct boolean no longer masquerades as a −33pp context-drop.
-
-Lesson, encoded in `bench_report`: a negative aggregate delta is *necessary-not-sufficient* evidence of a context-drop. The ⚠️ on the aggregate is a heuristic; per-task plus cross-model checks separate a real regression from model noise before the table is trusted.
-
+- The real-model runs were obtained via Claude Code on plan quota; the supported path for reproduction is a direct `ANTHROPIC_API_KEY` run (see the appendix and [benchmarks/README.md](benchmarks/README.md)).
 "#;
 
 /// "6 / 3 / 2"-style sample-size string from a group's N column.
@@ -141,9 +125,8 @@ fn small_n(ns: &[usize]) -> String {
 }
 
 /// Build the provenance + delta-status note for a real accuracy run. Generic
-/// across models: states the claude-pty/plan-quota provenance and whether any
-/// mechanism showed a negative delta this run (the detailed cross-model
-/// investigation of the historical Haiku discovery slip lives in DECISIONS.md).
+/// across models: states the headless/plan-quota provenance and whether any
+/// mechanism showed a negative delta this run.
 fn accuracy_real_note(groups: &[accuracy::Group], model_label: &str) -> String {
     let negatives: Vec<&str> = groups
         .iter()
@@ -151,7 +134,7 @@ fn accuracy_real_note(groups: &[accuracy::Group], model_label: &str) -> String {
         .map(|g| g.mechanism.as_str())
         .collect();
     let mut s = String::from(
-        "\n> **Real run via `claude-pty`** (interactive Claude Code, plan quota — no API credit), tools disabled so each arm answers only from its given context, same isolation as a direct API call.\n",
+        "\n> **Real run via headless `claude -p`** (Claude Code, plan quota — no API credit), tools disabled so each arm answers only from its given context, same isolation as a direct API call.\n",
     );
     if negatives.is_empty() {
         s.push_str(&format!(
@@ -163,9 +146,6 @@ fn accuracy_real_note(groups: &[accuracy::Group], model_label: &str) -> String {
             negatives.join(", ")
         ));
     }
-    s.push_str(
-        ">\n> **Run-to-run variance (13-run repeat, `claude-opus-4-8`).** Treatment is deterministic: 100% in all 13 runs, every mechanism (std 0). Discovery and search control are likewise stable at 100%. Only darkroom control varies, spanning 17-67% (mean 42%, std 15.5), driven by three log-aggregation tasks (`0004`/`0005`/`0006`) that the truncated-context control answers about half the time. The treatment-over-control gap holds in every run; the precise control baseline does not, so read the darkroom control cell as one draw, not a rate.\n",
-    );
     s
 }
 
@@ -193,10 +173,10 @@ async fn main() -> anyhow::Result<()> {
             let ns: Vec<usize> = rep.groups.iter().map(|g| g.n).collect();
             let mut clean = table.clone();
             if rep.mode == "real" {
-                clean.push_str("\n> Run method: real model via `claude-pty`, tools disabled, context-only isolation — each arm answers only from its given context, exactly like a direct API call.\n");
+                clean.push_str("\n> Run method: real model via headless `claude -p`, tools disabled, context-only isolation — each arm answers only from its given context, exactly like a direct API call.\n");
             }
             clean.push_str(&format!(
-                ">\n> Samples are small (N = {}) and each task runs once. Re-running the suite 13 times on `claude-opus-4-8` found the treatment arm deterministic at 100% across every mechanism, while darkroom control alone swings 17-67% (mean ~42%): the treatment-over-control gap reproduces every run, but a single-run control figure is indicative, not a reproducible rate. Directional confirmations, not statistically powered rates.\n",
+                ">\n> Samples are small (N = {}) and each task runs once. Directional confirmations, not statistically powered rates.\n",
                 small_n(&ns)
             ));
 
@@ -242,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
 
     // --- Full audit trail BENCHMARKS_APPENDIX.md ----------------------------
     let appendix = format!(
-        "# lens benchmarks — appendix\n\n_This is the full measurement trail behind [BENCHMARKS.md](BENCHMARKS.md). Nothing here is recomputed; it is the same committed data, shown in full._\n\n{METHODOLOGY}## Savings (full)\n\n{savings_full_md}\n{scale_md}\n{ISOLATION_NOTE}## Accuracy (full)\n\n{appendix_accuracy_md}\n{DISCOVERY_INVESTIGATION}"
+        "# lens benchmarks — appendix\n\n_This is the full measurement trail behind [BENCHMARKS.md](BENCHMARKS.md). Nothing here is recomputed; it is the same committed data, shown in full._\n\n{METHODOLOGY}## Savings (full)\n\n{savings_full_md}\n{scale_md}\n{ISOLATION_NOTE}## Accuracy (full)\n\n{appendix_accuracy_md}\n"
     );
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

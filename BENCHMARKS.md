@@ -2,7 +2,7 @@
 
 lens is an MCP tool provider that keeps work **out** of the agent's context window: it indexes, darkroomes, compresses, and graphs data so the bytes a naive agent would read never enter context. The tables below are the measured results.
 
-_Full scale curves, mechanism classifications, the discovery-regression investigation, and methodology are in [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md)._
+_Full scale curves, mechanism classifications, and methodology are in [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md)._
 
 ## Savings
 
@@ -21,18 +21,18 @@ _Codebase exploration has no single honest representative number: discovery save
 
 ## Accuracy
 
-Model: `claude-opus-4-8 (via claude-pty)`
+Model: `claude-opus-4-8 (via claude-headless)`
 
 | Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Darkroom tasks | 6 | 67% | 100% | +33pp | 2999 | 111 | -2888 |
-| Discovery tasks | 3 | 67% | 100% | +33pp | 990 | 677 | -313 |
-| Search tasks | 2 | 100% | 100% | +0pp | 465 | 392 | -73 |
+| Discovery tasks | 4 | 75% | 100% | +25pp | 1708 | 2418 | +710 |
+| Search tasks | 3 | 67% | 100% | +33pp | 828 | 1160 | +332 |
 | Skeleton tasks | 2 | 0% | 100% | +100pp | 980 | 920 | -60 |
 
-> Run method: real model via `claude-pty`, tools disabled, context-only isolation — each arm answers only from its given context, exactly like a direct API call.
+> Run method: real model via headless `claude -p`, tools disabled, context-only isolation — each arm answers only from its given context, exactly like a direct API call.
 >
-> Samples are small (N = 6 / 3 / 2 / 2) and each task runs once. Re-running the suite 13 times on `claude-opus-4-8` found the treatment arm deterministic at 100% across every mechanism, while darkroom control alone swings 17-67% (mean ~42%): the treatment-over-control gap reproduces every run, but a single-run control figure is indicative, not a reproducible rate. Directional confirmations, not statistically powered rates.
+> Samples are small (N = 6 / 4 / 3 / 2) and each task runs once. Directional confirmations, not statistically powered rates.
 
 ## Session recovery
 
@@ -52,4 +52,4 @@ _Samples are small (N = 4 / 4); directional confirmations, not statistically pow
 ## Notes
 
 - Context Mode has no JSON-compactor or code-graph equivalent, so three of the four savings workloads have no faithful Context Mode head-to-head (full per-cell reasoning in the appendix); the one faithful Context Mode comparison is **session recovery**, above.
-- The real-model runs were obtained via `claude-pty` on plan quota; the supported path for reproduction is a direct `ANTHROPIC_API_KEY` run (see the appendix and [benchmarks/README.md](benchmarks/README.md)).
+- The real-model runs were obtained via Claude Code on plan quota; the supported path for reproduction is a direct `ANTHROPIC_API_KEY` run (see the appendix and [benchmarks/README.md](benchmarks/README.md)).

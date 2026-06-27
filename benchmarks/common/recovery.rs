@@ -483,6 +483,8 @@ fn call_claude_pty(model: &str, system: &str, user: &str) -> Result<String, Stri
 fn call_claude_headless(model: &str, system: &str, user: &str) -> Result<String, String> {
     let prompt = format!("{system}\n\n{user}");
     let workdir = env!("CARGO_MANIFEST_DIR");
+    // Reasoning effort, default low (short JSON answers); override with LENS_BENCH_EFFORT.
+    let effort = std::env::var("LENS_BENCH_EFFORT").unwrap_or_else(|_| "low".to_string());
     let mut cmd = Command::new("perl");
     cmd.current_dir(workdir)
         .args(["-e", "alarm shift; exec @ARGV", "120"])
@@ -491,7 +493,7 @@ fn call_claude_headless(model: &str, system: &str, user: &str) -> Result<String,
         .arg(&prompt)
         .args(["--output-format", "json"])
         .args(["--allowedTools", ""])
-        .args(["--effort", "low"]);
+        .args(["--effort", effort.as_str()]);
     if !model.is_empty() {
         cmd.args(["--model", model]);
     }

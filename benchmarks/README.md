@@ -68,17 +68,18 @@ the same model:
 Both are scored against `ground_truth`; tokens consumed are recorded.
 
 ```sh
-LENS_BENCH_BACKEND=claude-pty cargo run --bin bench_accuracy   # real model on plan quota (no API credit)
+LENS_BENCH_BACKEND=headless cargo run --bin bench_accuracy     # real model on plan quota (no API credit)
 cargo run --bin bench_accuracy                                 # ANTHROPIC_API_KEY if set, else mock
-LENS_BENCH_MODEL=claude-opus-4-8 LENS_BENCH_BACKEND=claude-pty cargo run --bin bench_accuracy
+LENS_BENCH_MODEL=claude-opus-4-8 LENS_BENCH_BACKEND=headless LENS_BENCH_EFFORT=high cargo run --bin bench_accuracy
 ```
 
-- **claude-pty backend** (`LENS_BENCH_BACKEND=claude-pty`, takes precedence over the
-  API key): each arm is answered by a real model driven through interactive Claude
-  Code on **plan quota** (no API credit), tools disabled so it answers only from the
+- **headless backend** (`LENS_BENCH_BACKEND=headless`, takes precedence over the
+  API key): each arm is answered by a real model driven through headless `claude -p`
+  on **plan quota** (no API credit), tools disabled so it answers only from the
   given context. This is the path that produced the committed `BENCHMARKS.md`
-  numbers; set the model with `LENS_BENCH_MODEL` (the docs use `claude-opus-4-8`).
-- **Real mode** (`ANTHROPIC_API_KEY` set, no claude-pty): each arm's question is
+  numbers (run with `LENS_BENCH_MODEL=claude-opus-4-8 LENS_BENCH_EFFORT=high`).
+  `LENS_BENCH_BACKEND=claude-pty` selects the older PTY backend instead.
+- **Real mode** (`ANTHROPIC_API_KEY` set, no `LENS_BENCH_BACKEND`): each arm's question is
   answered by the Anthropic API (via `curl`, so no SDK dependency). Model id defaults
   to a current small-but-capable model and is configurable via `LENS_BENCH_MODEL`.
 - **Mock mode** (no key): a **context-presence oracle** answers — it returns the

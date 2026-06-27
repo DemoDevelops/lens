@@ -10,7 +10,7 @@ Headline savings are at **realistic session scale**, not the 1× diagnostic fixt
 
 | Workload | Mechanism | Before (bytes) | After (bytes) | Savings |
 | --- | --- | ---: | ---: | ---: |
-| Code search | index | 160,230 | 9,780 | **94–99%** |
+| Code search | index | 160,230 | 10,020 | **94–99%** |
 | Log debugging | darkroom | 7,210 | 517 | **93%** |
 | Issue triage | compression | 94,195 | 31,323 | **~67%** |
 | Codebase exploration | discovery | 2,606 | 2,163 | see note |

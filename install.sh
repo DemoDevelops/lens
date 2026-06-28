@@ -4,19 +4,19 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh
 #
-# Default routing is `nudge`: it encourages the lens tools but never denies
-# WebFetch or rewrites commands. Install the aggressive mode (deny WebFetch,
-# redirect curl/build into the darkroom, wrap output, RTK shell compression) with:
+# Default is the aggressive mode: routing `full` (denies WebFetch, redirects
+# curl/build into the darkroom, wraps output) plus RTK shell compression. Opt down to
+# nudges-only (encourages the lens tools, never denies WebFetch or rewrites commands):
 #
-#   curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh -s -- --full
+#   curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | LENS_ROUTING=nudge sh
 #
 # Overrides: LENS_ROUTING=<off|nudge|steer|wrap|full>, LENS_VERSION=vX.Y.Z,
 # LENS_BIN_DIR=<dir>, CLAUDE_CONFIG_DIR=<dir>.
 set -eu
 
 REPO="DemoDevelops/lens"
-ROUTING="${LENS_ROUTING:-nudge}"
-WITH_RTK=0
+ROUTING="${LENS_ROUTING:-full}"
+WITH_RTK=1
 for arg in "$@"; do
   case "$arg" in
     --full) ROUTING="full"; WITH_RTK=1 ;;
@@ -150,6 +150,6 @@ Done. Restart Claude Code to load lens.
   Dashboard: $bin dashboard   then open http://localhost:7878
              (or just 'lens dashboard' in a new terminal)
 
-Re-run with --full for the aggressive mode, or edit "env":{"LENS_ROUTING":"..."} in $SETTINGS.
+Opt down to nudges-only with LENS_ROUTING=nudge, or edit "env":{"LENS_ROUTING":"..."} in $SETTINGS.
 Uninstall:  $bin session uninstall$rtk_uninstall  &&  claude mcp remove lens  &&  rm "$bin"
 EOF

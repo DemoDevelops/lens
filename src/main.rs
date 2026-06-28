@@ -36,6 +36,12 @@ fn main() -> Result<()> {
         Some("session") => return session::install::run_cli(&args[2..]),
         Some("setup") => return lens::setup::run_cli(&args[2..]),
         Some("update") => return lens::setup::run_update_cli(&args[2..]),
+        // Hidden: refresh the cached latest-release tag for the SessionStart nudge.
+        // Spawned detached by the hook; always silent, never errors out.
+        Some("__update-check") => {
+            lens::setup::run_update_check_cli();
+            return Ok(());
+        }
         Some("stats") => return obs::stats::run_cli(&args[2..]),
         Some("verify") => return obs::verify::run_cli(&args[2..]),
         Some("dashboard") => return obs::dashboard::run_cli(&args[2..]),

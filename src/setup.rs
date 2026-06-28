@@ -168,12 +168,14 @@ fn parse_opts(args: &[String]) -> Result<Opts> {
     })
 }
 
-/// Resolve the routing level: explicit `--routing` wins, else `full` when `--full`
-/// is set, else the safe `nudge` default. Rejects an unknown level.
+/// Resolve the routing level: explicit `--routing` wins, else `full` (the default;
+/// `--full` is kept for back-compat and is a no-op now that full is the default).
+/// Rejects an unknown level.
 fn resolve_routing(explicit: Option<&str>, full: bool) -> Result<String> {
+    let _ = full;
     let level = explicit
         .map(|s| s.to_string())
-        .unwrap_or_else(|| if full { "full".into() } else { "nudge".into() });
+        .unwrap_or_else(|| "full".into());
     if !ROUTING_LEVELS.contains(&level.as_str()) {
         bail!(
             "invalid routing level '{level}' (use one of: {})",
@@ -456,15 +458,15 @@ fn warn(msg: &str) {
 
 /// CLI entry for `lens update`: if a newer release exists, download the matching
 /// binary and re-run `setup` with it (preserving routing level + install location).
-/// Needs `gh` (the repo is private); falls back to a clear message otherwise.
+/// Hits the public GitHub release over `curl` (no auth, no `gh`).
 pub fn run_update_cli(args: &[String]) -> Result<()> {
     let config_dir = parse_config_dir(args);
     if let Some(dir) = &config_dir {
         std::env::set_var("CLAUDE_CONFIG_DIR", dir);
     }
 
-    if !cmd_exists("gh") {
-        bail!("`lens update` needs the GitHub CLI to reach the private repo. Install gh (https://cli.github.com), run `gh auth login`, then retry — or re-run `lens setup` with a binary you were sent.");
+    if !cmd_exists("curl") {
+        bail!("`lens update` needs `curl` to reach the public release. Install curl, then retry.");
     }
 
     let repo = repo();
@@ -497,7 +499,7 @@ pub fn run_update_cli(args: &[String]) -> Result<()> {
     // and the existing install location.
     let settings = rtk::claude_settings_path()
         .ok_or_else(|| anyhow!("cannot resolve Claude settings path"))?;
-    let routing = current_routing(&settings).unwrap_or_else(|| "nudge".to_string());
+    let routing = current_routing(&settings).unwrap_or_else(|| "full".to_string());
 
     let mut cmd = Command::new(&tmp);
     cmd.arg("setup").arg("--routing").arg(&routing);
@@ -533,47 +535,48 @@ fn lens_target() -> Result<&'static str> {
     })
 }
 
-/// Latest published release tag via `gh release view`.
+/// Latest published release tag, read with no auth: `/releases/latest` 302-redirects
+/// to `/releases/tag/<tag>`, so follow it with `curl` and take the tag from the final URL.
 fn latest_tag(repo: &str) -> Result<String> {
-    let out = Command::new("gh")
-        .args([
-            "release", "view", "--repo", repo, "--json", "tagName", "--jq", ".tagName",
-        ])
+    let url = format!("https://github.com/{repo}/releases/latest");
+    let out = Command::new("curl")
+        .args(["-fsSLI", "-o", "/dev/null", "-w", "%{url_effective}", &url])
         .output()
-        .context("running `gh release view` (is gh authenticated?)")?;
+        .context("running `curl` to resolve the latest release tag")?;
     if !out.status.success() {
         bail!(
-            "`gh release view` failed: {}",
+            "resolving the latest release of {repo} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if tag.is_empty() {
-        bail!("no releases found for {repo}");
-    }
-    Ok(tag)
+    let effective = String::from_utf8_lossy(&out.stdout);
+    tag_from_release_url(&effective)
+        .ok_or_else(|| anyhow!("no releases found for {repo} (resolved to {})", effective.trim()))
 }
 
-/// Download `lens-<target>` from `tag` to `dest` via `gh release download`.
+/// Extract the tag from a `…/releases/tag/<tag>` URL. `None` if the URL doesn't name a
+/// tag (e.g. a repo with no releases redirects to `…/releases`).
+fn tag_from_release_url(url: &str) -> Option<String> {
+    let (_, tag) = url.trim().rsplit_once("/releases/tag/")?;
+    let tag = tag.trim_matches('/');
+    if tag.is_empty() || tag.contains('/') {
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+/// Download `lens-<target>` from `tag` to `dest` over the public release URL via `curl`.
 fn download_release(repo: &str, tag: &str, target: &str, dest: &Path) -> Result<()> {
-    let out = Command::new("gh")
-        .args([
-            "release",
-            "download",
-            tag,
-            "--repo",
-            repo,
-            "--pattern",
-            &format!("lens-{target}"),
-            "--clobber",
-            "--output",
-        ])
+    let url = format!("https://github.com/{repo}/releases/download/{tag}/lens-{target}");
+    let out = Command::new("curl")
+        .args(["-fsSL", "-o"])
         .arg(dest)
+        .arg(&url)
         .output()
-        .context("running `gh release download`")?;
+        .context("running `curl` to download the release binary")?;
     if !out.status.success() {
         bail!(
-            "downloading lens-{target} from {tag} failed: {}",
+            "downloading {url} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
@@ -623,6 +626,95 @@ fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+// ── update-available nudge ───────────────────────────────────────────────────
+//
+// The SessionStart hook calls `update_nudge_line()`, which only *reads* a cached
+// result so it never blocks the session on the network. When the cache is stale it
+// spawns a detached `lens __update-check` to refresh it for next time.
+
+/// How long a cached update-check stays fresh before a background refresh.
+const UPDATE_TTL_SECS: u64 = 24 * 60 * 60;
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Global, per-user cache file for the latest-release check.
+fn update_cache_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))?;
+    Some(base.join("lens").join("update-check.json"))
+}
+
+/// `(cached_tag, fresh)` from the cache file. Missing/unparseable reads as `(None, false)`
+/// so a stale or absent cache triggers a background refresh.
+fn read_update_cache() -> (Option<String>, bool) {
+    let Some(path) = update_cache_path() else {
+        return (None, false);
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return (None, false);
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return (None, false);
+    };
+    let tag = v
+        .get("latest_tag")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string());
+    let checked_at = v.get("checked_at").and_then(|t| t.as_u64()).unwrap_or(0);
+    let fresh = now_unix().saturating_sub(checked_at) < UPDATE_TTL_SECS;
+    (tag, fresh)
+}
+
+/// Spawn a detached `lens __update-check` to refresh the cache; returns immediately.
+fn spawn_update_check() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = Command::new(exe)
+        .arg("__update-check")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// One-line "update available" nudge for SessionStart, or `None` when up to date, opted
+/// out (`LENS_NO_UPDATE_CHECK`), or the cache has nothing yet. Reads the cache only and
+/// kicks off a detached refresh when stale, so it never waits on the network.
+pub fn update_nudge_line() -> Option<String> {
+    if std::env::var_os("LENS_NO_UPDATE_CHECK").is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    let (cached_tag, fresh) = read_update_cache();
+    if !fresh {
+        spawn_update_check();
+    }
+    let tag = cached_tag?;
+    let current = env!("CARGO_PKG_VERSION");
+    is_newer(&tag, current)
+        .then(|| format!("lens {tag} is available (you're on v{current}). Update: lens update"))
+}
+
+/// `lens __update-check`: refresh the cached latest-release tag. Best-effort and silent;
+/// always stamps `checked_at` (even on a failed fetch) so it backs off for the full TTL.
+pub fn run_update_check_cli() {
+    let tag = latest_tag(&repo()).ok();
+    let Some(path) = update_cache_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = json!({ "checked_at": now_unix(), "latest_tag": tag });
+    let _ = std::fs::write(&path, body.to_string());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,9 +722,9 @@ mod tests {
 
     #[test]
     fn resolve_routing_defaults_and_validates() {
-        assert_eq!(resolve_routing(None, false).unwrap(), "nudge");
+        assert_eq!(resolve_routing(None, false).unwrap(), "full"); // full is the default
         assert_eq!(resolve_routing(None, true).unwrap(), "full");
-        // Explicit wins over --full.
+        // Explicit wins over the default.
         assert_eq!(resolve_routing(Some("wrap"), true).unwrap(), "wrap");
         assert_eq!(resolve_routing(Some("off"), false).unwrap(), "off");
         // Unknown level is rejected.
@@ -738,5 +830,23 @@ mod tests {
         assert!(!is_newer("0.1.2", "0.1.2")); // equal
         assert!(!is_newer("v0.1.1", "0.1.2")); // older
         assert!(!is_newer("garbage", "0.1.2")); // unparseable never updates
+    }
+
+    #[test]
+    fn tag_parsed_from_release_redirect_url() {
+        assert_eq!(
+            tag_from_release_url("https://github.com/DemoDevelops/lens/releases/tag/v0.3.0"),
+            Some("v0.3.0".to_string())
+        );
+        // Trailing slash / whitespace tolerated.
+        assert_eq!(
+            tag_from_release_url(" https://github.com/o/r/releases/tag/v1.2.3/ \n"),
+            Some("v1.2.3".to_string())
+        );
+        // A repo with no releases redirects to the releases index, not a tag.
+        assert_eq!(
+            tag_from_release_url("https://github.com/o/r/releases"),
+            None
+        );
     }
 }

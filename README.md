@@ -32,38 +32,27 @@ Full methodology: [BENCHMARKS.md](BENCHMARKS.md)
 
 ## Install
 
-lens is one binary. Get it onto your machine, then run `lens setup` to wire it into Claude Code.
-
-**From a binary you were sent** (no GitHub access needed). Pick the file matching your platform (`uname -sm`):
+One line downloads the binary, registers the MCP server, installs the session hooks and the `/dashboard` command, installs RTK shell compression, sets routing, and prints a verification report:
 
 ```sh
-chmod +x lens-aarch64-apple-darwin     # or x86_64-apple-darwin / x86_64-unknown-linux-gnu
-./lens-aarch64-apple-darwin setup --full
+curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh
 ```
 
-**As a collaborator** (repo access + `gh auth login`):
+Restart Claude Code, then verify with the `lens_stats` tool. Supported: macOS (arm64, x64), Linux (x64).
 
-```sh
-# target: aarch64-apple-darwin | x86_64-apple-darwin | x86_64-unknown-linux-gnu
-gh release download --repo DemoDevelops/lens --pattern "lens-<target>" --output lens
-chmod +x lens && ./lens setup --full
-```
+Routing defaults to the aggressive `full` level: WebFetch and noisy commands are redirected into the darkroom, plus RTK shell compression. For nudges-only (encourages the lens tools, never denies WebFetch or rewrites commands), install with `… | LENS_ROUTING=nudge sh`, or change it anytime with `lens setup --routing <off|nudge|steer|wrap|full>`.
 
 **From source** ([Rust](https://rustup.rs) stable; optional `python3`/`node`/`ruby`/`go`, only to run those languages through `lens_run`):
 
 ```sh
 git clone https://github.com/DemoDevelops/lens && cd lens
 cargo build --release
-./target/release/lens setup --full
+./target/release/lens setup
 ```
 
-`lens setup` copies the binary to `~/.local/bin`, registers the MCP server, installs the session hooks and the `/dashboard` command, installs RTK shell compression, sets the routing level, and prints a verification report. Restart Claude Code, then verify with the `lens_stats` tool.
+`lens setup` does the same wiring from a binary you built (copies it to `~/.local/bin`, registers the MCP server, installs the hooks + `/dashboard` + RTK, sets routing). Target a specific config dir with `lens setup --config-dir <dir>`.
 
-Routing defaults to the safe `nudge` level (encourages the lens tools, never denies WebFetch or rewrites commands). `--full` turns on the aggressive routing (WebFetch and noisy commands redirected into the darkroom) plus RTK. Change it anytime with `lens setup --routing <off|nudge|steer|wrap|full>`.
-
-Target a specific config dir: `lens setup --config-dir <dir>`. Supported: macOS (arm64, x64), Linux (x64).
-
-Update later with `lens update`: it checks for a newer release, downloads the matching binary, and re-applies setup (preserving your routing level). It uses `gh` for the private repo, so run `gh auth login` once. Without `gh`, re-run `setup` with a newer binary instead.
+Update later with `lens update`: it checks the public GitHub release (no auth), downloads the matching binary, and re-applies setup (preserving your routing level). lens also drops a one-line heads-up into a session when a newer release is out; silence it with `LENS_NO_UPDATE_CHECK=1`.
 
 ## Tools
 

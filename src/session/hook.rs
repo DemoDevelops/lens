@@ -244,6 +244,17 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             } else {
                 ctx
             };
+            // Append a one-line "update available" nudge on fresh startups only. Reads a
+            // cached check (never blocks), refreshing it detached when stale.
+            let ctx = if source == "startup" {
+                match crate::setup::update_nudge_line() {
+                    Some(line) if ctx.is_empty() => line,
+                    Some(line) => format!("{ctx}\n\n{line}"),
+                    None => ctx,
+                }
+            } else {
+                ctx
+            };
             Ok(serde_json::to_string(&json!({
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",

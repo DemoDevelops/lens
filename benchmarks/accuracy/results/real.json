@@ -231,7 +231,7 @@
       "mechanism": "search",
       "treatment": {
         "answer": {
-          "file": "/Users/gene/Documents/AI Stuff/lens/benchmarks/accuracy/fixtures/repo/crypto.rs"
+          "file": "crypto.rs"
         },
         "context_bytes": 1251,
         "correct": true,

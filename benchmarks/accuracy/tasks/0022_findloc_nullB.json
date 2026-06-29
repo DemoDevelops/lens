@@ -1,0 +1,10 @@
+{
+  "id": "0022_findloc_nullB",
+  "prompt": "In this codebase, which function validates a session? Give its exact name.",
+  "fixtures": ["fixtures/findloc_nullB"],
+  "ground_truth": { "function": "session_validate" },
+  "check": "contains",
+  "primary_mechanism": "rerank",
+  "evidence": ["session_validate"],
+  "treatment": { "graph_op": "find", "name": "session validate", "limit": 3 }
+}

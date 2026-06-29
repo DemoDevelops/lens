@@ -59,6 +59,9 @@ pub struct Treatment {
     pub to: Option<String>,
     /// Skeleton: path to a source file to reduce to signatures + nesting.
     pub skeleton: Option<String>,
+    /// Find: top-K budget for the `find` graph_op (how many ranked matches survive
+    /// before their neighbors are pulled in). Defaults to 3.
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,6 +288,25 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
             }
             // The token-budgeted repomap; budget matches the lens_overview tool default.
             "overview" => gquery::overview(&outcome.graph, 2000),
+            // Natural-language find, re-ranked per `LENS_FIND_RANK` (L36 A/B lever).
+            // The treatment IS the lens improvement, so it defaults to the
+            // personalized-PR ranking; the A/B control sets `raw` (current
+            // production lexical) and the third arm sets `blend` (lexical-primary,
+            // PR tie-break).
+            "find" => {
+                let rank = match std::env::var("LENS_FIND_RANK").as_deref() {
+                    Ok("raw") => gquery::FindRank::Raw,
+                    Ok("blend") => gquery::FindRank::Blend,
+                    _ => gquery::FindRank::Personalized,
+                };
+                let view = gquery::find_ranked(
+                    &outcome.graph,
+                    t.name.as_deref().unwrap_or(""),
+                    t.limit.unwrap_or(3),
+                    rank,
+                );
+                serde_json::to_string_pretty(&view)?
+            }
             other => return Err(anyhow::anyhow!("unknown graph_op '{other}'")),
         };
         return Ok(json);

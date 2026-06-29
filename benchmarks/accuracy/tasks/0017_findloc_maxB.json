@@ -1,0 +1,10 @@
+{
+  "id": "0017_findloc_maxB",
+  "prompt": "Several payment-ingest handler functions all call one shared bus function. What is the exact name of that shared function they all call?",
+  "fixtures": ["fixtures/findloc_maxB"],
+  "ground_truth": { "function": "payment_bus" },
+  "check": "contains",
+  "primary_mechanism": "rerank",
+  "evidence": ["payment_bus"],
+  "treatment": { "graph_op": "find", "name": "payment processor", "limit": 3 }
+}

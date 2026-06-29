@@ -1,0 +1,10 @@
+{
+  "id": "0020_findloc_bordC",
+  "prompt": "Several metrics-emit functions all call one shared sink function. What is the exact name of that shared function they all call?",
+  "fixtures": ["fixtures/findloc_bordC"],
+  "ground_truth": { "function": "metrics_sink" },
+  "check": "contains",
+  "primary_mechanism": "rerank",
+  "evidence": ["metrics_sink"],
+  "treatment": { "graph_op": "find", "name": "metrics export", "limit": 4 }
+}

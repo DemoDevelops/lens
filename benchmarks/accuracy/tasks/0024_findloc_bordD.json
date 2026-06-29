@@ -1,0 +1,10 @@
+{
+  "id": "0024_findloc_bordD",
+  "prompt": "Several stream-tap functions all call one shared pipe function. What is the exact name of that shared function they all call?",
+  "fixtures": ["fixtures/findloc_bordD"],
+  "ground_truth": { "function": "stream_pipe" },
+  "check": "contains",
+  "primary_mechanism": "rerank",
+  "evidence": ["stream_pipe"],
+  "treatment": { "graph_op": "find", "name": "stream filter", "limit": 3 }
+}

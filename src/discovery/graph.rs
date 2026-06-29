@@ -141,6 +141,62 @@ impl Graph {
         if n == 0 {
             return HashMap::new();
         }
+        let base = 1.0 / n as f64;
+        let teleport: HashMap<&str, f64> =
+            self.nodes.iter().map(|nd| (nd.id.as_str(), base)).collect();
+        self.pagerank(&teleport)
+    }
+
+    /// Query-seeded personalized PageRank (L36): identical weighted reference
+    /// graph and damping to [`importance`], but the restart/teleport vector is
+    /// `seed` (a per-node weight — e.g. the lexical query-match score) instead of
+    /// uniform, so rank mass concentrates on symbols transitively reachable from
+    /// the query's matched entry points. This re-ranks PER QUERY, distinct from
+    /// the static global PR above. `seed` need not be normalized; non-positive
+    /// weights are ignored, and an empty/zero seed falls back to uniform (i.e.
+    /// reduces to [`importance`]). Deterministic: same graph + same seed -> same
+    /// scores.
+    pub fn personalized_importance(&self, seed: &HashMap<String, f64>) -> HashMap<String, f64> {
+        let n = self.nodes.len();
+        if n == 0 {
+            return HashMap::new();
+        }
+        let total: f64 = self
+            .nodes
+            .iter()
+            .filter_map(|nd| seed.get(&nd.id).copied())
+            .filter(|w| *w > 0.0)
+            .sum();
+        let base = 1.0 / n as f64;
+        let teleport: HashMap<&str, f64> = self
+            .nodes
+            .iter()
+            .map(|nd| {
+                let p = if total > 0.0 {
+                    seed.get(&nd.id).copied().unwrap_or(0.0).max(0.0) / total
+                } else {
+                    base
+                };
+                (nd.id.as_str(), p)
+            })
+            .collect();
+        self.pagerank(&teleport)
+    }
+
+    /// Weighted PageRank power-iteration over the reference (calls + imports)
+    /// graph with restart distribution `teleport` (a per-node probability that
+    /// should sum to ~1 over all nodes). Shared core for global [`importance`]
+    /// (uniform teleport) and [`personalized_importance`] (query-seeded teleport).
+    /// Aider-style edge weighting (RepoGraph / aider repomap): a reference to a
+    /// symbol used across more than five files, or to a private (`_`-prefixed)
+    /// symbol, counts for 0.1x — too-common and internal symbols are less useful
+    /// to surface. Deterministic: same graph + same teleport -> same scores
+    /// (iterates the node/edge Vecs in order, never a HashMap).
+    fn pagerank(&self, teleport: &HashMap<&str, f64>) -> HashMap<String, f64> {
+        let n = self.nodes.len();
+        if n == 0 {
+            return HashMap::new();
+        }
         let is_ref = |kind: &str| kind == "calls" || kind == "imports";
         let node_file: HashMap<&str, &str> = self
             .nodes
@@ -182,14 +238,14 @@ impl Graph {
         }
         const DAMP: f64 = 0.85;
         const ITERS: usize = 20;
-        let base = 1.0 / n as f64;
+        let tp = |id: &str| teleport.get(id).copied().unwrap_or(0.0);
         let mut rank: HashMap<&str, f64> =
-            self.nodes.iter().map(|nd| (nd.id.as_str(), base)).collect();
+            self.nodes.iter().map(|nd| (nd.id.as_str(), tp(nd.id.as_str()))).collect();
         for _ in 0..ITERS {
             let mut next: HashMap<&str, f64> = self
                 .nodes
                 .iter()
-                .map(|nd| (nd.id.as_str(), (1.0 - DAMP) * base))
+                .map(|nd| (nd.id.as_str(), (1.0 - DAMP) * tp(nd.id.as_str())))
                 .collect();
             let mut dangling = 0.0;
             for nd in &self.nodes {
@@ -207,9 +263,12 @@ impl Graph {
                     dangling += r;
                 }
             }
-            let spread = DAMP * dangling / n as f64;
-            for v in next.values_mut() {
-                *v += spread;
+            // Dangling mass is redistributed along the teleport vector (uniform
+            // for global PR, query-seeded for personalized) rather than uniformly.
+            for nd in &self.nodes {
+                if let Some(slot) = next.get_mut(nd.id.as_str()) {
+                    *slot += DAMP * dangling * tp(nd.id.as_str());
+                }
             }
             rank = next;
         }
@@ -384,6 +443,38 @@ mod tests {
         let a = Node::make_id("f.rs", "function", "a", 1);
         let d = Node::make_id("f.rs", "function", "d", 13);
         assert!(g.shortest_path(&a, &d).is_none());
+    }
+
+    #[test]
+    fn personalized_importance_empty_seed_equals_global() {
+        // No positive seed weight -> teleport falls back to uniform, so the
+        // personalized scores must match the global PR exactly.
+        let g = sample();
+        let global = g.importance();
+        let pers = g.personalized_importance(&HashMap::new());
+        for (id, gv) in &global {
+            let pv = pers.get(id).copied().unwrap();
+            assert!((pv - gv).abs() < 1e-12, "{id}: {pv} vs {gv}");
+        }
+    }
+
+    #[test]
+    fn personalized_importance_seed_boosts_reachable_demotes_unseeded() {
+        // Seed all mass on `a` (entry point of the a -> b -> c call chain). The
+        // query-conditioned restart must (1) demote the disconnected, unseeded `d`
+        // below its global score, and (2) rank `a` and its downstream-reachable
+        // `c` strictly above `d` — the personalization the static global PR can't do.
+        let g = sample();
+        let a = Node::make_id("f.rs", "function", "a", 1);
+        let c = Node::make_id("f.rs", "function", "c", 9);
+        let d = Node::make_id("f.rs", "function", "d", 13);
+        let global = g.importance();
+        let mut seed = HashMap::new();
+        seed.insert(a.clone(), 1.0);
+        let pers = g.personalized_importance(&seed);
+        assert!(pers[&d] < global[&d], "unseeded disconnected node must lose mass");
+        assert!(pers[&a] > pers[&d], "seeded entry must outrank unseeded node");
+        assert!(pers[&c] > pers[&d], "reachable downstream node must outrank unseeded node");
     }
 
     #[test]

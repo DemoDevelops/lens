@@ -52,7 +52,7 @@ One line downloads the binary, registers the MCP server, installs the session ho
 curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh
 ```
 
-Restart Claude Code, then verify with the `lens_stats` tool. Supported: macOS (arm64, x64), Linux (x64).
+Restart Claude Code, then verify with the `lens_stats` tool. Supported: macOS (arm64, x64), Linux (x64, arm64).
 
 Routing defaults to the aggressive `full` level: WebFetch and noisy commands are redirected into the darkroom, plus RTK shell compression. For nudges-only (encourages the lens tools, never denies WebFetch or rewrites commands), install with `… | LENS_ROUTING=nudge sh`, or change it anytime with `lens setup --routing <off|nudge|steer|wrap|full>`.
 

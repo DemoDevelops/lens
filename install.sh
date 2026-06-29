@@ -43,7 +43,6 @@ case "$os" in
   Linux)
     case "$arch" in
       x86_64|amd64) target="x86_64-unknown-linux-gnu" ;;
-      arm64|aarch64) target="aarch64-unknown-linux-gnu" ;;
       *) die "no prebuilt Linux binary for $arch yet. Build from source: https://github.com/$REPO" ;;
     esac ;;
   *) die "unsupported OS: $os. Build from source: https://github.com/$REPO" ;;

@@ -1,0 +1,10 @@
+{
+  "id": "0016_findloc_maxA",
+  "prompt": "Several order-intake handler functions all call one shared routing function. What is the exact name of that shared function they all call?",
+  "fixtures": ["fixtures/findloc_maxA"],
+  "ground_truth": { "function": "order_gateway" },
+  "check": "contains",
+  "primary_mechanism": "rerank",
+  "evidence": ["order_gateway"],
+  "treatment": { "graph_op": "find", "name": "order processor", "limit": 3 }
+}

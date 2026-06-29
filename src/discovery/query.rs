@@ -1,5 +1,7 @@
 //! Graph traversal: `lens_symbol`, `lens_links`, `lens_path`.
 
+use std::collections::HashMap;
+
 use super::graph::{Edge, Graph, Node};
 use crate::tools::{EdgeView, GraphView, NodeView, PathResponse};
 
@@ -90,13 +92,42 @@ fn suffix_on_boundary(hay: &str, needle: &str) -> bool {
 /// a prefix match beats a substring match, and a symbol gets a bonus for each
 /// extra distinct query token it hits. Returns the top `limit` symbols plus their
 /// immediate connections, like [`query`]. Case-insensitive.
+///
+/// Ranking is [`FindRank::Blend`]: lexical score stays the primary key (an exact
+/// match is never demoted), and query-seeded personalized PageRank breaks ties
+/// toward the canonically-referenced definition — the only thing that changes
+/// vs raw lexical is which of several equal-score collisions (the many `index` /
+/// `render` / same-named components a frontend has) survives the budget cut.
 pub fn find(graph: &Graph, query: &str, limit: usize) -> GraphView {
+    find_ranked(graph, query, limit, FindRank::Blend)
+}
+
+/// How [`find_ranked`] orders the lexical candidate set before the `limit` cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindRank {
+    /// Pure lexical: score (desc), then id. The pre-L36 ranking, kept as the
+    /// A/B control and the no-tie fast path inside [`FindRank::Blend`].
+    Raw,
+    /// Query-seeded personalized PageRank (L36) as the PRIMARY key, lexical score
+    /// then id as tie-breaks. Surfaces a low-lexical-but-central hop into the
+    /// budgeted top-`limit` when the query's matches transitively reach it.
+    Personalized,
+    /// Lexical score PRIMARY, personalized PR only as the tie-break. Preserves
+    /// top-rank lexical fidelity (no MRR dip) but, being lexical-first, cannot
+    /// lift a low-lexical hub past higher-lexical decoys into a small budget.
+    Blend,
+}
+
+/// Lexical candidate find re-ranked by `rank`, returning the top `limit` symbols
+/// plus their immediate connections. The candidate SET is identical across
+/// rankings (every symbol with a lexical hit); only the order — and thus which
+/// survive the `limit` cut and contribute their neighbors — changes.
+pub fn find_ranked(graph: &Graph, query: &str, limit: usize, rank: FindRank) -> GraphView {
     let tokens = tokenize(query);
     if tokens.is_empty() {
         return subgraph(graph, &[]);
     }
-    // Score every node; keep only those with a hit. Sort by score desc, then id
-    // for a deterministic tie-break.
+    // Score every node; keep only those with a hit.
     let mut scored: Vec<(u32, &str)> = graph
         .nodes
         .iter()
@@ -105,7 +136,46 @@ pub fn find(graph: &Graph, query: &str, limit: usize) -> GraphView {
             (s > 0).then_some((s, n.id.as_str()))
         })
         .collect();
+    // Raw lexical order: score desc, then id. The starting point for every rank.
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    match rank {
+        FindRank::Raw => {}
+        FindRank::Personalized => {
+            // Seed personalized PR with the per-candidate lexical scores, then
+            // order by PR PRIMARY (lexical score, id as tie-breaks).
+            let seed: HashMap<String, f64> =
+                scored.iter().map(|(s, id)| (id.to_string(), *s as f64)).collect();
+            let pr = graph.personalized_importance(&seed);
+            scored.sort_by(|a, b| {
+                pr_cmp(&pr, a, b)
+                    .then_with(|| b.0.cmp(&a.0))
+                    .then_with(|| a.1.cmp(b.1))
+            });
+        }
+        FindRank::Blend => {
+            // Lexical PRIMARY with personalized PR only as the tie-break. The PR
+            // can change the SELECTED top-`limit` set only when a lexical-score
+            // tie straddles the `limit` cut (equal-score members on both sides of
+            // the boundary). When the cut is clean — the common case, including
+            // every unique-name query — the set is identical to Raw, so we skip
+            // the power iteration entirely and Blend is a provable no-op.
+            let straddles =
+                limit > 0 && scored.len() > limit && scored[limit - 1].0 == scored[limit].0;
+            if straddles {
+                let seed: HashMap<String, f64> =
+                    scored.iter().map(|(s, id)| (id.to_string(), *s as f64)).collect();
+                let pr = graph.personalized_importance(&seed);
+                // Re-sort lexical-primary, PR then id: only reorders within
+                // equal-score groups, pulling the canonical (highest-PR) member of
+                // the straddling tie across the cut.
+                scored.sort_by(|a, b| {
+                    b.0.cmp(&a.0)
+                        .then_with(|| pr_cmp(&pr, a, b))
+                        .then_with(|| a.1.cmp(b.1))
+                });
+            }
+        }
+    }
 
     let mut node_ids: Vec<String> = Vec::new();
     for (_, id) in scored.into_iter().take(limit) {
@@ -116,6 +186,15 @@ pub fn find(graph: &Graph, query: &str, limit: usize) -> GraphView {
         }
     }
     subgraph(graph, &node_ids)
+}
+
+/// Compare two scored candidates by descending personalized-PR weight (the
+/// shared tie-break/primary used by [`FindRank::Personalized`] and
+/// [`FindRank::Blend`]). Missing weights sort as 0.
+fn pr_cmp(pr: &HashMap<String, f64>, a: &(u32, &str), b: &(u32, &str)) -> std::cmp::Ordering {
+    let pa = pr.get(a.1).copied().unwrap_or(0.0);
+    let pb = pr.get(b.1).copied().unwrap_or(0.0);
+    pb.partial_cmp(&pa).unwrap_or(std::cmp::Ordering::Equal)
 }
 
 /// Split a string into lowercase alphanumeric word tokens, also breaking
@@ -543,6 +622,64 @@ mod tests {
         let resp = path(&g, "a", "lonely");
         assert!(!resp.found);
         assert!(resp.path.is_empty());
+    }
+
+    /// Five symbols all match "order" with the SAME lexical score (a tie). Four
+    /// `order_zint_*`/`order_zsink` form a cluster where the callers invoke the
+    /// `order_zsink` hub; `order_aaa_leaf` is disconnected. Raw lexical breaks the
+    /// tie arbitrarily (by id hash); the shipped default (Blend) breaks it by
+    /// personalized PR toward `order_zsink`, the definition the other matches
+    /// call. The frontend collision case in miniature.
+    fn order_tie_graph() -> Graph {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("r.rs"),
+            "fn order_aaa_leaf() {}\n\
+             fn order_zsink() {}\n\
+             fn order_zint_1() { order_zsink(); }\n\
+             fn order_zint_2() { order_zsink(); }\n\
+             fn order_zint_3() { order_zsink(); }\n",
+        )
+        .unwrap();
+        discover(dir.path(), None).unwrap().graph
+    }
+
+    #[test]
+    fn find_defaults_to_blend_tiebreak_pulls_central_into_budget() {
+        let g = order_tie_graph();
+        let names = |v: &GraphView| {
+            v.nodes
+                .iter()
+                .map(|n| n.name.clone())
+                .collect::<std::collections::HashSet<_>>()
+        };
+        // Blend selects the called-by-all hub as the single primary, pulling its
+        // whole caller cluster into the 1-slot budget.
+        let blend = names(&find(&g, "order", 1));
+        for c in ["order_zsink", "order_zint_1", "order_zint_2", "order_zint_3"] {
+            assert!(blend.contains(c), "blend should surface the hub cluster member {c}");
+        }
+        // Raw, lacking the PR tie-break, picks an arbitrary tied match -> a
+        // different, smaller selected set.
+        let raw = names(&find_ranked(&g, "order", 1, FindRank::Raw));
+        assert_ne!(blend, raw, "the PR tie-break must change the selected set vs raw");
+    }
+
+    #[test]
+    fn find_blend_is_noop_when_cut_is_clean() {
+        // Budget covers every match -> no lexical tie straddles the cut, so Blend
+        // must skip the power iteration and return exactly the Raw node set.
+        let g = order_tie_graph();
+        let ids = |v: &GraphView| {
+            let mut out: Vec<String> = v.nodes.iter().map(|n| n.id.clone()).collect();
+            out.sort();
+            out
+        };
+        assert_eq!(
+            ids(&find(&g, "order", 10)),
+            ids(&find_ranked(&g, "order", 10, FindRank::Raw)),
+            "blend is a no-op vs raw when the budget cut is clean"
+        );
     }
 
     #[test]

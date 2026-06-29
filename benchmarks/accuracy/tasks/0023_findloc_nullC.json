@@ -1,0 +1,10 @@
+{
+  "id": "0023_findloc_nullC",
+  "prompt": "In this codebase, which function validates an audit entry? Give its exact name.",
+  "fixtures": ["fixtures/findloc_nullC"],
+  "ground_truth": { "function": "audit_validate" },
+  "check": "contains",
+  "primary_mechanism": "rerank",
+  "evidence": ["audit_validate"],
+  "treatment": { "graph_op": "find", "name": "audit validate", "limit": 1 }
+}

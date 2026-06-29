@@ -52,9 +52,12 @@ jobs:
           name: lens-${{ matrix.target }}
           path: staged/lens
           if-no-files-found: error
+      # Release body comes from RELEASE_NOTES.md at the tagged commit. Update it
+      # in each release commit so releases never publish an empty description.
       - name: Attach binary to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          body_path: RELEASE_NOTES.md
           files: staged/lens-${{ matrix.target }}
           fail_on_unmatched_files: true

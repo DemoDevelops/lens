@@ -1,6 +1,6 @@
 # Service configuration for the demo app.
 service:
-  name: ctxforge-demo
+  name: lens-demo
   log_level: info
 
 server:

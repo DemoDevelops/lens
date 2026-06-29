@@ -1,34 +1,48 @@
 # lens
 
-AI agents waste tokens reading raw data into context: file dumps, grep floods, build logs, web pages. lens is a set of MCP tools and hooks for Claude Code that does that work without the bytes. Like the glass it's named for, it focuses: your script runs in a darkroom (a subprocess), and only the developed image comes back, never the raw light. The same idea powers full-text search, a code symbol graph, and lossless recall; a continuity layer carries session state across compaction so long runs keep their thread.
+**Keep raw data out of your agent's context window.** When Claude Code reads a 50k-line log, greps a large repo, or fetches a web page, every byte enters the conversation and keeps re-costing tokens on every later turn. Like the glass it's named for, lens focuses: your script runs in a *darkroom* (a subprocess), and only the developed image comes back, never the raw light.
+
+Concretely: counting the log levels in a 50k-line build log costs **7,210 bytes** of context read inline, and **517** through `lens_run`, because the script runs in the darkroom and only the answer comes back. The same move powers full-text search, a code-symbol graph, and lossless recall, with a continuity layer that carries session state across compaction so long runs keep their thread.
 
 ## Results
 
-Token savings at realistic session scale:
+Measured savings at realistic session scale. Full methodology and scale curves in [BENCHMARKS.md](BENCHMARKS.md).
 
-| Workload | Mechanism | Tokens before | Tokens after | Saved |
+| Workload | Mechanism | Before | After | Saved |
 | --- | --- | ---: | ---: | ---: |
-| Code search | FTS5 index | 160,230 | 9,780 | **94–99%** |
+| Code search | FTS5 index | 160,230 | 10,020 | **94–99%** |
 | Log debugging | darkroom | 7,210 | 517 | **93%** |
 | Issue triage | compression | 94,195 | 31,323 | **~67%** |
 
-Accuracy on real tasks (`claude-opus-4-8`):
+Numbers are byte counts against a fixed corpus, a close proxy for tokens (token savings run a little lower for already-compact outputs). Code search and issue triage are shown at 10× the committed test fixture (code search reaches 99% at 50×); log debugging is size-insensitive, shown at 1×. Read each percentage as "what this mechanism does to a workload of this shape," not a guaranteed figure for your repo.
 
-| Task type | Without lens | With lens |
-| --- | ---: | ---: |
-| Darkroom (data analysis) | 67% | **100%** |
-| Discovery (code structure) | 67% | 100% |
-| Search | 100% | 100% |
-| File skeleton (read a file's API) | 0% | **100%** |
+Accuracy on small real-model task sets (`claude-opus-4-8`, headless, context-only):
 
-Session recovery vs Context Mode:
+| Task type | N | Without lens | With lens |
+| --- | ---: | ---: | ---: |
+| Darkroom (data analysis) | 6 | 67% | **100%** |
+| Discovery (code structure) | 4 | 75% | 100% |
+| Search | 3 | 67% | 100% |
+| File skeleton (read a file's API) | 2 | 0% | **100%** |
+
+N is tiny (2–6 tasks, each run once), so these are directional, not powered rates. The control answers from one truncated slice of the file, which is part of why skeleton reads go 0%→100% (the answer sits past the cut). The signal points the right way; don't quote these as headline percentages.
+
+Session recovery is the one head-to-head against a real comparator, Context Mode (N=4 per set). lens recovers 100% of post-compaction state vs Context Mode's 75%, at roughly 20× lower token cost:
 
 | Scenario | Context Mode | lens | CM tokens | lens tokens |
 | --- | ---: | ---: | ---: | ---: |
 | File/task recovery | 75% | **100%** | 4,622 | 205 |
 | Error/decision recovery | 75% | **100%** | 4,677 | 291 |
 
-Full methodology: [BENCHMARKS.md](BENCHMARKS.md)
+## How it compares
+
+Most tools here either compress data that still lands in context, or pull more data in. lens does neither: the bytes stay in the darkroom and only the result comes back.
+
+- **vs output compressors (RTK, headroom, squeez):** they shrink tool output, but the smaller data still enters the transcript and re-costs on later turns. lens keeps it out entirely, and anything it does surface is recoverable in full by reference. lens bundles RTK and defers Bash to it, so you can run both.
+- **vs code-search / context servers (Serena, Zilliz claude-context, repomix):** these retrieve code *into* context, and several need a vector DB, an embedding API key, or a cloud account. lens answers structure questions from a local tree-sitter graph and returns snippets, not whole files, with zero external dependencies.
+- **vs context-mode:** the closest design. Its `ctx_execute` is the same darkroom idea and it has session continuity too, but no code-symbol graph, no lossless recall, and an ELv2 (source-available) license. lens adds those and is MIT.
+
+Run lens alongside any of them. It is not trying to replace your agent or your search tool, just keep their byte-floods out of context.
 
 ## Install
 
@@ -151,7 +165,7 @@ The `$` headline prices the measured tokens-saved at the model input rate (`--ra
 
 lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio server** (the `lens_*` tools, `src/server.rs`) and as **hook handlers** the same binary runs on Claude Code's PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, and SessionStart events. Per-repo state lives in `.lens/` (the symbol graph, the FTS index, and the reversible blob store); the managed RTK binary lives in `~/.lens/bin`.
 
-**Darkroom (`lens_run` / `lens_run_file`).** Your script runs in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly.
+**Darkroom (`lens_run` / `lens_run_file`).** Your script runs in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly. The subprocess gives you process isolation and a timeout, not an OS sandbox (see [Security](#security)).
 
 **Search (`lens_index` / `lens_search`).** `lens_index` builds a SQLite FTS5 full-text index over the repo. `lens_search` ranks with BM25F, then over-fetches a deeper candidate pool and re-ranks it by term proximity (a chunk where the query terms sit in a tight window outranks one where they are scattered) before returning the top snippets with `path:line`, not whole files. Batch several questions in one call to save round-trips.
 
@@ -182,6 +196,10 @@ cargo run --bin bench_accuracy   # accuracy harness (LENS_BENCH_BACKEND=claude-p
 cargo run --bin bench_recovery   # session-recovery head-to-head vs Context Mode
 cargo run --bin bench_report     # regenerate BENCHMARKS.md + BENCHMARKS_APPENDIX.md
 ```
+
+## Security
+
+`lens_run` executes the script you or the agent supply in a subprocess: real process isolation and a timeout (30s default), but not an OS sandbox. The script runs as your user with your normal filesystem access, so treat a `lens_run` script like any code you'd run locally. Routing's `steer`/`full` levels redirect `WebFetch` and `curl`/`wget`/build commands into the darkroom; drop to `nudge` if you'd rather lens never rewrite a command. Report vulnerabilities via [SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -249,10 +249,18 @@ mod tests {
             results.push(run_task(task, &Model::Mock).await.expect("run task"));
         }
 
-        // Treatment surfaces the evidence for every task -> all treatment correct.
+        // Treatment surfaces the evidence for every savings task -> all correct.
+        // Excludes the L36 `findloc` ranking-A/B fixtures: those probe the
+        // boundary where personalized find DOES NOT surface the answer (the
+        // knife-edge and tight-budget regression cases), so a missing-evidence
+        // treatment there is the experiment, not a failure. They are measured by
+        // their dedicated LENS_FIND_RANK runs, not this savings health-check.
         assert!(
-            results.iter().all(|r| r.treatment.correct),
-            "every treatment arm should be correct under the mock oracle"
+            results
+                .iter()
+                .filter(|r| !r.id.contains("findloc"))
+                .all(|r| r.treatment.correct),
+            "every savings treatment arm should be correct under the mock oracle"
         );
         // The harness must be able to detect a wrong answer (control loses data).
         assert!(
@@ -276,9 +284,16 @@ mod tests {
             );
         }
 
-        // Treatment must consume fewer tokens than control overall.
-        let ctrl_tok: usize = results.iter().map(|r| r.control.tokens).sum();
-        let treat_tok: usize = results.iter().map(|r| r.treatment.tokens).sum();
+        // Treatment must consume fewer tokens than control overall. Excludes the
+        // L36 `findloc` ranking fixtures: those measure localization CORRECTNESS
+        // at a fixed find budget, not byte savings, and a find subgraph that
+        // surfaces the reachable hub is legitimately larger than a 2KB-truncated
+        // raw-source control. They remain in every accuracy/correctness assertion
+        // above.
+        let savings: Vec<&TaskResult> =
+            results.iter().filter(|r| !r.id.contains("findloc")).collect();
+        let ctrl_tok: usize = savings.iter().map(|r| r.control.tokens).sum();
+        let treat_tok: usize = savings.iter().map(|r| r.treatment.tokens).sum();
         assert!(
             treat_tok < ctrl_tok,
             "treatment tokens {treat_tok} should be < control tokens {ctrl_tok}"

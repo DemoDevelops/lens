@@ -217,7 +217,7 @@ impl Forge {
         max_inline: usize,
     ) -> anyhow::Result<Self> {
         let store = Store::open(&data_dir)?;
-        let index = Index::open(&data_dir)?;
+        let index = Index::open(&data_dir)?.with_repo_root(&repo_dir);
         let ops = OpLog::open(&data_dir);
         Ok(Forge {
             repo_dir,
@@ -1238,7 +1238,10 @@ impl Forge {
             return Ok(());
         }
         let current = crate::index::file_manifest(&self.repo_dir);
-        if self.store.get_stat("index_chunks").unwrap_or(0) > 0
+        // Gate on the live chunk count, not the cached `index_chunks` stat: a schema/
+        // path migration can wipe the index while the stat (in a separate db) still
+        // reads non-zero, which would wrongly skip the rebuild.
+        if self.index.chunk_count().unwrap_or(0) > 0
             && read_manifest(&self.index_manifest_file()).as_ref() == Some(&current)
         {
             self.index_walk.mark();

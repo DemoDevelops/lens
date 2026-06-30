@@ -53,12 +53,12 @@ impl Index {
         // every chunk and search returns each file twice (mirrors warmup's canonicalize).
         let root = &std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
-        // Single walk: collect current files with their mtimes.
+        // Single walk: collect current files with their mtimes, keyed by repo-relative
+        // storage key (see `rel_key`) so a file gets the same key whether the whole
+        // repo or a subpath was indexed.
         let mut current: HashMap<String, u64> = HashMap::new();
         if root.is_file() {
-            let path_str = root.to_string_lossy().to_string();
-            let mtime = mtime_ms(root);
-            current.insert(path_str, mtime);
+            current.insert(self.rel_key(root), mtime_ms(root));
         } else {
             let mut builder = WalkBuilder::new(root);
             builder.standard_filters(true); // respects .gitignore, hidden, etc.
@@ -75,22 +75,30 @@ impl Index {
                 }
                 let path = entry.into_path();
                 let mtime = mtime_ms(&path);
-                current.insert(path.to_string_lossy().into_owned(), mtime);
+                current.insert(self.rel_key(&path), mtime);
             }
         }
 
         let mut conn = self.conn()?;
 
-        // Load the stored mtime manifest for this root from the DB.
+        // Load the stored mtime manifest for this root from the DB. An empty prefix
+        // means `root` is the repo root itself, so load the whole manifest; otherwise
+        // load only keys at or under the relative prefix.
         let stored: HashMap<String, u64> = {
-            let prefix = root.to_string_lossy().into_owned();
-            let mut stmt = conn.prepare_cached(
-                "SELECT path, mtime FROM file_manifest WHERE path = ?1 OR path LIKE ?1 || '/%'",
-            )?;
-            let rows = stmt.query_map([&prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            rows.flatten()
-                .map(|(p, m)| (p, m as u64))
-                .collect()
+            let prefix = self.rel_key(root);
+            if prefix.is_empty() {
+                let mut stmt = conn.prepare_cached("SELECT path, mtime FROM file_manifest")?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+                rows.flatten().map(|(p, m)| (p, m as u64)).collect()
+            } else {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT path, mtime FROM file_manifest WHERE path = ?1 OR path LIKE ?1 || '/%'",
+                )?;
+                let rows = stmt
+                    .query_map([&prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+                rows.flatten().map(|(p, m)| (p, m as u64)).collect()
+            }
         };
 
         // Classify: changed_or_new (mtime differs or absent), deleted (in stored but not current).
@@ -137,8 +145,8 @@ impl Index {
             // Phase 1: read + chunk off-lock (the gap a concurrent writer acquires in).
             let mut prepared: Vec<FileRows> = Vec::with_capacity(batch.len());
             for &path_str in batch {
-                let file = std::path::Path::new(path_str.as_str());
-                let content = match std::fs::read(file) {
+                let file = self.abs_path(path_str);
+                let content = match std::fs::read(&file) {
                     Ok(bytes) => match String::from_utf8(bytes) {
                         Ok(s) => s,
                         Err(_) => continue, // skip binary/non-utf8
@@ -146,7 +154,7 @@ impl Index {
                     Err(_) => continue,
                 };
                 let mut rows = Vec::new();
-                for (i, chunk) in chunk_file(file, &content).iter().enumerate() {
+                for (i, chunk) in chunk_file(&file, &content).iter().enumerate() {
                     if chunk.trim().is_empty() {
                         continue;
                     }
@@ -202,19 +210,19 @@ impl Index {
     /// deleted files stop showing up in `lens_search`. Only code-file chunks are
     /// touched — session-continuity records (`path` prefixed `session://`) are left
     /// intact. Also cleans up chunks left under a different path scheme (e.g. an old
-    /// relative-root index) for files now indexed absolutely. Returns chunks removed.
+    /// absolute-path index) for files now indexed relatively. Returns chunks removed.
     ///
     /// Call ONLY with the repo root: a subpath `root` would wrongly prune everything
     /// outside it.
     pub fn prune_missing(&self, root: &Path) -> Result<usize> {
-        // Current file path strings, exactly as `index_path` would store them.
+        // Current file storage keys, exactly as `index_path` would store them.
         let mut current: HashSet<String> = HashSet::new();
         if root.exists() {
             let mut builder = WalkBuilder::new(root);
             builder.standard_filters(true);
             for entry in builder.build().flatten() {
                 if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                    current.insert(entry.into_path().to_string_lossy().to_string());
+                    current.insert(self.rel_key(&entry.into_path()));
                 }
             }
         }

@@ -1,6 +1,6 @@
 [package]
 name = "lens"
-version = "0.5.0"
+version = "0.5.2"
 edition = "2021"
 license = "MIT"
 description = "A token-saving MCP server: darkroom execution, FTS5 search, tree-sitter code graph, reversible compression."

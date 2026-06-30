@@ -45,9 +45,9 @@ pub fn run_cli(args: &[String]) -> Result<()> {
 /// Build the graph (→ `graph.json`) and FTS index for `root`, persisting both into
 /// `data_dir` and recording the count stats. Prints a human-readable summary.
 pub fn warmup(root: &Path, data_dir: &Path) -> Result<()> {
-    // Canonicalize so the index stores the same absolute paths the MCP server uses
-    // (its repo_dir is the absolute cwd) — one path scheme across both, and prune
-    // can clean up any older mixed-scheme entries.
+    // Canonicalize so the walk and the `with_repo_root(root)` base below share one
+    // spelling — stored keys come out repo-root-relative, matching the MCP server
+    // (which relativizes against the same canonical repo_dir).
     let root_buf = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let root = root_buf.as_path();
     let store = Store::open(data_dir).context("opening store")?;
@@ -78,7 +78,9 @@ pub fn warmup(root: &Path, data_dir: &Path) -> Result<()> {
     let _ = store.set_stat("graph_edges", g.edges as i64);
 
     // --- FTS content index ---
-    let index = Index::open(data_dir).context("opening index")?;
+    let index = Index::open(data_dir)
+        .context("opening index")?
+        .with_repo_root(root);
     let idx = index
         .index_path(root, true)
         .context("indexing repo contents")?;

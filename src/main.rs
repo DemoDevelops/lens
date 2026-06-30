@@ -95,12 +95,49 @@ async fn run_server() -> Result<()> {
         });
     }
 
+    // Capture the data dir before `serve` consumes the forge, so we can tidy the
+    // SQLite WAL sidecars on a clean shutdown below.
+    let data_dir = forge.data_dir().to_path_buf();
+
     let service = forge.serve(stdio()).await?;
     service.waiting().await?;
     if let Some(p) = &pidfile {
         let _ = std::fs::remove_file(p);
     }
+    finalize_wal_files(&data_dir);
     Ok(())
+}
+
+/// On a clean shutdown (the MCP client disconnected), checkpoint each WAL database
+/// fully into its main file and switch it out of WAL mode, then unlink the now-stale
+/// `-wal`/`-shm` sidecars so the data dir is tidy. The next start re-enables WAL via
+/// `configure_conn`. macOS leaves the `-shm` behind even after the mode switch, so the
+/// removal is explicit; it is safe only because the checkpoint already folded all WAL
+/// content into the main db. Best-effort: skipped on SIGKILL (no clean exit runs).
+fn finalize_wal_files(data_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("db") {
+            continue;
+        }
+        // Scope the connection so it is closed before we unlink the sidecars.
+        let checkpointed = match rusqlite::Connection::open(&path) {
+            Ok(conn) => conn
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+                .is_ok(),
+            Err(_) => false,
+        };
+        if checkpointed {
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.clone().into_os_string();
+                sidecar.push(suffix);
+                let _ = std::fs::remove_file(sidecar);
+            }
+        }
+    }
 }
 
 /// Resolve `<data_dir>/server.pid`, matching how the server/hook resolve the

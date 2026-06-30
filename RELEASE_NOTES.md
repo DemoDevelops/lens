@@ -1,7 +1,8 @@
-Better `lens_find` ranking and a public-ready README.
+Portable search index, tidier data dir, and a more reliable rebuild gate.
 
 ### Improved
-- `lens_find` blends lexical relevance with a PageRank tie-break, so the most structurally important symbol wins ties. Backed by new findloc accuracy fixtures.
+- The FTS index now stores chunk and manifest paths repo-root-relative instead of absolute, so the index is portable across checkouts and no longer leaks machine layout into search output. Indexes built with absolute paths are migrated automatically on first open.
+- On a clean shutdown the SQLite databases are checkpointed and their `-wal`/`-shm` sidecars removed, leaving the data dir tidy.
 
-### Docs
-- README rewrite: a 10-second pitch with a concrete before/after, an honest benchmarks-and-limits note, a "How it compares" section, and a security note on the darkroom (process isolation and a timeout, not an OS sandbox).
+### Fixed
+- The index rebuild now gates on the live chunk count rather than a cached stat, so a schema or path migration that wipes the index can no longer wrongly skip the rebuild.

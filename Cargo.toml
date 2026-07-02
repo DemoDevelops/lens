@@ -1,9 +1,9 @@
 [package]
 name = "lens"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
-description = "A token-saving MCP server: darkroom execution, FTS5 search, tree-sitter code graph, reversible compression."
+description = "A token-saving MCP server: darkroom execution, full-text search, tree-sitter code graph, reversible compression."
 repository = "https://github.com/DemoDevelops/lens"
 homepage = "https://github.com/DemoDevelops/lens"
 readme = "README.md"

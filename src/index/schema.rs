@@ -110,6 +110,11 @@ impl Index {
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_backend', ?1)",
                 [FTS_BACKEND_VERSION],
             )?;
+            // Reclaim the pages freed by dropping the pre-Tantivy FTS5 tables above: a
+            // real SQLite-era index.db can be tens of MB of trigram postings, and a bare
+            // DROP leaves them as free pages so the file never shrinks. VACUUM runs once,
+            // here on the version bump, and is cheap now that only the manifest is live.
+            conn.execute_batch("VACUUM")?;
         }
         Ok(())
     }
@@ -117,5 +122,109 @@ impl Index {
     /// Total chunks currently indexed (live Tantivy docs).
     pub fn chunk_count(&self) -> Result<i64> {
         Ok(self.store.num_docs()? as i64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// A pre-Tantivy `index.db` (FTS5 `chunks`/`chunks_tri` + a populated
+    /// `file_manifest`, no `fts_backend` marker) must migrate cleanly the first time
+    /// the Tantivy build opens it: the FTS5 tables are dropped, the manifest is wiped
+    /// so the server's chunk-count gate forces a full rebuild, the version marker is
+    /// set, and the pages freed by the drop are reclaimed rather than left as dead disk.
+    #[test]
+    fn upgrades_a_pre_tantivy_fts5_index_cleanly() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("index.db");
+
+        // Realistic SQLite-era index.db: the old FTS5 vtables with enough rows to
+        // allocate many pages, plus a manifest row, and no meta table.
+        {
+            let mut conn = Connection::open(&db).unwrap();
+            crate::obs::configure_conn(&conn).unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE chunks USING fts5(
+                     path UNINDEXED, chunk_id UNINDEXED, symbols, content, tokenize='porter');
+                 CREATE VIRTUAL TABLE chunks_tri USING fts5(
+                     path UNINDEXED, chunk_id UNINDEXED, content, tokenize='trigram');
+                 CREATE TABLE file_manifest(path TEXT PRIMARY KEY, mtime INTEGER NOT NULL);",
+            )
+            .unwrap();
+            let filler = "fn handle_request() { dispatch(); } ".repeat(8);
+            let tx = conn.transaction().unwrap();
+            for i in 0..300 {
+                let path = format!("src/f{i}.rs");
+                tx.execute(
+                    "INSERT INTO chunks(path, chunk_id, symbols, content) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![path, i, "handle_request", filler],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO chunks_tri(path, chunk_id, content) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![path, i, filler],
+                )
+                .unwrap();
+            }
+            tx.execute(
+                "INSERT INTO file_manifest(path, mtime) VALUES ('src/f0.rs', 123)",
+                [],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let pages_before: i64 = Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap();
+
+        // First open by the Tantivy build runs the migration.
+        let idx = Index::open(dir.path()).unwrap();
+
+        let conn = Connection::open(&db).unwrap();
+        assert!(
+            conn.prepare("SELECT 1 FROM chunks LIMIT 0").is_err(),
+            "old FTS5 `chunks` table must be dropped"
+        );
+        assert!(conn.prepare("SELECT 1 FROM chunks_tri LIMIT 0").is_err());
+        let manifest_rows: i64 = conn
+            .query_row("SELECT count(*) FROM file_manifest", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(manifest_rows, 0, "manifest must be cleared on the version bump");
+        let ver: String = conn
+            .query_row("SELECT value FROM meta WHERE key='fts_backend'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(ver, FTS_BACKEND_VERSION);
+        let freelist: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(freelist, 0, "VACUUM must reclaim the pages freed by the DROP");
+        let pages_after: i64 = conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            pages_after < pages_before,
+            "index.db must shrink after migration (was {pages_before}, now {pages_after})"
+        );
+
+        // Fresh Tantivy index is empty (so ensure_index rebuilds), and a rebuild over a
+        // real corpus is searchable end to end.
+        assert_eq!(idx.chunk_count().unwrap(), 0);
+        let corpus = tempdir().unwrap();
+        std::fs::write(
+            corpus.path().join("server.rs"),
+            "fn handle_request() { dispatch(); }\n",
+        )
+        .unwrap();
+        idx.index_path(corpus.path(), true).unwrap();
+        let out = idx.search(&["handle_request".into()], 5).unwrap();
+        assert!(
+            !out.results[0].hits.is_empty(),
+            "search must work after the migration rebuild"
+        );
     }
 }

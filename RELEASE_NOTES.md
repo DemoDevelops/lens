@@ -1,8 +1,8 @@
-Portable search index, tidier data dir, and a more reliable rebuild gate.
+Faster, multi-threaded index builds via a new full-text search backend.
 
 ### Improved
-- The FTS index now stores chunk and manifest paths repo-root-relative instead of absolute, so the index is portable across checkouts and no longer leaks machine layout into search output. Indexes built with absolute paths are migrated automatically on first open.
-- On a clean shutdown the SQLite databases are checkpointed and their `-wal`/`-shm` sidecars removed, leaving the data dir tidy.
+- The content index is now built by a new Tantivy-based full-text search backend instead of SQLite FTS5. Its multi-threaded segment build makes the cold index build near-linear in repository size, up to ~10x faster on large repositories (measured from 77s to 7s at ~161k chunks); the old build grew super-linearly and could take many minutes on a large tree.
 
-### Fixed
-- The index rebuild now gates on the live chunk count rather than a cached stat, so a schema or path migration that wipes the index can no longer wrongly skip the rebuild.
+### Changed
+- The backend swap is automatic. On the first run after upgrading, an existing index rebuilds itself once, the old SQLite FTS5 tables are dropped, and their on-disk space is reclaimed; no reindex command or manual step is needed.
+- Search results and ranking are unchanged: symbol-weighted BM25, substring/structural matching, and the same result ordering carry over to the new backend.

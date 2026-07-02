@@ -243,6 +243,16 @@ fn rotate_if_needed_at(path: &Path, max_bytes: u64, next_len: u64) {
 /// In test builds the mirror is suppressed unless `LENS_HOME` is set, so unit
 /// tests never append to the developer's real `~/.lens/ops.log`.
 fn global_ops_path(local: &Path) -> Option<PathBuf> {
+    // Test/bench harnesses must never mirror into the real ~/.lens ledger; doing
+    // so pollutes the dashboard with fixture ops (a 24-worker concurrency test
+    // alone leaked ~58M "saved" tokens). Unit tests are gated by cfg(test);
+    // integration tests link the lib in normal mode, so they and every other
+    // cargo-launched process opt out via LENS_NO_GLOBAL_MIRROR (set for all of
+    // cargo in .cargo/config.toml). The installed server runs the binary
+    // directly, not via cargo, so it still mirrors.
+    if std::env::var_os("LENS_NO_GLOBAL_MIRROR").is_some() {
+        return None;
+    }
     #[cfg(test)]
     {
         std::env::var_os("LENS_HOME")?;
@@ -505,6 +515,34 @@ mod tests {
     }
 
     #[test]
+    fn global_mirror_opt_out_suppresses_mirror() {
+        // home_root()/env are process-global; serialize with the other mutators.
+        let _g = crate::rtk::env_test_lock();
+        let prev_home = std::env::var_os("LENS_HOME");
+        let prev_flag = std::env::var_os("LENS_NO_GLOBAL_MIRROR");
+        // LENS_HOME opens the cfg(test) mirror gate; the runtime opt-out (set for
+        // integration tests + cargo runs via .cargo/config.toml) must close it, so
+        // fixture ops never reach the real ledger.
+        let home = tempdir().unwrap();
+        let local = home.path().join("proj/.lens/ops.log");
+        std::env::set_var("LENS_HOME", home.path());
+        std::env::remove_var("LENS_NO_GLOBAL_MIRROR");
+        let opted_in = global_ops_path(&local);
+        std::env::set_var("LENS_NO_GLOBAL_MIRROR", "1");
+        let opted_out = global_ops_path(&local);
+        match prev_home {
+            Some(v) => std::env::set_var("LENS_HOME", v),
+            None => std::env::remove_var("LENS_HOME"),
+        }
+        match prev_flag {
+            Some(v) => std::env::set_var("LENS_NO_GLOBAL_MIRROR", v),
+            None => std::env::remove_var("LENS_NO_GLOBAL_MIRROR"),
+        }
+        assert!(opted_in.is_some(), "mirror on when opted in");
+        assert!(opted_out.is_none(), "opt-out suppresses mirror");
+    }
+
+    #[test]
     fn finish_uses_published_current_session() {
         // The hook publishes the active session to <dir>/current_session; finish()
         // must stamp the op record with it (this is the IPC the server relies on).
@@ -557,6 +595,10 @@ mod tests {
     fn append_mirrors_into_global_home() {
         // home_root() is env-driven and process-global; serialize with other mutators.
         let _g = crate::rtk::env_test_lock();
+        // .cargo/config.toml sets the opt-out for every cargo run; clear it so this
+        // test exercises the real mirror path, then restore it for other tests.
+        let prev_flag = std::env::var_os("LENS_NO_GLOBAL_MIRROR");
+        std::env::remove_var("LENS_NO_GLOBAL_MIRROR");
         let home = tempdir().unwrap();
         std::env::set_var("LENS_HOME", home.path());
         let data = tempdir().unwrap();
@@ -564,11 +606,13 @@ mod tests {
             .start("lens_run", json!({}))
             .finish(8000, 100, Some("r".into()), "ok", "", None);
         std::env::remove_var("LENS_HOME");
-        // The per-repo log carries the record...
         let local = std::fs::read_to_string(data.path().join("ops.log")).unwrap();
-        assert!(local.contains("lens_run"));
-        // ...and so does the machine-global mirror under home_root().
         let global = std::fs::read_to_string(home.path().join("ops.log")).unwrap();
+        if let Some(v) = prev_flag {
+            std::env::set_var("LENS_NO_GLOBAL_MIRROR", v);
+        }
+        // The per-repo log carries the record, and so does the machine-global mirror.
+        assert!(local.contains("lens_run"));
         assert!(global.contains("lens_run"));
     }
 }

@@ -1,0 +1,6 @@
+# Keep test/bench runs from mirroring op records into the real ~/.lens ledger.
+# Applies to everything cargo launches (test binaries and their children); the
+# installed MCP server runs target/release/lens directly, not via cargo, so it
+# is unaffected and still mirrors normally. See global_ops_path in src/obs/mod.rs.
+[env]
+LENS_NO_GLOBAL_MIRROR = "1"

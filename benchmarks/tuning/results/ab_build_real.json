@@ -1,0 +1,83 @@
+{
+  "crossover_chunks": 1540,
+  "machine": {
+    "arch": "aarch64",
+    "logical_cpus": 12,
+    "os": "macos",
+    "reps": 3,
+    "unix_time": 1782969569
+  },
+  "max_speedup": 10.9,
+  "mode": "real",
+  "points": [
+    {
+      "chunks": 1540,
+      "files": 500,
+      "label": "500",
+      "speedup": 1.4,
+      "sqlite_ms": 459.7,
+      "sqlite_rows": 1540,
+      "sqlite_us_per_chunk": 298.5,
+      "tantivy_ms": 337.2,
+      "tantivy_us_per_chunk": 219.0
+    },
+    {
+      "chunks": 5666,
+      "files": 1000,
+      "label": "1000",
+      "speedup": 2.7,
+      "sqlite_ms": 1372.9,
+      "sqlite_rows": 5666,
+      "sqlite_us_per_chunk": 242.3,
+      "tantivy_ms": 502.1,
+      "tantivy_us_per_chunk": 88.6
+    },
+    {
+      "chunks": 8862,
+      "files": 2000,
+      "label": "2000",
+      "speedup": 4.0,
+      "sqlite_ms": 4059.4,
+      "sqlite_rows": 8862,
+      "sqlite_us_per_chunk": 458.1,
+      "tantivy_ms": 1025.1,
+      "tantivy_us_per_chunk": 115.7
+    },
+    {
+      "chunks": 15921,
+      "files": 4000,
+      "label": "4000",
+      "speedup": 5.0,
+      "sqlite_ms": 5296.8,
+      "sqlite_rows": 15921,
+      "sqlite_us_per_chunk": 332.7,
+      "tantivy_ms": 1059.1,
+      "tantivy_us_per_chunk": 66.5
+    },
+    {
+      "chunks": 41366,
+      "files": 8000,
+      "label": "8000",
+      "speedup": 8.7,
+      "sqlite_ms": 16007.1,
+      "sqlite_rows": 41366,
+      "sqlite_us_per_chunk": 387.0,
+      "tantivy_ms": 1833.2,
+      "tantivy_us_per_chunk": 44.3
+    },
+    {
+      "chunks": 161075,
+      "files": 16000,
+      "label": "16000",
+      "speedup": 10.9,
+      "sqlite_ms": 76769.3,
+      "sqlite_rows": 161075,
+      "sqlite_us_per_chunk": 476.6,
+      "tantivy_ms": 7057.3,
+      "tantivy_us_per_chunk": 43.8
+    }
+  ],
+  "real_root": "/Users/gene/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f",
+  "sqlite_per_chunk_trend": 1.4,
+  "tantivy_per_chunk_trend": 0.7
+}

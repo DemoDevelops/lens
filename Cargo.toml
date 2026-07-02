@@ -123,6 +123,10 @@ rayon = "1"
 # Offline BPE tokenizer (vocab embedded in the crate; no network) for accurate
 # token-count estimates instead of the bytes/4 heuristic.
 tiktoken-rs = "0.6"
+# Pure-Rust Lucene-style FTS: builds independent segments across N threads, the one
+# architectural way to use all cores for indexing (SQLite FTS5 is single-writer).
+# Replaces the FTS5 chunks/chunks_tri tables; SQLite stays for the mtime manifest.
+tantivy = "0.26"
 
 [dev-dependencies]
 assert_cmd = "2"

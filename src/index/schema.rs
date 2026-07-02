@@ -1,12 +1,22 @@
-//! FTS5 schema for the content index.
+//! Index handle: a Tantivy FTS store plus a small SQLite `index.db` that holds only
+//! the mtime manifest (incremental re-index key) and a backend version marker.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 
-/// Handle to the FTS5 index DB. A connection is opened per operation so the
-/// index is safe to use from multiple async tasks.
+use super::tantivy_index::TantivyStore;
+
+/// Bump to force a clean full rebuild after an on-disk format change. A mismatch
+/// clears the manifest so the next `index_path` re-reads every file into a fresh
+/// Tantivy index (also discards a stale SQLite-FTS5-era index).
+const FTS_BACKEND_VERSION: &str = "tantivy1";
+
+/// Handle to the content index. Cloneable and cheap to share across async tasks:
+/// the Tantivy store is behind an `Arc`, and the SQLite manifest opens a connection
+/// per operation.
 #[derive(Clone)]
 pub struct Index {
     db_path: PathBuf,
@@ -16,6 +26,7 @@ pub struct Index {
     /// fall back to absolute. Canonicalized so it matches the canonicalized walk
     /// paths in [`Index::index_path`].
     repo_root: PathBuf,
+    store: Arc<TantivyStore>,
 }
 
 impl Index {
@@ -25,9 +36,11 @@ impl Index {
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating data dir {}", dir.display()))?;
+        let store = TantivyStore::open(&dir.join("fts")).context("opening tantivy fts")?;
         let idx = Index {
             db_path: dir.join("index.db"),
             repo_root: dir.to_path_buf(),
+            store: Arc::new(store),
         };
         idx.init()?;
         Ok(idx)
@@ -56,6 +69,11 @@ impl Index {
         self.repo_root.join(key)
     }
 
+    /// The Tantivy FTS store (build + search primitives).
+    pub(crate) fn store(&self) -> &TantivyStore {
+        &self.store
+    }
+
     pub(crate) fn conn(&self) -> Result<Connection> {
         let conn = Connection::open(&self.db_path)
             .with_context(|| format!("opening index db {}", self.db_path.display()))?;
@@ -65,66 +83,39 @@ impl Index {
 
     fn init(&self) -> Result<()> {
         let conn = self.conn()?;
-        // BM25F migration: an index built before the `symbols` column has the wrong
-        // shape, so drop it (and its manifest) to recreate fresh. The next
-        // index_path re-reads every file and repopulates both.
-        let table_exists = conn.prepare("SELECT 1 FROM chunks LIMIT 0").is_ok();
-        let stale_schema =
-            table_exists && conn.prepare("SELECT symbols FROM chunks LIMIT 0").is_err();
-        // Path migration: indexes built before paths were relativized stored absolute
-        // keys (leaking machine layout and breaking portability across checkouts).
-        // Wipe so the next index_path repopulates with repo-root-relative keys; the
-        // manifest goes too, forcing a full re-read.
-        let has_abs_paths = table_exists
-            && conn
-                .query_row(
-                    "SELECT 1 FROM chunks WHERE path GLOB '/*' OR path GLOB '?:\\*' LIMIT 1",
-                    [],
-                    |_| Ok(()),
-                )
-                .optional()
-                .unwrap_or(None)
-                .is_some();
-        if stale_schema || has_abs_paths {
-            conn.execute_batch(
-                "DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS chunks_tri; DROP TABLE IF EXISTS file_manifest;",
-            )?;
-        }
-        // `path` and `chunk_id` are stored but not tokenized; `symbols` (the symbol
-        // names defined in the chunk) and `content` are searchable, with `symbols`
-        // field-weighted higher in `bm25()` so a query that names a symbol ranks the
-        // file that defines it above files that merely mention it. Porter stemming
-        // improves recall on code/prose.
-        //
-        // `chunks_tri` mirrors the same content under a trigram tokenizer so
-        // structural/operator queries (`std::fs`, `->`) the porter path strips can be
-        // matched as literal substrings. Kept in sync with `chunks` on every write.
+        // The SQLite side now holds only the mtime manifest + a version marker. Drop
+        // any FTS5-era tables left by a pre-Tantivy index (harmless no-op otherwise).
         conn.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
-                path UNINDEXED,
-                chunk_id UNINDEXED,
-                symbols,
-                content,
-                tokenize = 'porter'
-             );
-             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_tri USING fts5(
-                path UNINDEXED,
-                chunk_id UNINDEXED,
-                content,
-                tokenize = 'trigram'
-             );
-             CREATE TABLE IF NOT EXISTS file_manifest (
+            "CREATE TABLE IF NOT EXISTS file_manifest (
                  path TEXT PRIMARY KEY,
                  mtime INTEGER NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS meta (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             DROP TABLE IF EXISTS chunks;
+             DROP TABLE IF EXISTS chunks_tri;",
         )?;
+        // Version gate: on a mismatch (fresh dir, or a stale/SQLite-era index), clear
+        // the manifest so the next index_path does a full build into the Tantivy index.
+        let ver: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key = 'fts_backend'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if ver.as_deref() != Some(FTS_BACKEND_VERSION) {
+            conn.execute("DELETE FROM file_manifest", [])?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_backend', ?1)",
+                [FTS_BACKEND_VERSION],
+            )?;
+        }
         Ok(())
     }
 
-    /// Total chunks currently indexed.
+    /// Total chunks currently indexed (live Tantivy docs).
     pub fn chunk_count(&self) -> Result<i64> {
-        let conn = self.conn()?;
-        let n: i64 = conn.query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))?;
-        Ok(n)
+        Ok(self.store.num_docs()? as i64)
     }
 }

@@ -1,6 +1,7 @@
-//! `lens_index` / `lens_search`: build and query an FTS5 content index.
+//! `lens_index` / `lens_search`: build and query a Tantivy content index.
 
 pub mod schema;
+mod tantivy_index;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -10,28 +11,19 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use regex::Regex;
-use rusqlite::Connection;
 
 pub use schema::Index;
 
+use self::tantivy_index::TantivyStore;
 use crate::tools::{IndexResponse, QueryResult, SearchHit, SearchResponse};
 
 /// Lines per chunk for non-markdown files.
 const CODE_WINDOW: usize = 100;
 
-/// Run FTS5 `optimize` after an `index_path` that (re)indexed at least this many files,
-/// collapsing the segment forest a bulk build leaves. Below this (small incremental
-/// edits) the one-time optimize cost would outweigh the read gain.
-const OPTIMIZE_AFTER_FILES: usize = 64;
-
-/// Commit the in-flight index transaction every this many file operations so the
-/// `index.db` write lock is released periodically during a large walk, letting a
-/// concurrent writer (the MCP server's auto-index, another `lens index`) interleave
-/// instead of spinning on the busy handler to SQLITE_BUSY (Bug A). A fresh full-repo
-/// index marks every file "changed", so without batching the lock is held for the
-/// entire walk. Each committed batch is durable, so an interrupted index resumes from
-/// the manifest on the next run.
-const COMMIT_BATCH: usize = 150;
+/// A re-index touching at least this many changed files is a bulk build, so the
+/// Tantivy writer fans out across all cores; smaller edits use a single writer thread
+/// (spinning up N segment threads for one file is pure overhead).
+const BULK_FILE_THRESHOLD: usize = 32;
 
 impl Index {
     /// Index a file or directory, respecting `.gitignore`. Re-indexing a path
@@ -115,89 +107,83 @@ impl Index {
         let mut chunks_added = 0usize;
         let mut files_read = 0usize;
 
-        // Write in COMMIT_BATCH-file batches so the index.db write lock is held only
-        // briefly (Bug A). Two properties make a concurrent writer succeed:
-        //   * IMMEDIATE, not the default DEFERRED. This connection just ran the
-        //     manifest SELECT (a read). A deferred tx whose first statement is a write
-        //     tries to upgrade that read while another writer holds the lock, and
-        //     SQLite returns SQLITE_BUSY *without* invoking the busy handler (deadlock
-        //     avoidance) — the other writer would fail instantly. Taking the write
-        //     lock up front keeps the busy handler in play so it retries.
-        //   * read+chunk each batch OFF the lock, then write it under one short
-        //     IMMEDIATE tx. The lock-free read phase is the gap a retrying writer
-        //     acquires in. Re-acquiring IMMEDIATE right after each commit instead
-        //     would leave a sub-millisecond gap the other writer could never catch.
-        type FileRows = (String, i64, Vec<(String, String, String)>);
-
-        // Delete chunks for removed files, batched under IMMEDIATE transactions.
-        for batch in deleted.chunks(COMMIT_BATCH) {
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            for &path in batch {
-                tx.execute("DELETE FROM chunks WHERE path = ?1", [path])?;
-                tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path])?;
-                tx.execute("DELETE FROM file_manifest WHERE path = ?1", [path])?;
-            }
-            tx.commit()?;
+        // Nothing to do: every file unchanged and none deleted. Skip the writer
+        // entirely (acquiring it takes the exclusive index lock).
+        if changed.is_empty() && deleted.is_empty() {
+            return Ok(IndexResponse {
+                files_indexed,
+                chunks: 0,
+                files_read: 0,
+            });
         }
 
-        // Re-index changed or new files.
-        for batch in changed.chunks(COMMIT_BATCH) {
-            // Phase 1: read + chunk off-lock (the gap a concurrent writer acquires in).
-            let mut prepared: Vec<FileRows> = Vec::with_capacity(batch.len());
-            for &path_str in batch {
-                let file = self.abs_path(path_str);
-                let content = match std::fs::read(&file) {
-                    Ok(bytes) => match String::from_utf8(bytes) {
-                        Ok(s) => s,
-                        Err(_) => continue, // skip binary/non-utf8
-                    },
-                    Err(_) => continue,
-                };
-                let mut rows = Vec::new();
-                for (i, chunk) in chunk_file(&file, &content).iter().enumerate() {
-                    if chunk.trim().is_empty() {
-                        continue;
-                    }
-                    rows.push((format!("{path_str}#{i}"), chunk_symbols(chunk), chunk.clone()));
-                }
-                prepared.push((path_str.clone(), current[path_str] as i64, rows));
-            }
+        // One writer for the whole batch. Tantivy builds independent segments across
+        // its worker threads and merges on commit, so a bulk build uses every core;
+        // there is no single-writer lock to batch around (unlike the old SQLite path).
+        let store = self.store();
+        let threads = if changed.len() >= BULK_FILE_THRESHOLD {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            1
+        };
+        let mut writer = store.writer(threads)?;
 
-            // Phase 2: write the batch under one short IMMEDIATE transaction.
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            for (path_str, mtime, rows) in &prepared {
-                tx.execute("DELETE FROM chunks WHERE path = ?1", [path_str])?;
-                tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path_str])?;
-                for (chunk_id, symbols, content) in rows {
-                    tx.prepare_cached(
-                        "INSERT INTO chunks (path, chunk_id, symbols, content) VALUES (?1, ?2, ?3, ?4)",
-                    )?
-                    .execute(rusqlite::params![path_str, chunk_id, symbols, content])?;
-                    tx.prepare_cached(
-                        "INSERT INTO chunks_tri (path, chunk_id, content) VALUES (?1, ?2, ?3)",
-                    )?
-                    .execute(rusqlite::params![path_str, chunk_id, content])?;
-                    chunks_added += 1;
-                }
-                tx.prepare_cached(
-                    "INSERT OR REPLACE INTO file_manifest (path, mtime) VALUES (?1, ?2)",
-                )?
-                .execute(rusqlite::params![path_str, mtime])?;
-                files_read += 1;
-            }
-            tx.commit()?;
+        // Delete-by-`path` term drops every existing chunk of a removed file.
+        for &path in &deleted {
+            store.delete_path(&writer, path);
         }
 
-        // After a bulk build (initial index or a large re-index), collapse the FTS5
-        // segment forest so later queries scan one segment instead of many
-        // (bench_tuning W3: ~9% faster reads for a one-time ~5ms cost). Skipped on
-        // small incremental edits, where the optimize cost would just add latency.
-        if files_read >= OPTIMIZE_AFTER_FILES {
-            conn.execute_batch(
-                "INSERT INTO chunks(chunks) VALUES('optimize');
-                 INSERT INTO chunks_tri(chunks_tri) VALUES('optimize');",
+        // Re-index changed or new files: delete the old chunks, add the new ones.
+        // Manifest is updated only for files actually read, so an unreadable file is
+        // retried next run (matches the pre-Tantivy behavior).
+        let mut read_keys: Vec<&String> = Vec::new();
+        for &path_str in &changed {
+            let file = self.abs_path(path_str);
+            let content = match std::fs::read(&file) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(_) => continue, // skip binary/non-utf8
+                },
+                Err(_) => continue,
+            };
+            store.delete_path(&writer, path_str);
+            for (i, chunk) in chunk_file(&file, &content).iter().enumerate() {
+                if chunk.trim().is_empty() {
+                    continue;
+                }
+                store.add_chunk(
+                    &writer,
+                    path_str,
+                    &format!("{path_str}#{i}"),
+                    &chunk_symbols(chunk),
+                    chunk,
+                )?;
+                chunks_added += 1;
+            }
+            files_read += 1;
+            read_keys.push(path_str);
+        }
+
+        // Commit makes the segments durable and searchable; reload the reader so the
+        // next search sees them.
+        writer.commit().context("committing tantivy index")?;
+        drop(writer);
+        store.reload()?;
+
+        // Mirror the change into the SQLite mtime manifest (the incremental key).
+        let tx = conn.transaction()?;
+        for &path in &deleted {
+            tx.execute("DELETE FROM file_manifest WHERE path = ?1", [path])?;
+        }
+        for &path_str in &read_keys {
+            tx.execute(
+                "INSERT OR REPLACE INTO file_manifest (path, mtime) VALUES (?1, ?2)",
+                rusqlite::params![path_str, current[path_str] as i64],
             )?;
         }
+        tx.commit()?;
 
         Ok(IndexResponse {
             files_indexed,
@@ -209,8 +195,7 @@ impl Index {
     /// Remove indexed chunks for source files that no longer exist under `root`, so
     /// deleted files stop showing up in `lens_search`. Only code-file chunks are
     /// touched — session-continuity records (`path` prefixed `session://`) are left
-    /// intact. Also cleans up chunks left under a different path scheme (e.g. an old
-    /// absolute-path index) for files now indexed relatively. Returns chunks removed.
+    /// intact. Returns the number of files pruned.
     ///
     /// Call ONLY with the repo root: a subpath `root` would wrongly prune everything
     /// outside it.
@@ -226,70 +211,62 @@ impl Index {
                 }
             }
         }
-        let mut conn = self.conn()?;
-        let existing: Vec<String> = {
-            let mut stmt =
-                conn.prepare("SELECT DISTINCT path FROM chunks WHERE path NOT LIKE 'session://%'")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            rows.flatten().collect()
-        };
-        let stale: Vec<String> = existing
+        let store = self.store();
+        let stale: Vec<String> = store
+            .distinct_paths()?
             .into_iter()
-            .filter(|p| !current.contains(p))
+            .filter(|p| !p.starts_with("session://") && !current.contains(p))
             .collect();
         if stale.is_empty() {
             return Ok(0);
         }
-        let tx = conn.transaction()?;
-        let mut removed = 0usize;
+        let mut writer = store.writer(1)?;
         for path in &stale {
-            removed += tx.execute("DELETE FROM chunks WHERE path = ?1", [path])?;
-            tx.execute("DELETE FROM chunks_tri WHERE path = ?1", [path])?;
+            store.delete_path(&writer, path);
         }
-        tx.commit()?;
-        Ok(removed)
+        writer.commit().context("committing tantivy prune")?;
+        drop(writer);
+        store.reload()?;
+        Ok(stale.len())
     }
 
     /// Insert arbitrary `(path, chunk_id, content)` records into the index,
     /// replacing any existing rows with the same `chunk_id` first (idempotent).
     /// Used by session continuity to make detailed events `lens_search`-able.
     pub fn index_records(&self, records: &[(String, String, String)]) -> Result<usize> {
-        let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        let store = self.store();
+        let mut writer = store.writer(1)?;
         let mut added = 0usize;
         for (path, chunk_id, content) in records {
             if content.trim().is_empty() {
                 continue;
             }
-            tx.execute("DELETE FROM chunks WHERE chunk_id = ?1", [chunk_id])?;
-            tx.execute("DELETE FROM chunks_tri WHERE chunk_id = ?1", [chunk_id])?;
-            // Session-continuity records carry no code symbols, so the symbols
-            // column is empty (they rank on content only).
-            tx.execute(
-                "INSERT INTO chunks (path, chunk_id, symbols, content) VALUES (?1, ?2, '', ?3)",
-                rusqlite::params![path, chunk_id, content],
-            )?;
-            tx.execute(
-                "INSERT INTO chunks_tri (path, chunk_id, content) VALUES (?1, ?2, ?3)",
-                rusqlite::params![path, chunk_id, content],
-            )?;
+            store.delete_chunk_id(&writer, chunk_id);
+            // Session-continuity records carry no code symbols, so the symbols field
+            // is empty (they rank on content only).
+            store.add_chunk(&writer, path, chunk_id, "", content)?;
             added += 1;
         }
-        tx.commit()?;
+        if added == 0 {
+            return Ok(0);
+        }
+        writer.commit().context("committing tantivy records")?;
+        drop(writer);
+        store.reload()?;
         Ok(added)
     }
 
-    /// Run FTS5 search for each query. Alphanumeric queries take the BM25F-ranked
-    /// porter path; queries carrying structural punctuation (`std::fs`, `->`) route
+    /// Run FTS search for each query. Alphanumeric queries take the BM25-ranked
+    /// stemmed path; queries carrying structural punctuation (`std::fs`, `->`) route
     /// to the trigram path for literal-substring matching.
     pub fn search(&self, queries: &[String], limit_per_query: usize) -> Result<SearchResponse> {
-        let conn = self.conn()?;
+        let store = self.store();
         let mut results = Vec::new();
         for query in queries {
             let hits = if is_structural(query) {
-                structural_search(&conn, query, limit_per_query)?
+                structural_search(store, query, limit_per_query)?
             } else {
-                ranked_search(&conn, query, limit_per_query)?
+                ranked_search(store, query, limit_per_query)?
             };
             results.push(QueryResult {
                 query: query.clone(),
@@ -300,71 +277,54 @@ impl Index {
     }
 }
 
-/// Proximity boost weight: added to the negated BM25F score of a multi-term hit,
-/// scaled by `1 / span` where `span` is the tightest token-position window
-/// covering every query term in the chunk. Adjacent terms (span 1) get the full
-/// weight; terms scattered far apart decay toward zero. Sized so an adjacent-terms
-/// chunk overtakes a higher-TF but scattered chunk without disturbing the
-/// single-term / unrelated-query orderings the BM25F gates depend on.
+/// Proximity boost weight: added to the BM25 score of a multi-term hit, scaled by
+/// `1 / span` where `span` is the tightest token-position window covering every query
+/// term in the chunk. Adjacent terms (span 1) get the full weight; terms scattered
+/// far apart decay toward zero. Sized so an adjacent-terms chunk overtakes a
+/// higher-TF but scattered chunk without disturbing the single-term / unrelated-query
+/// orderings the BM25 gates depend on.
 const PROX_WEIGHT: f64 = 4.0;
 
-/// Over-fetch factor and cap for the proximity re-rank. The BM25F candidate pool is
+/// Over-fetch factor and cap for the proximity re-rank. The BM25 candidate pool is
 /// fetched `requested_limit * OVERFETCH_K` deep (bounded by `OVERFETCH_CAP`),
-/// re-ranked by the combined BM25F + proximity score, then truncated to the caller's
-/// limit. This lets an adjacent-terms chunk that BM25F alone ranks just OUTSIDE the
+/// re-ranked by the combined BM25 + proximity score, then truncated to the caller's
+/// limit. This lets an adjacent-terms chunk that BM25 alone ranks just OUTSIDE the
 /// top-L be lifted INTO the final top-L, so proximity is a recall win, not merely a
 /// reorder of the already-returned set. A query with no proximity boost (single-term,
-/// or terms that never co-occur) re-ranks to the identical BM25F order, so truncating
-/// the deeper pool to L yields byte-for-byte the same top-L as a plain `LIMIT L`.
+/// or terms that never co-occur) re-ranks to the identical BM25 order, so truncating
+/// the deeper pool to L yields the same top-L as a plain limit-L fetch.
 const OVERFETCH_K: usize = 8;
 const OVERFETCH_CAP: usize = 200;
 
 /// Multiplicative rank penalty for documentation chunks (`.md`/`.markdown`), applied
-/// to the BM25F base before the proximity boost. BM25 length-normalization otherwise
+/// to the BM25 base before the proximity boost. BM25 length-normalization otherwise
 /// floats a short markdown chunk (e.g. the README's own example queries) above the
 /// real code; the penalty lets equally-relevant code win. Uniform, so a doc-only
 /// result set keeps its order. 0.7 flips the observed README-over-code cases.
 const DOC_RANK_PENALTY: f64 = 0.7;
 
-/// BM25F-ranked search over the porter `chunks` table (the default path), with a
-/// deterministic term-proximity (min-window span) re-rank on top of `bm25()`.
-/// Over-fetches a deeper BM25F pool (see `OVERFETCH_K`), re-ranks by the combined
+/// BM25-ranked search over the stemmed `symbols` + `content` fields (the default
+/// path), with a deterministic term-proximity (min-window span) re-rank on top.
+/// Over-fetches a deeper BM25 pool (see `OVERFETCH_K`), re-ranks by the combined
 /// score, then truncates to `limit`, so proximity can lift an adjacent-terms chunk
-/// INTO the final top-L rather than only reordering the top-L BM25F already returned.
-fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-    let match_expr = sanitize_query(query);
-    if match_expr.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Over-fetch a deeper BM25F pool than the caller asked for, so the proximity
+/// INTO the final top-L rather than only reordering the top-L BM25 already returned.
+fn ranked_search(store: &TantivyStore, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    // Over-fetch a deeper BM25 pool than the caller asked for, so the proximity
     // re-rank below can pull a tight-span chunk ranked beyond L into the final top-L.
     let fetch = limit.saturating_mul(OVERFETCH_K).min(OVERFETCH_CAP);
-    // bm25() is more-negative-is-better; negate so higher = better. Column weights
-    // are (path, chunk_id, symbols, content): symbols is weighted 5x so a query
-    // naming a symbol ranks its defining file above files that only mention the
-    // term. snippet targets content (column 3).
-    let mut stmt = conn.prepare(
-        "SELECT path, chunk_id, snippet(chunks, 3, '[', ']', ' … ', 24) AS snip, content,
-                -bm25(chunks, 0.0, 0.0, 5.0, 1.0) AS score
-         FROM chunks
-         WHERE chunks MATCH ?1
-         ORDER BY bm25(chunks, 0.0, 0.0, 5.0, 1.0), path, chunk_id
-         LIMIT ?2",
-    )?;
-    // Distinct query terms for proximity. Porter stems the index, so an inflected
-    // query term won't position-match an unstemmed surface form; we match on exact
-    // lowercased tokens, which is conservative — it can only miss a boost, never add
-    // a spurious one. Single-term queries have no span, so the pass is a no-op and
-    // the order matches the SQL `ORDER BY` exactly.
+    let candidates = store.ranked_candidates(query, fetch)?;
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Distinct query terms for proximity. The index is stemmed, so an inflected query
+    // term won't position-match an unstemmed surface form; we match on exact
+    // lowercased tokens, which is conservative — it can only miss a boost, never add a
+    // spurious one. Single-term queries have no span, so the pass is a no-op and the
+    // order matches BM25 exactly.
     let terms = proximity_terms(query);
     // (path, chunk_id, snippet, combined_score)
-    let mut rows: Vec<(String, String, String, f64)> = Vec::new();
-    let mapped = stmt.query_map(rusqlite::params![match_expr, fetch as i64], |row| {
-        let path: String = row.get(0)?;
-        let chunk_id: String = row.get(1)?;
-        let snippet: String = row.get(2)?;
-        let content: String = row.get(3)?;
-        let mut score: f64 = row.get(4)?;
+    let mut rows: Vec<(String, String, String, f64)> = Vec::with_capacity(candidates.len());
+    for (path, chunk_id, content, mut score) in candidates {
         if is_doc_path(&path) {
             score *= DOC_RANK_PENALTY;
         }
@@ -373,16 +333,12 @@ fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Sea
                 score += PROX_WEIGHT / span.max(1) as f64;
             }
         }
-        Ok((path, chunk_id, snippet, score))
-    });
-    if let Ok(mapped) = mapped {
-        for r in mapped.flatten() {
-            rows.push(r);
-        }
+        let snippet = ranked_snippet(&content, &terms);
+        rows.push((path, chunk_id, snippet, score));
     }
-    // Re-rank: higher combined score first, then the SQL tiebreak (path, chunk_id).
-    // With no proximity boost this reproduces the SQL order byte-for-byte, so the
-    // truncation below leaves the unboosted top-L identical to a plain `LIMIT L`.
+    // Re-rank: higher combined score first, then a stable (path, chunk_id) tiebreak.
+    // With no proximity boost this reproduces the BM25 order, so the truncation below
+    // leaves the unboosted top-L identical to a plain limit-L fetch.
     rows.sort_by(|a, b| {
         b.3.partial_cmp(&a.3)
             .unwrap_or(Ordering::Equal)
@@ -401,9 +357,55 @@ fn ranked_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Sea
         .collect())
 }
 
-/// Lowercased alphanumeric tokens of `text`, in order. Matches the FTS5 porter
-/// tokenizer's word boundaries (split on non-alphanumeric) minus stemming, applied
-/// identically to query and chunk so positions align.
+/// Whitespace-token width of a ranked snippet, mirroring the old FTS5
+/// `snippet(content, …, 24)` so the context returned to the model (and its byte
+/// size) stays comparable.
+const SNIPPET_TOKENS: usize = 24;
+
+/// A deterministic snippet for a ranked hit: a ~[`SNIPPET_TOKENS`]-token window
+/// around the first query-term match in `content`, with matched tokens bracketed
+/// `[like]` and a ` … ` marker where text is elided (mirrors the old FTS5 snippet).
+/// A pure function of `(content, terms)`, so it is byte-stable across different
+/// `limit`s — the over-fetch prefix invariant depends on it.
+fn ranked_snippet(content: &str, terms: &[String]) -> String {
+    let toks: Vec<&str> = content.split_whitespace().collect();
+    if toks.is_empty() {
+        return String::new();
+    }
+    let is_match = |t: &str| {
+        let low = t.to_lowercase();
+        terms.iter().any(|q| low.contains(q.as_str()))
+    };
+    // Start the window a few tokens before the first match so the match sits in
+    // context, not at the very edge.
+    let first = toks.iter().position(|t| is_match(t)).unwrap_or(0);
+    let start = first.saturating_sub(4);
+    let end = (start + SNIPPET_TOKENS).min(toks.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push_str("… ");
+    }
+    for (i, t) in toks[start..end].iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        if is_match(t) {
+            out.push('[');
+            out.push_str(t);
+            out.push(']');
+        } else {
+            out.push_str(t);
+        }
+    }
+    if end < toks.len() {
+        out.push_str(" …");
+    }
+    out
+}
+
+/// Lowercased alphanumeric tokens of `text`, in order. Splits on non-alphanumeric
+/// (the stemmed tokenizer's word boundaries minus stemming), applied identically to
+/// query and chunk so positions align.
 fn proximity_tokens(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
@@ -458,58 +460,46 @@ fn min_cover_span(content: &str, terms: &[String]) -> Option<usize> {
     best
 }
 
-/// Literal-substring search over the trigram `chunks_tri` table for structural /
-/// operator queries. Queries of at least 3 chars use the trigram index; shorter
-/// operators (`->`) fall back to a `LIKE` scan, which a trigram index can't serve.
-fn structural_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+/// Literal-substring search over the trigram field for structural / operator
+/// queries, scored by case-insensitive occurrence count so the chunk mentioning the
+/// identifier most (typically its definition) leads. The candidate pool is filtered
+/// to exact literal matches (dropping ngram false positives), then sorted by count.
+fn structural_search(store: &TantivyStore, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    // Over-fetch like ranked_search, then rank by literal-occurrence count below, so
-    // the chunk that mentions the identifier most (typically its definition) leads
-    // instead of returning a hardcoded zero score in arbitrary path order.
+    // Over-fetch like ranked_search, then rank by literal-occurrence count below.
     let fetch = limit.saturating_mul(OVERFETCH_K).min(OVERFETCH_CAP);
-    let rows: Vec<(String, String)> = if q.chars().count() >= 3 {
-        let phrase = format!("\"{}\"", q.replace('"', "\"\""));
-        let mut stmt =
-            conn.prepare("SELECT path, content FROM chunks_tri WHERE chunks_tri MATCH ?1 ORDER BY path, chunk_id LIMIT ?2")?;
-        let mapped = stmt.query_map(rusqlite::params![phrase, fetch as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        mapped.flatten().collect()
-    } else {
-        let like = format!("%{q}%");
-        let mut stmt =
-            conn.prepare("SELECT path, content FROM chunks_tri WHERE content LIKE ?1 ORDER BY path, chunk_id LIMIT ?2")?;
-        let mapped = stmt.query_map(rusqlite::params![like, fetch as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        mapped.flatten().collect()
-    };
-    // Score each hit by case-insensitive occurrence count of the literal query, sort
-    // descending with a stable path tiebreak (the SQL already ordered by path,
-    // chunk_id, and the sort is stable), then truncate to the caller's limit.
     let needle = q.to_lowercase();
-    let mut hits: Vec<SearchHit> = rows
+    // (path, chunk_id, snippet, occurrence_count)
+    let mut hits: Vec<(String, String, String, f64)> = store
+        .structural_candidates(q, fetch)?
         .into_iter()
-        .map(|(path, content)| {
-            let score = content.to_lowercase().matches(&needle).count() as f64;
-            SearchHit {
-                path,
-                snippet: structural_snippet(&content, q),
-                score,
+        .filter_map(|(path, chunk_id, content)| {
+            let count = content.to_lowercase().matches(&needle).count();
+            if count == 0 {
+                return None; // drop trigram false positives (ngram is a superset)
             }
+            Some((path, chunk_id, structural_snippet(&content, q), count as f64))
         })
         .collect();
+    // Sort by occurrence count desc, then a stable (path, chunk_id) tiebreak.
     hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+        b.3.partial_cmp(&a.3)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
     });
     hits.truncate(limit);
-    Ok(hits)
+    Ok(hits
+        .into_iter()
+        .map(|(path, _chunk_id, snippet, score)| SearchHit {
+            path,
+            snippet,
+            score,
+        })
+        .collect())
 }
 
 /// The first line of `content` containing `needle`, trimmed and capped — the
@@ -526,9 +516,9 @@ fn structural_snippet(content: &str, needle: &str) -> String {
 }
 
 /// True when a query is a single whitespace-free token carrying structural
-/// punctuation the porter tokenizer would strip (`std::fs`, `->`, `Level::parse`),
+/// punctuation the stemmed tokenizer would strip (`std::fs`, `->`, `Level::parse`),
 /// so it routes to the trigram path for literal matching. A multi-word query goes to
-/// the porter/BM25F path even if it contains a hyphen, since it is prose, not a literal
+/// the stemmed/BM25 path even if it contains a hyphen, since it is prose, not a literal
 /// symbol (otherwise "a read-only bash command" would be phrase-matched and miss).
 fn is_structural(query: &str) -> bool {
     let q = query.trim();
@@ -629,7 +619,7 @@ fn chunk_symbols(content: &str) -> String {
 /// Split a camelCase/PascalCase identifier into its subwords for FTS expansion.
 ///
 /// Returns an empty vec for identifiers with no camel/acronym signal (pure
-/// snake_case or single-case, which the porter tokenizer already splits on
+/// snake_case or single-case, which the stemmed tokenizer already splits on
 /// underscores). Boundaries: lower/digit→Upper, an acronym run ending where the
 /// last uppercase begins a lowercase word (`HTTPServer` → `HTTP`, `Server`), and
 /// letter↔digit. Fragments of length <= 1 are dropped. Lookaround-free (a
@@ -673,21 +663,6 @@ fn split_subwords(ident: &str) -> Vec<String> {
     }
     parts.retain(|p| p.chars().count() > 1);
     parts
-}
-
-/// Turn an arbitrary query into a safe FTS5 MATCH expression. The query is split on
-/// non-alphanumeric runs into the same word tokens the porter tokenizer indexed (so
-/// `read-only` becomes `read` + `only`, not the never-indexed `readonly`), and the
-/// tokens are OR-joined. OR rather than implicit AND is what makes multi-word natural
-/// queries work: a relevant chunk rarely contains every term, and BM25F plus the
-/// proximity re-rank already float the densest matches to the top.
-fn sanitize_query(query: &str) -> String {
-    query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(" OR ")
 }
 
 /// Open an index at the given data dir.
@@ -827,10 +802,11 @@ mod tests {
     #[test]
     fn single_term_overfetch_top_l_is_prefix_stable() {
         // Over-fetch invariant: a single-term query carries no proximity boost, so the
-        // re-rank collapses to the plain BM25F order. Truncating a deeper over-fetched
+        // re-rank collapses to the plain BM25 order. Truncating a deeper over-fetched
         // pool to L must therefore yield exactly the first L of any larger limit — the
-        // top-L stays byte-identical to a plain `LIMIT L`. 12 matching chunks saturate
-        // the over-fetch (3*8 and 12*8 both exceed 12), so only the truncation differs.
+        // top-L stays byte-identical to a plain limit-L fetch. 12 matching chunks
+        // saturate the over-fetch (3*8 and 12*8 both exceed 12), so only the truncation
+        // differs.
         let data = tempdir().unwrap();
         let dir = tempdir().unwrap();
         for i in 0..12 {
@@ -923,13 +899,13 @@ mod tests {
     }
 
     #[test]
-    fn bulk_build_optimizes_and_stays_correct() {
-        // A build over >= OPTIMIZE_AFTER_FILES files triggers FTS5 optimize; results
-        // must stay correct, and a later 1-file edit (below the threshold, no optimize)
-        // must still re-index correctly.
+    fn bulk_build_stays_correct() {
+        // A large from-scratch build (fanned out across writer threads) must stay
+        // correct, and a later 1-file edit must still re-index correctly.
         let data = tempdir().unwrap();
         let src = tempdir().unwrap();
-        for i in 0..OPTIMIZE_AFTER_FILES + 5 {
+        let n = BULK_FILE_THRESHOLD + 40;
+        for i in 0..n {
             fs::write(
                 src.path().join(format!("f{i}.rs")),
                 format!("fn func_{i}() {{ let marker_{i} = {i}; }}\n"),
@@ -939,16 +915,17 @@ mod tests {
         let idx = Index::open(data.path()).unwrap();
         let res = idx.index_path(src.path(), true).unwrap();
         assert!(
-            res.files_read >= OPTIMIZE_AFTER_FILES,
-            "bulk build should read every file and trigger optimize"
+            res.files_read >= n,
+            "bulk build should read every file"
         );
         let out = idx.search(&["func_7".into()], 5).unwrap();
         assert!(
             out.results[0].hits.iter().any(|h| h.path.ends_with("f7.rs")),
-            "search must be correct after optimize"
+            "search must be correct after bulk build"
         );
 
-        // A 1-file edit (files_read < threshold, no optimize) must still re-index.
+        // A 1-file edit (below the bulk threshold, single writer thread) must still
+        // re-index.
         let edited = src.path().join("f7.rs");
         fs::write(&edited, "fn changed_7() { let z = 1; }\n").unwrap();
         let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
@@ -963,27 +940,17 @@ mod tests {
         let out2 = idx.search(&["changed_7".into()], 5).unwrap();
         assert!(
             out2.results[0].hits.iter().any(|h| h.path.ends_with("f7.rs")),
-            "edited content searchable without optimize"
+            "edited content searchable"
         );
     }
 
     // ── lens_search defect guards (each reproduces a fixed bug) ──────────────
 
     #[test]
-    fn sanitize_query_splits_punctuation_and_or_joins() {
-        // DEFECT 3 locked contract: split on non-alphanumeric into the indexed word
-        // tokens and OR-join, never a fused "readonly" or implicit AND.
-        assert_eq!(
-            sanitize_query("read-only blob"),
-            "\"read\" OR \"only\" OR \"blob\""
-        );
-    }
-
-    #[test]
     fn search_recalls_multiword_hyphenated_query() {
         // DEFECT 3: a natural multi-word query with a hyphenated term must recall.
-        // Pre-fix, terms were AND-ed and "read-only" fused to the never-indexed
-        // "readonly", so the query returned zero hits.
+        // The terms are OR-joined and "read-only" splits into read + only (never a
+        // fused, never-indexed "readonly" nor an implicit AND), so the query recalls.
         let data = tempdir().unwrap();
         let dir = tempdir().unwrap();
         fs::write(
@@ -1005,9 +972,9 @@ mod tests {
 
     #[test]
     fn structural_query_scores_nonzero_and_ranks_by_mentions() {
-        // DEFECT 2: identifier queries (with ::) route to the trigram path. Pre-fix
-        // every hit scored a hardcoded 0 in path order; now they rank by occurrence
-        // count, so the file mentioning the identifier most leads with score > 0.
+        // DEFECT 2: identifier queries (with ::) route to the trigram path. They rank
+        // by occurrence count, so the file mentioning the identifier most leads with
+        // score > 0.
         let data = tempdir().unwrap();
         let dir = tempdir().unwrap();
         fs::write(

@@ -1,0 +1,20 @@
+{
+  "id": "0025_identrank_needle",
+  "prompt": "What sealed reconciliation marker does the invoice-dispute resolution routine emit?",
+  "fixtures": [
+    "fixtures/identrank_pick"
+  ],
+  "ground_truth": {
+    "marker": "SEALCODE_K9W2Q7"
+  },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "evidence": [
+    "SEALCODE_K9W2Q7"
+  ],
+  "treatment": {
+    "queries": [
+      "resolveInvoiceDispute payment audit"
+    ]
+  }
+}

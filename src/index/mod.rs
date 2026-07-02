@@ -303,6 +303,19 @@ const OVERFETCH_CAP: usize = 200;
 /// result set keeps its order. 0.7 flips the observed README-over-code cases.
 const DOC_RANK_PENALTY: f64 = 0.7;
 
+/// Multiplicative rank boost for a chunk whose raw text contains a strong compound
+/// identifier from the query (see [`strong_ident_terms`]), applied once per distinct
+/// such term present, to the BM25 base after [`DOC_RANK_PENALTY`] and before
+/// the proximity boost. Multiplicative so it is scale-free against BM25 magnitudes
+/// (like the doc penalty): a query mixing a rare compound identifier with common prose
+/// words then reranks the file naming that identifier above a high-TF prose chunk that
+/// never mentions it. The 5x `symbols`-field weight alone misses this whenever the
+/// identifier is not captured as a definition (a call site, a config key, a language
+/// whose def keyword the symbol regex omits). Gated by `LENS_IDENT_RERANK` (default
+/// on); a query carrying no strong identifier yields no term, so the pass is a no-op
+/// and the order is exactly today's BM25 + proximity.
+const IDENT_BOOST: f64 = 3.0;
+
 /// BM25-ranked search over the stemmed `symbols` + `content` fields (the default
 /// path), with a deterministic term-proximity (min-window span) re-rank on top.
 /// Over-fetches a deeper BM25 pool (see `OVERFETCH_K`), re-ranks by the combined
@@ -322,11 +335,34 @@ fn ranked_search(store: &TantivyStore, query: &str, limit: usize) -> Result<Vec<
     // spurious one. Single-term queries have no span, so the pass is a no-op and the
     // order matches BM25 exactly.
     let terms = proximity_terms(query);
+    // Identifier-rarity boost terms: strong compound identifiers in the query (see
+    // `strong_ident_terms`). Read the escape hatch per call (default on when unset or
+    // any value != "0"); off, or a query carrying no compound identifier, yields an
+    // empty list so the per-candidate boost below is a no-op and the order is exactly
+    // today's BM25 + proximity (single-term prefix stability preserved by construction).
+    let ident_boost_on = std::env::var("LENS_IDENT_RERANK")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let ident_terms = if ident_boost_on {
+        strong_ident_terms(query)
+    } else {
+        Vec::new()
+    };
     // (path, chunk_id, snippet, combined_score)
     let mut rows: Vec<(String, String, String, f64)> = Vec::with_capacity(candidates.len());
     for (path, chunk_id, content, mut score) in candidates {
         if is_doc_path(&path) {
             score *= DOC_RANK_PENALTY;
+        }
+        // One multiply per DISTINCT strong identifier the raw chunk contains
+        // (case-insensitive substring), applied to the BM25 base like the doc penalty.
+        if !ident_terms.is_empty() {
+            let content_lc = content.to_lowercase();
+            for t in &ident_terms {
+                if content_lc.contains(t.as_str()) {
+                    score *= IDENT_BOOST;
+                }
+            }
         }
         if terms.len() >= 2 {
             if let Some(span) = min_cover_span(&content, &terms) {
@@ -418,6 +454,35 @@ fn proximity_terms(query: &str) -> Vec<String> {
     for t in proximity_tokens(query) {
         if !terms.contains(&t) {
             terms.push(t);
+        }
+    }
+    terms
+}
+
+/// Strong compound-identifier query terms (lowercased, first-seen order) for the
+/// identifier-rarity boost. A whitespace token is kept only if it carries an
+/// underscore OR an internal camelCase hump (a lowercase char immediately followed by
+/// an uppercase one) AND is at least 4 chars long, i.e. a compound symbol like
+/// `parse_shard_header` or `doFetchBillingInfo`, never a bare prose word (`parse`,
+/// `call`, `Billing`). Char-scan only (mirrors [`split_subwords`]), no regex, no new
+/// dependency.
+fn strong_ident_terms(query: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for tok in query.split_whitespace() {
+        let chars: Vec<char> = tok.chars().collect();
+        if chars.len() < 4 {
+            continue;
+        }
+        let has_underscore = chars.contains(&'_');
+        let has_camel_hump = chars
+            .windows(2)
+            .any(|w| w[0].is_lowercase() && w[1].is_uppercase());
+        if !(has_underscore || has_camel_hump) {
+            continue;
+        }
+        let lowered = tok.to_lowercase();
+        if !terms.contains(&lowered) {
+            terms.push(lowered);
         }
     }
     terms
@@ -1032,6 +1097,80 @@ mod tests {
             !hits[0].path.contains("/./"),
             "no /./ in stored path: {}",
             hits[0].path
+        );
+    }
+
+    // ── identifier-rarity boost (L39) ───────────────────────────────────────
+
+    /// Two-file corpus for the identifier-boost tests: `billing.rs` mentions the
+    /// compound identifier `doFetchBillingInfo` once as a CALL (so `chunk_symbols`
+    /// never captures it and the 5x symbols weight stays out of play), while
+    /// `usage.rs` repeats the prose query words `call`/`action`, so plain BM25 ranks
+    /// the prose file above the def file. The boost is the only thing that flips them.
+    fn ident_corpus() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("billing.rs"),
+            "fn handler() {\n    doFetchBillingInfo();\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("usage.rs"),
+            "call action call action call action call action call action call action\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// Serializes the two `LENS_IDENT_RERANK`-sensitive tests so their process-global
+    /// env mutation cannot interleave. Other tests are unaffected: their queries carry
+    /// no strong compound identifier, so a transient env value changes nothing for them.
+    static BOOST_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn ident_boost_lifts_def_over_prose() {
+        let _guard = BOOST_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Default ON: the escape hatch unset. (remove_var is a no-op if already unset.)
+        std::env::remove_var("LENS_IDENT_RERANK");
+        let data = tempdir().unwrap();
+        let src = ident_corpus();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(src.path(), true).unwrap();
+
+        let hits = &idx
+            .search(&["doFetchBillingInfo call action".into()], 5)
+            .unwrap()
+            .results[0]
+            .hits;
+        assert!(
+            hits[0].path.ends_with("billing.rs"),
+            "identifier boost must lift the def file to rank 1, got {}",
+            hits[0].path
+        );
+    }
+
+    #[test]
+    fn ident_boost_off_restores_bm25_order() {
+        let _guard = BOOST_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LENS_IDENT_RERANK", "0");
+        let data = tempdir().unwrap();
+        let src = ident_corpus();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(src.path(), true).unwrap();
+
+        let top = idx
+            .search(&["doFetchBillingInfo call action".into()], 5)
+            .unwrap()
+            .results[0]
+            .hits[0]
+            .path
+            .clone();
+        // Restore the env BEFORE asserting so a failed assertion can't leak the "0"
+        // value into a later test.
+        std::env::remove_var("LENS_IDENT_RERANK");
+        assert!(
+            !top.ends_with("billing.rs"),
+            "with the boost off, plain BM25 keeps the high-TF prose file on top, got {top}"
         );
     }
 }

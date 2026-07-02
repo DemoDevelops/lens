@@ -1,0 +1,83 @@
+{
+  "crossover_chunks": 4800,
+  "machine": {
+    "arch": "aarch64",
+    "logical_cpus": 12,
+    "os": "macos",
+    "reps": 3,
+    "unix_time": 1782970007
+  },
+  "max_speedup": 1.6,
+  "mode": "synthetic",
+  "points": [
+    {
+      "chunks": 12,
+      "files": 12,
+      "label": "1x",
+      "speedup": 0.1,
+      "sqlite_ms": 3.7,
+      "sqlite_rows": 12,
+      "sqlite_us_per_chunk": 307.0,
+      "tantivy_ms": 68.0,
+      "tantivy_us_per_chunk": 5665.2
+    },
+    {
+      "chunks": 120,
+      "files": 120,
+      "label": "10x",
+      "speedup": 0.1,
+      "sqlite_ms": 18.9,
+      "sqlite_rows": 120,
+      "sqlite_us_per_chunk": 157.8,
+      "tantivy_ms": 349.4,
+      "tantivy_us_per_chunk": 2911.7
+    },
+    {
+      "chunks": 600,
+      "files": 600,
+      "label": "50x",
+      "speedup": 0.3,
+      "sqlite_ms": 77.5,
+      "sqlite_rows": 600,
+      "sqlite_us_per_chunk": 129.2,
+      "tantivy_ms": 303.4,
+      "tantivy_us_per_chunk": 505.7
+    },
+    {
+      "chunks": 1200,
+      "files": 1200,
+      "label": "100x",
+      "speedup": 0.5,
+      "sqlite_ms": 178.4,
+      "sqlite_rows": 1200,
+      "sqlite_us_per_chunk": 148.6,
+      "tantivy_ms": 331.2,
+      "tantivy_us_per_chunk": 276.0
+    },
+    {
+      "chunks": 2400,
+      "files": 2400,
+      "label": "200x",
+      "speedup": 1.0,
+      "sqlite_ms": 329.3,
+      "sqlite_rows": 2400,
+      "sqlite_us_per_chunk": 137.2,
+      "tantivy_ms": 340.9,
+      "tantivy_us_per_chunk": 142.0
+    },
+    {
+      "chunks": 4800,
+      "files": 4800,
+      "label": "400x",
+      "speedup": 1.6,
+      "sqlite_ms": 713.6,
+      "sqlite_rows": 4800,
+      "sqlite_us_per_chunk": 148.7,
+      "tantivy_ms": 432.8,
+      "tantivy_us_per_chunk": 90.2
+    }
+  ],
+  "real_root": null,
+  "sqlite_per_chunk_trend": 1.0,
+  "tantivy_per_chunk_trend": 0.3
+}

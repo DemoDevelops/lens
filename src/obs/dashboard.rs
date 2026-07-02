@@ -11,7 +11,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -174,17 +174,51 @@ fn route(target: &str, dir: &Path, session: Option<&str>) -> (u16, &'static str,
         "/" | "/index.html" => (200, "text/html; charset=utf-8", INDEX_HTML.to_string()),
         "/api/stats" => {
             let since = query_param(query, "since").and_then(|v| v.parse::<i64>().ok());
-            // scope=global reads the machine-global mirror under home_root(), totaling
-            // every repo and launch profile; cross-repo, so it drops the session filter.
-            let (d, sess) = match (query_param(query, "scope"), crate::rtk::home_root()) {
-                (Some("global"), Some(home)) => (home, None),
+            let until = query_param(query, "until").and_then(|v| v.parse::<i64>().ok());
+            // scope resolution:
+            //   "global" -> the machine-global mirror under home_root() (every repo,
+            //               cross-repo so the session filter is dropped),
+            //   a repo path -> that repo's own <path>/.lens data dir (its own savings),
+            //   absent / "repo" -> the server's own launch dir (the default).
+            let (d, sess) = match query_param(query, "scope") {
+                Some("global") => match crate::rtk::home_root() {
+                    Some(home) => (home, None),
+                    None => (dir.to_path_buf(), session),
+                },
+                Some(p) if p != "repo" && !p.is_empty() => {
+                    (PathBuf::from(pct_decode(p)).join(".lens"), None)
+                }
                 _ => (dir.to_path_buf(), session),
             };
-            (
-                200,
-                "application/json",
-                snapshot_json_since(&d, sess, since).to_string(),
-            )
+            let mut v = snapshot_json_since(&d, sess, since, until);
+            // Repo picker: the projects known to the machine-global session store, and
+            // which project the server's own dir maps to (so the page can preselect it).
+            // Keep only real lens repos — a still-present `<proj>/.lens` dir that isn't the
+            // global home itself — which drops the tempdir/parent-dir noise the session
+            // store also records (deleted test tmpdirs no longer have a `.lens`). Recency
+            // order comes from the query; cap so a huge history stays a usable list.
+            if let Some(home) = crate::rtk::home_root() {
+                if let Ok(ss) = crate::session::store::SessionStore::open(&home) {
+                    if let Ok(projs) = ss.distinct_projects() {
+                        let real: Vec<String> = projs
+                            .into_iter()
+                            .filter(|p| {
+                                let d = Path::new(p).join(".lens");
+                                d.is_dir() && d != home
+                            })
+                            .take(30)
+                            .collect();
+                        v["projects"] = serde_json::json!(real);
+                    }
+                }
+            }
+            v["scope_repo"] = serde_json::json!(dir
+                .file_name()
+                .and_then(|f| f.to_str())
+                .filter(|f| *f == ".lens")
+                .and(dir.parent())
+                .and_then(|p| p.to_str()));
+            (200, "application/json", v.to_string())
         }
         _ => (404, "text/plain; charset=utf-8", "not found".to_string()),
     }
@@ -196,6 +230,27 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
         let (k, v) = kv.split_once('=')?;
         (k == key).then_some(v)
     })
+}
+
+/// Minimal percent-decoder for a query value (the repo path the picker sends via
+/// `encodeURIComponent`: `%20` spaces, `%2F` slashes). `+` is left literal — the
+/// frontend never form-encodes, so a `+` in a path stays a `+`.
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Read an HTTP request and return its target (the path from the request line).
@@ -263,7 +318,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     --dim:#b09a72; --accent:#e0a93c; --warn:#cc6a2a; --bad:#b0431c;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);
+  body{margin:0;background:var(--bg);color:var(--ink);color-scheme:dark;
     font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   header{display:flex;align-items:baseline;gap:9px;padding:5px 10px;
     border-bottom:1px solid var(--line);flex-wrap:wrap}
@@ -274,11 +329,25 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .dot.stale{background:var(--bad);box-shadow:none;animation:none}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
   .grow{flex:1}
-  select#win,input#winAt{background:var(--panel);color:var(--ink);border:1px solid var(--line);
-    border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 4px}
-  button#scope{background:var(--panel);color:var(--dim);border:1px solid var(--line);
-    border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 6px;cursor:pointer}
-  button#scope.on{color:var(--accent);border-color:var(--accent)}
+  /* Custom dropdown — native <select> option menus are OS-drawn on macOS and can't
+     be themed, so we render our own button + listbox. */
+  .dd{position:relative;display:inline-block}
+  .dd-btn{appearance:none;background:var(--panel) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238b97a3' stroke-width='1.4'/></svg>") no-repeat right 5px center;
+    color:var(--ink);border:1px solid var(--line);border-radius:5px;
+    font:10px ui-monospace,Menlo,monospace;padding:1px 17px 1px 6px;cursor:pointer;white-space:nowrap}
+  .dd-btn:hover{border-color:var(--dim)}
+  .dd.open>.dd-btn{border-color:var(--accent)}
+  .dd-list{position:absolute;z-index:70;top:calc(100% + 3px);left:0;min-width:100%;max-height:280px;
+    overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:6px;
+    box-shadow:0 8px 24px rgba(0,0,0,.5);padding:3px;display:none}
+  .dd.open>.dd-list{display:block}
+  .dd-opt{padding:3px 8px;border-radius:4px;color:var(--ink);white-space:nowrap;cursor:pointer;
+    font:10px ui-monospace,Menlo,monospace}
+  .dd-opt:hover{background:var(--line)}
+  .dd-opt.sel{color:var(--accent)}
+  input#winFrom,input#winTo{background:var(--panel);color:var(--ink);border:1px solid var(--line);
+    border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 4px;color-scheme:dark}
+  #winDash{color:var(--dim);font-size:10px}
   button#view,button#theme{background:var(--panel);color:var(--dim);border:1px solid var(--line);
     border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 6px;cursor:pointer}
   body.full button#view{color:var(--accent);border-color:var(--accent)}
@@ -294,18 +363,20 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .hbar .fill.dim{background:var(--line)}
   .hbar .val{text-align:right;color:var(--ink)}
   .hbar.z{opacity:.35}
-  .cost{cursor:pointer;display:flex;align-items:baseline;gap:6px;user-select:none}
-  .cost .dollars{color:var(--accent);font-weight:700;font-size:15px;letter-spacing:.3px}
-  .cost .basis{color:var(--dim);font-size:10px;border-bottom:1px dotted var(--line)}
-  .cost:hover .basis{color:var(--ink)}
-  .saved-top{color:var(--dim);font-size:10px}
+  .cost{display:flex;align-items:baseline;gap:7px}
+  .cost .dollars{color:var(--accent);font-weight:700;font-size:18px;letter-spacing:.3px}
+  .cost .dd-btn{color:var(--dim)}
+  .cost .dd-btn:hover{color:var(--ink)}
+  .cost .dd-list{left:auto;right:0}
+  .saved-top{color:var(--dim);font-size:9px}
   main{padding:9px 12px;display:grid;gap:10px}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 11px;min-width:0;overflow-x:auto}
   .panel h2{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin:0 0 4px}
   .seclabel{color:var(--dim);font-size:9px;letter-spacing:.3px;margin:2px 0 -3px}
+  .seclabel b{color:var(--ink);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
   .strip{display:flex;flex-wrap:wrap;gap:6px 22px;align-items:baseline}
   .strip .st i{color:var(--dim);font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.4px;margin-right:4px}
-  .strip .st b{font-size:14px;font-weight:600}
+  .strip .st b{font-size:13px;font-weight:600}
   .charts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
   .ch{display:flex;flex-direction:column;min-width:0}
   .ch>span{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;display:flex;justify-content:space-between}
@@ -354,13 +425,15 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <header>
   <h1>lens</h1>
   <div class="live"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
-  <select id="win" title="time window — how far back to scope savings + activity"></select>
-  <input id="winAt" type="text" placeholder="2pm" size="6" title="custom start time, e.g. 2pm or 14:30 — Enter to apply">
-  <button id="scope" title="toggle global view: total tokens across every repo and launch profile">this repo</button>
+  <div id="win" class="dd"></div>
+  <input id="winFrom" type="datetime-local" title="custom range start" style="display:none">
+  <span id="winDash" style="display:none">→</span>
+  <input id="winTo" type="datetime-local" title="custom range end (blank = now)" style="display:none">
+  <div id="scope" class="dd"></div>
   <button id="view" title="toggle mini view for a narrow pane (cmux); full view uses the whole window">mini</button>
   <button id="theme" title="color theme — click to switch (dark / 70s)">dark</button>
   <div class="grow"></div>
-  <div class="cost" id="cost" title="estimated $ saved — click to switch model rate"><span class="dollars" id="dollars">$—</span><span class="basis" id="basis">@ —</span></div>
+  <div class="cost" id="cost" title="estimated value of the tokens saved, priced at the selected model's input rate"><span class="dollars" id="dollars">$—</span><div id="rate" class="dd"></div></div>
   <div class="saved-top" id="savedTop">— saved</div>
 </header>
 <main>
@@ -369,19 +442,19 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <div class="ch"><span>tokens saved / min <b id="savedRate">—</b></span><canvas id="savedChart"></canvas></div>
     <div class="ch"><span>bytes returned / min <b id="bytesRate">—</b></span><canvas id="bytesChart"></canvas></div>
   </div>
-  <div class="seclabel">by tool + tool adoption &middot; saved &asymp; input tokens avoided &middot; dim = no calls in window</div>
+  <div class="seclabel"><b>by tool</b> + tool adoption &middot; saved &asymp; input tokens avoided &middot; dim = no calls in window</div>
   <div class="panel">
     <table id="tools"><thead><tr>
-      <th>tool</th><th>ops</th><th>raw</th><th>ret</th><th>saved~tok</th><th>save%</th><th>off</th><th>err</th><th>to</th>
+      <th>tool</th><th>ops</th><th title="raw bytes the tool processed in the darkroom">raw</th><th title="bytes actually returned to context">ret</th><th title="input tokens avoided ≈ (raw − returned) ÷ 4">saved~tok</th><th title="share of bytes kept out of context">save%</th><th title="offloaded ops · total bytes offloaded to the store">off</th><th title="errors">err</th><th title="timeouts">to</th>
     </tr></thead><tbody></tbody></table>
   </div>
   <div class="row2">
     <div class="panel"><h2>by mechanism</h2><div class="mech" id="byMech"></div></div>
     <div class="panel"><h2>RTK shell savings</h2><div class="mech" id="rtkCards"></div></div>
   </div>
-  <div class="seclabel">applied value &middot; benchmark rates &times; your live ops &middot; <span id="avNote">estimated, not measured this session</span></div>
+  <div class="seclabel"><b>applied value</b> &middot; benchmark rates &times; your live ops &middot; <span id="avNote">estimated, not measured this session</span></div>
   <div class="panel"><div class="av" id="appliedValue"></div></div>
-  <div class="seclabel">session activity &middot; built-in tools (Read / Edit / Bash) via hooks &middot; not token savings</div>
+  <div class="seclabel"><b>session activity</b> &middot; built-in tools (Read / Edit / Bash) via hooks &middot; not token savings</div>
   <div class="panel">
     <div class="actline" id="actLine"></div>
     <div class="actrow"><canvas id="actChart"></canvas><span class="rate" id="actRate">—</span></div>
@@ -410,21 +483,75 @@ const TOOL_DESC={
   lens_links:"Return the local subgraph within N hops of a node id: a symbol's neighborhood or blast radius at a chosen depth.",
   lens_path:"Find the shortest path between two symbols via BFS over graph edges: how A reaches B through the call/import chain.",
   lens_recall:"Recover the full blob behind a retrieve_ref returned by another tool, reversing any truncation or offloading.",
+  lens_skeleton:"Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to '...'. Far fewer tokens than reading the whole file; full text is one lens_recall away.",
+  lens_grep_ast:"Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds real calls without the false positives grep hits in comments or strings. Returns path:line matches.",
+  lens_overview:"Token-budgeted repo overview: the most structurally important symbols (PageRank-ranked) with their callers and callees, as much as fits a token budget. A high-signal map of a codebase at fixed cost.",
   lens_stats:"Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo."
 };
 let rtkBase=null;
-let scope='repo';
-try{const s=localStorage.getItem('lens_scope');if(s==='global'||s==='repo')scope=s;}catch(e){}
+// Custom dropdown: a styled button + listbox. Native <select> option menus are drawn by
+// the OS on macOS and can't be themed, so we render our own. API mirrors the slice of
+// <select> the page uses: set(options,value), .value, selectedLabel(), onChange(cb).
+function makeDD(el,title){
+  el.classList.add('dd');
+  const btn=document.createElement('button'); btn.type='button'; btn.className='dd-btn'; if(title)btn.title=title;
+  const lbl=document.createElement('span'); btn.appendChild(lbl);
+  const list=document.createElement('div'); list.className='dd-list';
+  el.appendChild(btn); el.appendChild(list);
+  let opts=[], val=null, cb=null;
+  function draw(){
+    const cur=opts.find(o=>o.value===val);
+    lbl.textContent=cur?cur.label:'';
+    list.innerHTML='';
+    opts.forEach(o=>{
+      const d=document.createElement('div'); d.className='dd-opt'+(o.value===val?' sel':''); d.textContent=o.label; if(o.title)d.title=o.title;
+      d.addEventListener('click',function(ev){ev.stopPropagation(); el.classList.remove('open'); if(o.value!==val){val=o.value; draw(); if(cb)cb(val);}});
+      list.appendChild(d);
+    });
+  }
+  btn.addEventListener('click',function(ev){ev.stopPropagation(); const open=el.classList.contains('open');
+    document.querySelectorAll('.dd.open').forEach(x=>x.classList.remove('open'));
+    if(!open){el.classList.add('open'); const s=list.querySelector('.dd-opt.sel'); if(s)s.scrollIntoView({block:'nearest'});}});
+  return {
+    set(o,v){opts=o.slice(); if(v!==undefined)val=v; if(!opts.some(x=>x.value===val)&&opts.length)val=opts[0].value; draw();},
+    get value(){return val;},
+    set value(v){val=v; draw();},
+    selectedLabel(){const c=opts.find(o=>o.value===val); return c?c.label:'';},
+    onChange(fn){cb=fn;}
+  };
+}
+document.addEventListener('click',function(){document.querySelectorAll('.dd.open').forEach(x=>x.classList.remove('open'));});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')document.querySelectorAll('.dd.open').forEach(x=>x.classList.remove('open'));});
 
-// Time window: the backend /api/stats?since= cutoff scopes ops + session activity.
-// "live" = since the page opened (default). Concrete clock times ("since 2:00 PM") and
-// relative presets are built into the dropdown; a text field accepts arbitrary times.
-// RTK savings can't honor an arbitrary cutoff (rtk gain is a cumulative counter), so
-// that one plane stays "since you opened the page" regardless of the selector.
+// Scope: which repo's data to show. 'global' = machine-global aggregate; a repo path =
+// that repo's own .lens. The picker is populated from the first snapshot (it carries the
+// project list); until then we fetch the stored or server-derived scope.
+let scope=null;
+try{const s=localStorage.getItem('lens_scope');if(s)scope=s;}catch(e){}
+const scopeDD=makeDD(document.getElementById('scope'),'which repo to show: a single project, or all repos combined');
+let scopeBuilt=false;
+function repoName(p){const parts=(p||'').split('/').filter(Boolean);return parts.length?parts[parts.length-1]:(p||'');}
+function scopeLabel(){return scope==='global'?'GLOBAL':(scope?repoName(scope):'');}
+function buildScope(projs,repoPath){
+  projs=projs||[];
+  const opts=[{label:'all repos',value:'global'}].concat(projs.map(p=>({label:repoName(p),value:p,title:p})));
+  const valid=v=> v==='global' || projs.includes(v);
+  if(!valid(scope)) scope = valid(repoPath)?repoPath:'global';
+  scopeDD.set(opts,scope);
+  try{localStorage.setItem('lens_scope',scope);}catch(e){}
+  scopeDD.onChange(function(v){scope=v;try{localStorage.setItem('lens_scope',scope);}catch(e){}tick();});
+  scopeBuilt=true;
+}
+
+// Time window: presets scope [since, now]; the custom option opens a start/end date
+// range so any window is selectable. RTK savings stay "since page open" (rtk gain is a
+// cumulative counter that can't honor an arbitrary cutoff).
 const PAGELOAD=Math.floor(Date.now()/1000);
-let activeSince=0, winMode='all', atLabel='';
-const winSel=document.getElementById('win'), winAt=document.getElementById('winAt');
-function addOpt(label,val){const o=document.createElement('option');o.textContent=label;o.value=val;winSel.appendChild(o);}
+let activeSince=0, activeUntil=0, winMode='all', atLabel='';
+const winDD=makeDD(document.getElementById('win'),'time window for savings + activity');
+const winFrom=document.getElementById('winFrom'), winTo=document.getElementById('winTo'), winDash=document.getElementById('winDash');
+let winOpts=[];
+function addOpt(label,val){winOpts.push({label,value:val});}
 (function buildWinOptions(){
   addOpt('live','live'); addOpt('last 15m','15m'); addOpt('last 1h','1h'); addOpt('last 3h','3h'); addOpt('today','today');
   // Concrete top-of-hour marks so "since 2pm" is a one-click pick, no fiddly time spinner.
@@ -434,16 +561,7 @@ function addOpt(label,val){const o=document.createElement('option');o.textConten
     if(d.getTime()>Date.now()) continue;
     addOpt('since '+d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}), 'at:'+Math.floor(d.getTime()/1000));
   }
-  addOpt('all time','all'); addOpt('custom…','custom');
-})();
-// Restore the last-picked window, but only if its option still exists: the concrete
-// "since 2pm" marks regenerate per current hour, so an old absolute pick may be gone —
-// fall back to all time then. Presets ('live','15m',…) always exist and recompute now.
-(function restoreWin(){
-  let w='all';
-  try{const s=localStorage.getItem('lens_win');if(s)w=s;const a=localStorage.getItem('lens_winat');if(a!=null)winAt.value=a;}catch(e){}
-  if(![...winSel.options].some(o=>o.value===w)) w='all';
-  winSel.value=w; applyWinValue(w);
+  addOpt('all time','all'); addOpt('custom range…','custom');
 })();
 function presetSince(m){
   const now=Math.floor(Date.now()/1000);
@@ -454,18 +572,11 @@ function presetSince(m){
   if(m==='15m') return now-900;
   return PAGELOAD; // live
 }
-// Lenient: "2pm" -> 14:00, "2:30pm" -> 14:30, "14:00"/"14" -> 14:00, "11am" -> 11:00.
-function parseTime(s){
-  s=(s||'').trim().toLowerCase(); if(!s) return null;
-  const m=s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/); if(!m) return null;
-  let h=+m[1]; const min=m[2]?+m[2]:0, ap=m[3];
-  if(ap==='pm'&&h<12) h+=12; if(ap==='am'&&h===12) h=0;
-  if(h>23||min>59) return null;
-  const d=new Date(); d.setHours(h,min,0,0);
-  let u=Math.floor(d.getTime()/1000); const now=Math.floor(Date.now()/1000);
-  if(u>now) u-=86400; return u; // a future time means "earlier today" already passed -> yesterday
-}
+// datetime-local value ("YYYY-MM-DDTHH:MM", local) -> unix seconds; 0 when blank.
+function dtSecs(el){const v=el.value; if(!v) return 0; const t=Date.parse(v); return isNaN(t)?0:Math.floor(t/1000);}
+function fmtTime(s){return new Date(s*1000).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}
 function winLabel(){
+  if(winMode==='custom'){return (activeSince?fmtTime(activeSince):'start')+' → '+(activeUntil?fmtTime(activeUntil):'now');}
   const at=new Date(activeSince*1000).toLocaleTimeString();
   if(winMode==='all') return 'all time';
   if(winMode==='live') return 'live · since '+at;
@@ -474,55 +585,91 @@ function winLabel(){
   if(winMode==='1h') return 'last 1h · since '+at;
   if(winMode==='15m') return 'last 15m · since '+at;
   if(winMode==='at') return atLabel;
-  return 'since '+at; // custom text
+  return 'since '+at;
 }
 function applyWin(){tick();}
 // Update window state from a selector value, without ticking or focusing — shared by
 // the change handler and the on-load restore.
 function applyWinValue(v){
-  winAt.style.display = v==='custom'?'':'none';
-  if(v==='custom'){ winMode='custom'; const u=parseTime(winAt.value); if(u!=null) activeSince=u; return; }
-  if(v.indexOf('at:')===0){ winMode='at'; atLabel=winSel.options[winSel.selectedIndex].text; activeSince=parseInt(v.slice(3),10); }
+  const custom = v==='custom';
+  winFrom.style.display=winTo.style.display=winDash.style.display = custom?'':'none';
+  if(custom){ winMode='custom'; activeSince=dtSecs(winFrom); activeUntil=dtSecs(winTo); return; }
+  activeUntil=0;
+  if(v.indexOf('at:')===0){ winMode='at'; atLabel=winDD.selectedLabel(); activeSince=parseInt(v.slice(3),10); }
   else { winMode=v; activeSince=presetSince(v); }
 }
-winSel.addEventListener('change',function(){
-  applyWinValue(this.value);
-  try{localStorage.setItem('lens_win',this.value);}catch(e){}
-  if(this.value==='custom') winAt.focus();
+// Restore the last-picked window, but only if its option still exists: the concrete
+// "since 2pm" marks regenerate per current hour, so an old absolute pick may be gone —
+// fall back to all time then. Presets ('live','15m',…) always exist and recompute now.
+(function restoreWin(){
+  let w='all';
+  try{const s=localStorage.getItem('lens_win');if(s)w=s;
+      const f=localStorage.getItem('lens_winfrom');if(f!=null)winFrom.value=f;
+      const t=localStorage.getItem('lens_winto');if(t!=null)winTo.value=t;}catch(e){}
+  if(!winOpts.some(o=>o.value===w)) w='all';
+  winDD.set(winOpts,w); applyWinValue(w);
+})();
+winDD.onChange(function(v){
+  applyWinValue(v);
+  try{localStorage.setItem('lens_win',v);}catch(e){}
+  if(v==='custom') winFrom.focus();
   applyWin();
 });
-function commitCustom(){ if(winMode!=='custom') return; const u=parseTime(winAt.value); if(u!=null){activeSince=u;try{localStorage.setItem('lens_winat',winAt.value);}catch(e){}applyWin();} else { winAt.style.borderColor='var(--bad)'; setTimeout(function(){winAt.style.borderColor='';},800); } }
-winAt.addEventListener('change',commitCustom);
-winAt.addEventListener('keydown',function(e){if(e.key==='Enter')commitCustom();});
-winAt.style.display='none';
-const scopeBtn=document.getElementById('scope');
-// Reflect the restored scope on the button before the first tick.
-scopeBtn.textContent = scope==='global' ? 'all repos' : 'this repo';
-scopeBtn.classList.toggle('on', scope==='global');
-scopeBtn.addEventListener('click',function(){
-  scope = scope==='repo' ? 'global' : 'repo';
-  this.textContent = scope==='global' ? 'all repos' : 'this repo';
-  this.classList.toggle('on', scope==='global');
-  try{localStorage.setItem('lens_scope',scope);}catch(e){}
-  tick();
-});
+function commitRange(){
+  if(winMode!=='custom') return;
+  activeSince=dtSecs(winFrom); activeUntil=dtSecs(winTo);
+  try{localStorage.setItem('lens_winfrom',winFrom.value);localStorage.setItem('lens_winto',winTo.value);}catch(e){}
+  // Reject an inverted range (end at/before start): flag both inputs, don't fetch.
+  if(activeSince&&activeUntil&&activeUntil<=activeSince){
+    [winFrom,winTo].forEach(el=>{el.style.borderColor='var(--bad)';setTimeout(()=>{el.style.borderColor='';},900);});
+    return;
+  }
+  applyWin();
+}
+winFrom.addEventListener('change',commitRange);
+winTo.addEventListener('change',commitRange);
 
 // Cost estimate: "tokens saved" are context INPUT tokens you avoided sending, so price
-// them at the input rate. Click the basis to cycle model; remembered in localStorage.
-const RATES=[{m:'Opus 4.8',r:5},{m:'Sonnet 4.6',r:3},{m:'Haiku 4.5',r:1}];
+// them at the input rate. The header dropdown chooses the model; remembered in localStorage.
+const RATES=[{m:'Opus 4.8',r:5},{m:'Fable 5',r:10},{m:'Sonnet 5',r:3},{m:'Haiku 4.5',r:1}];
 let rateIdx=0;
 try{const s=localStorage.getItem('lens_rate_model');const i=RATES.findIndex(x=>x.m===s);if(i>=0)rateIdx=i;}catch(e){}
-let savedTotal=0;
+let savedTotal=0, lastAv=null;
 function money(v){return '$'+(v>=1?v.toFixed(2):v>=0.01?v.toFixed(3):v.toFixed(4));}
 function renderCost(){
-  const x=RATES[rateIdx];
-  document.getElementById('dollars').textContent=money(savedTotal*x.r/1e6)+' saved';
-  document.getElementById('basis').textContent='@ $'+x.r+'/M · '+x.m+' in ▾';
+  document.getElementById('dollars').textContent=money(savedTotal*RATES[rateIdx].r/1e6)+' saved';
 }
-document.getElementById('cost').addEventListener('click',function(){
-  rateIdx=(rateIdx+1)%RATES.length;
+// Applied-value plane. Rendered from a cached snapshot so switching model re-prices the
+// "est. value" total instantly (the token/round-trip figures are rate-independent).
+function renderApplied(av){
+  const rts=av.round_trips_avoided||0, x=RATES[rateIdx];
+  document.getElementById('appliedValue').innerHTML=
+    `<div class="avtot">`+
+      `<span><i class="k">measured saved</i><b class="v">${humanCount(av.measured_tokens||0)} tok</b></span>`+
+      `<span><i class="k">est. counterfactual</i><b class="v">+${humanCount(av.est_counterfactual_tokens||0)} tok</b></span>`+
+      `<span><i class="k">est. total avoided</i><b class="v big">${humanCount(av.est_total_tokens||0)} tok</b></span>`+
+      `<span><i class="k">est. value</i><b class="v big">${money((av.est_total_tokens||0)*x.r/1e6)}</b> <span class="basis">@ $${x.r}/M · ${x.m}</span></span>`+
+      `<span><i class="k">round-trips avoided</i><b class="v">~${Math.round(rts)}</b></span>`+
+      `<span><i class="k">time saved</i><b class="v big">${humanTime(rts*RT_SECONDS)}</b> <span class="basis">@ ${RT_SECONDS}s/round-trip</span></span>`+
+    `</div>`+
+    (av.rows||[]).map(r=>{
+      const parts=[];
+      if(r.est_tokens>0) parts.push(`~${humanCount(r.est_tokens)} tok`);
+      if(r.round_trips>0) parts.push(`~${r.round_trips.toFixed(1)} rt`);
+      if(r.dimension==='darkroom'||r.dimension==='skeleton') parts.push('tok measured live');
+      const txt=parts.length?parts.join(', '):'—';
+      return `<div class="avrow${r.ops?'':' z'}" title="source ${r.source||'modeling floor'}"><span class="d">${r.dimension} <span class="dim2">×${r.ops}</span></span><span class="x">${txt}</span></div>`;
+    }).join('');
+  document.getElementById('avNote').textContent=(av.note||'')+(av.model?(' · '+av.model):'');
+}
+// Model picker: option value is the RATES index; prices the saved tokens at that model's
+// input $/M and re-renders the applied-value plane. Remembered by model name.
+const rateDD=makeDD(document.getElementById('rate'),'model to price saved tokens against');
+rateDD.set(RATES.map((x,i)=>({label:'$'+x.r+'/M · '+x.m,value:i})),rateIdx);
+rateDD.onChange(function(v){
+  rateIdx=v;
   try{localStorage.setItem('lens_rate_model',RATES[rateIdx].m);}catch(e){}
-  renderCost();
+  renderCost(); if(lastAv) renderApplied(lastAv);
 });
 renderCost();
 
@@ -584,10 +731,17 @@ function setStale(){
 }
 async function tick(){
   let d;
-  try{ d=await (await fetch('/api/stats?since='+activeSince+(scope==='global'?'&scope=global':''),{cache:'no-store'})).json(); }
+  const useScope=scope;
+  const sp = useScope==='global'?'&scope=global':(useScope?'&scope='+encodeURIComponent(useScope):'');
+  const uq = activeUntil?('&until='+activeUntil):'';
+  try{ d=await (await fetch('/api/stats?since='+activeSince+uq+sp,{cache:'no-store'})).json(); }
   catch(e){ setStale(); return; }
   document.getElementById('dot').classList.remove('stale');
-  document.getElementById('status').textContent=(scope==='global'?'GLOBAL · ':'')+winLabel()+(d.session?(' · '+d.session):'')+' · '+(d.activity&&d.activity.sessions||0)+' session(s)';
+  // First snapshot carries the project list; build the repo picker, then refetch if
+  // resolving the stored scope landed on a different repo than we just fetched.
+  if(!scopeBuilt){ buildScope(d.projects,d.scope_repo); if(scope!==useScope){ tick(); return; } }
+  const sl=scopeLabel();
+  document.getElementById('status').textContent=(sl?sl+' · ':'')+winLabel()+(d.session?(' · '+d.session):'')+' · '+(d.activity&&d.activity.sessions||0)+' session(s)';
 
   const savedMcp=(d.tokens_saved_mcp!==undefined?d.tokens_saved_mcp:d.tokens_saved_est);
   // Windowed sparklines: the backend buckets the selected window [since, now];
@@ -629,8 +783,8 @@ async function tick(){
     const w=Math.round(raw/maxRaw*48);
     const pct=raw>0?Math.round((raw-ret)/raw*100):null;
     const offtxt=offc?(offc+'·'+humanBytes(offb)):'—';
-    const desc=TOOL_DESC[name];
-    const nm=desc?`<span class="tname" data-desc="${desc}">${name}</span>`:name;
+    const desc=TOOL_DESC[name]||'Historical or third-party tool recorded in this data dir; not a current lens tool.';
+    const nm=`<span class="tname" data-desc="${desc}">${name}</span>`;
     return `<tr${ops?'':' class="z"'}><td>${nm}</td><td>${ops.toLocaleString()}</td>`+
       `<td>${t?('<span class="bar" style="width:'+w+'px"></span> '+humanBytes(raw)):'—'}</td>`+
       `<td>${t?humanBytes(ret):'—'}</td><td>${saved?saved.toLocaleString():'—'}</td>`+
@@ -655,35 +809,18 @@ async function tick(){
       `<span>saved <b>${humanCount(dSaved)}</b>tok</span>`+
       `<span>avg <b>${pct.toFixed(1)}%</b></span>`+
       `<span class="dim2">since opened</span>`;
-    document.getElementById('savedTop').textContent=humanCount((d.tokens_saved_mcp||0)+dSaved)+' tok';
+    document.getElementById('savedTop').textContent='≈ '+humanCount((d.tokens_saved_mcp||0)+dSaved)+' tok';
     savedTotal=(d.tokens_saved_mcp||0)+dSaved; renderCost();
   } else {
     document.getElementById('rtkCards').innerHTML='<span class="dim2">not installed — run lens rtk install</span>';
-    document.getElementById('savedTop').textContent=humanCount(savedMcp)+' tok';
+    document.getElementById('savedTop').textContent='≈ '+humanCount(savedMcp)+' tok';
     savedTotal=savedMcp; renderCost();
   }
 
   // Applied value — benchmark per-op rates × your live op counts. Estimates only;
   // never folded into savedTotal / the $ headline. Time = round-trips × RT_SECONDS.
-  const av=d.applied_value||{rows:[],measured_tokens:0,est_counterfactual_tokens:0,est_total_tokens:0,round_trips_avoided:0,note:'',model:''};
-  const rts=av.round_trips_avoided||0;
-  document.getElementById('appliedValue').innerHTML=
-    `<div class="avtot">`+
-      `<span><i class="k">measured saved</i><b class="v">${humanCount(av.measured_tokens||0)} tok</b></span>`+
-      `<span><i class="k">est. counterfactual</i><b class="v">+${humanCount(av.est_counterfactual_tokens||0)} tok</b></span>`+
-      `<span><i class="k">est. total avoided</i><b class="v big">${humanCount(av.est_total_tokens||0)} tok</b></span>`+
-      `<span><i class="k">round-trips avoided</i><b class="v">~${Math.round(rts)}</b></span>`+
-      `<span><i class="k">time saved</i><b class="v big">${humanTime(rts*RT_SECONDS)}</b> <span class="basis">@ ${RT_SECONDS}s/round-trip</span></span>`+
-    `</div>`+
-    (av.rows||[]).map(r=>{
-      const parts=[];
-      if(r.est_tokens>0) parts.push(`~${humanCount(r.est_tokens)} tok`);
-      if(r.round_trips>0) parts.push(`~${r.round_trips.toFixed(1)} rt`);
-      if(r.dimension==='darkroom'||r.dimension==='skeleton') parts.push('tok measured live');
-      const txt=parts.length?parts.join(', '):'—';
-      return `<div class="avrow${r.ops?'':' z'}" title="source ${r.source||'modeling floor'}"><span class="d">${r.dimension} <span class="dim2">×${r.ops}</span></span><span class="x">${txt}</span></div>`;
-    }).join('');
-  document.getElementById('avNote').textContent=(av.note||'')+(av.model?(' · '+av.model):'');
+  lastAv=d.applied_value||{rows:[],measured_tokens:0,est_counterfactual_tokens:0,est_total_tokens:0,round_trips_avoided:0,note:'',model:''};
+  renderApplied(lastAv);
 
   // session activity (built-in tools via hooks)
   const a=d.activity||{total_events:0,sessions:0,by_category:[],last_ts:null};

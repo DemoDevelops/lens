@@ -277,11 +277,22 @@ impl SessionStore {
     /// Read-only: the `WHERE`/`GROUP BY` run in SQL (covered by
     /// `idx_events_session_ts`), so we never scan rows from other sessions.
     pub fn activity(&self, session: Option<&str>, since: Option<i64>) -> Result<Activity> {
+        self.activity_range(session, since, None)
+    }
+
+    /// As [`activity`], with an optional exclusive upper time bound (unix seconds) so
+    /// the dashboard can scope a bounded `[since, until]` range, not just "since X".
+    pub fn activity_range(
+        &self,
+        session: Option<&str>,
+        since: Option<i64>,
+        until: Option<i64>,
+    ) -> Result<Activity> {
         let conn = self.conn()?;
         // Shared filter, byte-for-byte equivalent to the prior Rust path:
         // `session` -> exact session match; `since` -> keep ts >= cut (the Rust
-        // path skipped `ts < cut`, a half-open lower bound).
-        let (where_sql, params) = activity_filter(session, since);
+        // path skipped `ts < cut`, a half-open lower bound); `until` -> keep ts < cut.
+        let (where_sql, params) = activity_filter(session, since, until);
 
         // Scalar plane: total rows, distinct sessions, and the max timestamp
         // (NULL over zero rows -> None, matching the prior `Option` accumulator).
@@ -315,6 +326,18 @@ impl SessionStore {
             by_category: grouped("category")?,
             by_hook: grouped("source_hook")?,
         })
+    }
+
+    /// Distinct project paths seen in this store, most-recently-active first. Backs
+    /// the dashboard's repo picker (run against the machine-global store).
+    pub fn distinct_projects(&self) -> Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT project, max(timestamp) t FROM session_events
+             GROUP BY project ORDER BY t DESC",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Per-bucket event counts over `[start, end]` (unix seconds) split into `n`
@@ -464,6 +487,7 @@ fn memory_item(e: &Event) -> Option<(&'static str, String)> {
 fn activity_filter(
     session: Option<&str>,
     since: Option<i64>,
+    until: Option<i64>,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut clauses: Vec<&str> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -474,6 +498,10 @@ fn activity_filter(
     if let Some(cut) = since {
         params.push(Box::new(cut));
         clauses.push("timestamp >= ?");
+    }
+    if let Some(cut) = until.filter(|&u| u > 0) {
+        params.push(Box::new(cut));
+        clauses.push("timestamp < ?");
     }
     let where_sql = if clauses.is_empty() {
         String::new()

@@ -348,9 +348,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
   input#winFrom,input#winTo{background:var(--panel);color:var(--ink);border:1px solid var(--line);
     border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 4px;color-scheme:dark}
   #winDash{color:var(--dim);font-size:10px}
-  button#view,button#theme{background:var(--panel);color:var(--dim);border:1px solid var(--line);
-    border-radius:5px;font:10px ui-monospace,Menlo,monospace;padding:1px 6px;cursor:pointer}
-  body.full button#view{color:var(--accent);border-color:var(--accent)}
   #fullcharts{display:none}
   body.full #fullcharts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin-top:3px}
   .bigpanel h2{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin:0 0 7px}
@@ -365,8 +362,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .hbar.z{opacity:.35}
   .cost{display:flex;align-items:baseline;gap:7px}
   .cost .dollars{color:var(--accent);font-weight:700;font-size:18px;letter-spacing:.3px}
-  .cost .dd-btn{color:var(--dim)}
-  .cost .dd-btn:hover{color:var(--ink)}
   .cost .dd-list{left:auto;right:0}
   .saved-top{color:var(--dim);font-size:9px}
   main{padding:9px 12px;display:grid;gap:10px}
@@ -430,8 +425,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
   <span id="winDash" style="display:none">→</span>
   <input id="winTo" type="datetime-local" title="custom range end (blank = now)" style="display:none">
   <div id="scope" class="dd"></div>
-  <button id="view" title="toggle mini view for a narrow pane (cmux); full view uses the whole window">mini</button>
-  <button id="theme" title="color theme — click to switch (dark / 70s)">dark</button>
+  <div id="view" class="dd"></div>
+  <div id="theme" class="dd"></div>
   <div class="grow"></div>
   <div class="cost" id="cost" title="estimated value of the tokens saved, priced at the selected model's input rate"><span class="dollars" id="dollars">$—</span><div id="rate" class="dd"></div></div>
   <div class="saved-top" id="savedTop">— saved</div>
@@ -534,7 +529,7 @@ function repoName(p){const parts=(p||'').split('/').filter(Boolean);return parts
 function scopeLabel(){return scope==='global'?'GLOBAL':(scope?repoName(scope):'');}
 function buildScope(projs,repoPath){
   projs=projs||[];
-  const opts=[{label:'all repos',value:'global'}].concat(projs.map(p=>({label:repoName(p),value:p,title:p})));
+  const opts=[{label:'global',value:'global'}].concat(projs.map(p=>({label:repoName(p),value:p,title:p})));
   const valid=v=> v==='global' || projs.includes(v);
   if(!valid(scope)) scope = valid(repoPath)?repoPath:'global';
   scopeDD.set(opts,scope);
@@ -854,20 +849,22 @@ async function tick(){
   document.getElementById('compByTool').innerHTML=comp.map(t=>compbar(t.tool,t.raw,t.returned,maxCompRaw)).join('')||'<span class="dim2">no offloading tool calls yet</span>';
 }
 let view='mini';
-const viewBtn=document.getElementById('view');
-function applyView(){document.body.classList.toggle('full',view==='full');viewBtn.textContent=view==='full'?'mini':'full';}
+const viewDD=makeDD(document.getElementById('view'),'layout: mini fits a narrow pane (cmux); full uses the whole window');
+function applyView(){document.body.classList.toggle('full',view==='full');}
 try{const v=localStorage.getItem('lens_view');if(v==='full')view='full';}catch(e){}
+viewDD.set([{label:'mini',value:'mini'},{label:'full',value:'full'}],view);
 applyView();
-viewBtn.addEventListener('click',function(){view=view==='full'?'mini':'full';try{localStorage.setItem('lens_view',view);}catch(e){}applyView();tick();});
-// Color theme — dark (the :root default) or retro 70s (body.t70), toggled here and
-// remembered. Sparklines read --accent/--warn at draw time, so they follow with no extra wiring.
+viewDD.onChange(function(v){view=v;try{localStorage.setItem('lens_view',view);}catch(e){}applyView();tick();});
+// Color theme — dark (the :root default) or retro 70s (body.t70), remembered.
+// Sparklines read --accent/--warn at draw time, so they follow with no extra wiring.
 const THEMES=['dark','seventies'];
 let theme='dark';
 try{const t=localStorage.getItem('lens_theme');if(THEMES.includes(t))theme=t;}catch(e){}
-const themeBtn=document.getElementById('theme');
-function applyTheme(){document.body.classList.toggle('t70',theme==='seventies');themeBtn.textContent=theme==='seventies'?'70s':'dark';}
+const themeDD=makeDD(document.getElementById('theme'),'color theme');
+function applyTheme(){document.body.classList.toggle('t70',theme==='seventies');}
+themeDD.set([{label:'dark',value:'dark'},{label:'70s',value:'seventies'}],theme);
 applyTheme();
-themeBtn.addEventListener('click',function(){theme=theme==='dark'?'seventies':'dark';try{localStorage.setItem('lens_theme',theme);}catch(e){}applyTheme();tick();});
+themeDD.onChange(function(v){theme=v;try{localStorage.setItem('lens_theme',theme);}catch(e){}applyTheme();tick();});
 // Instant styled tooltip for tool descriptions (native title is delayed + clipped by the panel).
 (function(){
   const tip=document.createElement('div'); tip.className='tip'; document.body.appendChild(tip);

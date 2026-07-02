@@ -402,7 +402,7 @@ const ADOPTION_TOOLS=['lens_run','lens_run_file','lens_search','lens_index','len
 const TOOL_DESC={
   lens_run:"Run code (python/js/ts/bash/ruby/go) in a darkroom subprocess; only stdout/stderr returns to context, not the data the script read. Large output is offloaded with a recall ref.",
   lens_run_file:"Analyze one file in the darkroom; your code gets the file path as its first CLI arg (sys.argv[1] / process.argv[2] / $1). Only what it prints returns; the file's bytes stay out of context.",
-  lens_index:"Build an FTS5 full-text index over a file or directory (respects .gitignore). Returns files indexed and chunk count; prerequisite for lens_search.",
+  lens_index:"Build a full-text index over a file or directory (respects .gitignore). Returns files indexed and chunk count; prerequisite for lens_search.",
   lens_search:"Run one or more BM25-ranked full-text queries in a single call. Returns the top snippets per query with path and relevance score; answers 'where is X mentioned'.",
   lens_map:"Parse the whole repo with tree-sitter into a symbol graph (functions, types, modules) and their relationships (calls, imports, contains). Run once before the other graph tools.",
   lens_symbol:"Find graph symbols by name substring (+ optional kind) and return each with its immediate connections: where a symbol lives and what directly touches it.",

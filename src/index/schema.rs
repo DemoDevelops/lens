@@ -106,15 +106,24 @@ impl Index {
             .optional()?;
         if ver.as_deref() != Some(FTS_BACKEND_VERSION) {
             conn.execute("DELETE FROM file_manifest", [])?;
+            // The server's on-disk staleness cache (`index.manifest.json`, a sibling of
+            // index.db) still describes the pre-migration index. Remove it so the first
+            // `ensure_index` after this wipe cannot match that stale snapshot against a
+            // now-empty (or session-only) index and wrongly skip the mandatory full
+            // rebuild, leaving `lens_search` with no code. Best-effort: absent on a fresh dir.
+            if let Some(parent) = self.db_path.parent() {
+                let _ = std::fs::remove_file(parent.join("index.manifest.json"));
+            }
+            // Reclaim the pages freed by dropping the pre-Tantivy FTS5 tables above: a
+            // real SQLite-era index.db can be tens of MB of trigram postings, and a bare
+            // DROP leaves them as free pages so the file never shrinks. Best-effort and
+            // before the marker write: a crash mid-VACUUM just retries on the next open,
+            // and a slow or contended VACUUM can never fail or block server startup.
+            let _ = conn.execute_batch("VACUUM");
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_backend', ?1)",
                 [FTS_BACKEND_VERSION],
             )?;
-            // Reclaim the pages freed by dropping the pre-Tantivy FTS5 tables above: a
-            // real SQLite-era index.db can be tens of MB of trigram postings, and a bare
-            // DROP leaves them as free pages so the file never shrinks. VACUUM runs once,
-            // here on the version bump, and is cheap now that only the manifest is live.
-            conn.execute_batch("VACUUM")?;
         }
         Ok(())
     }

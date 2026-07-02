@@ -3,8 +3,9 @@
 //! Replaces the FTS5 `chunks` / `chunks_tri` tables. Tantivy builds independent
 //! segments across N threads (the one architectural way to use all cores for
 //! indexing, since SQLite is single-writer). Two analyzers mirror the two old
-//! tables: `en_stem` (porter-equivalent, Tantivy built-in) for the natural-language
-//! `symbols` + `content` fields, and a trigram ngram tokenizer for literal-substring
+//! tables: `en_stem` (porter-equivalent, re-registered without the 40-byte token filter)
+//! for the natural-language `symbols` + `content` fields, and a trigram ngram tokenizer
+//! for literal-substring
 //! / operator queries (mirrors `chunks_tri`).
 //!
 //! Ranking parity lives in `mod.rs`: the proximity, doc-penalty, and occurrence
@@ -21,7 +22,9 @@ use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Occur, Query, TermQuery
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
 };
-use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
+use tantivy::tokenizer::{
+    Language, LowerCaser, NgramTokenizer, SimpleTokenizer, Stemmer, TextAnalyzer,
+};
 use tantivy::{doc, Index as TIndex, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
 /// The `symbols` field is weighted this many times over `content`, matching the
@@ -41,7 +44,8 @@ const HEAP_PER_THREAD: usize = 64 * 1024 * 1024;
 const MAX_WRITER_THREADS: usize = 8;
 
 const NGRAM_TOKENIZER: &str = "ngram3";
-/// Tantivy built-in: simple tokenizer + lowercase + English (porter) stemmer.
+/// Re-registered in [`register_tokenizers`] as simple + lowercase + English stemmer
+/// WITHOUT Tantivy's default 40-byte `RemoveLongFilter`, so long tokens stay indexed.
 const STEM_TOKENIZER: &str = "en_stem";
 
 /// How long to retry acquiring the single Tantivy writer lock before giving up
@@ -117,7 +121,13 @@ fn build_schema() -> (Schema, Fields) {
     )
 }
 
-/// Register the trigram tokenizer (`en_stem` ships registered by default).
+/// Register the trigram tokenizer and override the built-in `en_stem`.
+///
+/// Tantivy's default `en_stem` includes `RemoveLongFilter::limit(40)`, which DROPS any
+/// token >= 40 bytes at index AND query time, so a long identifier or a 64-char hash
+/// silently becomes unsearchable. FTS5's porter never dropped long tokens, so we
+/// re-register `en_stem` as the same simple + lowercase + English-stem pipeline WITHOUT
+/// the length filter to preserve that recall.
 fn register_tokenizers(index: &TIndex) {
     let ngram = TextAnalyzer::builder(
         NgramTokenizer::new(NGRAM, NGRAM, false).expect("valid ngram bounds"),
@@ -125,6 +135,12 @@ fn register_tokenizers(index: &TIndex) {
     .filter(LowerCaser)
     .build();
     index.tokenizers().register(NGRAM_TOKENIZER, ngram);
+
+    let stem = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(LowerCaser)
+        .filter(Stemmer::new(Language::English))
+        .build();
+    index.tokenizers().register(STEM_TOKENIZER, stem);
 }
 
 impl TantivyStore {

@@ -99,7 +99,7 @@ pub struct SkeletonResponse {
 }
 
 // ---------------------------------------------------------------------------
-// lens_index / lens_search (FTS5)
+// lens_index / lens_search (full-text)
 // ---------------------------------------------------------------------------
 
 fn default_true() -> bool {

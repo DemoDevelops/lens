@@ -374,7 +374,7 @@ fn capture_rules(project: &Path) -> Vec<RawEvent> {
     out
 }
 
-/// Write detailed events into the FTS5 index so the model can `lens_search`
+/// Write detailed events into the full-text index so the model can `lens_search`
 /// them on demand after resume. Best-effort.
 fn index_events(data_dir: &Path, session_id: &str, events: &[Event]) {
     let idx = match Index::open(data_dir) {

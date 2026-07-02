@@ -507,9 +507,9 @@ impl Forge {
         }
     }
 
-    /// Index files into the FTS5 search index.
+    /// Index files into the full-text search index.
     #[tool(
-        description = "Index a file or directory (respecting .gitignore) into an FTS5 index for fast snippet search via lens_search."
+        description = "Index a file or directory (respecting .gitignore) into a full-text index for fast snippet search via lens_search."
     )]
     async fn lens_index(
         &self,
@@ -551,9 +551,9 @@ impl Forge {
         }
     }
 
-    /// Search the FTS5 index with one or more queries.
+    /// Search the full-text index with one or more queries.
     #[tool(
-        description = "Search the FTS5 index with one or more queries (BM25-ranked); returns top snippets with path and score per query."
+        description = "Search the full-text index with one or more queries (BM25-ranked); returns top snippets with path and score per query."
     )]
     async fn lens_search(
         &self,
@@ -1374,6 +1374,59 @@ mod tests {
         let data = dir.path().join(".lens");
         let f = Forge::with_paths(dir.path().to_path_buf(), data, 8192).unwrap();
         (f, dir)
+    }
+
+    /// Regression: after the backend-version migration wipes the index, a session hook
+    /// can write `session://` records (making `chunk_count() > 0`) before any real
+    /// `index_path`. If the stale `index.manifest.json` survived the migration,
+    /// `ensure_index`'s gate would see "non-empty + manifest matches current" and skip
+    /// the rebuild, so `lens_search` serves session noise with no code. The migration
+    /// invalidates that manifest so the first search still rebuilds.
+    #[tokio::test]
+    async fn resume_noise_after_migration_still_rebuilds() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn helper() -> i32 { 1 }\nfn main() { let _ = helper(); }\n",
+        )
+        .unwrap();
+        let data = dir.path().join(".lens");
+        std::fs::create_dir_all(&data).unwrap();
+        // The pre-upgrade server's staleness snapshot matched the repo as-is; without the
+        // fix the post-migration gate would treat the wiped index as already fresh.
+        write_manifest(
+            &data.join("index.manifest.json"),
+            &crate::index::file_manifest(dir.path()),
+        );
+
+        // First open runs the backend migration (a fresh index.db has no marker), which
+        // must delete the stale staleness manifest.
+        let f = Forge::with_paths(dir.path().to_path_buf(), data.clone(), 8192).unwrap();
+        assert!(
+            !data.join("index.manifest.json").exists(),
+            "migration must invalidate the stale FTS staleness manifest"
+        );
+
+        // Session-continuity noise arrives first, faking a non-empty index with no code.
+        f.index
+            .index_records(&[(
+                "session://s/note".into(),
+                "session://s#0".into(),
+                "[note] resumed".into(),
+            )])
+            .unwrap();
+        assert!(
+            f.index.chunk_count().unwrap() > 0,
+            "session noise should make the index non-empty"
+        );
+
+        // The first real search must rebuild and surface the code, not serve only noise.
+        f.ensure_index().expect("ensure_index rebuilds");
+        let out = f.index.search(&["helper".into()], 5).unwrap();
+        assert!(
+            out.results[0].hits.iter().any(|h| h.path.ends_with("lib.rs")),
+            "post-migration search must find real code, not just session noise"
+        );
     }
 
     #[tokio::test]

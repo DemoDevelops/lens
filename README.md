@@ -10,7 +10,7 @@ Measured savings at realistic session scale. Full methodology and scale curves i
 
 | Workload | Mechanism | Before | After | Saved |
 | --- | --- | ---: | ---: | ---: |
-| Code search | FTS5 index | 160,230 | 10,020 | **94–99%** |
+| Code search | full-text index | 160,230 | 10,020 | **94–99%** |
 | Log debugging | darkroom | 7,210 | 517 | **93%** |
 | Issue triage | compression | 94,195 | 31,323 | **~67%** |
 
@@ -167,7 +167,7 @@ lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio
 
 **Darkroom (`lens_run` / `lens_run_file`).** Your script runs in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly. The subprocess gives you process isolation and a timeout, not an OS sandbox (see [Security](#security)).
 
-**Search (`lens_index` / `lens_search`).** `lens_index` builds a SQLite FTS5 full-text index over the repo. `lens_search` ranks with BM25F, then over-fetches a deeper candidate pool and re-ranks it by term proximity (a chunk where the query terms sit in a tight window outranks one where they are scattered) before returning the top snippets with `path:line`, not whole files. Batch several questions in one call to save round-trips.
+**Search (`lens_index` / `lens_search`).** `lens_index` builds a full-text index over the repo. `lens_search` ranks with BM25F, then over-fetches a deeper candidate pool and re-ranks it by term proximity (a chunk where the query terms sit in a tight window outranks one where they are scattered) before returning the top snippets with `path:line`, not whole files. Batch several questions in one call to save round-trips.
 
 **Graph (`lens_map` / `lens_symbol` / `lens_find` / `lens_links` / `lens_path`).** `lens_map` parses [supported files](SUPPORTED.md) with tree-sitter and builds a deterministic structural graph (functions, types, modules, and their calls/imports/contains edges) in `.lens/graph.json`. The query tools walk that graph, so "who calls X" or "how does A reach B" is a graph lookup instead of a pile of file reads.
 

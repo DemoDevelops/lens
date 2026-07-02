@@ -70,3 +70,28 @@ fn pascalcase_subword_is_searchable() {
     assert!(!exact.results[0].hits.is_empty());
     assert!(exact.results[0].hits[0].path.ends_with("screen.tsx"));
 }
+
+#[test]
+fn long_token_hash_is_searchable() {
+    // Regression guard: Tantivy's built-in `en_stem` includes `RemoveLongFilter(40)`,
+    // which DROPS any token >= 40 bytes at index AND query time; FTS5's porter never
+    // dropped long tokens. A 64-char sha256 (one contiguous token, so subword
+    // splitting cannot rescue it) must stay searchable, like it was under FTS5.
+    let data = tempdir().unwrap();
+    let corpus = tempdir().unwrap();
+    let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; // 64 hex
+    fs::write(
+        corpus.path().join("lock.rs"),
+        format!("const CHECKSUM: &str = \"{hash}\";\n"),
+    )
+    .unwrap();
+    let idx = Index::open(data.path()).unwrap();
+    idx.index_path(corpus.path(), true).unwrap();
+
+    let out = idx.search(&[hash.into()], 5).unwrap();
+    assert!(
+        !out.results[0].hits.is_empty(),
+        "64-char hash must be searchable (RemoveLongFilter(40) recall regression)"
+    );
+    assert!(out.results[0].hits[0].path.ends_with("lock.rs"));
+}

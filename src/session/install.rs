@@ -405,7 +405,7 @@ fn print_status(s: &Status) {
         }
     );
     println!("  event store     : {}", mark(s.store_ok));
-    println!("  FTS5 index      : {}", mark(s.fts_ok));
+    println!("  Search index    : {}", mark(s.fts_ok));
 }
 
 #[cfg(test)]

@@ -272,7 +272,7 @@ pub const SNAPSHOT_DIMENSIONS: &[&str] = &[
 /// the shape the web dashboard polls. Cumulative; rate/throughput is the client's
 /// job (it diffs successive snapshots), keeping this stateless.
 pub fn snapshot_json(dir: &Path, session: Option<&str>) -> serde_json::Value {
-    snapshot_json_since(dir, session, None)
+    snapshot_json_since(dir, session, None, None)
 }
 
 /// As [`snapshot_json`], but `since` (unix seconds) restricts ops + session
@@ -283,11 +283,18 @@ pub fn snapshot_json_since(
     dir: &Path,
     session: Option<&str>,
     since: Option<i64>,
+    until: Option<i64>,
 ) -> serde_json::Value {
     let mut records = read_records(dir, session);
     if let Some(cut) = since {
         let iso = super::iso8601_secs(cut);
         records.retain(|r| r.ts.as_str() >= iso.as_str());
+    }
+    // Upper bound for an explicit range (half-open, matching the lower bound); open to
+    // now when unset. `until <= 0` means "no upper bound" (the sentinel the dashboard sends).
+    if let Some(cut) = until.filter(|&u| u > 0) {
+        let iso = super::iso8601_secs(cut);
+        records.retain(|r| r.ts.as_str() < iso.as_str());
     }
     let t = aggregate(&records);
     let (store_size, index_chunks, graph_nodes, graph_edges) = store_index_graph(dir);
@@ -335,7 +342,7 @@ pub fn snapshot_json_since(
 
     // The "first plane": built-in tool activity captured by the session hooks.
     let activity = SessionStore::open(dir)
-        .and_then(|s| s.activity(session, since))
+        .and_then(|s| s.activity_range(session, since, until))
         .unwrap_or_default();
     let act_categories: Vec<serde_json::Value> = activity
         .by_category
@@ -365,7 +372,10 @@ pub fn snapshot_json_since(
             .min()
             .unwrap_or(now)
     });
-    let span = (now - start).max(1);
+    // Window end: the explicit `until` for a range, else now. Buckets + window_end
+    // span [start, end] so a bounded range renders its own timeline, not up to now.
+    let end = until.filter(|&u| u > 0).unwrap_or(now);
+    let span = (end - start).max(1);
     let bucket = |ts: i64| {
         (((ts - start) as f64 / span as f64).clamp(0.0, 1.0) * BUCKETS as f64) as usize
     };
@@ -393,7 +403,7 @@ pub fn snapshot_json_since(
     let bytes_buckets = cumulative(&bytes_b);
     let event_buckets = cumulative(
         &SessionStore::open(dir)
-            .and_then(|s| s.event_buckets(session, start, now, BUCKETS))
+            .and_then(|s| s.event_buckets(session, start, end, BUCKETS))
             .unwrap_or_else(|_| vec![0i64; BUCKETS]),
     );
 
@@ -408,7 +418,7 @@ pub fn snapshot_json_since(
         "bytes_buckets": bytes_buckets,
         "event_buckets": event_buckets,
         "window_start": start,
-        "window_end": now,
+        "window_end": end,
         "errors": t.errors,
         "timeouts": t.timeouts,
         "lock_wait_ms": t.lock_wait_ms,
@@ -777,7 +787,7 @@ esac
 
         // Cutoff in the far future ⇒ the op (recorded "now") is before it ⇒ excluded.
         let future = 32_503_680_000; // ~year 3000
-        let scoped = snapshot_json_since(dir.path(), None, Some(future));
+        let scoped = snapshot_json_since(dir.path(), None, Some(future), None);
         assert_eq!(scoped["ops"], json!(0), "ops before the cutoff are dropped");
         assert_eq!(scoped["tokens_saved_est"], json!(0));
         assert_eq!(scoped["since"], json!(future));
@@ -785,7 +795,7 @@ esac
 
         // Cutoff at the epoch ⇒ everything is at/after it ⇒ included.
         assert_eq!(
-            snapshot_json_since(dir.path(), None, Some(0))["ops"],
+            snapshot_json_since(dir.path(), None, Some(0), None)["ops"],
             json!(1)
         );
     }

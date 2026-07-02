@@ -830,7 +830,7 @@ pub fn run(
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let since = window.since(now, tz_offset);
-        let mut snap = snapshot_json_since(&d, sess.as_deref(), since);
+        let mut snap = snapshot_json_since(&d, sess.as_deref(), since, None);
         // Surface scope + window to the renderer (pure fn can't know them otherwise).
         snap["scope_global"] = Value::Bool(scope_global);
         snap["window_label"] = Value::String(window_label.clone());

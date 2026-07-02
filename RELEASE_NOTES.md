@@ -1,8 +1,13 @@
-Faster, multi-threaded index builds via a new full-text search backend.
+A refreshed savings dashboard and a fix for test runs polluting the savings ledger.
+
+### Fixed
+- Test and benchmark runs no longer leak fixture operations into the real `~/.lens/ops.log` ledger. Integration tests previously mirrored their fixture ops into the machine-global ledger (a single concurrency test added tens of millions of bogus "saved" tokens), inflating the dashboard's lifetime totals. Cargo-launched processes now opt out of the global mirror; the installed server runs the compiled binary directly and still records normally.
 
 ### Improved
-- The content index is now built by a new Tantivy-based full-text search backend instead of SQLite FTS5. Its multi-threaded segment build makes the cold index build near-linear in repository size, up to ~10x faster on large repositories (measured from 77s to 7s at ~161k chunks); the old build grew super-linearly and could take many minutes on a large tree.
+- The web dashboard's header controls are now consistent, self-describing dropdowns. The view (mini/full) and theme (dark/70s) toggles became dropdowns that show the current selection, matching the repo, time-range, and model pickers.
+- Added a repo picker: scope the dashboard to a single project or view all repos combined ("global").
+- Added a custom time-range picker: alongside the presets, pick an arbitrary start/end window; savings, activity, and charts all honor it.
+- The model picker now re-prices both the headline "$ saved" and the applied-value estimate against the selected model's input rate (Opus 4.8 / Fable 5 / Sonnet 5 / Haiku 4.5).
 
 ### Changed
-- The backend swap is automatic. On the first run after upgrading, an existing index rebuilds itself once, the old SQLite FTS5 tables are dropped, and their on-disk space is reclaimed; no reindex command or manual step is needed.
-- Search results and ranking are unchanged: symbol-weighted BM25, substring/structural matching, and the same result ordering carry over to the new backend.
+- All dashboard dropdowns are custom-rendered so they theme correctly (native menus are drawn by the OS and cannot be styled to match).

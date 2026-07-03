@@ -744,3 +744,59 @@ fn greps_share_the_deny_counter_and_edits_reset_it() {
         "lookups after an Edit reset must not deny: {after}"
     );
 }
+
+#[test]
+fn find_trace_prompt_arms_a_one_shot_deny_on_the_first_grep() {
+    let d = tempfile::tempdir().unwrap();
+    let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
+    let prompt = json!({
+        "session_id": "s10",
+        "cwd": d.path().to_string_lossy(),
+        "prompt": "Where is the deny threshold defined and what calls it?",
+    });
+    let grep = json!({
+        "session_id": "s10",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "Grep",
+        "tool_input": { "pattern": "deny_threshold" },
+    });
+
+    // The find/trace prompt arms the marker; the first Grep is denied once.
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+    let (_, first) = run_hook("PreToolUse", &grep, &envs, d.path());
+    assert_eq!(
+        first["hookSpecificOutput"]["permissionDecision"], "deny",
+        "first Grep after a find/trace prompt must deny: {first}"
+    );
+    let reason = first["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.contains("lens_search") && reason.contains("fires once"),
+        "deny reason maps intents and states one-shot semantics: {reason}"
+    );
+
+    // The marker was consumed: the retried Grep passes.
+    let (_, second) = run_hook("PreToolUse", &grep, &envs, d.path());
+    assert_ne!(
+        second["hookSpecificOutput"]["permissionDecision"], "deny",
+        "retried Grep must pass (marker consumed): {second}"
+    );
+
+    // Re-armed by a new find/trace prompt, then DISARMED by a lens call:
+    // the follow-up Grep is no longer drift and must pass.
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+    let lens_post = json!({
+        "session_id": "s10",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "mcp__lens__lens_search",
+        "tool_input": { "queries": ["deny threshold"] },
+        "tool_response": "ok",
+    });
+    run_hook("PostToolUse", &lens_post, &envs, d.path());
+    let (_, third) = run_hook("PreToolUse", &grep, &envs, d.path());
+    assert_ne!(
+        third["hookSpecificOutput"]["permissionDecision"], "deny",
+        "Grep after a lens call must pass (marker disarmed): {third}"
+    );
+}

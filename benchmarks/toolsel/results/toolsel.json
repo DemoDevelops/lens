@@ -1,9 +1,11 @@
 {
   "mined_lens_first_rate": 0.4,
-  "mined_rate": 0.4666666666666667,
-  "model": "headless+lens-hooks-v3-ups",
-  "overall_lens_first_rate": 0.46153846153846156,
-  "overall_rate": 0.5128205128205129,
+  "mined_rate": 0.6666666666666667,
+  "mined_strict_rate": 0.3666666666666667,
+  "model": "headless+lens-hooks-v4-grepdeny",
+  "overall_lens_first_rate": 0.48717948717948717,
+  "overall_rate": 0.7435897435897435,
+  "overall_strict_rate": 0.46153846153846156,
   "runs": 3,
   "tasks": [
     {
@@ -14,29 +16,29 @@
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_skeleton"
-          ],
-          "strict": true
+          ]
         },
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_skeleton"
-          ],
-          "strict": true
+          ]
         },
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_skeleton"
-          ],
-          "strict": true
+          ]
         }
       ],
       "strict_rate": 1.0
@@ -49,144 +51,151 @@
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_symbol"
-          ],
-          "strict": true
+          ]
         },
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_symbol"
-          ],
-          "strict": true
+          ]
         },
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_symbol"
-          ],
-          "strict": true
+          ]
         }
       ],
       "strict_rate": 1.0
     },
     {
       "id": "0003_search_quarantine",
-      "lens_first_rate": 0.0,
-      "rate": 0.0,
-      "runs": [
-        {
-          "lens_first": false,
-          "pass": false,
-          "tools": [
-            "Grep"
-          ],
-          "strict": false
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "tools": [
-            "Grep"
-          ],
-          "strict": false
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "tools": [
-            "Grep"
-          ],
-          "strict": false
-        }
-      ],
-      "strict_rate": 0.0
-    },
-    {
-      "id": "0004_readonly_setup_doctor_checks",
-      "lens_first_rate": 1.0,
+      "lens_first_rate": 0.3333333333333333,
       "rate": 1.0,
       "runs": [
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
-            "lens_skeleton",
-            "lens_skeleton"
-          ],
-          "strict": true
+            "lens_search",
+            "lens_run"
+          ]
         },
         {
-          "lens_first": true,
+          "lens_first": false,
           "pass": true,
+          "strict": false,
           "tools": [
             "ToolSearch",
-            "lens_symbol",
-            "Read"
-          ],
-          "strict": true
+            "Grep",
+            "lens_index",
+            "lens_search"
+          ]
         },
         {
-          "lens_first": true,
+          "lens_first": false,
           "pass": true,
+          "strict": false,
           "tools": [
             "ToolSearch",
-            "lens_skeleton"
-          ],
-          "strict": true
+            "Grep",
+            "lens_index",
+            "lens_search"
+          ]
         }
       ],
-      "strict_rate": 1.0
+      "strict_rate": 0.3333333333333333
     },
     {
-      "id": "0005_readonly_extract_name_reuse",
+      "id": "0004_readonly_setup_doctor_checks",
       "lens_first_rate": 0.6666666666666666,
       "rate": 0.6666666666666666,
       "runs": [
         {
-          "lens_first": true,
-          "pass": true,
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
           "tools": [
             "ToolSearch",
-            "lens_skeleton",
-            "lens_skeleton",
-            "lens_skeleton"
-          ],
-          "strict": true
+            "Grep",
+            "Read"
+          ]
         },
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
+          "tools": [
+            "ToolSearch",
+            "lens_symbol",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": true,
+          "tools": [
+            "ToolSearch",
+            "lens_skeleton"
+          ]
+        }
+      ],
+      "strict_rate": 0.6666666666666666
+    },
+    {
+      "id": "0005_readonly_extract_name_reuse",
+      "lens_first_rate": 0.3333333333333333,
+      "rate": 0.3333333333333333,
+      "runs": [
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "Grep",
+            "Grep"
+          ]
+        },
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_skeleton",
             "lens_skeleton",
             "lens_skeleton"
-          ],
-          "strict": true
+          ]
         },
         {
           "lens_first": false,
           "pass": false,
+          "strict": false,
           "tools": [
             "Grep",
             "Grep",
-            "Grep",
-            "Grep",
+            "Read",
+            "Read",
             "ToolSearch",
-            "lens_search"
-          ],
-          "strict": false
+            "lens_skeleton"
+          ]
         }
       ],
-      "strict_rate": 0.6666666666666666
+      "strict_rate": 0.3333333333333333
     },
     {
       "id": "0006_readonly_dashboard_serve_handler",
@@ -196,74 +205,71 @@
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_skeleton"
-          ],
-          "strict": true
+          ]
         },
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
-            "ToolSearch",
             "lens_skeleton"
-          ],
-          "strict": true
+          ]
         },
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
+            "ToolSearch",
             "lens_skeleton"
-          ],
-          "strict": true
+          ]
         }
       ],
       "strict_rate": 1.0
     },
     {
       "id": "0007_nav_include_bodies_threading",
-      "lens_first_rate": 0.0,
-      "rate": 0.0,
+      "lens_first_rate": 0.3333333333333333,
+      "rate": 0.3333333333333333,
       "runs": [
         {
           "lens_first": false,
           "pass": false,
+          "strict": false,
           "tools": [
-            "Grep",
-            "Read",
-            "Read",
+            "Grep"
+          ]
+        },
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": false,
+          "tools": [
             "ToolSearch",
+            "lens_search",
             "lens_skeleton",
+            "lens_grep_ast",
+            "lens_grep_ast",
             "lens_skeleton",
-            "lens_skeleton"
-          ],
-          "strict": false
+            "lens_run_file",
+            "lens_run_file"
+          ]
         },
         {
           "lens_first": false,
           "pass": false,
-          "tools": [
-            "Grep",
-            "Read",
-            "Read",
-            "ToolSearch",
-            "lens_symbol"
-          ],
-          "strict": false
-        },
-        {
-          "lens_first": false,
-          "pass": false,
+          "strict": false,
           "tools": [
             "ToolSearch",
             "Grep",
             "Read",
             "Read",
             "lens_skeleton"
-          ],
-          "strict": false
+          ]
         }
       ],
       "strict_rate": 0.0
@@ -276,34 +282,35 @@
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
+          "tools": [
+            "ToolSearch",
+            "lens_search",
+            "ToolSearch",
+            "lens_search",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_search",
             "lens_skeleton",
             "lens_skeleton"
-          ],
-          "strict": true
+          ]
         },
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_search",
             "lens_skeleton"
-          ],
-          "strict": true
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "tools": [
-            "ToolSearch",
-            "lens_search",
-            "lens_symbol",
-            "lens_skeleton"
-          ],
-          "strict": true
+          ]
         }
       ],
       "strict_rate": 1.0
@@ -316,119 +323,127 @@
         {
           "lens_first": false,
           "pass": false,
+          "strict": false,
           "tools": [
             "Grep",
-            "Grep",
-            "Grep"
-          ],
-          "strict": false
+            "Glob",
+            "ToolSearch",
+            "Read",
+            "Glob",
+            "lens_skeleton"
+          ]
         },
         {
           "lens_first": false,
           "pass": true,
+          "strict": false,
           "tools": [
             "Grep",
-            "lens_skeleton"
-          ],
-          "strict": false
+            "ToolSearch",
+            "lens_run",
+            "lens_run"
+          ]
         },
         {
           "lens_first": false,
           "pass": true,
+          "strict": false,
           "tools": [
             "Grep",
-            "lens_skeleton"
-          ],
-          "strict": false
+            "Glob",
+            "ToolSearch",
+            "lens_run",
+            "lens_run"
+          ]
         }
       ],
       "strict_rate": 0.0
     },
     {
       "id": "0010_grep_include_bodies_occurrences",
-      "lens_first_rate": 0.0,
-      "rate": 0.0,
+      "lens_first_rate": 0.3333333333333333,
+      "rate": 1.0,
       "runs": [
         {
           "lens_first": false,
-          "pass": false,
+          "pass": true,
+          "strict": false,
           "tools": [
             "Grep",
-            "Read",
-            "Read",
-            "Read",
-            "Read",
-            "Read",
             "ToolSearch",
+            "lens_run",
+            "lens_run",
+            "lens_run",
             "lens_run"
-          ],
-          "strict": false
+          ]
         },
         {
           "lens_first": false,
-          "pass": false,
-          "tools": [
-            "Grep"
-          ],
-          "strict": false
-        },
-        {
-          "lens_first": false,
-          "pass": false,
+          "pass": true,
+          "strict": false,
           "tools": [
             "Grep",
-            "Read",
-            "Read",
-            "Read",
-            "Read",
-            "Read",
-            "Read",
-            "Read",
-            "Read",
             "ToolSearch",
-            "lens_run_file"
-          ],
-          "strict": false
+            "lens_run",
+            "lens_run",
+            "lens_run",
+            "lens_run"
+          ]
+        },
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": true,
+          "tools": [
+            "ToolSearch",
+            "lens_run",
+            "lens_run",
+            "lens_run",
+            "lens_run"
+          ]
         }
       ],
-      "strict_rate": 0.0
+      "strict_rate": 0.3333333333333333
     },
     {
       "id": "0011_grep_repo_map_occurrences",
       "lens_first_rate": 0.0,
-      "rate": 0.0,
+      "rate": 1.0,
       "runs": [
         {
           "lens_first": false,
-          "pass": false,
+          "pass": true,
+          "strict": false,
           "tools": [
-            "Grep"
-          ],
-          "strict": false
+            "Grep",
+            "ToolSearch",
+            "lens_run",
+            "Read",
+            "Read"
+          ]
         },
         {
           "lens_first": false,
-          "pass": false,
+          "pass": true,
+          "strict": false,
           "tools": [
-            "Grep",
-            "Read",
-            "Read",
             "ToolSearch",
-            "lens_run_file"
-          ],
-          "strict": false
+            "Grep",
+            "lens_run",
+            "lens_run",
+            "lens_run"
+          ]
         },
         {
           "lens_first": false,
-          "pass": false,
+          "pass": true,
+          "strict": false,
           "tools": [
             "Grep",
-            "Read",
-            "Read",
             "ToolSearch",
-            "lens_run_file"
-          ],
-          "strict": false
+            "lens_run",
+            "lens_run"
+          ]
         }
       ],
       "strict_rate": 0.0
@@ -436,32 +451,34 @@
     {
       "id": "0012_bigread_server_tool_surface",
       "lens_first_rate": 0.3333333333333333,
-      "rate": 0.3333333333333333,
+      "rate": 0.6666666666666666,
       "runs": [
         {
           "lens_first": true,
           "pass": true,
+          "strict": true,
           "tools": [
             "ToolSearch",
             "lens_run_file"
-          ],
-          "strict": true
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "lens_run_file"
+          ]
         },
         {
           "lens_first": false,
           "pass": false,
+          "strict": false,
           "tools": [
+            "Grep",
             "Grep"
-          ],
-          "strict": false
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "tools": [
-            "Grep"
-          ],
-          "strict": false
+          ]
         }
       ],
       "strict_rate": 0.3333333333333333
@@ -474,34 +491,31 @@
         {
           "lens_first": false,
           "pass": false,
+          "strict": false,
           "tools": [
+            "Grep"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Grep"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Grep",
             "Grep",
             "Read"
-          ],
-          "strict": false
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "tools": [
-            "Grep"
-          ],
-          "strict": false
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "tools": [
-            "Grep",
-            "Grep"
-          ],
-          "strict": false
+          ]
         }
       ],
       "strict_rate": 0.0
     }
-  ],
-  "overall_strict_rate": 0.46153846153846156,
-  "mined_strict_rate": 0.4,
-  "note": "rescored from raw run sequences after the chain-metric rework; primary rate = lens engaged within first 3 inspection calls"
+  ]
 }

@@ -131,6 +131,25 @@ pub fn reset(data_dir: &Path, session: &str, key: &str) {
         .insert((session.to_string(), key.to_string()), 0);
 }
 
+/// Atomic check-and-consume for one-shot armed markers: if `(session, key)`
+/// has a positive count, zero it and return true; otherwise leave it and
+/// return false. Unlike [`fired`], a reset-to-zero key reads as disarmed.
+pub fn take(data_dir: &Path, session: &str, key: &str) -> bool {
+    let mut map = throttle().0.lock().unwrap();
+    let state = map.entry(data_dir.to_path_buf()).or_default();
+    ensure_loaded(state, data_dir);
+    let c = state
+        .counts
+        .entry((session.to_string(), key.to_string()))
+        .or_insert(0);
+    if *c == 0 {
+        return false;
+    }
+    *c = 0;
+    append_reset(data_dir, session, key);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

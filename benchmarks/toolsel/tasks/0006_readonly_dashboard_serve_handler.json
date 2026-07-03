@@ -1,0 +1,7 @@
+{
+  "id": "0006_readonly_dashboard_serve_handler",
+  "prompt": "What function in src/obs/dashboard.rs handles each incoming connection to the dashboard's built-in HTTP server, and what constant defines the human-readable tool-description strings shown in its UI? Do not modify anything.",
+  "expected_tools": ["lens_skeleton", "lens_run_file", "lens_symbol"],
+  "score": "first_tool",
+  "source": "mined:34fe18fa"
+}

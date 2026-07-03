@@ -626,20 +626,20 @@ fn read_payload(dir: &Path, session: &str, file_path: &str) -> Value {
 }
 
 #[test]
-fn read_denies_after_six_consecutive_code_reads_then_lens_call_resets() {
+fn read_denies_after_four_consecutive_code_reads_then_lens_call_resets() {
     let d = tempfile::tempdir().unwrap();
     let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
     let p = read_payload(d.path(), "s1", "src/server.rs");
 
-    let mut sixth = Value::Null;
-    for _ in 0..6 {
+    let mut fourth = Value::Null;
+    for _ in 0..4 {
         let (_, v) = run_hook("PreToolUse", &p, &envs, d.path());
-        sixth = v;
+        fourth = v;
     }
-    let hso = &sixth["hookSpecificOutput"];
+    let hso = &fourth["hookSpecificOutput"];
     assert_eq!(
         hso["permissionDecision"], "deny",
-        "6th consecutive code Read must deny: {sixth}"
+        "4th consecutive code Read must deny: {fourth}"
     );
     let reason = hso["permissionDecisionReason"].as_str().unwrap();
     assert!(
@@ -661,5 +661,86 @@ fn read_denies_after_six_consecutive_code_reads_then_lens_call_resets() {
     assert_ne!(
         after["hookSpecificOutput"]["permissionDecision"], "deny",
         "Read after a lens tool call must not deny: {after}"
+    );
+}
+
+#[test]
+fn find_trace_prompts_get_the_intent_nudge_at_prompt_submit() {
+    let d = tempfile::tempdir().unwrap();
+    let envs = [("LENS_ROUTING", "full")];
+    let p = json!({
+        "session_id": "s9",
+        "cwd": d.path().to_string_lossy(),
+        "prompt": "Where is the deny threshold defined and what calls it?",
+    });
+    let (_, v) = run_hook("UserPromptSubmit", &p, &envs, d.path());
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("lens_search") && ctx.contains("lens_links"),
+        "find/trace prompt must inject the tool mapping: {v}"
+    );
+
+    // Non-matching prompt: no injection.
+    let plain = json!({
+        "session_id": "s9",
+        "cwd": d.path().to_string_lossy(),
+        "prompt": "bump the version and tag the release",
+    });
+    let (_, v2) = run_hook("UserPromptSubmit", &plain, &envs, d.path());
+    assert!(
+        v2["hookSpecificOutput"]["additionalContext"].is_null(),
+        "plain prompt must not inject: {v2}"
+    );
+
+    // Routing off: no injection even for a matching prompt.
+    let d2 = tempfile::tempdir().unwrap();
+    let (_, v3) = run_hook("UserPromptSubmit", &p, &[("LENS_ROUTING", "off")], d2.path());
+    assert!(
+        v3["hookSpecificOutput"]["additionalContext"].is_null(),
+        "routing off must not inject: {v3}"
+    );
+}
+
+#[test]
+fn greps_share_the_deny_counter_and_edits_reset_it() {
+    let d = tempfile::tempdir().unwrap();
+    let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
+    let grep = json!({
+        "session_id": "s2",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "Grep",
+        "tool_input": { "pattern": "include_bodies" },
+    });
+    let read = read_payload(d.path(), "s2", "src/server.rs");
+
+    // Grep,Read,Read then a 4th lookup: mixed calls share one counter.
+    run_hook("PreToolUse", &grep, &envs, d.path());
+    run_hook("PreToolUse", &read, &envs, d.path());
+    run_hook("PreToolUse", &read, &envs, d.path());
+    let (_, fourth) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert_eq!(
+        fourth["hookSpecificOutput"]["permissionDecision"], "deny",
+        "4th mixed Grep/Read lookup must deny: {fourth}"
+    );
+
+    // An Edit (PostToolUse) resets the counter: Read-before-Edit is not drift.
+    run_hook("PreToolUse", &read, &envs, d.path());
+    run_hook("PreToolUse", &read, &envs, d.path());
+    let edit_post = json!({
+        "session_id": "s2",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "Edit",
+        "tool_input": { "file_path": "src/server.rs" },
+        "tool_response": "ok",
+    });
+    run_hook("PostToolUse", &edit_post, &envs, d.path());
+    // Two more lookups stay under the threshold (counter restarted at 0).
+    run_hook("PreToolUse", &read, &envs, d.path());
+    let (_, after) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert_ne!(
+        after["hookSpecificOutput"]["permissionDecision"], "deny",
+        "lookups after an Edit reset must not deny: {after}"
     );
 }

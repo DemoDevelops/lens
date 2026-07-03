@@ -167,14 +167,16 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             let events = attribute(raws, &session_id, &project_str, ts, "PostToolUse");
             store.insert_events(&events)?;
             // A lens tool call is itself the "checked the graph" signal the
-            // consecutive-read deny counter (T5, `routing::read_decision`) is
-            // watching for: reset it so "read-code" measures reads-since-
-            // last-lens-call, not cumulative-per-session.
-            if tool
+            // consecutive-lookup deny counter (`routing::inspect_escalation`)
+            // is watching for: reset it so "read-code" measures lookups-since-
+            // last-lens-call, not cumulative-per-session. A file edit resets it
+            // too — Read-before-Edit was the right tool, not drift, so an
+            // edit-heavy session never accumulates toward the deny.
+            let is_lens = tool
                 .strip_prefix("mcp__")
                 .and_then(|rest| rest.split("__").next())
-                .is_some_and(|server| server.contains("lens"))
-            {
+                .is_some_and(|server| server.contains("lens"));
+            if is_lens || matches!(tool.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
                 routing::throttle::reset(&data_dir, &session_id, "read-code");
             }
             // Scale-aware search steer: a Grep whose result floods context gets a
@@ -207,6 +209,22 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 let raws = extract::extract_user_events(&prompt);
                 let events = attribute(raws, &session_id, &project_str, ts, "UserPromptSubmit");
                 store.insert_events(&events)?;
+                // Find/trace prompts get the tool mapping injected HERE, at the
+                // decision point: first-tool choice is made from what's in
+                // context before the first call, which PreToolUse nudges are
+                // too late for (measured: find/trace tasks stayed Grep-first
+                // on SessionStart steering alone).
+                if routing::Level::from_env().nudges()
+                    && routing::prompt_wants_find_trace(&prompt)
+                {
+                    return Ok(json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "UserPromptSubmit",
+                            "additionalContext": routing::PROMPT_INTENT_NUDGE,
+                        }
+                    })
+                    .to_string());
+                }
             }
             Ok("{}".to_string())
         }

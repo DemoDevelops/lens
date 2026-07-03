@@ -241,6 +241,14 @@ pub const SEARCH_NUDGE: &str = "<context_guidance>\n  <tip>\n    That grep retur
 /// the decision point itself.
 pub const PROMPT_INTENT_NUDGE: &str = "<lens_hint>\n  Find/trace question — answer it from the index/graph, not by grepping: lens_search(queries: [\"...\"]) or lens_symbol(name) to locate; lens_links for callers/callees; lens_path for how A reaches B; lens_skeleton(path) for one file's shape. Grep's line hits pull a whole-file Read per hit — that chain costs more than one lens call.\n</lens_hint>";
 
+/// Shown when the FIRST Grep after a find/trace-shaped prompt is denied (the
+/// `grep-first` marker armed at UserPromptSubmit, consumed here). Measured:
+/// the intent nudge alone flips some tasks but most Grep-first ones ignore
+/// every prompt-level hint — this is the Serena FORBIDDEN pattern applied at
+/// the exact decision point. One-shot: the marker is consumed before the deny
+/// returns, so the same Grep passes on retry.
+pub const GREP_FIRST_DENY_REASON: &str = "This prompt is a find/trace question — answer it with one lens call instead of a grep chain. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_links. How does A reach B: lens_path. A file's shape: lens_skeleton(path). This fires once per prompt — the same Grep will pass if you re-run it, but the lens call answers in one step.";
+
 /// Whether a user prompt reads as a find/trace question worth the
 /// [`PROMPT_INTENT_NUDGE`]. High-precision substrings only — firing on every
 /// prompt would train the model to ignore the hint. Prompts that already name
@@ -354,6 +362,17 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
         "Grep" => {
             if !ctx.level.nudges() {
                 return Decision::Passthrough;
+            }
+            // First Grep after a find/trace-shaped prompt: deny once with the
+            // intent mapping. `take` is last in the chain so the marker stays
+            // armed when a gate blocks (e.g. MCP not ready yet), and it is
+            // consumed BEFORE the deny returns, so the retry passes.
+            if ctx.level.steers()
+                && ctx.mcp_ready
+                && grep_first_deny_enabled()
+                && throttle::take(ctx.data_dir, ctx.session_id, "grep-first")
+            {
+                return Decision::Deny(GREP_FIRST_DENY_REASON.to_string());
             }
             if let Some(d) = inspect_escalation(ctx) {
                 return d;
@@ -483,6 +502,12 @@ fn read_deny_threshold() -> u64 {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(READ_DENY_THRESHOLD_DEFAULT)
+}
+
+/// First-Grep deny kill-switch: `LENS_GREP_FIRST_DENY=0` disables the armed
+/// deny without a recompile (the per-mechanism ablation knob). On by default.
+fn grep_first_deny_enabled() -> bool {
+    std::env::var("LENS_GREP_FIRST_DENY").map_or(true, |v| v.trim() != "0")
 }
 
 /// Grep result-size (bytes) above which the result is a "flood" worth steering to
@@ -1625,6 +1650,44 @@ mod tests {
     // The other deny tests below never touch the env var, so they're safe to
     // run in parallel.
     static READ_DENY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn armed_first_grep_denies_once_and_respects_gates() {
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let g = json!({"pattern": "deny_threshold"});
+
+        // Unarmed: no deny.
+        assert!(!matches!(route("Grep", &g, &ctx), Decision::Deny(_)));
+
+        // Armed but MCP not ready: passthrough, marker STAYS armed.
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
+        let not_ready = RouteCtx {
+            mcp_ready: false,
+            ..ctx
+        };
+        assert!(!matches!(route("Grep", &g, &not_ready), Decision::Deny(_)));
+
+        // MCP ready: the armed deny fires with the intent mapping.
+        match route("Grep", &g, &ctx) {
+            Decision::Deny(reason) => assert!(
+                reason.contains("find/trace") && reason.contains("lens_search"),
+                "deny reason maps intents: {reason}"
+            ),
+            other => panic!("armed first Grep should deny, got {other:?}"),
+        }
+        // Consumed: the retried Grep passes.
+        assert!(!matches!(route("Grep", &g, &ctx), Decision::Deny(_)));
+
+        // Kill-switch: armed but LENS_GREP_FIRST_DENY=0 disables the deny.
+        throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
+        std::env::set_var("LENS_GREP_FIRST_DENY", "0");
+        assert!(!matches!(route("Grep", &g, &ctx), Decision::Deny(_)));
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+    }
 
     #[test]
     fn read_denies_at_threshold_then_resets_and_respects_override() {

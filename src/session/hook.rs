@@ -178,6 +178,9 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 .is_some_and(|server| server.contains("lens"));
             if is_lens || matches!(tool.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
                 routing::throttle::reset(&data_dir, &session_id, "read-code");
+                // Also disarm the first-Grep deny: a lens call answered the
+                // find/trace question, so a follow-up Grep is no longer drift.
+                routing::throttle::reset(&data_dir, &session_id, "grep-first");
             }
             // Scale-aware search steer: a Grep whose result floods context gets a
             // one-shot nudge toward lens_search (lens_search only beats grep at scale).
@@ -214,9 +217,14 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 // context before the first call, which PreToolUse nudges are
                 // too late for (measured: find/trace tasks stayed Grep-first
                 // on SessionStart steering alone).
-                if routing::Level::from_env().nudges()
-                    && routing::prompt_wants_find_trace(&prompt)
-                {
+                let level = routing::Level::from_env();
+                if level.nudges() && routing::prompt_wants_find_trace(&prompt) {
+                    // Arm the one-shot first-Grep deny for this prompt (the
+                    // Grep arm in `routing::route_inner` consumes it; any
+                    // lens call or edit disarms it via the PostToolUse reset).
+                    if level.steers() {
+                        routing::throttle::bump(&data_dir, &session_id, "grep-first");
+                    }
                     return Ok(json!({
                         "hookSpecificOutput": {
                             "hookEventName": "UserPromptSubmit",

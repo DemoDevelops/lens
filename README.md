@@ -148,6 +148,8 @@ A local, read-only view of what lens is saving you: the op log, token savings, a
 - **theme**: dark (default) or retro 70s
 - **mini / full**: a compact pane vs the expansive charts
 
+<img width="1206" height="868" alt="image" src="https://github.com/user-attachments/assets/a651e84b-4087-4e6f-9e43-21ceb68b9bdb" />
+
 **Terminal** (`lens dashboard --tui`, alias `lens top`): the same snapshot in the terminal, no browser or socket. Zero-dependency ANSI (box panels, block sparklines, `NO_COLOR`-aware), auto mini/full by width.
 
 ```sh

@@ -1,0 +1,7 @@
+{
+  "id": "0007_nav_include_bodies_threading",
+  "prompt": "The `include_bodies` field was added to lens_skeleton. Trace it end-to-end: where is it defined as a field (src/tools.rs), where does the server handler read it (src/server.rs), and which function in src/discovery/skeleton.rs changes behavior based on it? Name each function/struct at every hop. Do not modify anything.",
+  "expected_tools": ["lens_symbol", "lens_links", "lens_path"],
+  "score": "first_tool",
+  "source": "mined:601b7cd5"
+}

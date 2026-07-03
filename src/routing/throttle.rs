@@ -34,7 +34,10 @@ fn log_path(data_dir: &Path) -> PathBuf {
 }
 
 /// Load a data dir's log into `state` once per process (best-effort; a missing
-/// or garbled file just starts empty).
+/// or garbled file just starts empty). Lines are `session\tkey` (a fire,
+/// incrementing the count) or `session\tkey\t!reset` (a reset sentinel,
+/// zeroing the count outright) — processed in order, so a reset followed by
+/// more fires counts up from zero again.
 fn ensure_loaded(state: &mut DirState, data_dir: &Path) {
     if state.loaded {
         return;
@@ -42,11 +45,15 @@ fn ensure_loaded(state: &mut DirState, data_dir: &Path) {
     state.loaded = true;
     if let Ok(text) = std::fs::read_to_string(log_path(data_dir)) {
         for line in text.lines() {
-            if let Some((s, k)) = line.split_once('\t') {
-                *state
-                    .counts
-                    .entry((s.to_string(), k.to_string()))
-                    .or_insert(0) += 1;
+            let mut fields = line.splitn(3, '\t');
+            let (Some(s), Some(k)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            let key = (s.to_string(), k.to_string());
+            if fields.next() == Some("!reset") {
+                state.counts.insert(key, 0);
+            } else {
+                *state.counts.entry(key).or_insert(0) += 1;
             }
         }
     }
@@ -61,6 +68,18 @@ fn append(data_dir: &Path, session: &str, key: &str) {
         .open(log_path(data_dir))
     {
         let _ = writeln!(f, "{session}\t{key}");
+    }
+}
+
+/// Append a `session\tkey\t!reset` sentinel to the on-disk log (best-effort).
+fn append_reset(data_dir: &Path, session: &str, key: &str) {
+    let _ = std::fs::create_dir_all(data_dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path(data_dir))
+    {
+        let _ = writeln!(f, "{session}\t{key}\t!reset");
     }
 }
 
@@ -100,6 +119,18 @@ pub fn bump(data_dir: &Path, session: &str, key: &str) -> u64 {
     *c
 }
 
+/// Zero the `(session, key)` fire count (cache + on-disk log, best-effort).
+/// A later `bump` counts up from zero again, even in a fresh process.
+pub fn reset(data_dir: &Path, session: &str, key: &str) {
+    let mut map = throttle().0.lock().unwrap();
+    let state = map.entry(data_dir.to_path_buf()).or_default();
+    ensure_loaded(state, data_dir);
+    append_reset(data_dir, session, key);
+    state
+        .counts
+        .insert((session.to_string(), key.to_string()), 0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +164,56 @@ mod tests {
         assert!(
             fired(d.path(), "sess", "grep"),
             "a new process must see the prior fire from the log"
+        );
+    }
+
+    #[test]
+    fn reset_zeroes_the_count() {
+        let d = tempdir().unwrap();
+        assert_eq!(bump(d.path(), "s", "k"), 1);
+        assert_eq!(bump(d.path(), "s", "k"), 2);
+        assert_eq!(bump(d.path(), "s", "k"), 3);
+        reset(d.path(), "s", "k");
+        assert_eq!(bump(d.path(), "s", "k"), 1);
+    }
+
+    #[test]
+    fn reset_of_unknown_key_is_a_noop() {
+        let d = tempdir().unwrap();
+        reset(d.path(), "s", "never-bumped"); // must not panic
+        assert_eq!(bump(d.path(), "s", "never-bumped"), 1);
+    }
+
+    #[test]
+    fn reset_does_not_affect_other_keys() {
+        let d = tempdir().unwrap();
+        mark(d.path(), "s", "a");
+        assert_eq!(bump(d.path(), "s", "b"), 1);
+        assert_eq!(bump(d.path(), "s", "b"), 2);
+
+        reset(d.path(), "s", "a");
+
+        assert!(fired(d.path(), "s", "b"));
+        assert_eq!(bump(d.path(), "s", "b"), 3);
+    }
+
+    #[test]
+    fn reset_persists_across_processes_via_the_log() {
+        // Same simulated-fresh-process trick as
+        // `persists_across_processes_via_the_log`, but proving a reset (not
+        // just a fire) survives the reload.
+        let d = tempdir().unwrap();
+        assert_eq!(bump(d.path(), "sess", "k"), 1);
+        assert_eq!(bump(d.path(), "sess", "k"), 2);
+        assert_eq!(bump(d.path(), "sess", "k"), 3);
+        reset(d.path(), "sess", "k");
+
+        throttle().0.lock().unwrap().remove(d.path()); // drop the cache
+
+        assert_eq!(
+            bump(d.path(), "sess", "k"),
+            1,
+            "a new process must honor the on-disk reset and count up from zero"
         );
     }
 }

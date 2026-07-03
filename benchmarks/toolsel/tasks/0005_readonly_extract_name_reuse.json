@@ -1,0 +1,7 @@
+{
+  "id": "0005_readonly_extract_name_reuse",
+  "prompt": "Does src/discovery/skeleton.rs's `include_bodies` name-matching reuse a name-extraction helper from src/discovery/extract.rs, or does it implement its own? Identify the specific function(s) involved. Do not modify anything.",
+  "expected_tools": ["lens_skeleton", "lens_run_file", "lens_symbol"],
+  "score": "first_tool",
+  "source": "mined:533d92b2"
+}

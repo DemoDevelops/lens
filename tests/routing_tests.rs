@@ -286,14 +286,26 @@ fn sessionstart_injects_routing_block_when_steering() {
         ctx.contains("context_window_protection"),
         "routing block present: {ctx}"
     );
-    assert!(ctx.contains("lens_run"), "tool hierarchy names lens_run");
+    for tool in [
+        "lens_run",
+        "lens_run_file",
+        "lens_search",
+        "lens_index",
+        "lens_map",
+        "lens_symbol",
+        "lens_links",
+        "lens_path",
+        "lens_recall",
+        "lens_skeleton",
+        "lens_overview",
+        "lens_find",
+        "lens_grep_ast",
+    ] {
+        assert!(ctx.contains(tool), "bootstrap select list names {tool}: {ctx}");
+    }
     assert!(
-        ctx.contains("lens_search"),
-        "tool hierarchy names lens_search"
-    );
-    assert!(
-        ctx.contains("lens_symbol"),
-        "tool hierarchy names the graph"
+        ctx.contains("include_bodies"),
+        "block documents include_bodies"
     );
     assert!(
         ctx.contains("ToolSearch"),
@@ -499,4 +511,155 @@ async fn lens_run_file_e2e() {
         .contains(&"A".repeat(50000)));
 
     client.cancel().await.ok();
+}
+
+// ---------------------------------------------------------------------------
+// T4: SessionStart pushes a repo-map digest from an existing graph.json (never
+// builds one — load-or-skip keeps SessionStart fast).
+// ---------------------------------------------------------------------------
+
+/// A minimal but valid `Graph` (see `discovery::graph::Graph`) with enough
+/// nodes/edges that `discovery::query::overview` renders a non-empty digest.
+fn minimal_graph_json() -> Value {
+    json!({
+        "nodes": [
+            {"id": "n1", "name": "alpha", "kind": "function", "file": "a.rs", "line": 1, "language": "rust"},
+            {"id": "n2", "name": "beta", "kind": "function", "file": "a.rs", "line": 10, "language": "rust"},
+        ],
+        "edges": [
+            {"from": "n1", "to": "n2", "kind": "calls"},
+        ],
+    })
+}
+
+/// Like `run_hook`, but also returns the process exit status (needed to assert
+/// a clean 0 exit on the graph-absent path, which `run_hook` doesn't expose).
+fn run_hook_with_status(
+    event: &str,
+    payload: &Value,
+    envs: &[(&str, &str)],
+    data_dir: &Path,
+) -> (std::process::ExitStatus, Value) {
+    let mut cmd = Command::new(bin());
+    cmd.args(["hook", "claude", event])
+        .env("LENS_DIR", data_dir)
+        .env_remove("LENS_ROUTING")
+        .env_remove("LENS_ROUTING_MCP")
+        .env("LENS_DEFER_BASH_TO_RTK", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn hook");
+    {
+        let mut si = child.stdin.take().unwrap();
+        si.write_all(payload.to_string().as_bytes()).unwrap();
+    }
+    let out = child.wait_with_output().expect("hook output");
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let parsed = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    (out.status, parsed)
+}
+
+#[test]
+fn sessionstart_repo_map_digest_gated_on_graph_and_budget() {
+    let d = tempfile::tempdir().unwrap();
+    let payload =
+        json!({ "session_id": "s1", "cwd": d.path().to_string_lossy(), "source": "startup" });
+
+    // (a) a valid graph.json in the data dir -> digest injected, naming a
+    // ranked symbol from it.
+    std::fs::write(d.path().join("graph.json"), minimal_graph_json().to_string()).unwrap();
+    let (_, v) = run_hook("SessionStart", &payload, &[], d.path());
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(ctx.contains("<repo_map>"), "digest injected: {ctx}");
+    assert!(
+        ctx.contains("lens_symbol") && ctx.contains("lens_links") && ctx.contains("lens_path"),
+        "digest points at graph-nav tools: {ctx}"
+    );
+    assert!(ctx.contains("alpha"), "digest names a ranked symbol: {ctx}");
+
+    // (b) no graph.json at all -> no digest, and the hook still exits 0 cleanly.
+    let d2 = tempfile::tempdir().unwrap();
+    let payload2 =
+        json!({ "session_id": "s2", "cwd": d2.path().to_string_lossy(), "source": "startup" });
+    let (status2, v2) = run_hook_with_status("SessionStart", &payload2, &[], d2.path());
+    assert!(status2.success(), "hook exits 0 with no graph.json present");
+    assert_eq!(v2["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    let ctx2 = v2["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(!ctx2.contains("<repo_map>"), "no graph.json => no digest: {ctx2}");
+
+    // (c) LENS_SESSION_OVERVIEW_BUDGET=0 disables the digest even with a valid
+    // graph.json present.
+    let (_, v3) = run_hook(
+        "SessionStart",
+        &payload,
+        &[("LENS_SESSION_OVERVIEW_BUDGET", "0")],
+        d.path(),
+    );
+    let ctx3 = v3["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !ctx3.contains("<repo_map>"),
+        "budget=0 disables the digest: {ctx3}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T5: consecutive-read counter-deny (Serena `remind` pattern)
+// ---------------------------------------------------------------------------
+
+fn read_payload(dir: &Path, session: &str, file_path: &str) -> Value {
+    json!({
+        "session_id": session,
+        "cwd": dir.to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": file_path },
+    })
+}
+
+#[test]
+fn read_denies_after_six_consecutive_code_reads_then_lens_call_resets() {
+    let d = tempfile::tempdir().unwrap();
+    let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
+    let p = read_payload(d.path(), "s1", "src/server.rs");
+
+    let mut sixth = Value::Null;
+    for _ in 0..6 {
+        let (_, v) = run_hook("PreToolUse", &p, &envs, d.path());
+        sixth = v;
+    }
+    let hso = &sixth["hookSpecificOutput"];
+    assert_eq!(
+        hso["permissionDecision"], "deny",
+        "6th consecutive code Read must deny: {sixth}"
+    );
+    let reason = hso["permissionDecisionReason"].as_str().unwrap();
+    assert!(
+        reason.contains("lens_skeleton"),
+        "deny reason names lens_skeleton: {reason}"
+    );
+
+    // A lens tool call (PostToolUse) resets the counter, so the next Read passes.
+    let lens_post = json!({
+        "session_id": "s1",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "mcp__lens__lens_skeleton",
+        "tool_input": { "path": "src/server.rs" },
+        "tool_response": "ok",
+    });
+    run_hook("PostToolUse", &lens_post, &envs, d.path());
+
+    let (_, after) = run_hook("PreToolUse", &p, &envs, d.path());
+    assert_ne!(
+        after["hookSpecificOutput"]["permissionDecision"], "deny",
+        "Read after a lens tool call must not deny: {after}"
+    );
 }

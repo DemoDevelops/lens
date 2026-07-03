@@ -387,7 +387,7 @@ impl Forge {
     /// Skeletonize a source file: signatures + nesting, executable bodies elided,
     /// the full text stored so any body is one `lens_recall` away.
     #[tool(
-        description = "Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to `…`. Far fewer tokens than reading the whole file, and the full text is stored so any elided body is one lens_recall away (use the returned retrieve_ref). Use this when you need a file's API/shape; use Read when you must see or edit the bodies."
+        description = "Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to `…`. Far fewer tokens than reading the whole file, and the full text is stored so any elided body is one lens_recall away (use the returned retrieve_ref). Pass `include_bodies` with definition names to get those bodies back verbatim in the same response, without a second call. Do not Read a code file just to see its structure — use this first; use Read only when about to Edit."
     )]
     async fn lens_skeleton(
         &self,
@@ -415,7 +415,9 @@ impl Forge {
             return Err(ToolFailure::recoverable(msg));
         };
         let language = spec.name.to_string();
-        let Some(skeleton) = crate::discovery::skeleton::skeletonize(&content, &spec) else {
+        let Some(skeleton) =
+            crate::discovery::skeleton::skeletonize(&content, &spec, req.include_bodies.as_deref())
+        else {
             let msg = format!("could not parse {} for skeleton; use Read", p.display());
             op.finish(0, 0, None, "error", msg.clone(), None);
             return Err(ToolFailure::recoverable(msg));
@@ -553,7 +555,7 @@ impl Forge {
 
     /// Search the full-text index with one or more queries.
     #[tool(
-        description = "Search the full-text index with one or more queries (BM25-ranked); returns top snippets with path and score per query."
+        description = "Search the full-text index with one or more queries (BM25-ranked); returns top snippets with path and score per query. For symbol definitions/relationships use lens_symbol, not text search."
     )]
     async fn lens_search(
         &self,
@@ -585,7 +587,7 @@ impl Forge {
 
     /// Build the structural code graph for the repo.
     #[tool(
-        description = "Parse the repo with tree-sitter into a graph of symbols (functions, types, modules) and relationships (calls, imports, contains). Run once, then use lens_symbol/lens_links/lens_path."
+        description = "Parse the repo with tree-sitter into a graph of symbols (functions, types, modules) and relationships (calls, imports, contains). Run once per repo; then query with lens_symbol/lens_links/lens_path — do not re-run per question."
     )]
     async fn lens_map(
         &self,
@@ -612,7 +614,7 @@ impl Forge {
 
     /// Find symbols by name and return their immediate connections.
     #[tool(
-        description = "Find graph symbols by name substring (+ optional kind) and return them with immediate connections. Large results are compacted with a lens_recall ref."
+        description = "Find graph symbols by name substring (+ optional kind) and return them with immediate connections. Large results are compacted with a lens_recall ref. If you only know what the symbol does, not its name, DO NOT guess substrings — use lens_find."
     )]
     async fn lens_symbol(
         &self,
@@ -641,7 +643,7 @@ impl Forge {
 
     /// Find symbols by natural-language meaning, ranked lexically (no embeddings).
     #[tool(
-        description = "Find symbols by natural-language query, ranked lexically (no embeddings): tokenizes the query and scores symbol names by word overlap (exact > prefix > substring, with a bonus for multi-word hits). Returns the best matches with their immediate connections. Use when you know what a symbol does but not its exact name."
+        description = "Find symbols by natural-language query, ranked lexically (no embeddings): tokenizes the query and scores symbol names by word overlap (exact > prefix > substring, with a bonus for multi-word hits). Returns the best matches with their immediate connections. Use when you know what a symbol does but not its exact name. If you know the exact name, use lens_symbol instead."
     )]
     async fn lens_find(
         &self,
@@ -667,7 +669,7 @@ impl Forge {
 
     /// Return the local subgraph around a node.
     #[tool(
-        description = "Return the local subgraph within `depth` hops of a node id (from lens_symbol results)."
+        description = "Return the local subgraph within `depth` hops of a node id (from lens_symbol results). For a specific A-to-B connection use lens_path instead; this returns the whole neighborhood around one node."
     )]
     async fn lens_links(
         &self,
@@ -693,7 +695,7 @@ impl Forge {
 
     /// Shortest path between two symbols.
     #[tool(
-        description = "Find the shortest path between two symbols (by node id or name) via BFS over graph edges."
+        description = "Find the shortest path between two symbols (by node id or name) via BFS over graph edges. For a symbol's whole neighborhood rather than one target, use lens_links instead."
     )]
     async fn lens_path(
         &self,
@@ -720,7 +722,7 @@ impl Forge {
 
     /// A token-budgeted map of the repo's most important symbols.
     #[tool(
-        description = "Get a token-budgeted overview of the repo: the most structurally important symbols (PageRank-ranked) with their callers/callees, as much as fits a token budget (default 2000). A high-signal map of a codebase at fixed cost instead of reading files."
+        description = "Get a token-budgeted overview of the repo: the most structurally important symbols (PageRank-ranked) with their callers/callees, as much as fits a token budget (default 2000). A high-signal map of a codebase at fixed cost instead of reading files. For one file's structure use lens_skeleton; this is the whole-repo ranked map."
     )]
     async fn lens_overview(
         &self,
@@ -748,7 +750,7 @@ impl Forge {
 
     /// Structural (tree-sitter) search: run an AST query, get path:line matches.
     #[tool(
-        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns path:line matches."
+        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns path:line matches. For plain-text/idea search use lens_search; this is for syntax-shape matches."
     )]
     async fn lens_grep_ast(
         &self,
@@ -1730,6 +1732,7 @@ mod tests {
         let resp = f
             .lens_skeleton(Parameters(crate::tools::SkeletonRequest {
                 path: file.display().to_string(),
+                include_bodies: None,
             }))
             .await
             .unwrap()

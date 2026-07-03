@@ -203,6 +203,12 @@ pub const BUILD_REDIRECT_REASON: &str = "lens routing: redirected a build comman
 /// Shown when the tool-selection guide is injected into a sub-agent prompt.
 pub const AGENT_INJECT_REASON: &str = "lens routing: injected the tool-selection guide into the sub-agent prompt so it reaches for lens tools.";
 
+/// Shown when [`read_decision`] denies a Read after too many consecutive
+/// code-file reads with no intervening lens tool call (Serena `remind`
+/// pattern). Factual, names the alternatives, and states that the counter was
+/// reset so the caller isn't walled off if it still needs to Read.
+pub const READ_DENY_REASON: &str = "6 consecutive code-file reads without any lens tool. For the file's shape use lens_skeleton(path) (add include_bodies for specific functions); to locate a symbol use lens_symbol or lens_find; for connections use lens_links / lens_path. The counter was reset — Read will pass now if you still need it.";
+
 // Per-tool `<context_guidance>` injected on PreToolUse (tool names mapped to lens).
 // Re-injected periodically (see `throttle_periodic`), not once per session.
 
@@ -214,7 +220,7 @@ pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    A grep can return
 
 /// Contextual guidance steering analysis-reads into the darkroom, and
 /// navigational code-reads toward the graph.
-pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading this file to Edit it? Stay with Read — Edit has to match the exact bytes you're holding. Reading it to understand, summarize, or extract a few facts? Send it through lens_run_file(path, language, code) and return only what you derived. To see a file's API — signatures and structure without the bodies — use lens_skeleton(path), with the full text a lens_recall away. And when you're tracing how code connects (callers, callees, where a symbol is defined, how A reaches B), don't read file after file — query the graph with lens_symbol / lens_links / lens_path (run lens_map once if it's empty).\n  </tip>\n</context_guidance>";
+pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading this file to Edit it? Stay with Read — Edit has to match the exact bytes you're holding. Reading it to understand, summarize, or extract a few facts? Send it through lens_run_file(path, language, code) and return only what you derived. To see a file's API — signatures and structure without the bodies — use lens_skeleton(path) first, then lens_skeleton(path, include_bodies: [\"the_fn\"]) for just the bodies you need, with the full text always a lens_recall away. And when you're tracing how code connects (callers, callees, where a symbol is defined, how A reaches B), don't read file after file — query the graph with lens_symbol / lens_links / lens_path (run lens_map once if it's empty). Six consecutive code-file reads with no lens tool call between them trigger a one-time deny — that's not a wall, just the point where the graph or skeleton clearly beats reading further.\n  </tip>\n</context_guidance>";
 
 /// Contextual guidance emitted AFTER a Grep whose result set floods context. A
 /// result this large is exactly where lens_search (ranked top-K, flat with corpus
@@ -395,6 +401,24 @@ fn read_graph_threshold() -> u64 {
         .unwrap_or(READ_GRAPH_THRESHOLD_DEFAULT)
 }
 
+/// After this many CONSECUTIVE code-file reads with no intervening lens tool
+/// call, [`read_decision`] denies the read once instead of nudging — Serena's
+/// `remind` pattern: the counter resets on deny (see [`read_decision`]) and
+/// again on the next lens tool call (see the PostToolUse arm in
+/// `session::hook`), so this is a single blocking stop per drift episode,
+/// never a hard wall.
+const READ_DENY_THRESHOLD_DEFAULT: u64 = 6;
+
+/// The deny threshold, overridable via `LENS_READ_DENY_THRESHOLD` so an A/B
+/// can disable it (`0`) without a recompile. Falls back to
+/// [`READ_DENY_THRESHOLD_DEFAULT`] when unset or unparseable.
+fn read_deny_threshold() -> u64 {
+    std::env::var("LENS_READ_DENY_THRESHOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(READ_DENY_THRESHOLD_DEFAULT)
+}
+
 /// Grep result-size (bytes) above which the result is a "flood" worth steering to
 /// lens_search, overridable via `LENS_GREP_FLOOD_BYTES` (so an A/B can disable it
 /// by setting it very high). Default 16384: comfortably above lens_search's flat
@@ -414,7 +438,9 @@ fn grep_flood_bytes() -> usize {
 /// ([`crate::discovery::extract::spec_for_extension`]) count toward escalation —
 /// reading a doc/config/data file shouldn't push the agent at the graph. Once the
 /// session's code-read count crosses [`READ_GRAPH_THRESHOLD`] the graph-specific
-/// nudge fires, then again every [`READ_GRAPH_PERIOD`]-th read after.
+/// nudge fires, then again every [`READ_GRAPH_PERIOD`]-th read after. Past
+/// [`read_deny_threshold`] consecutive code reads (while steering), the read is
+/// denied once instead — see [`READ_DENY_REASON`].
 fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if !ctx.level.nudges() {
         return Decision::Passthrough;
@@ -426,6 +452,13 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
         .unwrap_or(false);
     if is_code {
         let n = throttle::bump(ctx.data_dir, ctx.session_id, "read-code");
+        let deny_threshold = read_deny_threshold();
+        if deny_threshold > 0 && n >= deny_threshold && ctx.level.steers() {
+            // Deny once per drift episode, never a hard wall: reset the
+            // counter first so the immediate retry passes if still needed.
+            throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
+            return mcp_redirect(ctx, Decision::Deny(READ_DENY_REASON.to_string()));
+        }
         let threshold = read_graph_threshold();
         if n >= threshold && (n - threshold).is_multiple_of(READ_GRAPH_PERIOD) {
             return Decision::Context(read_graph_nudge(n));
@@ -443,7 +476,7 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
 /// the agent sees how much reading it has already done.
 fn read_graph_nudge(n: u64) -> String {
     format!(
-        "<context_guidance>\n  <tip>\n    You've read {n} code files this session. If you're tracing how the code fits together — who calls a function, what it calls, where a symbol is defined, how one part reaches another — stop reading file by file and query the graph instead: lens_symbol to locate a symbol, lens_links for its callers/callees, lens_path for how A reaches B. One query replaces many reads and keeps their bytes out of your context. (Run lens_map once if the graph is empty.)\n  </tip>\n</context_guidance>"
+        "<context_guidance>\n  <tip>\n    You've read {n} code files this session. If you're tracing how the code fits together — who calls a function, what it calls, where a symbol is defined, how one part reaches another — stop reading file by file and query the graph instead: lens_symbol to locate a symbol, lens_links for its callers/callees, lens_path for how A reaches B. Just need one file's shape? lens_skeleton(path), with include_bodies: [\"the_fn\"] for the bodies you actually need. One query replaces many reads and keeps their bytes out of your context. (Run lens_map once if the graph is empty.) At 6 consecutive code reads with no lens tool call between them, the next Read is denied once — a nudge to switch, not a hard wall.\n  </tip>\n</context_guidance>"
     )
 }
 
@@ -905,7 +938,7 @@ const BLOCK_HEAD: &str = r##"<context_window_protection>
   </why>
   <loading_lens_tools>
     lens's tools may start out unregistered in this harness — their schemas aren't loaded, so a direct call errors ("tool not found" or a validation error). Register them once, before your first lens_* call:
-    ToolSearch(query: "select:lens_run,lens_run_file,lens_search,lens_index,lens_map,lens_symbol,lens_links,lens_path,lens_recall")
+    ToolSearch(query: "select:lens_run,lens_run_file,lens_search,lens_index,lens_map,lens_symbol,lens_links,lens_path,lens_recall,lens_skeleton,lens_overview,lens_find,lens_grep_ast")
     If a lens_* call later comes back not-found, re-run that ToolSearch and retry instead of falling back to Bash/Read/Grep.
   </loading_lens_tools>
   <which_tool>
@@ -913,12 +946,15 @@ const BLOCK_HEAD: &str = r##"<context_window_protection>
     - Where a string or idea appears across the tree: lens_index once, then lens_search(queries: [...]) — batch several questions into the array and get ranked snippets, not whole files.
     - Turning data into an answer (filter, count, parse, reshape, summarize): lens_run(language, code) or lens_run_file(path, language, code). Only what you print returns; the inputs stay in the darkroom.
     - Recovering something offloaded or truncated: lens_recall(ref).
+    - You know the symbol's exact name: lens_symbol. You only know what it does, not its name: lens_find. You have a syntax-shape pattern (a call, a signature shape) rather than a name or plain-text idea: lens_grep_ast.
+    - Whole-repo orientation — how the codebase is put together before you've read anything: lens_overview. A digest is already pushed into context at session start; treat that as the first call's answer and expand from it with lens_symbol / lens_links rather than re-running lens_overview.
+    - One file's shape — signatures and structure without the bodies: lens_skeleton(path); pass include_bodies: ["the_fn"] to get back the full text of just the functions you need, in the same call.
   </which_tool>
   <when_plain_tools_win>"##;
 
 const BULLET_BASH: &str = "\n    - Bash: keep it for commands that change something, or whose output is short and you just want to glance at it (pwd, a clean git status, moving a file). The moment you'd pipe that output onward to count, grep, or reshape it, give it to lens_run instead so the bulk never lands in the transcript.";
 
-const BULLET_READ: &str = "\n    - Read: right when you're about to Edit a file, since Edit has to match the exact bytes you're holding. If you only need to understand it, summarize it, or pull a few facts out, send it through lens_run_file and return just those; for a file's shape (signatures, no bodies) use lens_skeleton.";
+const BULLET_READ: &str = "\n    - Need to understand a file? lens_skeleton(path) first; then lens_skeleton(path, include_bodies: [\"the_fn\"]) for the one body you need — not a second Read. Read is for when you are about to Edit (Edit must match exact bytes). Already Read the full file this session? Use what you have — do not re-analyse it with lens tools.\n    - Common rationalizations that lead to waste: \"the file is small\", \"I already know the path\", \"one Read beats two lens calls\" — measured across sessions these produce whole-file dumps that tax every later turn.";
 
 const BULLET_SEARCH: &str = "\n    - Finding where something lives or what touches it: reach for lens_search or lens_symbol first — hand-scanning many files with Read/Grep is exactly what these replace.";
 
@@ -1402,6 +1438,10 @@ mod tests {
 
     #[test]
     fn read_code_files_escalate_to_the_graph() {
+        // Reaches the default deny threshold (6) at its last read, so it must
+        // not race `read_denies_at_threshold_then_resets_and_respects_override`,
+        // which overrides `LENS_READ_DENY_THRESHOLD` process-wide.
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
         let d = tempdir().unwrap();
         let ctx = rc(Level::Steer, true, d.path());
         let code = json!({"file_path": "src/server.rs"});
@@ -1420,10 +1460,12 @@ mod tests {
             ),
             other => panic!("expected graph nudge, got {other:?}"),
         }
-        // 4th, 5th quiet; 6th fires again (every READ_GRAPH_PERIOD-th read).
+        // 4th, 5th quiet. The periodic graph nudge would repeat at the 6th
+        // read, but that's also T5's deny threshold — deny takes priority
+        // there (see `read_denies_at_threshold_then_resets_and_respects_override`).
         assert_eq!(route("Read", &code, &ctx), Decision::Passthrough);
         assert_eq!(route("Read", &code, &ctx), Decision::Passthrough);
-        assert!(matches!(route("Read", &code, &ctx), Decision::Context(_)));
+        assert!(matches!(route("Read", &code, &ctx), Decision::Deny(_)));
     }
 
     #[test]
@@ -1445,6 +1487,93 @@ mod tests {
     fn read_nudge_offers_the_graph() {
         assert!(READ_NUDGE.contains("lens_symbol"));
         assert!(READ_NUDGE.contains("lens_run_file"));
+    }
+
+    // ── read_decision(): consecutive-code-read deny (T5) ────────────────────
+    // NOTE: default-vs-override behavior is grouped into one test (like
+    // `mcp_ready_env_override_and_heartbeat`) to avoid racing another test's
+    // view of `LENS_READ_DENY_THRESHOLD`. `read_code_files_escalate_to_the_graph`
+    // (above) also depends on the default value, so both share this lock.
+    // The other deny tests below never touch the env var, so they're safe to
+    // run in parallel.
+    static READ_DENY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn read_denies_at_threshold_then_resets_and_respects_override() {
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LENS_READ_DENY_THRESHOLD");
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let code = json!({"file_path": "src/server.rs"});
+        for i in 1..=5 {
+            assert!(
+                !matches!(route("Read", &code, &ctx), Decision::Deny(_)),
+                "read {i} of 5 must not deny (default threshold is 6)"
+            );
+        }
+        match route("Read", &code, &ctx) {
+            Decision::Deny(reason) => assert!(
+                reason.contains("lens_skeleton"),
+                "deny reason names lens_skeleton: {reason}"
+            ),
+            other => panic!("6th consecutive code read should deny by default, got {other:?}"),
+        }
+        // The deny reset the counter, so the immediate retry (7th) passes.
+        assert!(
+            !matches!(route("Read", &code, &ctx), Decision::Deny(_)),
+            "7th read (post-reset) must not deny"
+        );
+
+        // LENS_READ_DENY_THRESHOLD=0 disables the deny entirely.
+        std::env::set_var("LENS_READ_DENY_THRESHOLD", "0");
+        let d2 = tempdir().unwrap();
+        let ctx2 = rc(Level::Full, true, d2.path());
+        for i in 1..=12 {
+            assert!(
+                !matches!(route("Read", &code, &ctx2), Decision::Deny(_)),
+                "read {i}: threshold=0 must never deny"
+            );
+        }
+        std::env::remove_var("LENS_READ_DENY_THRESHOLD");
+    }
+
+    #[test]
+    fn read_deny_never_bumped_by_non_code_files() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let doc = json!({"file_path": "NOTES.md"});
+        for i in 1..=10 {
+            assert!(
+                !matches!(route("Read", &doc, &ctx), Decision::Deny(_)),
+                "read {i}: non-code files never count toward the deny counter"
+            );
+        }
+    }
+
+    #[test]
+    fn read_deny_gated_on_mcp_ready() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, false, d.path());
+        let code = json!({"file_path": "src/server.rs"});
+        for i in 1..=8 {
+            assert!(
+                !matches!(route("Read", &code, &ctx), Decision::Deny(_)),
+                "read {i}: mcp not ready must downgrade the deny to passthrough"
+            );
+        }
+    }
+
+    #[test]
+    fn read_deny_never_fires_at_nudge_level() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Nudge, true, d.path());
+        let code = json!({"file_path": "src/server.rs"});
+        for i in 1..=8 {
+            assert!(
+                !matches!(route("Read", &code, &ctx), Decision::Deny(_)),
+                "read {i}: Level::Nudge does not steer, so it must never deny"
+            );
+        }
     }
 
     // ── post_route(): scale-aware search nudge ──────────────────────────────
@@ -1744,6 +1873,11 @@ mod tests {
             "lens_links",
             "lens_path",
             "lens_recall",
+            "lens_skeleton",
+            "lens_overview",
+            "lens_find",
+            "lens_grep_ast",
+            "include_bodies",
             "which_tool",
             "WebFetch is off",
             // the highest-impact additions over the old soft nudge:

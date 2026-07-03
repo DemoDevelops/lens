@@ -5,8 +5,9 @@
 //! [`super::extract`]). It is deterministic: it walks the AST in source order
 //! and emits byte ranges verbatim, so the output ordering is fixed by the file.
 //!
-//! Not registered as an MCP tool (lens invariant 5). It exists as an internal
-//! function plus a standalone measurement test.
+//! Wrapped by the `lens_skeleton` MCP tool (`src/server.rs`); an optional
+//! `include_bodies` list lets a caller name specific definitions whose bodies
+//! should be emitted verbatim instead of elided.
 
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -56,9 +57,15 @@ fn is_body_node(kind: &str) -> bool {
 // For Python the class/function body node kind is `block`.
 
 /// Produce a skeleton of `source`: signatures and nesting preserved, executable
-/// bodies replaced by `…`. Returns `None` if the grammar can't be loaded or the
-/// source fails to parse.
-pub fn skeletonize(source: &str, spec: &LangSpec) -> Option<String> {
+/// bodies replaced by `…`. `include_bodies`, if given, names definitions whose
+/// bodies should be emitted in full instead of elided; unmatched names are
+/// ignored. Returns `None` if the grammar can't be loaded or the source fails
+/// to parse.
+pub fn skeletonize(
+    source: &str,
+    spec: &LangSpec,
+    include_bodies: Option<&[String]>,
+) -> Option<String> {
     let language = (spec.language)();
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
@@ -66,7 +73,7 @@ pub fn skeletonize(source: &str, spec: &LangSpec) -> Option<String> {
     let src = source.as_bytes();
     let mut out = String::new();
     let root = tree.root_node();
-    emit_children(root, src, spec.name, &mut out);
+    emit_children(root, src, spec.name, include_bodies, &mut out);
     // Collapse any run of blank lines introduced by elision to a single newline
     // for stable, compact output.
     Some(normalize_blank_lines(&out))
@@ -74,17 +81,17 @@ pub fn skeletonize(source: &str, spec: &LangSpec) -> Option<String> {
 
 /// Emit the source-order children of `node`, eliding bodies. Top-level entry
 /// walks the root's children.
-fn emit_children(node: TsNode, src: &[u8], lang: &str, out: &mut String) {
+fn emit_children(node: TsNode, src: &[u8], lang: &str, include_bodies: Option<&[String]>, out: &mut String) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        emit_node(child, src, lang, out);
+        emit_node(child, src, lang, include_bodies, out);
     }
 }
 
 /// Emit a single top-level-or-nested node. If it's a container definition we
 /// keep its header and recurse into the body; otherwise we keep the header and
-/// elide the body to `…`.
-fn emit_node(node: TsNode, src: &[u8], lang: &str, out: &mut String) {
+/// elide the body to `…`, unless its name is in `include_bodies`.
+fn emit_node(node: TsNode, src: &[u8], lang: &str, include_bodies: Option<&[String]>, out: &mut String) {
     let kind = node.kind();
 
     // Find the body child (if any) by kind.
@@ -104,7 +111,10 @@ fn emit_node(node: TsNode, src: &[u8], lang: &str, out: &mut String) {
             if is_container {
                 // Keep the body's opening delimiter, recurse to keep nested
                 // signatures, then the closing delimiter.
-                emit_container_body(body, src, lang, out);
+                emit_container_body(body, src, lang, include_bodies, out);
+            } else if wants_body(node, src, include_bodies) {
+                // Caller asked for this definition's body verbatim.
+                push_range(src, body.start_byte(), body.end_byte(), out);
             } else {
                 // Leaf def (function/method): elide the whole body to a single
                 // ellipsis, but keep the body's delimiters for readability.
@@ -118,6 +128,30 @@ fn emit_node(node: TsNode, src: &[u8], lang: &str, out: &mut String) {
     }
 }
 
+/// True if `node`'s definition name is in `include_bodies`. Name extraction
+/// mirrors `extract`'s definitions: the tree-sitter `name` field, falling back
+/// to the first `identifier`-kind child.
+fn wants_body(node: TsNode, src: &[u8], include_bodies: Option<&[String]>) -> bool {
+    let Some(wanted) = include_bodies else {
+        return false;
+    };
+    let Some(name) = def_name(node, src) else {
+        return false;
+    };
+    wanted.iter().any(|w| w == &name)
+}
+
+/// Extract a definition node's name: the `name` field if the grammar has one,
+/// else the first child whose kind is an identifier variant.
+fn def_name(node: TsNode, src: &[u8]) -> Option<String> {
+    let name_node = node.child_by_field_name("name").or_else(|| {
+        (0..node.child_count())
+            .filter_map(|i| node.child(i))
+            .find(|c| c.kind().contains("identifier"))
+    })?;
+    Some(node_text(name_node, src))
+}
+
 /// Find a child of `node` that is the definition's body, by kind.
 fn find_body_child(node: TsNode) -> Option<TsNode> {
     (0..node.child_count())
@@ -126,7 +160,7 @@ fn find_body_child(node: TsNode) -> Option<TsNode> {
 }
 
 /// A container body: keep the delimiter run and recurse into nested defs.
-fn emit_container_body(body: TsNode, src: &[u8], lang: &str, out: &mut String) {
+fn emit_container_body(body: TsNode, src: &[u8], lang: &str, include_bodies: Option<&[String]>, out: &mut String) {
     // Opening delimiter: the body's first byte up to its first named child.
     let first_named = first_named_child(body);
     let open_end = first_named
@@ -134,7 +168,7 @@ fn emit_container_body(body: TsNode, src: &[u8], lang: &str, out: &mut String) {
         .unwrap_or(body.end_byte());
     push_range(src, body.start_byte(), open_end, out);
     // Recurse into the body's children, emitting their signatures.
-    emit_children(body, src, lang, out);
+    emit_children(body, src, lang, include_bodies, out);
     // Closing delimiter: from the last named child end to body end.
     let last_named = last_named_child(body);
     let close_start = last_named.map(|c| c.end_byte()).unwrap_or(body.start_byte());
@@ -238,7 +272,7 @@ mod tests {
         let spec = spec_for_language("rust").unwrap();
         for rel in SAMPLE_FILES {
             let src = read_sample(rel);
-            let skel = skeletonize(&src, &spec).expect("skeletonize");
+            let skel = skeletonize(&src, &spec, None).expect("skeletonize");
             // Collect top-level def names from the original via the existing
             // extractor, then assert each name still appears in the skeleton.
             let fx = crate::discovery::extract::extract_file(rel, &src, &spec)
@@ -272,7 +306,7 @@ mod tests {
         let mut skel_total = 0usize;
         for rel in SAMPLE_FILES {
             let src = read_sample(rel);
-            let skel = skeletonize(&src, &spec).expect("skeletonize");
+            let skel = skeletonize(&src, &spec, None).expect("skeletonize");
             let full_t = count_tokens(&src);
             let skel_t = count_tokens(&skel);
             assert!(
@@ -302,8 +336,8 @@ mod tests {
     fn deterministic() {
         let spec = spec_for_language("rust").unwrap();
         let src = read_sample("src/discovery/extract.rs");
-        let a = skeletonize(&src, &spec).unwrap();
-        let b = skeletonize(&src, &spec).unwrap();
+        let a = skeletonize(&src, &spec, None).unwrap();
+        let b = skeletonize(&src, &spec, None).unwrap();
         assert_eq!(a, b);
     }
 
@@ -321,7 +355,7 @@ fn work() {
     let _ = LOCAL;
 }
 "#;
-        let skel = skeletonize(src, &spec).unwrap();
+        let skel = skeletonize(src, &spec, None).unwrap();
         assert!(skel.contains("const MAX"), "top-level const dropped:\n{skel}");
         assert!(skel.contains("type Id"), "top-level type dropped:\n{skel}");
         // The function-local const is correctly elided with the body.
@@ -344,7 +378,7 @@ trait Draw {
     fn draw(&self);
 }
 "#;
-        let skel = skeletonize(src, &spec).unwrap();
+        let skel = skeletonize(src, &spec, None).unwrap();
         for want in ["struct Widget", "impl Widget", "fn new", "fn render", "trait Draw", "fn draw"] {
             assert!(skel.contains(want), "skeleton dropped `{want}`:\n{skel}");
         }
@@ -352,5 +386,54 @@ trait Draw {
         assert!(!skel.contains("compute()"), "body not elided:\n{skel}");
         assert!(!skel.contains("format!"), "body not elided:\n{skel}");
         assert!(skel.contains(ELLIPSIS));
+    }
+
+    const FOO_BAR_SRC: &str = r#"
+fn foo() {
+    let x = 1;
+    println!("{}", x);
+}
+
+fn bar() {
+    let y = 2;
+    println!("{}", y);
+}
+"#;
+
+    /// `include_bodies` emits the named definition's body verbatim while other
+    /// definitions stay elided.
+    #[test]
+    fn include_bodies_emits_named_body_verbatim() {
+        let spec = spec_for_language("rust").unwrap();
+        let include = vec!["foo".to_string()];
+        let skel = skeletonize(FOO_BAR_SRC, &spec, Some(&include)).unwrap();
+        assert!(
+            skel.contains("let x = 1;") && skel.contains("println!(\"{}\", x);"),
+            "foo's body not emitted verbatim:\n{skel}"
+        );
+        assert!(
+            !skel.contains("let y = 2;"),
+            "bar's body should stay elided:\n{skel}"
+        );
+        assert!(skel.contains(ELLIPSIS), "bar's elision missing:\n{skel}");
+    }
+
+    /// `None` output is unchanged (regression against the pre-change behavior).
+    #[test]
+    fn none_output_is_golden() {
+        let spec = spec_for_language("rust").unwrap();
+        let skel = skeletonize(FOO_BAR_SRC, &spec, None).unwrap();
+        let expected = "fn foo() { … }\nfn bar() { … }\n";
+        assert_eq!(skel, expected);
+    }
+
+    /// An unknown requested name is ignored: output is identical to `None`.
+    #[test]
+    fn unknown_include_body_name_is_ignored() {
+        let spec = spec_for_language("rust").unwrap();
+        let none_skel = skeletonize(FOO_BAR_SRC, &spec, None).unwrap();
+        let include = vec!["nonexistent".to_string()];
+        let unknown_skel = skeletonize(FOO_BAR_SRC, &spec, Some(&include)).unwrap();
+        assert_eq!(unknown_skel, none_skel);
     }
 }

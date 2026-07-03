@@ -717,7 +717,7 @@ async fn file_read() -> anyhow::Result<SavingsRow> {
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;
         };
-        let Some(skel) = discovery::skeleton::skeletonize(&content, &spec) else {
+        let Some(skel) = discovery::skeleton::skeletonize(&content, &spec, None) else {
             continue;
         };
         let reference = store.put(&content)?;

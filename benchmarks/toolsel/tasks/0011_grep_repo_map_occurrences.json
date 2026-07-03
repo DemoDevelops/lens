@@ -1,0 +1,7 @@
+{
+  "id": "0011_grep_repo_map_occurrences",
+  "prompt": "Search this repo for every occurrence of the `<repo_map>` tag, both where it's emitted and where it's asserted in tests, and summarize each occurrence. Do not modify anything.",
+  "expected_tools": ["lens_search", "lens_find"],
+  "score": "first_tool",
+  "source": "mined:37d401a9"
+}

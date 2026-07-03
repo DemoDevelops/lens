@@ -1,0 +1,7 @@
+{
+  "id": "0012_bigread_server_tool_surface",
+  "prompt": "Without reading the whole 69 KB src/server.rs file, list every #[tool] method name exposed by the `Forge` struct. Do not modify anything.",
+  "expected_tools": ["lens_skeleton", "lens_run_file"],
+  "score": "first_tool",
+  "source": "mined:1aee6ace"
+}

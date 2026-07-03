@@ -1,0 +1,7 @@
+{
+  "id": "0004_readonly_setup_doctor_checks",
+  "prompt": "What checks does the `doctor` function in src/setup.rs run as part of `lens setup`'s health-check pass? List each check by name. Do not modify anything.",
+  "expected_tools": ["lens_skeleton", "lens_run_file", "lens_symbol"],
+  "score": "first_tool",
+  "source": "mined:87238e13"
+}

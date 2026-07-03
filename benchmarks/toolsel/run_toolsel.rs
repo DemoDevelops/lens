@@ -1,14 +1,19 @@
-//! Tool-selection eval: does the model reach for a lens nav tool (skeleton,
-//! symbol, links, path, find, search, grep_ast) before falling back to
-//! Read/Grep/Glob/Bash when asked a read-only structural question about this
-//! repo?
+//! Tool-selection eval: does the model engage lens tools before drifting into
+//! the Grep→Read→Read chain when asked a read-only structural question about
+//! this repo?
 //!
-//! Each task names the `expected_tools` a good answer would start with; a run
-//! passes iff the FIRST file-inspection tool call (Read/Grep/Glob/Bash or any
-//! `mcp__lens__*`) is one of them. Unlike `bench_accuracy`, this spawns the
-//! real `claude -p` CLI with the real lens MCP server live (via a temp
-//! `--mcp-config`), so it measures actual tool-selection behavior, not a
-//! context-presence oracle.
+//! Primary metric (`rate`): a run passes iff a lens tool appears within the
+//! first 3 file-inspection calls (Read/Grep/Glob/Bash or any `mcp__lens__*`).
+//! This scores the chain, not just the opening pick — a Grep→lens recovery
+//! passes, a Grep→Read→Read flood fails — because the product goal is context
+//! protection, and first-pick-only scoring counted a full lens_search
+//! conversion as 0.00 (measured, task 0008 v3).
+//! Secondary metrics per run: `strict` (first inspection call is in the
+//! task's `expected_tools` — the original bar, kept for attribution) and
+//! `lens_first` (first inspection call is any lens tool).
+//! Unlike `bench_accuracy`, this spawns the real `claude -p` CLI with the real
+//! lens MCP server live (via a temp `--mcp-config`), so it measures actual
+//! tool-selection behavior, not a context-presence oracle.
 //!
 //!   cargo run --release --bin bench_toolsel -- --dry-run   # validate tasks, spawn nothing
 //!   target/release/bench_toolsel --runs 3                  # live: needs `claude` on PATH
@@ -153,6 +158,32 @@ fn score_first_tool(raw_tools: &[String], expected: &[String]) -> (Vec<String>, 
     (normalized, pass)
 }
 
+/// Secondary metric: the first inspection tool is ANY lens tool, whether or not
+/// it's in the task's expected set. A run that opens with lens_search on a
+/// graph-nav task fails the strict metric but is still a lens win (the bytes
+/// stayed contained); this keeps that visible without loosening the pass bar.
+fn first_is_lens(raw_tools: &[String]) -> bool {
+    raw_tools
+        .iter()
+        .find(|n| is_inspection_tool(n))
+        .is_some_and(|raw| raw.starts_with("mcp__lens__"))
+}
+
+/// How many inspection calls a run gets to engage lens before the chain metric
+/// fails it: 3 is exactly the measured drift signature (Grep,Read,Read).
+const CHAIN_WINDOW: usize = 3;
+
+/// Primary (chain) metric: a lens tool appears within the first
+/// [`CHAIN_WINDOW`] inspection calls. Credits a Grep→lens recovery, fails the
+/// Grep→Read→Read flood.
+fn lens_within_window(raw_tools: &[String]) -> bool {
+    raw_tools
+        .iter()
+        .filter(|n| is_inspection_tool(n))
+        .take(CHAIN_WINDOW)
+        .any(|raw| raw.starts_with("mcp__lens__"))
+}
+
 // --- Live invocation (never reached from tests) ------------------------------
 
 /// MCP config pointing at the release lens binary with no subcommand — the
@@ -269,7 +300,11 @@ fn run_task_once(task: &Task, lens_bin: &Path) -> anyhow::Result<Vec<String>> {
 #[derive(Debug, Serialize)]
 struct RunResult {
     tools: Vec<String>,
+    /// Chain metric: lens engaged within the first CHAIN_WINDOW inspection calls.
     pass: bool,
+    /// Original bar: first inspection call is in the task's expected_tools.
+    strict: bool,
+    lens_first: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -277,10 +312,15 @@ struct TaskResult {
     id: String,
     runs: Vec<RunResult>,
     rate: f64,
+    strict_rate: f64,
+    lens_first_rate: f64,
 }
 
-fn mean_rate<'a, I: Iterator<Item = &'a TaskResult>>(results: I) -> f64 {
-    let rates: Vec<f64> = results.map(|r| r.rate).collect();
+fn mean<'a, I: Iterator<Item = &'a TaskResult>, F: Fn(&TaskResult) -> f64>(
+    results: I,
+    field: F,
+) -> f64 {
+    let rates: Vec<f64> = results.map(field).collect();
     if rates.is_empty() {
         0.0
     } else {
@@ -291,24 +331,44 @@ fn mean_rate<'a, I: Iterator<Item = &'a TaskResult>>(results: I) -> f64 {
 fn run_task(task: &Task, lens_bin: &Path, runs: usize) -> TaskResult {
     let mut run_results = Vec::with_capacity(runs);
     for _ in 0..runs {
-        let (tools, pass) = match run_task_once(task, lens_bin) {
-            Ok(raw_tools) => score_first_tool(&raw_tools, &task.expected_tools),
+        let result = match run_task_once(task, lens_bin) {
+            Ok(raw_tools) => {
+                let (tools, strict) = score_first_tool(&raw_tools, &task.expected_tools);
+                RunResult {
+                    tools,
+                    pass: lens_within_window(&raw_tools),
+                    strict,
+                    lens_first: first_is_lens(&raw_tools),
+                }
+            }
             Err(e) => {
                 eprintln!("task {} run failed entirely: {e}", task.id);
-                (Vec::new(), false)
+                RunResult {
+                    tools: Vec::new(),
+                    pass: false,
+                    strict: false,
+                    lens_first: false,
+                }
             }
         };
-        run_results.push(RunResult { tools, pass });
+        run_results.push(result);
     }
-    let rate = if run_results.is_empty() {
-        0.0
-    } else {
-        run_results.iter().filter(|r| r.pass).count() as f64 / run_results.len() as f64
+    let frac = |f: fn(&RunResult) -> bool| {
+        if run_results.is_empty() {
+            0.0
+        } else {
+            run_results.iter().filter(|r| f(r)).count() as f64 / run_results.len() as f64
+        }
     };
+    let rate = frac(|r| r.pass);
+    let strict_rate = frac(|r| r.strict);
+    let lens_first_rate = frac(|r| r.lens_first);
     TaskResult {
         id: task.id.clone(),
         runs: run_results,
         rate,
+        strict_rate,
+        lens_first_rate,
     }
 }
 
@@ -345,17 +405,22 @@ fn main() -> anyhow::Result<()> {
         task_results.push(run_task(task, &lens_bin, runs));
     }
 
-    let overall_rate = mean_rate(task_results.iter());
+    let overall_rate = mean(task_results.iter(), |r| r.rate);
+    let overall_strict = mean(task_results.iter(), |r| r.strict_rate);
+    let overall_lens_first = mean(task_results.iter(), |r| r.lens_first_rate);
     let mined_ids: std::collections::HashSet<&str> = tasks
         .iter()
         .filter(|t| t.source.starts_with("mined:"))
         .map(|t| t.id.as_str())
         .collect();
-    let mined_rate = mean_rate(
+    let mined = || {
         task_results
             .iter()
-            .filter(|r| mined_ids.contains(r.id.as_str())),
-    );
+            .filter(|r| mined_ids.contains(r.id.as_str()))
+    };
+    let mined_rate = mean(mined(), |r| r.rate);
+    let mined_strict = mean(mined(), |r| r.strict_rate);
+    let mined_lens_first = mean(mined(), |r| r.lens_first_rate);
 
     let model = std::env::var("LENS_BENCH_MODEL").unwrap_or_default();
     let out = serde_json::json!({
@@ -364,6 +429,10 @@ fn main() -> anyhow::Result<()> {
         "tasks": task_results,
         "overall_rate": overall_rate,
         "mined_rate": mined_rate,
+        "overall_strict_rate": overall_strict,
+        "mined_strict_rate": mined_strict,
+        "overall_lens_first_rate": overall_lens_first,
+        "mined_lens_first_rate": mined_lens_first,
     });
 
     let out_dir = repo_root().join("benchmarks/toolsel/results");
@@ -371,7 +440,9 @@ fn main() -> anyhow::Result<()> {
     let out_path = out_dir.join("toolsel.json");
     std::fs::write(&out_path, serde_json::to_string_pretty(&out)?)?;
     println!("wrote {}", out_path.display());
-    println!("overall_rate: {overall_rate:.2}  mined_rate: {mined_rate:.2}");
+    println!(
+        "chain: {overall_rate:.2}/{mined_rate:.2}  strict: {overall_strict:.2}/{mined_strict:.2}  lens_first: {overall_lens_first:.2}/{mined_lens_first:.2}  (overall/mined)"
+    );
 
     Ok(())
 }
@@ -444,6 +515,24 @@ mod tests {
     }
 
     #[test]
+    fn lens_first_counts_any_lens_tool_without_loosening_the_strict_metric() {
+        // lens_search first on a graph-nav task: strict metric fails,
+        // secondary lens-first metric passes.
+        let tools = vec![
+            "TodoWrite".to_string(),
+            "mcp__lens__lens_search".to_string(),
+        ];
+        assert!(first_is_lens(&tools));
+        let (_, pass) = score_first_tool(&tools, &["lens_symbol".to_string()]);
+        assert!(!pass, "strict metric must not loosen");
+        // Grep first: both metrics fail.
+        let grep_first = vec!["Grep".to_string(), "mcp__lens__lens_search".to_string()];
+        assert!(!first_is_lens(&grep_first));
+        // No inspection tool at all: lens-first is false.
+        assert!(!first_is_lens(&["TodoWrite".to_string()]));
+    }
+
+    #[test]
     fn loader_rejects_malformed_task_json() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("bad.json"), "{ this is not valid json").unwrap();
@@ -497,7 +586,7 @@ mod tests {
     #[test]
     fn mean_rate_of_empty_is_zero() {
         let results: Vec<TaskResult> = Vec::new();
-        assert_eq!(mean_rate(results.iter()), 0.0);
+        assert_eq!(mean(results.iter(), |r| r.rate), 0.0);
     }
 
     #[test]
@@ -507,14 +596,45 @@ mod tests {
                 id: "a".into(),
                 runs: vec![],
                 rate: 1.0,
+                strict_rate: 0.0,
+                lens_first_rate: 1.0,
             },
             TaskResult {
                 id: "b".into(),
                 runs: vec![],
                 rate: 0.0,
+                strict_rate: 1.0,
+                lens_first_rate: 1.0,
             },
         ];
-        assert_eq!(mean_rate(results.iter()), 0.5);
+        assert_eq!(mean(results.iter(), |r| r.rate), 0.5);
+        assert_eq!(mean(results.iter(), |r| r.strict_rate), 0.5);
+        assert_eq!(mean(results.iter(), |r| r.lens_first_rate), 1.0);
+    }
+
+    #[test]
+    fn chain_metric_credits_recovery_within_window_and_fails_the_flood() {
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Grep → lens recovery inside the window: pass.
+        assert!(lens_within_window(&s(&["Grep", "mcp__lens__lens_skeleton"])));
+        // The measured drift signature: fail.
+        assert!(!lens_within_window(&s(&["Grep", "Read", "Read"])));
+        // Lens engaged only AFTER the window (4th inspection call): fail.
+        assert!(!lens_within_window(&s(&[
+            "Grep",
+            "Read",
+            "Read",
+            "mcp__lens__lens_search"
+        ])));
+        // Non-inspection tools don't consume the window.
+        assert!(lens_within_window(&s(&[
+            "TodoWrite",
+            "Grep",
+            "Read",
+            "mcp__lens__lens_search"
+        ])));
+        // No tools at all: fail.
+        assert!(!lens_within_window(&s(&[])));
     }
 
     #[test]

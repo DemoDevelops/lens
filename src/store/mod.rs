@@ -10,12 +10,23 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-/// Handle to the reversible blob store and the stats counters (both live in
-/// `store.db`). A new SQLite connection is opened per operation, which keeps
-/// the store safe to use from multiple async tasks without sharing a handle.
+/// Handle to the reversible blob store, the stats counters, and the blob
+/// provenance table (all live in `store.db`). A new SQLite connection is
+/// opened per operation, which keeps the store safe to use from multiple
+/// async tasks without sharing a handle.
 #[derive(Clone)]
 pub struct Store {
     db_path: PathBuf,
+}
+
+/// Provenance of a blob that is a byte-for-byte snapshot of a source file:
+/// the blob's full hash plus the file it was captured from. Because the blob
+/// is the file's exact bytes, `hash` doubles as the captured content hash —
+/// staleness is simply `blake3(current file) != hash`.
+#[derive(Debug)]
+pub struct BlobSource {
+    pub hash: String,
+    pub path: String,
 }
 
 impl Store {
@@ -46,7 +57,12 @@ impl Store {
              CREATE TABLE IF NOT EXISTS stats (
                 key   TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS blob_sources (
+                hash TEXT PRIMARY KEY,
+                path TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS blob_sources_path ON blob_sources(path);",
         )?;
         Ok(())
     }
@@ -86,6 +102,64 @@ impl Store {
             }
             None => Ok(None),
         }
+    }
+
+    /// Record that the blob at `hash` (full hash, as returned by [`Store::put`])
+    /// is a snapshot of the file at `path`, so a later edit to the file can be
+    /// surfaced: `lens_recall` flags the ref stale and the session hook posts a
+    /// supersession notice. Re-recording a hash overwrites its path (the same
+    /// content captured from a new location: last capture wins).
+    pub fn record_source(&self, hash: &str, path: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO blob_sources (hash, path) VALUES (?1, ?2)
+             ON CONFLICT(hash) DO UPDATE SET path = ?2",
+            rusqlite::params![hash, path],
+        )?;
+        Ok(())
+    }
+
+    /// The recorded source of a blob, if any. Accepts the full hash or a unique
+    /// short prefix (the same git-style resolution as [`Store::get`]) and always
+    /// returns the full hash, so the caller can compare it against the live
+    /// file's content hash.
+    pub fn source(&self, reference: &str) -> Result<Option<BlobSource>> {
+        if reference.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn()?;
+        // Same prefix-scan trick as `get`: lowercase hex keys make
+        // [reference, reference + 'g') cover every hash with that prefix.
+        let upper = format!("{reference}g");
+        let mut stmt = conn.prepare(
+            "SELECT hash, path FROM blob_sources WHERE hash >= ?1 AND hash < ?2 ORDER BY hash LIMIT 1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![reference, upper])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(BlobSource {
+                hash: row.get(0)?,
+                path: row.get(1)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Every snapshot recorded for `path`, so an edit to the file can count how
+    /// many previously handed-out refs it supersedes.
+    pub fn sources_for_path(&self, path: &str) -> Result<Vec<BlobSource>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT hash, path FROM blob_sources WHERE path = ?1")?;
+        let rows = stmt.query_map([path], |row| {
+            Ok(BlobSource {
+                hash: row.get(0)?,
+                path: row.get(1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Add `delta` to a named counter, returning nothing. Counters are created
@@ -172,6 +246,53 @@ mod tests {
         assert_eq!(store.get(&full).unwrap().unwrap(), content);
         // An empty ref never resolves to a blob.
         assert!(store.get("").unwrap().is_none());
+    }
+
+    #[test]
+    fn source_roundtrip_and_prefix() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let hash = store.put("fn a() {}\n").unwrap();
+        store.record_source(&hash, "/repo/src/a.rs").unwrap();
+        // The full hash and a short prefix both resolve to the recorded source,
+        // and the returned hash is always the full one (callers compare it
+        // against the live file's content hash).
+        for r in [hash.as_str(), &hash[..12]] {
+            let src = store.source(r).unwrap().unwrap();
+            assert_eq!(src.hash, hash);
+            assert_eq!(src.path, "/repo/src/a.rs");
+        }
+        // A blob without provenance, an unknown ref, and an empty ref have none.
+        let plain = store.put("no provenance").unwrap();
+        assert!(store.source(&plain).unwrap().is_none());
+        assert!(store.source("deadbeef").unwrap().is_none());
+        assert!(store.source("").unwrap().is_none());
+    }
+
+    #[test]
+    fn sources_for_path_lists_recorded_snapshots() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let v1 = store.put("v1").unwrap();
+        let v2 = store.put("v2").unwrap();
+        store.record_source(&v1, "/repo/a.rs").unwrap();
+        store.record_source(&v2, "/repo/a.rs").unwrap();
+        let other = store.put("other").unwrap();
+        store.record_source(&other, "/repo/b.rs").unwrap();
+
+        let a = store.sources_for_path("/repo/a.rs").unwrap();
+        assert_eq!(a.len(), 2);
+        assert!(a.iter().any(|s| s.hash == v1));
+        assert!(a.iter().any(|s| s.hash == v2));
+        assert!(store
+            .sources_for_path("/repo/missing.rs")
+            .unwrap()
+            .is_empty());
+
+        // The blob hash is the key: re-recording a hash moves it to the new path.
+        store.record_source(&v1, "/repo/b.rs").unwrap();
+        assert_eq!(store.sources_for_path("/repo/a.rs").unwrap().len(), 1);
+        assert_eq!(store.sources_for_path("/repo/b.rs").unwrap().len(), 2);
     }
 
     #[test]

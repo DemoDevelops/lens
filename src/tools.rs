@@ -75,6 +75,11 @@ pub struct RetrieveRequest {
 pub struct RetrieveResponse {
     /// The full stored blob.
     pub content: String,
+    /// Present when the blob snapshots a source file that has since changed or
+    /// been deleted: a one-line warning naming the file. Absent while the file
+    /// still matches the snapshot (or the blob has no source file).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -84,6 +84,49 @@ impl HookInput {
     }
 }
 
+/// A one-line supersession notice when an edit invalidates stored file
+/// snapshots (`lens_skeleton` refs): skeletons or recalled contents of the file
+/// from earlier in the conversation no longer match it. Compares content hashes
+/// rather than mtimes, so a revert that restores the captured bytes stays
+/// silent; the file read only happens when refs exist for the path (the rare
+/// case). Throttled once per (session, file) via the routing nudge throttle.
+fn supersession_notice(
+    data_dir: &Path,
+    session_id: &str,
+    tool: &str,
+    tool_input: &Value,
+) -> Option<String> {
+    if !matches!(tool, "Edit" | "MultiEdit" | "NotebookEdit" | "Write") {
+        return None;
+    }
+    let path = tool_input
+        .get("file_path")
+        .and_then(Value::as_str)
+        .or_else(|| tool_input.get("notebook_path").and_then(Value::as_str))?;
+    let key = format!("stale-file:{path}");
+    if routing::throttle::fired(data_dir, session_id, &key) {
+        return None;
+    }
+    let store = crate::store::Store::open(data_dir).ok()?;
+    let sources = store.sources_for_path(path).ok()?;
+    if sources.is_empty() {
+        return None; // common case: lens never snapshotted this file
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let current = blake3::hash(&bytes).to_hex().to_string();
+    let n = sources.iter().filter(|s| s.hash != current).count();
+    if n == 0 {
+        return None;
+    }
+    routing::throttle::mark(data_dir, session_id, &key);
+    Some(format!(
+        "<context_guidance>\n  <tip>\n    This edit supersedes {n} lens snapshot(s) of {path}: \
+         skeletons or recalled contents of this file from earlier in the conversation no longer \
+         match it. Don't rely on them — re-run lens_skeleton (or Read) for the current file; \
+         lens_recall on the old refs will flag them stale.\n  </tip>\n</context_guidance>"
+    ))
+}
+
 /// Nearest enclosing repo root at or above `start`: the deepest ancestor that
 /// holds a `.git` entry, or — failing that — one that already holds a
 /// `.lens` data dir. `.git` is preferred so a pre-existing stray `.lens`
@@ -166,6 +209,15 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             let raws = extract::extract_tool_events(&tool, &ti, &resp);
             let events = attribute(raws, &session_id, &project_str, ts, "PostToolUse");
             store.insert_events(&events)?;
+            // An edit that invalidates stored lens snapshots of the file gets a
+            // one-line supersession notice (once per session+file). Fires at every
+            // routing level: it is a correctness signal about content already in
+            // the model's context, not a tool-selection nudge.
+            if let Some(note) = supersession_notice(&data_dir, &session_id, &tool, &ti) {
+                return Ok(
+                    routing::to_post_hook_json(&routing::Decision::Context(note)).to_string(),
+                );
+            }
             // Scale-aware search steer: a Grep whose result floods context gets a
             // one-shot nudge toward lens_search (lens_search only beats grep at scale).
             // Capture above runs regardless of routing level; the nudge fires whenever
@@ -503,6 +555,60 @@ mod tests {
         let (_out, _store, data_dir) = run("PostToolUse", input);
         let got = std::fs::read_to_string(data_dir.join("current_session")).unwrap();
         assert_eq!(got.trim(), "sess1");
+    }
+
+    #[test]
+    fn posttooluse_edit_fires_supersession_notice_once() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("widget.rs");
+        std::fs::write(&file, "pub fn one() -> i32 { 2 }\n").unwrap();
+        // A snapshot of the file's earlier contents, as lens_skeleton records it.
+        let data_dir = super::super::resolve_data_dir(dir.path());
+        let store = crate::store::Store::open(&data_dir).unwrap();
+        let old = store.put("pub fn one() -> i32 { 1 }\n").unwrap();
+        store.record_source(&old, &file.to_string_lossy()).unwrap();
+
+        let edit_input = || {
+            let mut input = input_for(dir.path());
+            input.tool_name = Some("Edit".into());
+            input.tool_input = Some(json!({"file_path": file.to_string_lossy()}));
+            input.tool_response = Some(json!("ok"));
+            input
+        };
+        let (out, _store, _) = run("PostToolUse", edit_input());
+        assert!(
+            out.contains("additionalContext"),
+            "expected a supersession notice, got: {out}"
+        );
+        assert!(
+            out.contains("widget.rs"),
+            "notice should name the file: {out}"
+        );
+
+        // Once per (session, file): a second edit stays silent.
+        let (again, _, _) = run("PostToolUse", edit_input());
+        assert_eq!(again, "{}");
+    }
+
+    #[test]
+    fn posttooluse_edit_matching_snapshot_stays_silent() {
+        // The file's bytes still equal the recorded snapshot (e.g. a revert):
+        // nothing in context went stale, so no notice.
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("widget.rs");
+        let content = "pub fn one() -> i32 { 1 }\n";
+        std::fs::write(&file, content).unwrap();
+        let data_dir = super::super::resolve_data_dir(dir.path());
+        let store = crate::store::Store::open(&data_dir).unwrap();
+        let hash = store.put(content).unwrap();
+        store.record_source(&hash, &file.to_string_lossy()).unwrap();
+
+        let mut input = input_for(dir.path());
+        input.tool_name = Some("Edit".into());
+        input.tool_input = Some(json!({"file_path": file.to_string_lossy()}));
+        input.tool_response = Some(json!("ok"));
+        let (out, _store, _) = run("PostToolUse", input);
+        assert_eq!(out, "{}");
     }
 
     #[test]

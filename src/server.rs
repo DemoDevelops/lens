@@ -430,6 +430,11 @@ impl Forge {
                 return Err(ToolFailure::recoverable(msg));
             }
         };
+        // Remember which file this snapshot came from, so a later edit to it can
+        // be surfaced: lens_recall flags the ref stale and the session hook posts
+        // a supersession notice. Best-effort — losing the staleness signal must
+        // not lose the skeleton (mirrors the bump_stat credit below).
+        let _ = self.store.record_source(&reference, &p.to_string_lossy());
         let retrieve_ref = reference[..reference.len().min(12)].to_string();
         let raw_in = content.len() as u64;
         let returned = skeleton.len() as u64;
@@ -459,7 +464,7 @@ impl Forge {
 
     /// Fetch a full blob previously offloaded to the reversible store.
     #[tool(
-        description = "Retrieve the full content for a retrieve_ref returned by another tool (reverses any truncation/compression)."
+        description = "Retrieve the full content for a retrieve_ref returned by another tool (reverses any truncation/compression). If the blob snapshots a file that has since changed or been deleted, the response carries a one-line `stale` warning naming the file."
     )]
     async fn lens_recall(
         &self,
@@ -470,6 +475,7 @@ impl Forge {
             .start("lens_recall", serde_json::json!({ "ref": req.reference }));
         match self.store.get(&req.reference) {
             Ok(Some(content)) => {
+                let stale = self.stale_note(&req.reference);
                 // Retrieve is the inverse of offloading (expansion), so it saves
                 // nothing: raw_in == returned keeps tokens_saved_est at 0.
                 let bytes = content.len() as u64;
@@ -484,7 +490,7 @@ impl Forge {
                     "blob expanded from store",
                     explain,
                 );
-                Ok(Json(RetrieveResponse { content }))
+                Ok(Json(RetrieveResponse { content, stale }))
             }
             Ok(None) => {
                 op.finish(
@@ -918,6 +924,35 @@ impl Forge {
     /// calls silently index zero files while `lens_map` succeeded.
     fn resolve_unescaped(&self, p: &str) -> PathBuf {
         self.resolve(&p.replace("\\ ", " "))
+    }
+
+    /// A one-line staleness warning for a recalled blob that snapshots a source
+    /// file: `None` while the file's bytes still hash to the blob's ref (or when
+    /// the blob has no recorded source), `Some` once the file diverged or is
+    /// gone. Compares content hashes rather than mtimes so a touch stays fresh
+    /// and a revert to the captured bytes clears the warning; the file read is
+    /// cheap at recall frequency.
+    fn stale_note(&self, reference: &str) -> Option<String> {
+        let src = self.store.source(reference).ok().flatten()?;
+        match std::fs::read(&src.path) {
+            Ok(bytes) => {
+                if blake3::hash(&bytes).to_hex().to_string() == src.hash {
+                    None
+                } else {
+                    Some(format!(
+                        "{} has changed since this snapshot was captured; the content here is \
+                         the captured version, not the current file. Re-run lens_skeleton (or \
+                         Read) for the current contents.",
+                        src.path
+                    ))
+                }
+            }
+            Err(_) => Some(format!(
+                "{} no longer exists (or is unreadable); the content here is a historical \
+                 snapshot.",
+                src.path
+            )),
+        }
     }
 
     /// Resolve the root for `lens_map`. The model's path is un-escaped by
@@ -1756,6 +1791,75 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(recalled.content, full, "recall did not return the full file");
+    }
+
+    /// Recall a ref and unwrap the response (staleness tests hit this repeatedly).
+    async fn recall(f: &Forge, reference: &str) -> crate::tools::RetrieveResponse {
+        f.lens_recall(Parameters(crate::tools::RetrieveRequest {
+            reference: reference.to_string(),
+        }))
+        .await
+        .unwrap()
+        .0
+    }
+
+    #[tokio::test]
+    async fn recall_flags_stale_after_source_edit() {
+        let base = tempdir().unwrap();
+        let repo = base.path().to_path_buf();
+        let file = repo.join("widget.rs");
+        let v1 = "pub fn one() -> i32 { 1 }\n";
+        std::fs::write(&file, v1).unwrap();
+        let f = Forge::with_paths(repo.clone(), base.path().join(".lens"), 8192).unwrap();
+        let skel = f
+            .lens_skeleton(Parameters(crate::tools::SkeletonRequest {
+                path: file.display().to_string(),
+            }))
+            .await
+            .unwrap()
+            .0;
+
+        // Fresh: the file still matches the snapshot, so no warning.
+        let fresh = recall(&f, &skel.retrieve_ref).await;
+        assert_eq!(fresh.content, v1);
+        assert!(
+            fresh.stale.is_none(),
+            "unchanged file flagged stale: {:?}",
+            fresh.stale
+        );
+
+        // A rewrite with identical bytes is not a change (mtime alone must not trip it).
+        std::fs::write(&file, v1).unwrap();
+        assert!(recall(&f, &skel.retrieve_ref).await.stale.is_none());
+
+        // Content change: recall still returns the captured bytes, plus a warning.
+        std::fs::write(&file, "pub fn one() -> i32 { 2 }\n").unwrap();
+        let stale = recall(&f, &skel.retrieve_ref).await;
+        assert_eq!(
+            stale.content, v1,
+            "recall must keep returning the captured snapshot"
+        );
+        let msg = stale.stale.expect("edited file must be flagged stale");
+        assert!(
+            msg.contains("widget.rs"),
+            "warning should name the file: {msg}"
+        );
+
+        // Deleted source: the snapshot is historical, and the warning says so.
+        std::fs::remove_file(&file).unwrap();
+        let gone = recall(&f, &skel.retrieve_ref).await;
+        assert_eq!(gone.content, v1);
+        assert!(gone.stale.is_some(), "deleted file must be flagged");
+    }
+
+    #[tokio::test]
+    async fn recall_without_provenance_has_no_stale_field() {
+        let (f, _dir) = forge(8192);
+        // A plain offloaded blob (darkroom output) has no source file to go stale.
+        let reference = f.store.put("just a blob").unwrap();
+        let resp = recall(&f, &reference).await;
+        assert_eq!(resp.content, "just a blob");
+        assert!(resp.stale.is_none());
     }
 
     #[tokio::test]

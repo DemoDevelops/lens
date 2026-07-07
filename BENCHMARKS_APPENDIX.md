@@ -41,7 +41,7 @@ Token savings, not byte savings: lens's compact outputs (graph JSON, columnar pa
 
 | Workload | Before | After | Savings | Mechanism |
 | --- | ---: | ---: | ---: | --- |
-| Code search (results across files) | 3,681 | 2,377 | 35% | index |
+| Code search (results across files) | 3,681 | 2,193 | 40% | index |
 | Log debugging (buried root cause) | 2,853 | 181 | 94% | darkroom |
 | Issue triage (structured payload) | 1,953 | 1,190 | 39% | compression |
 | Codebase exploration (subtree) | 657 | 766 | 0% | discovery |
@@ -51,7 +51,7 @@ Token savings, not byte savings: lens's compact outputs (graph JSON, columnar pa
 
 | Workload | Before (bytes) | After (bytes) | Without lens, the agent… | Detail |
 | --- | ---: | ---: | --- | --- |
-| Code search (results across files) | 15,915 | 8,196 | Agent greps for the terms, then opens every matched file in full to read context. | 6 queries, 30 hits returned, 12 matched files read by the naive path |
+| Code search (results across files) | 15,915 | 7,896 | Agent greps for the terms, then opens every matched file in full to read context. | 6 queries, 30 hits returned, 12 matched files read by the naive path |
 | Log debugging (buried root cause) | 7,210 | 517 | Agent loads the entire log into context to locate the one FATAL line. | grep over 7210 bytes -> 517 bytes of matching lines (+context) |
 | Issue triage (structured payload) | 8,902 | 3,327 | Agent loads the full structured triage payload (minified) into context. | reversible columnar (schema-once) + value-dictionary compaction; full payload recoverable via lens_recall (raw file 8903 bytes) |
 | Codebase exploration (subtree) | 2,606 | 2,163 | Agent reads every source file in the subtree to map its structure. | discover summary (30 nodes, 41 edges) + one scoped lens_symbol |
@@ -63,9 +63,9 @@ The §0.1 diagnostic: savings that *rise* with size mean the fixture was too sma
 
 | Workload | Mechanism | Scale | Before (bytes) | After (bytes) | Savings |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Code search | index | 1× | 15,915 | 10,236 | 36% |
-| Code search | index | 10× | 160,230 | 10,020 | 94% |
-| Code search | index | 50× | 802,110 | 10,052 | 99% |
+| Code search | index | 1× | 15,915 | 9,936 | 38% |
+| Code search | index | 10× | 160,230 | 9,515 | 94% |
+| Code search | index | 50× | 802,110 | 9,558 | 99% |
 | Issue triage | compression | 1× | 8,902 | 3,327 | 63% |
 | Issue triage | compression | 10× | 94,195 | 31,323 | 67% |
 | Issue triage | compression | 50× | 476,155 | 158,287 | 67% |

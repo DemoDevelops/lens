@@ -27,11 +27,13 @@ const EVENTS: [&str; 5] = [
 const MARKER: &str = "hook claude";
 const SELF_MARKER: &str = "lens";
 
-/// The `/dashboard` slash command, embedded at compile time so a sent binary can
-/// install it with no repo checkout. Written to `<config dir>/commands/dashboard.md`
-/// on install, removed on uninstall.
-const DASHBOARD_COMMAND: &str = include_str!("../../assets/commands/dashboard.md");
-const DASHBOARD_COMMAND_FILE: &str = "dashboard.md";
+/// Bundled slash commands, embedded at compile time so a sent binary can install them
+/// with no repo checkout. Each is written to `<config dir>/commands/<file>` on install,
+/// removed on uninstall.
+const BUNDLED_COMMANDS: &[(&str, &str)] = &[
+    ("dashboard.md", include_str!("../../assets/commands/dashboard.md")),
+    ("warmup.md", include_str!("../../assets/commands/warmup.md")),
+];
 
 /// CLI entry: `args` is everything after `session`.
 pub fn run_cli(args: &[String]) -> Result<()> {
@@ -176,8 +178,8 @@ pub fn install(settings: &Path, bin: &str) -> Result<()> {
     write_command(settings)
 }
 
-/// Write the bundled `/dashboard` slash command into `<config dir>/commands/`, where
-/// the config dir is the settings file's parent. Overwrites (idempotent).
+/// Write the bundled slash commands into `<config dir>/commands/`, where the config
+/// dir is the settings file's parent. Overwrites (idempotent).
 fn write_command(settings: &Path) -> Result<()> {
     let Some(dir) = settings.parent() else {
         return Ok(());
@@ -185,14 +187,20 @@ fn write_command(settings: &Path) -> Result<()> {
     let cmd_dir = dir.join("commands");
     std::fs::create_dir_all(&cmd_dir)
         .with_context(|| format!("creating {}", cmd_dir.display()))?;
-    let path = cmd_dir.join(DASHBOARD_COMMAND_FILE);
-    std::fs::write(&path, DASHBOARD_COMMAND).with_context(|| format!("writing {}", path.display()))
+    for (file, content) in BUNDLED_COMMANDS {
+        let path = cmd_dir.join(file);
+        std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
 }
 
-/// Remove the bundled `/dashboard` command file (best-effort).
+/// Remove the bundled command files (best-effort).
 fn remove_command(settings: &Path) {
     if let Some(dir) = settings.parent() {
-        let _ = std::fs::remove_file(dir.join("commands").join(DASHBOARD_COMMAND_FILE));
+        let cmd_dir = dir.join("commands");
+        for (file, _) in BUNDLED_COMMANDS {
+            let _ = std::fs::remove_file(cmd_dir.join(file));
+        }
     }
 }
 
@@ -560,5 +568,18 @@ mod tests {
         assert!(body.contains("lens dashboard --port"));
         uninstall(&settings).unwrap();
         assert!(!cmd.exists(), "/dashboard command should be removed on uninstall");
+    }
+
+    #[test]
+    fn install_writes_warmup_command_and_uninstall_removes_it() {
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        install(&settings, "/usr/bin/lens").unwrap();
+        let cmd = dir.path().join("commands").join("warmup.md");
+        assert!(cmd.is_file(), "/warmup command should be installed");
+        let body = std::fs::read_to_string(&cmd).unwrap();
+        assert!(body.contains("lens warmup"));
+        uninstall(&settings).unwrap();
+        assert!(!cmd.exists(), "/warmup command should be removed on uninstall");
     }
 }

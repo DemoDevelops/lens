@@ -28,6 +28,19 @@ fn go_cache_dir() -> &'static PathBuf {
     })
 }
 
+/// `go build`'s own compilation cache (distinct from `go_cache_dir`, which holds
+/// our compiled artifacts). Set explicitly so builds don't depend on the
+/// ambient `HOME`/`XDG_CACHE_HOME`, which sandboxed subprocess environments may
+/// not define.
+fn go_build_cache_dir() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let p = std::env::temp_dir().join("lens_go_buildcache");
+        let _ = std::fs::create_dir_all(&p);
+        p
+    })
+}
+
 /// How much of a truncated stdout to keep at the head and at the tail.
 const PREVIEW_SIDE: usize = 2048;
 
@@ -237,6 +250,7 @@ async fn run_go_cached(
                 .arg(&tmp_bin)
                 .arg(&src_path)
                 .current_dir(repo_dir)
+                .env("GOCACHE", go_build_cache_dir())
                 .output(),
         )
         .await

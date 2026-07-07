@@ -347,9 +347,11 @@ pub fn count_rtk_hooks(settings: &Path) -> usize {
 /// Reduce the rtk PreToolUse hooks to exactly one — lens's managed
 /// `lens-rtk-rewrite.sh` — by removing any other entry whose command mentions `rtk`
 /// (a pre-existing `rtk-rewrite.sh` from a manual `rtk init`, or an old `rtk hook`
-/// marker) so the Bash rewrite never double-fires. No-op when lens's managed hook
-/// isn't present, so a failed lens install never strips the user's only rtk hook.
-/// Non-rtk hooks are left untouched. Returns how many foreign entries were removed.
+/// marker) and any duplicate managed entry (the same script registered under two
+/// path spellings, e.g. `~/.claude` vs `$CLAUDE_CONFIG_DIR`, keeping the first) so
+/// the Bash rewrite never double-fires. No-op when lens's managed hook isn't
+/// present, so a failed lens install never strips the user's only rtk hook.
+/// Non-rtk hooks are left untouched. Returns how many entries were removed.
 pub fn dedup_rtk_hooks(settings: &Path) -> Result<usize> {
     if !settings.is_file() {
         return Ok(0);
@@ -366,7 +368,14 @@ pub fn dedup_rtk_hooks(settings: &Path) -> Result<usize> {
         return Ok(0);
     }
     let before = arr.len();
-    arr.retain(|e| !entry_command_contains(e, "rtk") || entry_command_contains(e, LENS_RTK_MARKER));
+    let mut seen_managed = false;
+    arr.retain(|e| {
+        if entry_command_contains(e, LENS_RTK_MARKER) {
+            !std::mem::replace(&mut seen_managed, true)
+        } else {
+            !entry_command_contains(e, "rtk")
+        }
+    });
     let removed = before - arr.len();
     if removed > 0 {
         write_settings(settings, &root)?;
@@ -698,6 +707,26 @@ mod tests {
         let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert!(arr.iter().any(|e| entry_command_contains(e, LENS_RTK_MARKER)));
+    }
+
+    #[test]
+    fn dedup_collapses_duplicate_managed_hooks_keeping_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        // The same managed script registered under two path spellings, as happens
+        // when one setup ran with $CLAUDE_CONFIG_DIR set and a later one without
+        // (both resolve to the same file through a symlinked config dir).
+        let v = serde_json::json!({ "hooks": { "PreToolUse": [
+            { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/h/.claude-personal/hooks/lens-rtk-rewrite.sh" } ] },
+            { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/h/.claude/hooks/lens-rtk-rewrite.sh" } ] }
+        ] } });
+        std::fs::write(&settings, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        assert_eq!(dedup_rtk_hooks(&settings).unwrap(), 1);
+        assert_eq!(count_rtk_hooks(&settings), 1);
+        let root = read_settings(&settings).unwrap();
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert!(entry_command_contains(&arr[0], ".claude-personal"));
     }
 
     #[test]

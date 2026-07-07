@@ -85,6 +85,11 @@ pub struct RetrieveResponse {
 pub struct SkeletonRequest {
     /// Path to the source file to skeletonize (relative to repo root, or absolute).
     pub path: String,
+    /// Definition names (functions, methods, etc.) whose bodies should be emitted
+    /// in full instead of elided to `…`. Names that don't match anything in the
+    /// file are silently ignored.
+    #[serde(default)]
+    pub include_bodies: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

@@ -318,7 +318,7 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
         let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
         let spec = discovery::extract::spec_for_extension(ext)
             .ok_or_else(|| anyhow::anyhow!("no language spec for {}", p.display()))?;
-        let skel = discovery::skeleton::skeletonize(&content, &spec)
+        let skel = discovery::skeleton::skeletonize(&content, &spec, None)
             .ok_or_else(|| anyhow::anyhow!("could not skeletonize {}", p.display()))?;
         return Ok(skel);
     }

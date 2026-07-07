@@ -1,0 +1,12 @@
+{
+  "id": "0008_nav_sessionstart_repo_map_digest",
+  "prompt": "Trace how the SessionStart hook builds its `<repo_map>` digest: which function loads the prebuilt graph, which function computes the ranked overview from it, and which function assembles the final block that gets injected into the session context? Name each function and its file. Do not modify anything.",
+  "expected_tools": [
+    "lens_symbol",
+    "lens_links",
+    "lens_path",
+    "lens_search"
+  ],
+  "score": "first_tool",
+  "source": "mined:9c724799"
+}

@@ -286,14 +286,26 @@ fn sessionstart_injects_routing_block_when_steering() {
         ctx.contains("context_window_protection"),
         "routing block present: {ctx}"
     );
-    assert!(ctx.contains("lens_run"), "tool hierarchy names lens_run");
+    for tool in [
+        "lens_run",
+        "lens_run_file",
+        "lens_search",
+        "lens_index",
+        "lens_map",
+        "lens_symbol",
+        "lens_links",
+        "lens_path",
+        "lens_recall",
+        "lens_skeleton",
+        "lens_overview",
+        "lens_find",
+        "lens_grep_ast",
+    ] {
+        assert!(ctx.contains(tool), "bootstrap select list names {tool}: {ctx}");
+    }
     assert!(
-        ctx.contains("lens_search"),
-        "tool hierarchy names lens_search"
-    );
-    assert!(
-        ctx.contains("lens_symbol"),
-        "tool hierarchy names the graph"
+        ctx.contains("include_bodies"),
+        "block documents include_bodies"
     );
     assert!(
         ctx.contains("ToolSearch"),
@@ -499,4 +511,292 @@ async fn lens_run_file_e2e() {
         .contains(&"A".repeat(50000)));
 
     client.cancel().await.ok();
+}
+
+// ---------------------------------------------------------------------------
+// T4: SessionStart pushes a repo-map digest from an existing graph.json (never
+// builds one — load-or-skip keeps SessionStart fast).
+// ---------------------------------------------------------------------------
+
+/// A minimal but valid `Graph` (see `discovery::graph::Graph`) with enough
+/// nodes/edges that `discovery::query::overview` renders a non-empty digest.
+fn minimal_graph_json() -> Value {
+    json!({
+        "nodes": [
+            {"id": "n1", "name": "alpha", "kind": "function", "file": "a.rs", "line": 1, "language": "rust"},
+            {"id": "n2", "name": "beta", "kind": "function", "file": "a.rs", "line": 10, "language": "rust"},
+        ],
+        "edges": [
+            {"from": "n1", "to": "n2", "kind": "calls"},
+        ],
+    })
+}
+
+/// Like `run_hook`, but also returns the process exit status (needed to assert
+/// a clean 0 exit on the graph-absent path, which `run_hook` doesn't expose).
+fn run_hook_with_status(
+    event: &str,
+    payload: &Value,
+    envs: &[(&str, &str)],
+    data_dir: &Path,
+) -> (std::process::ExitStatus, Value) {
+    let mut cmd = Command::new(bin());
+    cmd.args(["hook", "claude", event])
+        .env("LENS_DIR", data_dir)
+        .env_remove("LENS_ROUTING")
+        .env_remove("LENS_ROUTING_MCP")
+        .env("LENS_DEFER_BASH_TO_RTK", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn hook");
+    {
+        let mut si = child.stdin.take().unwrap();
+        si.write_all(payload.to_string().as_bytes()).unwrap();
+    }
+    let out = child.wait_with_output().expect("hook output");
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let parsed = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    (out.status, parsed)
+}
+
+#[test]
+fn sessionstart_repo_map_digest_gated_on_graph_and_budget() {
+    let d = tempfile::tempdir().unwrap();
+    let payload =
+        json!({ "session_id": "s1", "cwd": d.path().to_string_lossy(), "source": "startup" });
+
+    // (a) a valid graph.json in the data dir -> digest injected, naming a
+    // ranked symbol from it.
+    std::fs::write(d.path().join("graph.json"), minimal_graph_json().to_string()).unwrap();
+    let (_, v) = run_hook("SessionStart", &payload, &[], d.path());
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(ctx.contains("<repo_map>"), "digest injected: {ctx}");
+    assert!(
+        ctx.contains("lens_symbol") && ctx.contains("lens_links") && ctx.contains("lens_path"),
+        "digest points at graph-nav tools: {ctx}"
+    );
+    assert!(ctx.contains("alpha"), "digest names a ranked symbol: {ctx}");
+
+    // (b) no graph.json at all -> no digest, and the hook still exits 0 cleanly.
+    let d2 = tempfile::tempdir().unwrap();
+    let payload2 =
+        json!({ "session_id": "s2", "cwd": d2.path().to_string_lossy(), "source": "startup" });
+    let (status2, v2) = run_hook_with_status("SessionStart", &payload2, &[], d2.path());
+    assert!(status2.success(), "hook exits 0 with no graph.json present");
+    assert_eq!(v2["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    let ctx2 = v2["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(!ctx2.contains("<repo_map>"), "no graph.json => no digest: {ctx2}");
+
+    // (c) LENS_SESSION_OVERVIEW_BUDGET=0 disables the digest even with a valid
+    // graph.json present.
+    let (_, v3) = run_hook(
+        "SessionStart",
+        &payload,
+        &[("LENS_SESSION_OVERVIEW_BUDGET", "0")],
+        d.path(),
+    );
+    let ctx3 = v3["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !ctx3.contains("<repo_map>"),
+        "budget=0 disables the digest: {ctx3}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T5: consecutive-read counter-deny (Serena `remind` pattern)
+// ---------------------------------------------------------------------------
+
+fn read_payload(dir: &Path, session: &str, file_path: &str) -> Value {
+    json!({
+        "session_id": session,
+        "cwd": dir.to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": file_path },
+    })
+}
+
+#[test]
+fn read_denies_after_four_consecutive_code_reads_then_lens_call_resets() {
+    let d = tempfile::tempdir().unwrap();
+    let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
+    let p = read_payload(d.path(), "s1", "src/server.rs");
+
+    let mut fourth = Value::Null;
+    for _ in 0..4 {
+        let (_, v) = run_hook("PreToolUse", &p, &envs, d.path());
+        fourth = v;
+    }
+    let hso = &fourth["hookSpecificOutput"];
+    assert_eq!(
+        hso["permissionDecision"], "deny",
+        "4th consecutive code Read must deny: {fourth}"
+    );
+    let reason = hso["permissionDecisionReason"].as_str().unwrap();
+    assert!(
+        reason.contains("lens_skeleton"),
+        "deny reason names lens_skeleton: {reason}"
+    );
+
+    // A lens tool call (PostToolUse) resets the counter, so the next Read passes.
+    let lens_post = json!({
+        "session_id": "s1",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "mcp__lens__lens_skeleton",
+        "tool_input": { "path": "src/server.rs" },
+        "tool_response": "ok",
+    });
+    run_hook("PostToolUse", &lens_post, &envs, d.path());
+
+    let (_, after) = run_hook("PreToolUse", &p, &envs, d.path());
+    assert_ne!(
+        after["hookSpecificOutput"]["permissionDecision"], "deny",
+        "Read after a lens tool call must not deny: {after}"
+    );
+}
+
+#[test]
+fn find_trace_prompts_get_the_intent_nudge_at_prompt_submit() {
+    let d = tempfile::tempdir().unwrap();
+    let envs = [("LENS_ROUTING", "full")];
+    let p = json!({
+        "session_id": "s9",
+        "cwd": d.path().to_string_lossy(),
+        "prompt": "Where is the deny threshold defined and what calls it?",
+    });
+    let (_, v) = run_hook("UserPromptSubmit", &p, &envs, d.path());
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("lens_search") && ctx.contains("lens_links"),
+        "find/trace prompt must inject the tool mapping: {v}"
+    );
+
+    // Non-matching prompt: no injection.
+    let plain = json!({
+        "session_id": "s9",
+        "cwd": d.path().to_string_lossy(),
+        "prompt": "bump the version and tag the release",
+    });
+    let (_, v2) = run_hook("UserPromptSubmit", &plain, &envs, d.path());
+    assert!(
+        v2["hookSpecificOutput"]["additionalContext"].is_null(),
+        "plain prompt must not inject: {v2}"
+    );
+
+    // Routing off: no injection even for a matching prompt.
+    let d2 = tempfile::tempdir().unwrap();
+    let (_, v3) = run_hook("UserPromptSubmit", &p, &[("LENS_ROUTING", "off")], d2.path());
+    assert!(
+        v3["hookSpecificOutput"]["additionalContext"].is_null(),
+        "routing off must not inject: {v3}"
+    );
+}
+
+#[test]
+fn greps_share_the_deny_counter_and_edits_reset_it() {
+    let d = tempfile::tempdir().unwrap();
+    let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
+    let grep = json!({
+        "session_id": "s2",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "Grep",
+        "tool_input": { "pattern": "include_bodies" },
+    });
+    let read = read_payload(d.path(), "s2", "src/server.rs");
+
+    // Grep,Read,Read then a 4th lookup: mixed calls share one counter.
+    run_hook("PreToolUse", &grep, &envs, d.path());
+    run_hook("PreToolUse", &read, &envs, d.path());
+    run_hook("PreToolUse", &read, &envs, d.path());
+    let (_, fourth) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert_eq!(
+        fourth["hookSpecificOutput"]["permissionDecision"], "deny",
+        "4th mixed Grep/Read lookup must deny: {fourth}"
+    );
+
+    // An Edit (PostToolUse) resets the counter: Read-before-Edit is not drift.
+    run_hook("PreToolUse", &read, &envs, d.path());
+    run_hook("PreToolUse", &read, &envs, d.path());
+    let edit_post = json!({
+        "session_id": "s2",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "Edit",
+        "tool_input": { "file_path": "src/server.rs" },
+        "tool_response": "ok",
+    });
+    run_hook("PostToolUse", &edit_post, &envs, d.path());
+    // Two more lookups stay under the threshold (counter restarted at 0).
+    run_hook("PreToolUse", &read, &envs, d.path());
+    let (_, after) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert_ne!(
+        after["hookSpecificOutput"]["permissionDecision"], "deny",
+        "lookups after an Edit reset must not deny: {after}"
+    );
+}
+
+#[test]
+fn find_trace_prompt_arms_a_one_shot_deny_on_the_first_grep() {
+    let d = tempfile::tempdir().unwrap();
+    let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
+    let prompt = json!({
+        "session_id": "s10",
+        "cwd": d.path().to_string_lossy(),
+        "prompt": "Where is the deny threshold defined and what calls it?",
+    });
+    let grep = json!({
+        "session_id": "s10",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "Grep",
+        "tool_input": { "pattern": "deny_threshold" },
+    });
+
+    // The find/trace prompt arms the marker; the first Grep is denied once.
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+    let (_, first) = run_hook("PreToolUse", &grep, &envs, d.path());
+    assert_eq!(
+        first["hookSpecificOutput"]["permissionDecision"], "deny",
+        "first Grep after a find/trace prompt must deny: {first}"
+    );
+    let reason = first["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.contains("lens_search") && reason.contains("fires once"),
+        "deny reason maps intents and states one-shot semantics: {reason}"
+    );
+
+    // The marker was consumed: the retried Grep passes.
+    let (_, second) = run_hook("PreToolUse", &grep, &envs, d.path());
+    assert_ne!(
+        second["hookSpecificOutput"]["permissionDecision"], "deny",
+        "retried Grep must pass (marker consumed): {second}"
+    );
+
+    // Re-armed by a new find/trace prompt, then DISARMED by a lens call:
+    // the follow-up Grep is no longer drift and must pass.
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+    let lens_post = json!({
+        "session_id": "s10",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "mcp__lens__lens_search",
+        "tool_input": { "queries": ["deny threshold"] },
+        "tool_response": "ok",
+    });
+    run_hook("PostToolUse", &lens_post, &envs, d.path());
+    let (_, third) = run_hook("PreToolUse", &grep, &envs, d.path());
+    assert_ne!(
+        third["hookSpecificOutput"]["permissionDecision"], "deny",
+        "Grep after a lens call must pass (marker disarmed): {third}"
+    );
 }

@@ -1,0 +1,405 @@
+{
+  "mined_rate": 0.1,
+  "model": "headless-claude-default",
+  "overall_rate": 0.17948717948717946,
+  "runs": 3,
+  "tasks": [
+    {
+      "id": "0001_skeleton_forge",
+      "rate": 0.6666666666666666,
+      "runs": [
+        {
+          "pass": true,
+          "tools": [
+            "ToolSearch",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "pass": true,
+          "tools": [
+            "ToolSearch",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "ToolSearch",
+            "lens_run_file",
+            "lens_run_file",
+            "lens_run_file"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0002_symbol_throttle_fired",
+      "rate": 0.6666666666666666,
+      "runs": [
+        {
+          "pass": true,
+          "tools": [
+            "ToolSearch",
+            "lens_symbol"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Grep"
+          ]
+        },
+        {
+          "pass": true,
+          "tools": [
+            "ToolSearch",
+            "lens_symbol"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0003_search_quarantine",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "Grep"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0004_readonly_setup_doctor_checks",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0005_readonly_extract_name_reuse",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Grep",
+            "Read",
+            "Grep",
+            "Grep",
+            "Read",
+            "Grep"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "ToolSearch",
+            "Grep",
+            "Grep",
+            "Read",
+            "Grep",
+            "Grep"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "ToolSearch",
+            "Grep",
+            "Grep",
+            "Grep",
+            "Grep"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0006_readonly_dashboard_serve_handler",
+      "rate": 1.0,
+      "runs": [
+        {
+          "pass": true,
+          "tools": [
+            "ToolSearch",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "pass": true,
+          "tools": [
+            "ToolSearch",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "pass": true,
+          "tools": [
+            "ToolSearch",
+            "lens_skeleton"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0007_nav_include_bodies_threading",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read",
+            "Read",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "ToolSearch",
+            "Grep",
+            "Read",
+            "Read",
+            "Grep",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read",
+            "Read",
+            "Read"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0008_nav_sessionstart_repo_map_digest",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "ToolSearch",
+            "Grep",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "ToolSearch",
+            "Grep",
+            "lens_skeleton",
+            "lens_skeleton",
+            "lens_skeleton",
+            "Grep"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "ToolSearch",
+            "Grep",
+            "Read"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0009_nav_bench_toolsel_entrypoint",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Glob",
+            "Grep"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Glob",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Glob",
+            "Grep"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0010_grep_include_bodies_occurrences",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0011_grep_repo_map_occurrences",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read",
+            "Read"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0012_bigread_server_tool_surface",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "Grep"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Grep"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0013_bigread_mod_throttle_consts",
+      "rate": 0.0,
+      "runs": [
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Read"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "Grep",
+            "Grep"
+          ]
+        },
+        {
+          "pass": false,
+          "tools": [
+            "ToolSearch",
+            "Grep"
+          ]
+        }
+      ]
+    }
+  ]
+}

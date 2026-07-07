@@ -203,18 +203,28 @@ pub const BUILD_REDIRECT_REASON: &str = "lens routing: redirected a build comman
 /// Shown when the tool-selection guide is injected into a sub-agent prompt.
 pub const AGENT_INJECT_REASON: &str = "lens routing: injected the tool-selection guide into the sub-agent prompt so it reaches for lens tools.";
 
+/// Shown when [`inspect_escalation`] denies a Read or Grep after too many
+/// consecutive manual code lookups with no intervening lens tool call (Serena
+/// `remind` pattern). Factual, maps each intent to its lens tool, and states
+/// that the counter was reset so the caller isn't walled off if it still
+/// needs the plain tool.
+pub const READ_DENY_REASON: &str = "Too many consecutive Read/Grep calls on code without any lens tool. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_links. How does A reach B: lens_path. A file's shape: lens_skeleton(path), with include_bodies for the functions you need. The counter was reset — the same call will pass now if you still need it.";
+
 // Per-tool `<context_guidance>` injected on PreToolUse (tool names mapped to lens).
 // Re-injected periodically (see `throttle_periodic`), not once per session.
 
 /// Contextual guidance when a read-only/high-output Bash command is observed.
 pub const BASH_NUDGE: &str = "<context_guidance>\n  <tip>\n    About to take this command's output and count, filter, or reshape it? Run it through lens_run(language: \"shell\", code: \"...\") instead — it executes in the darkroom and only what you print comes back. A plain Bash call is the right tool when you just need to see a short result or you're changing state (git, file moves, and the like).\n  </tip>\n</context_guidance>";
 
-/// Contextual guidance steering Grep toward indexed search / the graph.
-pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    A grep can return many more lines than you're after. If you plan to tally, filter, or work over the matches rather than eyeball one, run it inside lens_run(language: \"shell\", code: \"...\") so the match list stays in the darkroom and only your result returns. For \"where does X live\" or \"what calls X\", lens_search (after lens_index) or lens_symbol beats grepping across files.\n  </tip>\n</context_guidance>";
+/// Contextual guidance steering Grep toward indexed search / the graph. The
+/// measured drift signature is Grep -> Read -> Read: line hits name a file,
+/// the file gets read whole, repeat. So this maps each find/trace intent to
+/// the lens tool that answers it directly, instead of describing categories.
+pub const GREP_NUDGE: &str = "<context_guidance>\n  <tip>\n    About to grep to find something? Map the intent to the tool that answers it directly: where is X defined or used — lens_search(queries: [\"...\"]) (ranked snippets, several questions per call) or lens_symbol(name) if you know the exact name; what calls X / what does X call — lens_links; how does A reach B — lens_path; you only know what it does, not its name — lens_find. A grep here usually starts a chain: line hits, then a whole-file Read per hit — that chain is what these replace. Grep stays right for a quick check you'll eyeball in one file, and lens_run(language: \"shell\") for match lists you'll tally or reshape.\n  </tip>\n</context_guidance>";
 
 /// Contextual guidance steering analysis-reads into the darkroom, and
 /// navigational code-reads toward the graph.
-pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading this file to Edit it? Stay with Read — Edit has to match the exact bytes you're holding. Reading it to understand, summarize, or extract a few facts? Send it through lens_run_file(path, language, code) and return only what you derived. To see a file's API — signatures and structure without the bodies — use lens_skeleton(path), with the full text a lens_recall away. And when you're tracing how code connects (callers, callees, where a symbol is defined, how A reaches B), don't read file after file — query the graph with lens_symbol / lens_links / lens_path (run lens_map once if it's empty).\n  </tip>\n</context_guidance>";
+pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading this file to Edit it? Stay with Read — Edit has to match the exact bytes you're holding. Reading it to understand, summarize, or extract a few facts? Send it through lens_run_file(path, language, code) and return only what you derived. To see a file's API — signatures and structure without the bodies — use lens_skeleton(path) first, then lens_skeleton(path, include_bodies: [\"the_fn\"]) for just the bodies you need, with the full text always a lens_recall away. And when you're tracing how code connects (callers, callees, where a symbol is defined, how A reaches B), don't read file after file — query the graph with lens_symbol / lens_links / lens_path (run lens_map once if it's empty). Four consecutive code Reads/Greps with no lens tool call between them trigger a one-time deny — that's not a wall, just the point where the graph or skeleton clearly beats looking further by hand.\n  </tip>\n</context_guidance>";
 
 /// Contextual guidance emitted AFTER a Grep whose result set floods context. A
 /// result this large is exactly where lens_search (ranked top-K, flat with corpus
@@ -222,6 +232,64 @@ pub const READ_NUDGE: &str = "<context_guidance>\n  <tip>\n    Reading this file
 /// when the grep actually flooded — below the threshold grep is as lean and we stay
 /// quiet.
 pub const SEARCH_NUDGE: &str = "<context_guidance>\n  <tip>\n    That grep returned a large match set — more than lens_search would. For a result set this size, lens_search (after lens_index) returns the ranked top hits and keeps the rest out of your context; re-run the search through lens_search if you need more than the matches already shown.\n  </tip>\n</context_guidance>";
+
+/// One-line mapping injected at UserPromptSubmit when the prompt reads as a
+/// find/trace question. First-tool choice is decided by what's in context
+/// BEFORE the first call — PreToolUse nudges arrive one call too late and the
+/// SessionStart block alone doesn't overcome the Grep prior (measured:
+/// find/trace tasks stayed Grep-first with the block in place). This lands at
+/// the decision point itself.
+pub const PROMPT_INTENT_NUDGE: &str = "<lens_hint>\n  Find/trace question — answer it from the index/graph, not by grepping: lens_search(queries: [\"...\"]) or lens_symbol(name) to locate; lens_links for callers/callees; lens_path for how A reaches B; lens_skeleton(path) for one file's shape. Grep's line hits pull a whole-file Read per hit — that chain costs more than one lens call.\n</lens_hint>";
+
+/// Shown when the FIRST Grep after a find/trace-shaped prompt is denied (the
+/// `grep-first` marker armed at UserPromptSubmit, consumed here). Measured:
+/// the intent nudge alone flips some tasks but most Grep-first ones ignore
+/// every prompt-level hint — this is the Serena FORBIDDEN pattern applied at
+/// the exact decision point. One-shot: the marker is consumed before the deny
+/// returns, so the same Grep passes on retry.
+pub const GREP_FIRST_DENY_REASON: &str = "This prompt is a find/trace question — answer it with one lens call instead of a grep chain. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_links. How does A reach B: lens_path. A file's shape: lens_skeleton(path). This fires once per prompt — the same Grep will pass if you re-run it, but the lens call answers in one step.";
+
+/// Whether a user prompt reads as a find/trace question worth the
+/// [`PROMPT_INTENT_NUDGE`]. High-precision substrings only — firing on every
+/// prompt would train the model to ignore the hint. Prompts that already name
+/// a lens tool are skipped (the user is steering explicitly).
+pub fn prompt_wants_find_trace(prompt: &str) -> bool {
+    let p = prompt.to_ascii_lowercase();
+    if p.contains("lens_") {
+        return false;
+    }
+    const SHAPES: &[&str] = &[
+        "where is",
+        "where does",
+        "where are",
+        "where do ",
+        "what calls",
+        "who calls",
+        "callers of",
+        "what does it call",
+        "which file",
+        "which function",
+        "which module",
+        "which struct",
+        "find where",
+        "find the",
+        "locate the",
+        "trace ",
+        "entry point",
+        "defined in",
+        "is it registered",
+        "how does",
+        "how is",
+        "search this repo",
+        "search the repo",
+        "every occurrence",
+        "every place",
+        "all usages",
+        "all uses of",
+        "is referenced",
+    ];
+    SHAPES.iter().any(|s| p.contains(s))
+}
 
 /// Periodic guidance for external (non-lens) MCP tools whose payloads flood
 /// context.
@@ -287,8 +355,29 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 bash_decision(tool_input, ctx)
             }
         }
+        // Grep counts toward the same consecutive-lookup counter as code Reads:
+        // the measured drift signature (Grep → Read → Read) starts here, and a
+        // Read-only counter never catches it. Escalation first, then the
+        // one-shot intent-mapping tip.
         "Grep" => {
-            if ctx.level.nudges() && nudge_once(ctx, "grep") {
+            if !ctx.level.nudges() {
+                return Decision::Passthrough;
+            }
+            // First Grep after a find/trace-shaped prompt: deny once with the
+            // intent mapping. `take` is last in the chain so the marker stays
+            // armed when a gate blocks (e.g. MCP not ready yet), and it is
+            // consumed BEFORE the deny returns, so the retry passes.
+            if ctx.level.steers()
+                && ctx.mcp_ready
+                && grep_first_deny_enabled()
+                && throttle::take(ctx.data_dir, ctx.session_id, "grep-first")
+            {
+                return Decision::Deny(GREP_FIRST_DENY_REASON.to_string());
+            }
+            if let Some(d) = inspect_escalation(ctx) {
+                return d;
+            }
+            if nudge_once(ctx, "grep") {
                 Decision::Context(GREP_NUDGE.to_string())
             } else {
                 Decision::Passthrough
@@ -395,6 +484,32 @@ fn read_graph_threshold() -> u64 {
         .unwrap_or(READ_GRAPH_THRESHOLD_DEFAULT)
 }
 
+/// After this many CONSECUTIVE manual code lookups (code-file Reads and Greps)
+/// with no intervening lens tool call, [`inspect_escalation`] denies the call
+/// once instead of nudging — Serena's `remind` pattern: the counter resets on
+/// deny and again on the next lens tool call or file edit (see the PostToolUse
+/// arm in `session::hook`), so this is a single blocking stop per drift
+/// episode, never a hard wall. 4, not 6: the measured drift signature is a
+/// short `Grep,Read,Read` chain, which a threshold of 6 never catches inside
+/// a focused task.
+const READ_DENY_THRESHOLD_DEFAULT: u64 = 4;
+
+/// The deny threshold, overridable via `LENS_READ_DENY_THRESHOLD` so an A/B
+/// can disable it (`0`) without a recompile. Falls back to
+/// [`READ_DENY_THRESHOLD_DEFAULT`] when unset or unparseable.
+fn read_deny_threshold() -> u64 {
+    std::env::var("LENS_READ_DENY_THRESHOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(READ_DENY_THRESHOLD_DEFAULT)
+}
+
+/// First-Grep deny kill-switch: `LENS_GREP_FIRST_DENY=0` disables the armed
+/// deny without a recompile (the per-mechanism ablation knob). On by default.
+fn grep_first_deny_enabled() -> bool {
+    std::env::var("LENS_GREP_FIRST_DENY").map_or(true, |v| v.trim() != "0")
+}
+
 /// Grep result-size (bytes) above which the result is a "flood" worth steering to
 /// lens_search, overridable via `LENS_GREP_FLOOD_BYTES` (so an A/B can disable it
 /// by setting it very high). Default 16384: comfortably above lens_search's flat
@@ -410,11 +525,10 @@ fn grep_flood_bytes() -> usize {
 }
 
 /// Read routing: a general analysis tip once per session, plus escalation of
-/// code-file reads toward the graph. Only files the graph indexes
-/// ([`crate::discovery::extract::spec_for_extension`]) count toward escalation —
-/// reading a doc/config/data file shouldn't push the agent at the graph. Once the
-/// session's code-read count crosses [`READ_GRAPH_THRESHOLD`] the graph-specific
-/// nudge fires, then again every [`READ_GRAPH_PERIOD`]-th read after.
+/// code-file reads toward the graph via [`inspect_escalation`]. Only files
+/// the graph indexes ([`crate::discovery::extract::spec_for_extension`]) count
+/// toward escalation — reading a doc/config/data file shouldn't push the agent
+/// at the graph.
 fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if !ctx.level.nudges() {
         return Decision::Passthrough;
@@ -425,10 +539,8 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
         .map(|ext| crate::discovery::extract::spec_for_extension(&ext).is_some())
         .unwrap_or(false);
     if is_code {
-        let n = throttle::bump(ctx.data_dir, ctx.session_id, "read-code");
-        let threshold = read_graph_threshold();
-        if n >= threshold && (n - threshold).is_multiple_of(READ_GRAPH_PERIOD) {
-            return Decision::Context(read_graph_nudge(n));
+        if let Some(d) = inspect_escalation(ctx) {
+            return d;
         }
     }
     if nudge_once(ctx, "read") {
@@ -438,12 +550,35 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     }
 }
 
+/// Shared consecutive-lookup escalation for code Reads and Greps (the
+/// `read-code` counter, reset by any lens tool call or file edit in
+/// PostToolUse — see `session::hook`). Once the count crosses
+/// [`READ_GRAPH_THRESHOLD`] the graph-specific nudge fires, then again every
+/// [`READ_GRAPH_PERIOD`]-th lookup. Past [`read_deny_threshold`] consecutive
+/// lookups (while steering), the call is denied once instead — see
+/// [`READ_DENY_REASON`]. `None` → the caller falls through to its one-shot tip.
+fn inspect_escalation(ctx: &RouteCtx) -> Option<Decision> {
+    let n = throttle::bump(ctx.data_dir, ctx.session_id, "read-code");
+    let deny_threshold = read_deny_threshold();
+    if deny_threshold > 0 && n >= deny_threshold && ctx.level.steers() {
+        // Deny once per drift episode, never a hard wall: reset the
+        // counter first so the immediate retry passes if still needed.
+        throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
+        return Some(mcp_redirect(ctx, Decision::Deny(READ_DENY_REASON.to_string())));
+    }
+    let threshold = read_graph_threshold();
+    if n >= threshold && (n - threshold).is_multiple_of(READ_GRAPH_PERIOD) {
+        return Some(Decision::Context(read_graph_nudge(n)));
+    }
+    None
+}
+
 /// The escalation nudge: names the three graph tools and frames them as the
-/// replacement for reading file-by-file. `n` is the running code-read count, so
-/// the agent sees how much reading it has already done.
+/// replacement for looking file-by-file. `n` is the running lookup count, so
+/// the agent sees how much manual searching it has already done.
 fn read_graph_nudge(n: u64) -> String {
     format!(
-        "<context_guidance>\n  <tip>\n    You've read {n} code files this session. If you're tracing how the code fits together — who calls a function, what it calls, where a symbol is defined, how one part reaches another — stop reading file by file and query the graph instead: lens_symbol to locate a symbol, lens_links for its callers/callees, lens_path for how A reaches B. One query replaces many reads and keeps their bytes out of your context. (Run lens_map once if the graph is empty.)\n  </tip>\n</context_guidance>"
+        "<context_guidance>\n  <tip>\n    You've made {n} manual code lookups (Read/Grep) this session. If you're tracing how the code fits together — who calls a function, what it calls, where a symbol is defined, how one part reaches another — stop looking file by file and query the graph instead: lens_symbol to locate a symbol, lens_links for its callers/callees, lens_path for how A reaches B, lens_search(queries: [...]) for where an idea appears. Just need one file's shape? lens_skeleton(path), with include_bodies: [\"the_fn\"] for the bodies you actually need. One query replaces many lookups and keeps their bytes out of your context. (Run lens_map once if the graph is empty.) At 4 consecutive code Reads/Greps with no lens tool call between them, the next call is denied once — a nudge to switch, not a hard wall.\n  </tip>\n</context_guidance>"
     )
 }
 
@@ -905,7 +1040,7 @@ const BLOCK_HEAD: &str = r##"<context_window_protection>
   </why>
   <loading_lens_tools>
     lens's tools may start out unregistered in this harness — their schemas aren't loaded, so a direct call errors ("tool not found" or a validation error). Register them once, before your first lens_* call:
-    ToolSearch(query: "select:lens_run,lens_run_file,lens_search,lens_index,lens_map,lens_symbol,lens_links,lens_path,lens_recall")
+    ToolSearch(query: "select:lens_run,lens_run_file,lens_search,lens_index,lens_map,lens_symbol,lens_links,lens_path,lens_recall,lens_skeleton,lens_overview,lens_find,lens_grep_ast")
     If a lens_* call later comes back not-found, re-run that ToolSearch and retry instead of falling back to Bash/Read/Grep.
   </loading_lens_tools>
   <which_tool>
@@ -913,14 +1048,17 @@ const BLOCK_HEAD: &str = r##"<context_window_protection>
     - Where a string or idea appears across the tree: lens_index once, then lens_search(queries: [...]) — batch several questions into the array and get ranked snippets, not whole files.
     - Turning data into an answer (filter, count, parse, reshape, summarize): lens_run(language, code) or lens_run_file(path, language, code). Only what you print returns; the inputs stay in the darkroom.
     - Recovering something offloaded or truncated: lens_recall(ref).
+    - You know the symbol's exact name: lens_symbol. You only know what it does, not its name: lens_find. You have a syntax-shape pattern (a call, a signature shape) rather than a name or plain-text idea: lens_grep_ast.
+    - Whole-repo orientation — how the codebase is put together before you've read anything: lens_overview. A digest is already pushed into context at session start; treat that as the first call's answer and expand from it with lens_symbol / lens_links rather than re-running lens_overview.
+    - One file's shape — signatures and structure without the bodies: lens_skeleton(path); pass include_bodies: ["the_fn"] to get back the full text of just the functions you need, in the same call.
   </which_tool>
   <when_plain_tools_win>"##;
 
 const BULLET_BASH: &str = "\n    - Bash: keep it for commands that change something, or whose output is short and you just want to glance at it (pwd, a clean git status, moving a file). The moment you'd pipe that output onward to count, grep, or reshape it, give it to lens_run instead so the bulk never lands in the transcript.";
 
-const BULLET_READ: &str = "\n    - Read: right when you're about to Edit a file, since Edit has to match the exact bytes you're holding. If you only need to understand it, summarize it, or pull a few facts out, send it through lens_run_file and return just those; for a file's shape (signatures, no bodies) use lens_skeleton.";
+const BULLET_READ: &str = "\n    - Need to understand a file? lens_skeleton(path) first; then lens_skeleton(path, include_bodies: [\"the_fn\"]) for the one body you need — not a second Read. Read is for when you are about to Edit (Edit must match exact bytes). Already Read the full file this session? Use what you have — do not re-analyse it with lens tools.\n    - Common rationalizations that lead to waste: \"the file is small\", \"I already know the path\", \"one Read beats two lens calls\" — measured across sessions these produce whole-file dumps that tax every later turn.";
 
-const BULLET_SEARCH: &str = "\n    - Finding where something lives or what touches it: reach for lens_search or lens_symbol first — hand-scanning many files with Read/Grep is exactly what these replace.";
+const BULLET_SEARCH: &str = "\n    - Finding or tracing something? Map the intent, don't grep: where is X / where does an idea appear — lens_search(queries: [...]) or lens_symbol(name); what calls X / what does X call — lens_links; how does A reach B — lens_path; know the behavior but not the name — lens_find. Grep's line hits pull in a whole-file Read per hit; that chain is the drift these replace. \"A quick grep is lighter\" is the rationalization that starts it — one lens_search is the lighter call.";
 
 const BULLET_WEBFETCH: &str = "\n    - WebFetch is off here: pull a URL with lens_run (python), keep only the part of the response you need, and print that. The full page stays in the darkroom, retrievable via lens_recall.";
 
@@ -1402,6 +1540,10 @@ mod tests {
 
     #[test]
     fn read_code_files_escalate_to_the_graph() {
+        // Reaches the default deny threshold (4) at its last read, so it must
+        // not race `read_denies_at_threshold_then_resets_and_respects_override`,
+        // which overrides `LENS_READ_DENY_THRESHOLD` process-wide.
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
         let d = tempdir().unwrap();
         let ctx = rc(Level::Steer, true, d.path());
         let code = json!({"file_path": "src/server.rs"});
@@ -1420,10 +1562,63 @@ mod tests {
             ),
             other => panic!("expected graph nudge, got {other:?}"),
         }
-        // 4th, 5th quiet; 6th fires again (every READ_GRAPH_PERIOD-th read).
-        assert_eq!(route("Read", &code, &ctx), Decision::Passthrough);
-        assert_eq!(route("Read", &code, &ctx), Decision::Passthrough);
+        // 4th: the deny threshold — deny takes priority over the periodic nudge
+        // (see `read_denies_at_threshold_then_resets_and_respects_override`).
+        assert!(matches!(route("Read", &code, &ctx), Decision::Deny(_)));
+    }
+
+    #[test]
+    fn prompt_intent_matcher_hits_find_trace_shapes_only() {
+        for p in [
+            "Where is the retry logic defined?",
+            "what calls Forge::load_graph?",
+            "How does the SessionStart digest get built?",
+            "Which function parses the stream-json transcript?",
+            "trace the deny decision from hook to output",
+        ] {
+            assert!(prompt_wants_find_trace(p), "should match: {p}");
+        }
+        for p in [
+            "fix the failing test in throttle.rs",
+            "bump the version and tag the release",
+            "add a --runs flag",
+            "where is lens_symbol's handler? use lens_links after", // names a lens tool: user is steering
+        ] {
+            assert!(!prompt_wants_find_trace(p), "should not match: {p}");
+        }
+    }
+
+    #[test]
+    fn greps_count_toward_the_same_deny_counter_as_code_reads() {
+        // The measured drift signature is Grep → Read → Read → Read: mixed
+        // lookups must share one counter, denying the 4th call.
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Steer, true, d.path());
+        let grep = json!({"pattern": "include_bodies"});
+        let code = json!({"file_path": "src/server.rs"});
+        // 1st (Grep): the one-shot intent-mapping tip.
+        assert_eq!(
+            route("Grep", &grep, &ctx),
+            Decision::Context(GREP_NUDGE.to_string())
+        );
+        // 2nd (Read): the one-shot general tip.
+        assert_eq!(
+            route("Read", &code, &ctx),
+            Decision::Context(READ_NUDGE.to_string())
+        );
+        // 3rd (Read, graph threshold): escalation.
         assert!(matches!(route("Read", &code, &ctx), Decision::Context(_)));
+        // 4th (Read): deny, reason maps find/trace intents to the graph tools.
+        match route("Read", &code, &ctx) {
+            Decision::Deny(reason) => assert!(
+                reason.contains("lens_search") && reason.contains("lens_links"),
+                "deny reason maps find/trace intents: {reason}"
+            ),
+            other => panic!("4th mixed lookup should deny, got {other:?}"),
+        }
+        // Deny reset the counter: a fresh Grep passes through (tips spent).
+        assert_eq!(route("Grep", &grep, &ctx), Decision::Passthrough);
     }
 
     #[test]
@@ -1445,6 +1640,131 @@ mod tests {
     fn read_nudge_offers_the_graph() {
         assert!(READ_NUDGE.contains("lens_symbol"));
         assert!(READ_NUDGE.contains("lens_run_file"));
+    }
+
+    // ── read_decision(): consecutive-code-read deny (T5) ────────────────────
+    // NOTE: default-vs-override behavior is grouped into one test (like
+    // `mcp_ready_env_override_and_heartbeat`) to avoid racing another test's
+    // view of `LENS_READ_DENY_THRESHOLD`. `read_code_files_escalate_to_the_graph`
+    // (above) also depends on the default value, so both share this lock.
+    // The other deny tests below never touch the env var, so they're safe to
+    // run in parallel.
+    static READ_DENY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn armed_first_grep_denies_once_and_respects_gates() {
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let g = json!({"pattern": "deny_threshold"});
+
+        // Unarmed: no deny.
+        assert!(!matches!(route("Grep", &g, &ctx), Decision::Deny(_)));
+
+        // Armed but MCP not ready: passthrough, marker STAYS armed.
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
+        let not_ready = RouteCtx {
+            mcp_ready: false,
+            ..ctx
+        };
+        assert!(!matches!(route("Grep", &g, &not_ready), Decision::Deny(_)));
+
+        // MCP ready: the armed deny fires with the intent mapping.
+        match route("Grep", &g, &ctx) {
+            Decision::Deny(reason) => assert!(
+                reason.contains("find/trace") && reason.contains("lens_search"),
+                "deny reason maps intents: {reason}"
+            ),
+            other => panic!("armed first Grep should deny, got {other:?}"),
+        }
+        // Consumed: the retried Grep passes.
+        assert!(!matches!(route("Grep", &g, &ctx), Decision::Deny(_)));
+
+        // Kill-switch: armed but LENS_GREP_FIRST_DENY=0 disables the deny.
+        throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
+        std::env::set_var("LENS_GREP_FIRST_DENY", "0");
+        assert!(!matches!(route("Grep", &g, &ctx), Decision::Deny(_)));
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+    }
+
+    #[test]
+    fn read_denies_at_threshold_then_resets_and_respects_override() {
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LENS_READ_DENY_THRESHOLD");
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let code = json!({"file_path": "src/server.rs"});
+        for i in 1..=3 {
+            assert!(
+                !matches!(route("Read", &code, &ctx), Decision::Deny(_)),
+                "read {i} of 3 must not deny (default threshold is 4)"
+            );
+        }
+        match route("Read", &code, &ctx) {
+            Decision::Deny(reason) => assert!(
+                reason.contains("lens_skeleton"),
+                "deny reason names lens_skeleton: {reason}"
+            ),
+            other => panic!("4th consecutive code read should deny by default, got {other:?}"),
+        }
+        // The deny reset the counter, so the immediate retry (5th) passes.
+        assert!(
+            !matches!(route("Read", &code, &ctx), Decision::Deny(_)),
+            "5th read (post-reset) must not deny"
+        );
+
+        // LENS_READ_DENY_THRESHOLD=0 disables the deny entirely.
+        std::env::set_var("LENS_READ_DENY_THRESHOLD", "0");
+        let d2 = tempdir().unwrap();
+        let ctx2 = rc(Level::Full, true, d2.path());
+        for i in 1..=12 {
+            assert!(
+                !matches!(route("Read", &code, &ctx2), Decision::Deny(_)),
+                "read {i}: threshold=0 must never deny"
+            );
+        }
+        std::env::remove_var("LENS_READ_DENY_THRESHOLD");
+    }
+
+    #[test]
+    fn read_deny_never_bumped_by_non_code_files() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let doc = json!({"file_path": "NOTES.md"});
+        for i in 1..=10 {
+            assert!(
+                !matches!(route("Read", &doc, &ctx), Decision::Deny(_)),
+                "read {i}: non-code files never count toward the deny counter"
+            );
+        }
+    }
+
+    #[test]
+    fn read_deny_gated_on_mcp_ready() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, false, d.path());
+        let code = json!({"file_path": "src/server.rs"});
+        for i in 1..=8 {
+            assert!(
+                !matches!(route("Read", &code, &ctx), Decision::Deny(_)),
+                "read {i}: mcp not ready must downgrade the deny to passthrough"
+            );
+        }
+    }
+
+    #[test]
+    fn read_deny_never_fires_at_nudge_level() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Nudge, true, d.path());
+        let code = json!({"file_path": "src/server.rs"});
+        for i in 1..=8 {
+            assert!(
+                !matches!(route("Read", &code, &ctx), Decision::Deny(_)),
+                "read {i}: Level::Nudge does not steer, so it must never deny"
+            );
+        }
     }
 
     // ── post_route(): scale-aware search nudge ──────────────────────────────
@@ -1744,6 +2064,11 @@ mod tests {
             "lens_links",
             "lens_path",
             "lens_recall",
+            "lens_skeleton",
+            "lens_overview",
+            "lens_find",
+            "lens_grep_ast",
+            "include_bodies",
             "which_tool",
             "WebFetch is off",
             // the highest-impact additions over the old soft nudge:

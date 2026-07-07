@@ -77,6 +77,10 @@ path = "benchmarks/calibration/run_calibration.rs"
 name = "bench_acceptance"
 path = "benchmarks/acceptance/run_acceptance.rs"
 
+[[bin]]
+name = "bench_toolsel"
+path = "benchmarks/toolsel/run_toolsel.rs"
+
 [dependencies]
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync"] }

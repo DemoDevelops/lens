@@ -1,0 +1,7 @@
+{
+  "id": "0009_nav_bench_toolsel_entrypoint",
+  "prompt": "This repo just added a benchmark binary bench_toolsel for evaluating tool selection. Where is it registered in Cargo.toml, and what is the entry function in its source file that runs when it's invoked? Do not modify anything.",
+  "expected_tools": ["lens_symbol", "lens_links", "lens_path"],
+  "score": "first_tool",
+  "source": "mined:b0a790d2"
+}

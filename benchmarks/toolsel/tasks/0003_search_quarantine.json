@@ -1,0 +1,7 @@
+{
+  "id": "0003_search_quarantine",
+  "prompt": "Which files in this repo mention \"quarantine\", and in what context? Do not modify anything.",
+  "expected_tools": ["lens_search", "lens_grep_ast"],
+  "score": "first_tool",
+  "source": "seed"
+}

@@ -1,0 +1,7 @@
+{
+  "id": "0002_symbol_throttle_fired",
+  "prompt": "Where is the `fired` function in src/routing/throttle.rs defined, and what other module calls it? Do not modify anything.",
+  "expected_tools": ["lens_symbol", "lens_links", "lens_find"],
+  "score": "first_tool",
+  "source": "seed"
+}

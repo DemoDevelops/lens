@@ -1,0 +1,636 @@
+[
+  {
+    "session": "f3a84733",
+    "ts": 6,
+    "pattern": "readonly-read",
+    "files": [
+      "mod.rs"
+    ],
+    "intent": "Read mod.rs 7 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads. This file is a recurring read-only target across sessions.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read mod.rs x7; not Edited/Written this session"
+  },
+  {
+    "session": "1677a4ca",
+    "ts": 6,
+    "pattern": "readonly-read",
+    "files": [
+      "server.rs"
+    ],
+    "intent": "Read server.rs 3 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads. This file is a recurring read-only target across sessions.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read server.rs x3; not Edited/Written this session"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 166,
+    "pattern": "readonly-read",
+    "files": [
+      "accuracy.rs"
+    ],
+    "intent": "Read accuracy.rs 3 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read accuracy.rs x3; not Edited/Written this session"
+  },
+  {
+    "session": "87238e13",
+    "ts": 1,
+    "pattern": "readonly-read",
+    "files": [
+      "setup.rs"
+    ],
+    "intent": "Read setup.rs 2 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read setup.rs x2; not Edited/Written this session"
+  },
+  {
+    "session": "31082665",
+    "ts": 2,
+    "pattern": "readonly-read",
+    "files": [
+      "schema.rs"
+    ],
+    "intent": "Opened schema.rs to understand its structure without editing it; lens_skeleton (or lens_symbol for a specific definition) surfaces its shape without loading the whole file.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read schema.rs; not Edited/Written this session"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 20,
+    "pattern": "readonly-read",
+    "files": [
+      "run_fitness.rs"
+    ],
+    "intent": "Read run_fitness.rs 3 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read run_fitness.rs x3; not Edited/Written this session"
+  },
+  {
+    "session": "87ebc725",
+    "ts": 22,
+    "pattern": "readonly-read",
+    "files": [
+      "hook.rs"
+    ],
+    "intent": "Read hook.rs 2 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read hook.rs x2; not Edited/Written this session"
+  },
+  {
+    "session": "37d401a9",
+    "ts": 83,
+    "pattern": "readonly-read",
+    "files": [
+      "run_savings.rs"
+    ],
+    "intent": "Read run_savings.rs 2 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read run_savings.rs x2; not Edited/Written this session"
+  },
+  {
+    "session": "34fe18fa",
+    "ts": 20,
+    "pattern": "readonly-read",
+    "files": [
+      "stats.rs"
+    ],
+    "intent": "Read stats.rs 2 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read stats.rs x2; not Edited/Written this session"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 89,
+    "pattern": "readonly-read",
+    "files": [
+      "harness.rs"
+    ],
+    "intent": "Read harness.rs 2 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read harness.rs x2; not Edited/Written this session"
+  },
+  {
+    "session": "34fe18fa",
+    "ts": 29,
+    "pattern": "readonly-read",
+    "files": [
+      "dashboard.rs"
+    ],
+    "intent": "Read dashboard.rs 4 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads. This file is a recurring read-only target across sessions.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read dashboard.rs x4; not Edited/Written this session"
+  },
+  {
+    "session": "533d92b2",
+    "ts": 13,
+    "pattern": "readonly-read",
+    "files": [
+      "extract.rs"
+    ],
+    "intent": "Read extract.rs 2 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read extract.rs x2; not Edited/Written this session"
+  },
+  {
+    "session": "1aee6ace",
+    "ts": 20,
+    "pattern": "readonly-read",
+    "files": [
+      "main.rs"
+    ],
+    "intent": "Opened main.rs to understand its structure without editing it; lens_skeleton (or lens_symbol for a specific definition) surfaces its shape without loading the whole file.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read main.rs; not Edited/Written this session"
+  },
+  {
+    "session": "4733ca36",
+    "ts": 11,
+    "pattern": "readonly-read",
+    "files": [
+      "install.rs"
+    ],
+    "intent": "Read install.rs 3 times in one session without ever editing it; lens_skeleton would return its API shape in a single call instead of repeated full-file reads.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read install.rs x3; not Edited/Written this session"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 7,
+    "pattern": "readonly-read",
+    "files": [
+      "warmup.rs"
+    ],
+    "intent": "Opened warmup.rs to understand its structure without editing it; lens_skeleton (or lens_symbol for a specific definition) surfaces its shape without loading the whole file.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read warmup.rs; not Edited/Written this session"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 62,
+    "pattern": "readonly-read",
+    "files": [
+      "savings.rs"
+    ],
+    "intent": "Opened savings.rs to understand its structure without editing it; lens_skeleton (or lens_symbol for a specific definition) surfaces its shape without loading the whole file.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read savings.rs; not Edited/Written this session"
+  },
+  {
+    "session": "1aee6ace",
+    "ts": 9,
+    "pattern": "nav-run",
+    "files": [
+      "run_navigation.rs",
+      "generate_report.rs",
+      "accuracy.rs",
+      "recovery.rs",
+      "mod.rs",
+      "schema.rs"
+    ],
+    "intent": "Hand-traced connections across 6 files (run_navigation.rs, generate_report.rs, accuracy.rs, recovery.rs, mod.rs, schema.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read run_navigation.rs; Read generate_report.rs; Read accuracy.rs; Read recovery.rs; Read mod.rs; Read schema.rs"
+  },
+  {
+    "session": "37d401a9",
+    "ts": 15,
+    "pattern": "nav-run",
+    "files": [
+      "extract.rs",
+      "server.rs",
+      "snapshot.rs",
+      "install.rs",
+      "query.rs",
+      "run_hotpaths.rs"
+    ],
+    "intent": "Hand-traced connections across 6 files (extract.rs, server.rs, snapshot.rs, install.rs, query.rs, run_hotpaths.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read extract.rs; Read server.rs; Read snapshot.rs; Read install.rs; Read query.rs; Read run_hotpaths.rs"
+  },
+  {
+    "session": "1aee6ace",
+    "ts": 2,
+    "pattern": "nav-run",
+    "files": [
+      "Cargo.toml",
+      "run_changes.rs",
+      "run_prove.rs",
+      "navigation.rs",
+      "savings.rs"
+    ],
+    "intent": "Hand-traced connections across 5 files (Cargo.toml, run_changes.rs, run_prove.rs, navigation.rs, savings.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read Cargo.toml; Read run_changes.rs; Read run_prove.rs; Read navigation.rs; Read savings.rs"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 10,
+    "pattern": "nav-run",
+    "files": [
+      "tools.rs",
+      "server.rs",
+      "hook.rs",
+      "mod.rs",
+      "Cargo.toml"
+    ],
+    "intent": "Hand-traced connections across 5 files (tools.rs, server.rs, hook.rs, mod.rs, Cargo.toml) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read tools.rs; Read server.rs; Read hook.rs; Read mod.rs; Read Cargo.toml"
+  },
+  {
+    "session": "34fe18fa",
+    "ts": 37,
+    "pattern": "nav-run",
+    "files": [
+      "gain.rs",
+      "dashboard.rs",
+      "main.rs",
+      "mod.rs"
+    ],
+    "intent": "Hand-traced connections across 4 files (gain.rs, dashboard.rs, main.rs, mod.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read gain.rs; Read dashboard.rs; Read main.rs; Read mod.rs"
+  },
+  {
+    "session": "507bef84",
+    "ts": 3,
+    "pattern": "nav-run",
+    "files": [
+      "mod.rs",
+      "schema.rs",
+      "server.rs",
+      "setup.rs"
+    ],
+    "intent": "Hand-traced connections across 4 files (mod.rs, schema.rs, server.rs, setup.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read mod.rs; Read schema.rs; Read server.rs; Read setup.rs"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 4,
+    "pattern": "nav-run",
+    "files": [
+      "mod.rs",
+      "schema.rs",
+      "index_tests.rs",
+      "warmup.rs"
+    ],
+    "intent": "Hand-traced connections across 4 files (mod.rs, schema.rs, index_tests.rs, warmup.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read mod.rs; Read schema.rs; Read index_tests.rs; Read warmup.rs"
+  },
+  {
+    "session": "9c724799",
+    "ts": 12,
+    "pattern": "nav-run",
+    "files": [
+      "graph.rs",
+      "extract.rs",
+      "server.rs",
+      "mod.rs"
+    ],
+    "intent": "Hand-traced connections across 4 files (graph.rs, extract.rs, server.rs, mod.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read graph.rs; Read extract.rs; Read server.rs; Read mod.rs"
+  },
+  {
+    "session": "b0a790d2",
+    "ts": 17,
+    "pattern": "nav-run",
+    "files": [
+      "server.rs",
+      "warmup.rs",
+      "setup.rs",
+      "hook.rs"
+    ],
+    "intent": "Hand-traced connections across 4 files (server.rs, warmup.rs, setup.rs, hook.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read server.rs; Read warmup.rs; Read setup.rs; Read hook.rs"
+  },
+  {
+    "session": "c3217c36",
+    "ts": 14,
+    "pattern": "nav-run",
+    "files": [
+      "main.rs",
+      "install.rs",
+      "mod.rs",
+      "lib.rs"
+    ],
+    "intent": "Hand-traced connections across 4 files (main.rs, install.rs, mod.rs, lib.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read main.rs; Read install.rs; Read mod.rs; Read lib.rs"
+  },
+  {
+    "session": "f3a84733",
+    "ts": 4,
+    "pattern": "nav-run",
+    "files": [
+      "run_tuning.rs",
+      "schema.rs",
+      "mod.rs",
+      "index_concurrency.rs"
+    ],
+    "intent": "Hand-traced connections across 4 files (run_tuning.rs, schema.rs, mod.rs, index_concurrency.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read run_tuning.rs; Read schema.rs; Read mod.rs; Read index_concurrency.rs"
+  },
+  {
+    "session": "507bef84",
+    "ts": 11,
+    "pattern": "nav-run",
+    "files": [
+      "e2e_tests.rs",
+      "Cargo.toml",
+      "lib.rs"
+    ],
+    "intent": "Hand-traced connections across 3 files (e2e_tests.rs, Cargo.toml, lib.rs) with consecutive whole-file reads and no graph query; lens_symbol then lens_links/lens_path maps the callers and callees directly.",
+    "right_tool": "lens_symbol",
+    "evidence": "Read e2e_tests.rs; Read Cargo.toml; Read lib.rs"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 9,
+    "pattern": "grep-then-read",
+    "files": [
+      "tools.rs",
+      "server.rs",
+      "hook.rs",
+      "mod.rs",
+      "Cargo.toml"
+    ],
+    "intent": "Ran a grep shell search then opened tools.rs, server.rs, hook.rs, mod.rs, Cargo.toml to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read tools.rs; Read server.rs; Read hook.rs; Read mod.rs; Read Cargo.toml"
+  },
+  {
+    "session": "34fe18fa",
+    "ts": 36,
+    "pattern": "grep-then-read",
+    "files": [
+      "gain.rs",
+      "dashboard.rs",
+      "main.rs",
+      "mod.rs"
+    ],
+    "intent": "Ran a grep shell search then opened gain.rs, dashboard.rs, main.rs, mod.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read gain.rs; Read dashboard.rs; Read main.rs; Read mod.rs"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 3,
+    "pattern": "grep-then-read",
+    "files": [
+      "mod.rs",
+      "schema.rs",
+      "index_tests.rs",
+      "warmup.rs"
+    ],
+    "intent": "Ran a grep shell search then opened mod.rs, schema.rs, index_tests.rs, warmup.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read mod.rs; Read schema.rs; Read index_tests.rs; Read warmup.rs"
+  },
+  {
+    "session": "b0a790d2",
+    "ts": 16,
+    "pattern": "grep-then-read",
+    "files": [
+      "server.rs",
+      "warmup.rs",
+      "setup.rs",
+      "hook.rs"
+    ],
+    "intent": "Ran a grep shell search then opened server.rs, warmup.rs, setup.rs, hook.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read server.rs; Read warmup.rs; Read setup.rs; Read hook.rs"
+  },
+  {
+    "session": "37d401a9",
+    "ts": 32,
+    "pattern": "grep-then-read",
+    "files": [
+      "savings.rs",
+      "recovery.rs"
+    ],
+    "intent": "Ran a grep shell search then opened savings.rs, recovery.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read savings.rs; Read recovery.rs"
+  },
+  {
+    "session": "37d401a9",
+    "ts": 44,
+    "pattern": "grep-then-read",
+    "files": [
+      "mod.rs",
+      "store.rs"
+    ],
+    "intent": "Ran a grep shell search then opened mod.rs, store.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read mod.rs; Read store.rs"
+  },
+  {
+    "session": "37d401a9",
+    "ts": 205,
+    "pattern": "grep-then-read",
+    "files": [
+      "mod.rs",
+      "hook.rs"
+    ],
+    "intent": "Ran a grep shell search then opened mod.rs, hook.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read mod.rs; Read hook.rs"
+  },
+  {
+    "session": "3a5e9cfa",
+    "ts": 23,
+    "pattern": "grep-then-read",
+    "files": [
+      "stats.rs",
+      "dashboard.rs"
+    ],
+    "intent": "Ran a grep shell search then opened stats.rs, dashboard.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read stats.rs; Read dashboard.rs"
+  },
+  {
+    "session": "3a5e9cfa",
+    "ts": 42,
+    "pattern": "grep-then-read",
+    "files": [
+      "observability_tests.rs",
+      "mod.rs"
+    ],
+    "intent": "Ran a grep shell search then opened observability_tests.rs, mod.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read observability_tests.rs; Read mod.rs"
+  },
+  {
+    "session": "4cead7f9",
+    "ts": 31,
+    "pattern": "grep-then-read",
+    "files": [
+      "mod.rs",
+      "install.rs"
+    ],
+    "intent": "Ran a grep shell search then opened mod.rs, install.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read mod.rs; Read install.rs"
+  },
+  {
+    "session": "533d92b2",
+    "ts": 258,
+    "pattern": "grep-then-read",
+    "files": [
+      "server.rs",
+      "tools.rs"
+    ],
+    "intent": "Ran a grep shell search then opened server.rs, tools.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read server.rs; Read tools.rs"
+  },
+  {
+    "session": "533d92b2",
+    "ts": 303,
+    "pattern": "grep-then-read",
+    "files": [
+      "harness.rs",
+      "accuracy.rs"
+    ],
+    "intent": "Ran a grep shell search then opened harness.rs, accuracy.rs to read the matches; lens_search returns ranked snippets across the tree so the follow-up file reads are unnecessary.",
+    "right_tool": "lens_search",
+    "evidence": "grep; Read harness.rs; Read accuracy.rs"
+  },
+  {
+    "session": "1aee6ace",
+    "ts": 25,
+    "pattern": "big-read",
+    "files": [
+      "server.rs"
+    ],
+    "intent": "Read the entire server.rs (69 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read server.rs (whole file, 69 KB, no limit/offset)"
+  },
+  {
+    "session": "946f280d",
+    "ts": 1,
+    "pattern": "big-read",
+    "files": [
+      "mod.rs"
+    ],
+    "intent": "Read the entire mod.rs (59 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read mod.rs (whole file, 59 KB, no limit/offset)"
+  },
+  {
+    "session": "601b7cd5",
+    "ts": 18,
+    "pattern": "big-read",
+    "files": [
+      "run_tuning.rs"
+    ],
+    "intent": "Read the entire run_tuning.rs (49 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read run_tuning.rs (whole file, 49 KB, no limit/offset)"
+  },
+  {
+    "session": "50a891db",
+    "ts": 200,
+    "pattern": "big-read",
+    "files": [
+      "tui.rs"
+    ],
+    "intent": "Read the entire tui.rs (40 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read tui.rs (whole file, 40 KB, no limit/offset)"
+  },
+  {
+    "session": "dd404bca",
+    "ts": 41,
+    "pattern": "big-read",
+    "files": [
+      "run_changes.rs"
+    ],
+    "intent": "Read the entire run_changes.rs (40 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read run_changes.rs (whole file, 40 KB, no limit/offset)"
+  },
+  {
+    "session": "50a891db",
+    "ts": 34,
+    "pattern": "big-read",
+    "files": [
+      "dashboard.rs"
+    ],
+    "intent": "Read the entire dashboard.rs (39 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read dashboard.rs (whole file, 39 KB, no limit/offset)"
+  },
+  {
+    "session": "1aee6ace",
+    "ts": 28,
+    "pattern": "big-read",
+    "files": [
+      "store.rs"
+    ],
+    "intent": "Read the entire store.rs (37 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read store.rs (whole file, 37 KB, no limit/offset)"
+  },
+  {
+    "session": "dd404bca",
+    "ts": 25,
+    "pattern": "big-read",
+    "files": [
+      "savings.rs"
+    ],
+    "intent": "Read the entire savings.rs (34 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read savings.rs (whole file, 34 KB, no limit/offset)"
+  },
+  {
+    "session": "1aee6ace",
+    "ts": 29,
+    "pattern": "big-read",
+    "files": [
+      "stats.rs"
+    ],
+    "intent": "Read the entire stats.rs (30 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read stats.rs (whole file, 30 KB, no limit/offset)"
+  },
+  {
+    "session": "efe4c02b",
+    "ts": 7,
+    "pattern": "big-read",
+    "files": [
+      "extract.rs"
+    ],
+    "intent": "Read the entire extract.rs (29 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read extract.rs (whole file, 29 KB, no limit/offset)"
+  },
+  {
+    "session": "d92feb62",
+    "ts": 29,
+    "pattern": "big-read",
+    "files": [
+      "setup.rs"
+    ],
+    "intent": "Read the entire setup.rs (29 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read setup.rs (whole file, 29 KB, no limit/offset)"
+  },
+  {
+    "session": "b5119f06",
+    "ts": 68,
+    "pattern": "big-read",
+    "files": [
+      "snapshot.rs"
+    ],
+    "intent": "Read the entire snapshot.rs (27 KB) with no offset or limit; lens_skeleton returns its structure and lens_run_file computes an answer over it without pulling the whole file into context.",
+    "right_tool": "lens_skeleton",
+    "evidence": "Read snapshot.rs (whole file, 27 KB, no limit/offset)"
+  }
+]

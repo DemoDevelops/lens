@@ -166,6 +166,22 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             let raws = extract::extract_tool_events(&tool, &ti, &resp);
             let events = attribute(raws, &session_id, &project_str, ts, "PostToolUse");
             store.insert_events(&events)?;
+            // A lens tool call is itself the "checked the graph" signal the
+            // consecutive-lookup deny counter (`routing::inspect_escalation`)
+            // is watching for: reset it so "read-code" measures lookups-since-
+            // last-lens-call, not cumulative-per-session. A file edit resets it
+            // too — Read-before-Edit was the right tool, not drift, so an
+            // edit-heavy session never accumulates toward the deny.
+            let is_lens = tool
+                .strip_prefix("mcp__")
+                .and_then(|rest| rest.split("__").next())
+                .is_some_and(|server| server.contains("lens"));
+            if is_lens || matches!(tool.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+                routing::throttle::reset(&data_dir, &session_id, "read-code");
+                // Also disarm the first-Grep deny: a lens call answered the
+                // find/trace question, so a follow-up Grep is no longer drift.
+                routing::throttle::reset(&data_dir, &session_id, "grep-first");
+            }
             // Scale-aware search steer: a Grep whose result floods context gets a
             // one-shot nudge toward lens_search (lens_search only beats grep at scale).
             // Capture above runs regardless of routing level; the nudge fires whenever
@@ -196,6 +212,27 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 let raws = extract::extract_user_events(&prompt);
                 let events = attribute(raws, &session_id, &project_str, ts, "UserPromptSubmit");
                 store.insert_events(&events)?;
+                // Find/trace prompts get the tool mapping injected HERE, at the
+                // decision point: first-tool choice is made from what's in
+                // context before the first call, which PreToolUse nudges are
+                // too late for (measured: find/trace tasks stayed Grep-first
+                // on SessionStart steering alone).
+                let level = routing::Level::from_env();
+                if level.nudges() && routing::prompt_wants_find_trace(&prompt) {
+                    // Arm the one-shot first-Grep deny for this prompt (the
+                    // Grep arm in `routing::route_inner` consumes it; any
+                    // lens call or edit disarms it via the PostToolUse reset).
+                    if level.steers() {
+                        routing::throttle::bump(&data_dir, &session_id, "grep-first");
+                    }
+                    return Ok(json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "UserPromptSubmit",
+                            "additionalContext": routing::PROMPT_INTENT_NUDGE,
+                        }
+                    })
+                    .to_string());
+                }
             }
             Ok("{}".to_string())
         }
@@ -332,12 +369,56 @@ fn session_start(
             }
             // Re-inject durable project memory (decisions/constraints/rules captured in
             // prior sessions) so a fresh session resumes with them despite the clear.
-            Ok(snapshot::render_project_memory(
-                &store.project_memory(project_str)?,
-            ))
+            let memory = snapshot::render_project_memory(&store.project_memory(project_str)?);
+            Ok(match repo_map_block(data_dir) {
+                Some(block) if memory.is_empty() => block,
+                Some(block) => format!("{memory}\n\n{block}"),
+                None => memory,
+            })
         }
         _ => Ok(String::new()), // "clear" and unknown — no injection
     }
+}
+
+/// Default token budget for the pushed repo-map digest (see `repo_map_block`);
+/// overridable via `LENS_SESSION_OVERVIEW_BUDGET`, `0` disables it entirely.
+const REPO_MAP_BUDGET_DEFAULT: usize = 1200;
+/// Hard byte cap on the emitted `<repo_map>` block — there's no outer byte
+/// budget on the SessionStart context string, so this digest caps itself.
+const REPO_MAP_CAP_BYTES: usize = 6 * 1024;
+
+/// A whole-repo structural digest (aider-style repo map): the most-connected
+/// symbols, ranked, so a fresh session can expand from a graph query instead of
+/// reading files cold. Loads an existing `graph.json` only — NEVER builds one
+/// here, so SessionStart stays fast; a missing/unreadable graph silently skips
+/// this (`None`), same as "no digest available yet".
+fn repo_map_block(data_dir: &Path) -> Option<String> {
+    let budget: usize = std::env::var("LENS_SESSION_OVERVIEW_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(REPO_MAP_BUDGET_DEFAULT);
+    if budget == 0 {
+        return None;
+    }
+    let graph = crate::discovery::graph::Graph::load(&data_dir.join("graph.json")).ok()?;
+    let digest = cap_bytes(&crate::discovery::query::overview(&graph, budget), REPO_MAP_CAP_BYTES);
+    Some(format!(
+        "<repo_map>\nGraph overview of this repo (most-connected symbols; expand any of these with lens_symbol / lens_links / lens_path):\n{digest}\n</repo_map>"
+    ))
+}
+
+/// Truncate `s` to at most `max` bytes at a char boundary, appending `…` when
+/// cut. Unlike `snapshot::cap` this preserves newlines — the digest's line
+/// structure (one symbol per line) is the point.
+fn cap_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 /// Best-effort: publish the active session id to `<data_dir>/current_session` so the

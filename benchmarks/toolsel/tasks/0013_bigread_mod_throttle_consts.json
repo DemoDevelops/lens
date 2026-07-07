@@ -1,0 +1,7 @@
+{
+  "id": "0013_bigread_mod_throttle_consts",
+  "prompt": "src/routing/mod.rs is about 59 KB. Without reading the whole file, what constants and functions govern the read-counter throttle escalation (bump threshold, nudge period)? Do not modify anything.",
+  "expected_tools": ["lens_skeleton", "lens_run_file"],
+  "score": "first_tool",
+  "source": "mined:946f280d"
+}

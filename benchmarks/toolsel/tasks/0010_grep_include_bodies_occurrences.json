@@ -1,0 +1,12 @@
+{
+  "id": "0010_grep_include_bodies_occurrences",
+  "prompt": "Search this repo for every place `include_bodies` is referenced (not just where it's defined) and summarize the role each occurrence plays. Do not modify anything.",
+  "expected_tools": [
+    "lens_search",
+    "lens_find",
+    "lens_run",
+    "lens_grep_ast"
+  ],
+  "score": "first_tool",
+  "source": "mined:601b7cd5"
+}

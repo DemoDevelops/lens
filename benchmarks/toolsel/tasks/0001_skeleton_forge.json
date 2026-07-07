@@ -1,0 +1,7 @@
+{
+  "id": "0001_skeleton_forge",
+  "prompt": "What public methods does struct Forge in src/server.rs expose? Do not modify anything.",
+  "expected_tools": ["lens_skeleton", "lens_symbol"],
+  "score": "first_tool",
+  "source": "seed"
+}

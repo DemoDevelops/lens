@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn mean_rate_averages_task_rates() {
-        let results = vec![
+        let results = [
             TaskResult {
                 id: "a".into(),
                 runs: vec![],

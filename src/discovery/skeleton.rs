@@ -73,10 +73,70 @@ pub fn skeletonize(
     let src = source.as_bytes();
     let mut out = String::new();
     let root = tree.root_node();
+    // Markdown has no single "body" node per definition — a `section`'s heading and
+    // its prose/subsections are siblings, so the generic container model
+    // (`container_kinds`/`is_body_node`/`find_body_child`) doesn't map. Emit the
+    // heading tree directly instead, collapsing each section's prose to one `…`.
+    if spec.name == "markdown" {
+        emit_md_children(root, src, &mut out);
+        return Some(normalize_blank_lines(&out));
+    }
     emit_children(root, src, spec.name, include_bodies, &mut out);
     // Collapse any run of blank lines introduced by elision to a single newline
     // for stable, compact output.
     Some(normalize_blank_lines(&out))
+}
+
+/// Walk the `section` children of a markdown `document`/`section` node and emit
+/// each as a heading + elided prose (see [`emit_md_section`]). Non-section
+/// children (a heading-less document prelude's opaque blocks) are skipped here.
+fn emit_md_children(node: TsNode, src: &[u8], out: &mut String) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "section" {
+            emit_md_section(child, src, out);
+        }
+    }
+}
+
+/// Emit one markdown `section`: its heading line(s) verbatim (keeping the `#`
+/// markers), then a single `…` standing in for the section's own prose blocks
+/// (any direct child that is neither the heading nor a nested `section`;
+/// consecutive prose collapses to one ellipsis), then its nested sections in
+/// source order. A heading-less prelude section emits no heading and no ellipsis
+/// of its own — it just hangs its subsections here, matching `extract`.
+fn emit_md_section(section: TsNode, src: &[u8], out: &mut String) {
+    let mut cursor = section.walk();
+    let children: Vec<TsNode> = section.children(&mut cursor).collect();
+
+    if let Some(heading) = children.iter().find(|c| is_md_heading_kind(c.kind())) {
+        push_heading_line(*heading, src, out);
+        let has_prose = children
+            .iter()
+            .any(|c| !is_md_heading_kind(c.kind()) && c.kind() != "section");
+        if has_prose {
+            out.push(ELLIPSIS);
+            out.push('\n');
+        }
+    }
+
+    for child in &children {
+        if child.kind() == "section" {
+            emit_md_section(*child, src, out);
+        }
+    }
+}
+
+/// The markdown heading node kinds (block grammar). Mirrors `extract::is_md_heading`.
+fn is_md_heading_kind(kind: &str) -> bool {
+    matches!(kind, "atx_heading" | "setext_heading")
+}
+
+/// Emit a heading's source text verbatim, normalized to end in exactly one
+/// newline (a setext heading keeps its internal text/underline newline).
+fn push_heading_line(heading: TsNode, src: &[u8], out: &mut String) {
+    out.push_str(node_text(heading, src).trim_end());
+    out.push('\n');
 }
 
 /// Emit the source-order children of `node`, eliding bodies. Top-level entry
@@ -425,6 +485,41 @@ fn bar() {
         let skel = skeletonize(FOO_BAR_SRC, &spec, None).unwrap();
         let expected = "fn foo() { … }\nfn bar() { … }\n";
         assert_eq!(skel, expected);
+    }
+
+    /// Markdown skeletonization keeps the full heading tree and collapses each
+    /// section's prose to a single `…`. Exercises the T2 fixture corpus.
+    #[test]
+    fn markdown_skeleton() {
+        let spec = spec_for_language("markdown").expect("markdown spec");
+        let src = read_sample("tests/fixtures/md/index.md");
+        let skel = skeletonize(&src, &spec, None).expect("skeletonize markdown");
+
+        // Every heading LINE from the source survives verbatim (markers kept).
+        for heading in ["# Index", "## Setup", "### Local", "## Remote"] {
+            assert!(
+                skel.contains(heading),
+                "skeleton dropped heading `{heading}`:\n{skel}"
+            );
+        }
+        // The ellipsis stands in for elided prose.
+        assert!(
+            skel.contains(ELLIPSIS),
+            "no prose was elided (no ellipsis present):\n{skel}"
+        );
+        // Paragraph prose is dropped.
+        let prose = "This is the main index document linking to other sections.";
+        assert!(
+            !skel.contains(prose),
+            "skeleton leaked paragraph prose:\n{skel}"
+        );
+        // Strictly fewer tokens than the source (same measure as `skeleton_saves_tokens`).
+        let full_t = count_tokens(&src);
+        let skel_t = count_tokens(&skel);
+        assert!(
+            skel_t < full_t,
+            "skeleton ({skel_t}) not smaller than source ({full_t}):\n{skel}"
+        );
     }
 
     /// An unknown requested name is ignored: output is identical to `None`.

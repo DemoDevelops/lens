@@ -200,6 +200,20 @@ pub fn all_specs() -> Vec<LangSpec> {
             "#,
             imports_query: r#"(import_declaration) @import"#,
         },
+        LangSpec {
+            name: "markdown",
+            extensions: &["md", "markdown"],
+            language: || tree_sitter_md::LANGUAGE.into(),
+            // Markdown is extracted by a CUSTOM path ([`extract_markdown`]), not the
+            // generic defs/calls/imports query loop: heading names must strip the
+            // `#` markers and `contains` must reflect section nesting, neither of
+            // which a flat capture query expresses. These queries are never
+            // compiled (the early branch in `extract_from_tree` returns first), so
+            // they stay empty and markdown needs no `cached_queries` entry.
+            defs_query: "",
+            calls_query: "",
+            imports_query: "",
+        },
     ]
 }
 
@@ -346,6 +360,12 @@ fn extract_from_tree(
     spec: &LangSpec,
     tree: &Tree,
 ) -> Option<FileExtract> {
+    // Markdown has no query-driven defs/calls/imports; it uses a bespoke walk that
+    // turns headings into symbols and section nesting into `contains` edges.
+    if spec.name == "markdown" {
+        return Some(extract_markdown(path, source, spec, tree));
+    }
+
     let root = tree.root_node();
     let src = source.as_bytes();
 
@@ -422,6 +442,191 @@ fn extract_from_tree(
         imports,
         contains,
     })
+}
+
+/// Custom extraction for markdown (tree-sitter-md block grammar). The grammar
+/// nests `section` nodes — each `section` opens with one heading and directly
+/// contains the sections of deeper headings — so this walks that nesting to emit
+/// one `heading` symbol per heading and a `contains` edge from each heading to the
+/// heading of every section nested one level beneath it (a top-level heading is
+/// contained by the file's `module` node, matching the other languages). Markdown
+/// carries no calls or imports at this tier.
+fn extract_markdown(path: &str, source: &str, spec: &LangSpec, tree: &Tree) -> FileExtract {
+    let src = source.as_bytes();
+    let module = Node::new(path, "module", path, 1, spec.name);
+    let mut defs: Vec<Node> = Vec::new();
+    let mut contains: Vec<(String, String)> = Vec::new();
+    let mut imports: Vec<(String, usize)> = Vec::new();
+
+    let root = tree.root_node();
+    for child in root.children(&mut root.walk()) {
+        if child.kind() == "section" {
+            walk_md_section(child, &module.id, path, src, spec.name, &mut defs, &mut contains);
+        }
+    }
+    collect_md_links(root, src, &mut imports);
+
+    FileExtract {
+        module,
+        defs,
+        calls: Vec::new(),
+        imports,
+        contains,
+    }
+}
+
+/// Recurse one markdown `section`. Create its heading symbol (its first heading
+/// child), link `parent -> this heading` as `contains`, then recurse into every
+/// nested `section`, hanging their headings under this one. A leading "prelude"
+/// section (content before the first heading, so no heading child) has no symbol
+/// of its own; its nested sections attach directly to `parent`.
+fn walk_md_section(
+    section: TsNode,
+    parent: &str,
+    path: &str,
+    src: &[u8],
+    lang: &str,
+    defs: &mut Vec<Node>,
+    contains: &mut Vec<(String, String)>,
+) {
+    let heading = section
+        .children(&mut section.walk())
+        .find(|c| is_md_heading(c.kind()));
+
+    let this_id = match heading {
+        Some(h) => {
+            let name = md_heading_name(&h, src);
+            let line = h.start_position().row + 1;
+            let node = Node::new(path, "heading", &name, line, lang);
+            let id = node.id.clone();
+            contains.push((parent.to_string(), id.clone()));
+            defs.push(node);
+            id
+        }
+        None => parent.to_string(),
+    };
+
+    for child in section.children(&mut section.walk()) {
+        if child.kind() == "section" {
+            walk_md_section(child, &this_id, path, src, lang, defs, contains);
+        }
+    }
+}
+
+fn is_md_heading(kind: &str) -> bool {
+    matches!(kind, "atx_heading" | "setext_heading")
+}
+
+/// Heading text with the `#` markers and surrounding whitespace removed. The block
+/// grammar exposes the text after the marker as a `heading_content` field; falling
+/// back to the raw heading text (markers stripped) covers headings the grammar
+/// leaves without that field.
+fn md_heading_name(heading: &TsNode, src: &[u8]) -> String {
+    if let Some(content) = heading.child_by_field_name("heading_content") {
+        let text = node_text(&content, src).trim().to_string();
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    node_text(heading, src)
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .to_string()
+}
+
+/// Walk the block tree collecting cross-doc links from prose. The block grammar
+/// leaves inline syntax unparsed, so link markup lives verbatim inside opaque
+/// `inline` nodes; code blocks carry no `inline` node and are skipped outright, so
+/// links inside code fences never resolve.
+fn collect_md_links(node: TsNode, src: &[u8], imports: &mut Vec<(String, usize)>) {
+    if matches!(node.kind(), "fenced_code_block" | "indented_code_block") {
+        return;
+    }
+    if node.kind() == "inline" {
+        let text = node_text(&node, src);
+        scan_md_links(&text, node.start_position().row, imports);
+        return;
+    }
+    for child in node.children(&mut node.walk()) {
+        collect_md_links(child, src, imports);
+    }
+}
+
+/// Scan one prose fragment for the two markdown link shapes, pushing each
+/// resolvable target as an `imports` segment. Standard `[text](target)` and the
+/// Obsidian `[[target]]`/`[[target#anchor]]` wikilink are handled in a single
+/// left-to-right pass. `base_row` is the fragment's 0-based start row, used to
+/// attribute each link to its own line.
+fn scan_md_links(text: &str, base_row: usize, imports: &mut Vec<(String, usize)>) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        let rest = &text[i..];
+        // Obsidian wikilink: [[target]] / [[target#anchor]].
+        if let Some(inner) = rest.strip_prefix("[[") {
+            if let Some(end) = inner.find("]]") {
+                push_md_link(&inner[..end], text, i, base_row, imports);
+                i += 2 + end + 2;
+                continue;
+            }
+        }
+        // Standard link: [text](target). The link text ends at the first `]`,
+        // which must be immediately followed by `(`.
+        if let Some(rb) = rest.find(']') {
+            if rest[rb + 1..].starts_with('(') {
+                if let Some(rp) = rest[rb + 2..].find(')') {
+                    push_md_link(&rest[rb + 2..rb + 2 + rp], text, i, base_row, imports);
+                    i += rb + 2 + rp + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Normalize a link target to a bare note name and, if it resolves, push it as an
+/// import segment attributed to the link's line (`base_row` plus newlines before
+/// the link within `text`).
+fn push_md_link(
+    target: &str,
+    text: &str,
+    at: usize,
+    base_row: usize,
+    imports: &mut Vec<(String, usize)>,
+) {
+    if let Some(seg) = normalize_md_target(target) {
+        let line = base_row + text[..at].matches('\n').count() + 1;
+        imports.push((seg, line));
+    }
+}
+
+/// Reduce a markdown link target to the bare note name used for cross-doc
+/// resolution: external `http(s)://` targets are dropped, and a trailing
+/// `#anchor`, a leading `./` or `../`, and a trailing `.md` are stripped.
+/// `./deploy.md` -> `deploy`; `arch#Overview` -> `arch`.
+fn normalize_md_target(target: &str) -> Option<String> {
+    let t = target.trim();
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return None;
+    }
+    let t = t.split_once('#').map_or(t, |(before, _)| before);
+    let t = t
+        .strip_prefix("./")
+        .or_else(|| t.strip_prefix("../"))
+        .unwrap_or(t);
+    let t = t.strip_suffix(".md").unwrap_or(t).trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 pub(super) fn node_text(node: &TsNode, src: &[u8]) -> String {
@@ -678,6 +883,87 @@ func main() {
         assert_eq!(spec_for_extension("rs").unwrap().name, "rust");
         assert_eq!(spec_for_extension("py").unwrap().name, "python");
         assert!(spec_for_extension("xyz").is_none());
+    }
+
+    #[test]
+    fn markdown_extraction() {
+        // Nested headings A > B > C plus a sibling D under A. The block grammar
+        // nests `section` nodes, so containment must mirror heading depth:
+        // A⊃B, B⊃C, A⊃D — and crucially NOT A⊃C (C is nested under B).
+        const MD: &str = "\
+# A
+intro prose under A
+
+## B
+body of B
+
+### C
+deep body of C
+
+## D
+sibling body of D
+";
+        // Both extensions must resolve to the markdown spec.
+        assert_eq!(spec_for_extension("md").unwrap().name, "markdown");
+        assert_eq!(spec_for_extension("markdown").unwrap().name, "markdown");
+
+        let spec = spec_for_language("markdown").unwrap();
+        let fx = extract_file("doc.md", MD, &spec).unwrap();
+
+        // Every def is a heading; names are exactly the marker-stripped text.
+        assert_eq!(kinds(&fx.defs), ["heading".to_string()], "only heading kind");
+        let mut names: Vec<&str> = fx.defs.iter().map(|n| n.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["A", "B", "C", "D"], "heading names");
+
+        let id = |name: &str| -> String {
+            fx.defs
+                .iter()
+                .find(|n| n.name == name)
+                .unwrap_or_else(|| panic!("no heading {name}; got {names:?}"))
+                .id
+                .clone()
+        };
+        let has = |from: &str, to: &str| {
+            fx.contains.iter().any(|(f, t)| *f == id(from) && *t == id(to))
+        };
+
+        assert!(has("A", "B"), "A⊃B missing; contains={:?}", fx.contains);
+        assert!(has("B", "C"), "B⊃C missing; contains={:?}", fx.contains);
+        assert!(has("A", "D"), "A⊃D missing; contains={:?}", fx.contains);
+        // Section nesting is one level deep, not transitive.
+        assert!(!has("A", "C"), "A must NOT directly contain C; contains={:?}", fx.contains);
+    }
+
+    #[test]
+    fn markdown_links() {
+        // A standard link, an anchored wikilink, an external link, and a link
+        // buried in a fenced code block (which must NOT resolve).
+        const MD: &str = "\
+# Title
+
+See [deploy](./deploy.md) for rollout and [[arch#Overview]] for design.
+External [site](https://example.com) is not a note.
+
+```text
+[incode](./secret.md)
+```
+";
+        let spec = spec_for_language("markdown").unwrap();
+        let fx = extract_file("index.md", MD, &spec).unwrap();
+        let segs: Vec<&str> = fx.imports.iter().map(|(s, _)| s.as_str()).collect();
+
+        // Both link forms are captured, normalized to bare note names.
+        assert!(segs.contains(&"deploy"), "standard link -> deploy; got {segs:?}");
+        assert!(segs.contains(&"arch"), "wikilink -> arch; got {segs:?}");
+
+        // The external https link contributes no import segment.
+        assert!(
+            !segs.iter().any(|s| s.contains("example") || s.contains("http")),
+            "external link must not import; got {segs:?}"
+        );
+        // A link inside a fenced code block is not a cross-doc edge.
+        assert!(!segs.contains(&"secret"), "code-fence link ignored; got {segs:?}");
     }
 
     /// Compare two extracts on every field, in order, so an incremental reparse can

@@ -525,10 +525,12 @@ fn grep_flood_bytes() -> usize {
 }
 
 /// Read routing: a general analysis tip once per session, plus escalation of
-/// code-file reads toward the graph via [`inspect_escalation`]. Only files
+/// code-file reads toward the graph via [`inspect_escalation`]. Only CODE files
 /// the graph indexes ([`crate::discovery::extract::spec_for_extension`]) count
 /// toward escalation — reading a doc/config/data file shouldn't push the agent
-/// at the graph.
+/// at the graph. Markdown is graph-indexed too (headings/links), but it is prose
+/// read linearly, not code navigation, so it is excluded here: reading a doc is
+/// not the manual-code-tracing drift this escalation exists to catch.
 fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if !ctx.level.nudges() {
         return Decision::Passthrough;
@@ -536,7 +538,10 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     let is_code = tool_input["file_path"]
         .as_str()
         .and_then(file_extension)
-        .map(|ext| crate::discovery::extract::spec_for_extension(&ext).is_some())
+        .map(|ext| {
+            crate::discovery::extract::spec_for_extension(&ext)
+                .is_some_and(|s| s.name != "markdown")
+        })
         .unwrap_or(false);
     if is_code {
         if let Some(d) = inspect_escalation(ctx) {

@@ -107,6 +107,10 @@ regex = "1"
 aho-corasick = "1"
 shell-words = "1"
 tree-sitter-swift = "0.6"
+# Markdown as a first-class hand-written grammar (block grammar only): heading
+# symbol nodes + section-nesting `contains` edges. Custom extraction, not the
+# generic defs-query loop (see extract_markdown in src/discovery/extract.rs).
+tree-sitter-md = "0.5"
 # --- Broad language support: tags-adapter grammars (T4-T8). Each wave owns a
 # block; adding these trips bench_fitness G2 (dep_count), refrozen at T10. ---
 tree-sitter-c = "0.24"

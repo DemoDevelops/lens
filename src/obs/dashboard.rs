@@ -208,6 +208,15 @@ fn route(target: &str, dir: &Path, session: Option<&str>) -> (u16, &'static str,
                             })
                             .take(30)
                             .collect();
+                        // grep-scope routing counters are per-repo (bump_stat never
+                        // writes the global home store), so the global view sums them
+                        // across every known project instead of reading the empty home
+                        // store the rest of this snapshot came from.
+                        if query_param(query, "scope") == Some("global") {
+                            let dirs: Vec<PathBuf> =
+                                real.iter().map(|p| Path::new(p).join(".lens")).collect();
+                            v["grep_scope"] = super::stats::grep_scope_aggregate(&dirs);
+                        }
                         v["projects"] = serde_json::json!(real);
                     }
                 }

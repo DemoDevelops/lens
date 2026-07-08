@@ -1315,6 +1315,7 @@ const BLOCK_HEAD: &str = r##"<context_window_protection>
     - You know the symbol's exact name: lens_symbol. You only know what it does, not its name: lens_find. You have a syntax-shape pattern (a call, a signature shape) rather than a name or plain-text idea: lens_grep_ast.
     - Whole-repo orientation — how the codebase is put together before you've read anything: lens_overview. A digest is already pushed into context at session start; treat that as the first call's answer and expand from it with lens_symbol / lens_links rather than re-running lens_overview.
     - One file's shape — signatures and structure without the bodies: lens_skeleton(path); pass include_bodies: ["the_fn"] to get back the full text of just the functions you need, in the same call.
+    - Worked examples: `lens_grep_ast(language="rust", query="(impl_item type: (type_identifier) @t (#eq? @t \"Forge\"))")` finds all impl blocks matching a syntax shape, not text. `lens_find(query="where sessions are persisted")` locates a symbol when you know its behavior but not its name. `lens_links(node_id)` shows all callers and callees before you change a declaration. `lens_path(from="route_inner", to="bump_stat")` traces how one symbol reaches another.
   </which_tool>
   <when_plain_tools_win>"##;
 

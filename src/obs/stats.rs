@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use super::{data_dir, OpRecord};
+use super::{credit, data_dir, OpRecord};
 use crate::session::store::SessionStore;
 use crate::store::Store;
 
@@ -107,13 +107,33 @@ pub struct Totals {
 
 /// Aggregate a slice of records into [`Totals`]. Pure — the reconciliation test
 /// drives this directly.
+///
+/// Savings are recomputed per record via the shared classifier rather than
+/// trusting the frozen `tokens_saved_est` on the record — this retroactively
+/// reclassifies history (old log lines lack `credit_class`, but `tool` +
+/// `input_summary` + `raw_bytes_in` are always present, so recomputation works
+/// on old records too). `raw_bytes_in`/`bytes_returned`/op counts/offloaded
+/// bytes stay true measured bytes, unaffected by classification.
 pub fn aggregate(records: &[OpRecord]) -> Totals {
     let mut t = Totals::default();
     for r in records {
         t.ops += 1;
         t.raw_bytes_in += r.raw_bytes_in;
         t.bytes_returned += r.bytes_returned;
-        t.tokens_saved_est += r.tokens_saved_est;
+        // `rtk_shell` carries RTK's own measured savings figure (synced from
+        // `rtk gain`, `raw_bytes_in`/`bytes_returned` both 0 by design — see
+        // `rtk::gain::sync`), not a darkroom byte delta the classifier can
+        // reconstruct; trust it as-is rather than recomputing to 0.
+        let saved = if r.tool == "rtk_shell" {
+            r.tokens_saved_est
+        } else {
+            let credited = credit::credited_raw(
+                credit::classify(&r.tool, &r.input_summary, r.raw_bytes_in),
+                r.raw_bytes_in,
+            );
+            ((credited as i64 - r.bytes_returned as i64).max(0)) / 4
+        };
+        t.tokens_saved_est += saved;
         t.lock_wait_ms += r.lock_wait_ms;
         if r.outcome == "error" {
             t.errors += 1;
@@ -129,7 +149,7 @@ pub fn aggregate(records: &[OpRecord]) -> Totals {
         agg.count += 1;
         agg.raw += r.raw_bytes_in;
         agg.returned += r.bytes_returned;
-        agg.saved += r.tokens_saved_est;
+        agg.saved += saved;
         if r.outcome == "error" {
             agg.errors += 1;
         }
@@ -260,6 +280,7 @@ fn store_index_graph(dir: &Path) -> (u64, i64, i64, i64) {
 /// add its key here, then both renderers (or the tripwire fails).
 pub const SNAPSHOT_DIMENSIONS: &[&str] = &[
     "tokens_saved_mcp",
+    "tokens_saved_measured_floor",
     "by_tool",
     "by_mechanism",
     "applied_value",
@@ -471,6 +492,7 @@ pub fn snapshot_json_since(
         "bytes_returned": t.bytes_returned,
         "tokens_saved_est": t.tokens_saved_est,
         "tokens_saved_mcp": tokens_saved_mcp,
+        "tokens_saved_measured_floor": (t.offloaded_bytes as i64) / 4,
         "saved_buckets": saved_buckets,
         "bytes_buckets": bytes_buckets,
         "event_buckets": event_buckets,
@@ -690,20 +712,79 @@ mod tests {
             .finish(50, 50, None, "ok", "", None);
         log.start("lens_run", json!({}))
             .finish(0, 0, None, "error", "boom", None);
+        // Volunteered op: a `.log` file handed to the darkroom to crunch, not
+        // intercepted context — must reconcile to the floored credit
+        // `(min(raw, 32768) - returned) / 4`, not the raw byte delta.
+        let vol_raw = 5 * 1024 * 1024u64;
+        let vol_returned = 200u64;
+        log.start("lens_run_file", json!({"path": "x.log"}))
+            .finish(vol_raw, vol_returned, None, "ok", "", None);
 
         let records = read_records(dir.path(), None);
         let t = aggregate(&records);
-        assert_eq!(t.ops, 3);
-        assert_eq!(t.raw_bytes_in, 8050);
-        assert_eq!(t.bytes_returned, 150);
-        assert_eq!(t.tokens_saved_est, (8000 - 100) / 4);
+        assert_eq!(t.ops, 4);
+        assert_eq!(t.raw_bytes_in, 8050 + vol_raw);
+        assert_eq!(t.bytes_returned, 150 + vol_returned);
+        assert_eq!(
+            t.tokens_saved_est,
+            (8000 - 100) / 4 + (32_768i64 - vol_returned as i64) / 4
+        );
         assert_eq!(t.errors, 1);
         assert_eq!(t.offloaded_ops, 1);
         assert_eq!(t.offloaded_bytes, 7900);
         assert_eq!(t.by_tool["lens_run"].count, 2);
-        // Sum of per-record returned bytes matches the aggregate exactly.
+        // Sum of per-record returned bytes matches the aggregate exactly (true
+        // bytes, unaffected by credit classification).
         let summed: u64 = records.iter().map(|r| r.bytes_returned).sum();
         assert_eq!(summed, t.bytes_returned);
+    }
+
+    /// `aggregate()` recomputes savings from `tool` + `input_summary` +
+    /// `raw_bytes_in` rather than trusting the frozen `tokens_saved_est` on the
+    /// record — the retroactive-reclassification path history relies on: old
+    /// log lines carry a stale (uncapped) `tokens_saved_est` and an empty
+    /// `credit_class` (as they would have been written before the classifier
+    /// existed), yet the aggregate still comes out floored.
+    #[test]
+    fn aggregate_recomputes_volunteered_floor() {
+        let make = |tool: &str, path: &str, raw: u64, returned: u64| OpRecord {
+            ts: super::super::iso8601_now(),
+            session_id: None,
+            agent_id: "test".into(),
+            pid: std::process::id(),
+            tool: tool.into(),
+            input_summary: json!({"path": path}),
+            raw_bytes_in: raw,
+            bytes_returned: returned,
+            // Stale: the raw byte delta, uncapped — what a pre-classifier log
+            // line would carry. aggregate() must not trust this.
+            tokens_saved_est: (raw as i64 - returned as i64) / 4,
+            credit_class: String::new(),
+            store_ref: None,
+            duration_ms: 0,
+            lock_wait_ms: 0,
+            outcome: "ok".into(),
+            note: String::new(),
+        };
+
+        let full_raw = 500_000u64;
+        let full_returned = 100u64;
+        let vol_raw = 5 * 1024 * 1024u64;
+        let vol_returned = 200u64;
+        let records = vec![
+            make("lens_run_file", "src/main.rs", full_raw, full_returned),
+            make("lens_run_file", "ops.log", vol_raw, vol_returned),
+        ];
+
+        let t = aggregate(&records);
+        let full_credit = (full_raw as i64 - full_returned as i64) / 4;
+        let vol_credit = (32_768i64 - vol_returned as i64) / 4;
+        assert_eq!(t.tokens_saved_est, full_credit + vol_credit);
+        assert_eq!(t.by_tool["lens_run_file"].saved, full_credit + vol_credit);
+
+        // Not the raw sum the stale per-record fields were primed with.
+        let raw_sum: i64 = records.iter().map(|r| r.tokens_saved_est).sum();
+        assert_ne!(t.tokens_saved_est, raw_sum);
     }
 
     #[test]
@@ -781,6 +862,7 @@ esac
             raw_bytes_in: 0,
             bytes_returned: 0,
             tokens_saved_est: 60,
+            credit_class: "neutral".into(),
             store_ref: None,
             duration_ms: 0,
             lock_wait_ms: 0,
@@ -900,6 +982,38 @@ esac
         let t = aggregate(&read_records(dir.path(), None));
         assert_eq!(snap["tokens_saved_est"], json!(t.tokens_saved_est));
         assert_eq!(snap["tokens_saved_mcp"], json!(t.tokens_saved_est)); // no rtk_shell op here
+    }
+
+    /// `snapshot_json` must surface both the measured floor (bytes provably moved to
+    /// the store via offload, converted to tokens) and the classified estimate
+    /// (the honest post-classifier total) for a mixed fixture ledger: one full-credit
+    /// source op and one volunteered/floored `.log` op, both offloaded.
+    #[test]
+    fn snapshot_carries_measured_floor_and_classified() {
+        let dir = tempdir().unwrap();
+        let log = OpLog::open(dir.path());
+
+        let full_raw = 500_000u64;
+        let full_returned = 100u64;
+        log.start("lens_run_file", json!({"path": "src/main.rs"}))
+            .finish(full_raw, full_returned, Some("blob1".into()), "ok", "", None);
+
+        let vol_raw = 5 * 1024 * 1024u64;
+        let vol_returned = 200u64;
+        log.start("lens_run_file", json!({"path": "x.log"}))
+            .finish(vol_raw, vol_returned, Some("blob2".into()), "ok", "", None);
+
+        let snap = snapshot_json(dir.path(), None);
+
+        let full_credit = (full_raw as i64 - full_returned as i64) / 4;
+        let vol_credit = (32_768i64 - vol_returned as i64) / 4;
+        assert_eq!(snap["tokens_saved_est"], json!(full_credit + vol_credit));
+
+        let offloaded_bytes = (full_raw - full_returned) + (vol_raw - vol_returned);
+        assert_eq!(
+            snap["tokens_saved_measured_floor"],
+            json!((offloaded_bytes as i64) / 4)
+        );
     }
 
     #[test]

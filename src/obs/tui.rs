@@ -86,6 +86,7 @@ pub fn render_snapshot(snap: &Value, width: u16, color: Theme, rate: f64, rt_sec
 /// estimate, matching the web `$` headline at steady state.
 fn header(snap: &Value, w: usize, mini: bool, color: Theme, rate: f64) -> String {
     let saved = saved_mcp(snap);
+    let floor = saved_measured_floor(snap);
     let dollars = saved as f64 * rate / 1_000_000.0;
     let money = if dollars >= 1.0 {
         format!("${dollars:.2}")
@@ -96,8 +97,9 @@ fn header(snap: &Value, w: usize, mini: bool, color: Theme, rate: f64) -> String
     };
     let title = bold(&gold("lens", color), color);
     let head = format!(
-        "{title}  {} saved · {} tok",
+        "{title}  {} saved · {} measured · ~{} classified tok",
         bold(&gold(&money, color), color),
+        human_count(floor),
         human_count(saved)
     );
     let ops = geti(snap, "ops");
@@ -461,6 +463,15 @@ fn saved_mcp(snap: &Value) -> u64 {
     snap.get("tokens_saved_mcp")
         .and_then(|v| v.as_i64())
         .or_else(|| snap.get("tokens_saved_est").and_then(|v| v.as_i64()))
+        .unwrap_or(0)
+        .max(0) as u64
+}
+/// The measured floor: bytes provably kept out of context via store-offload,
+/// converted to tokens the same way `tokens_saved_est` is — a hard fact, not a
+/// classified estimate.
+fn saved_measured_floor(snap: &Value) -> u64 {
+    snap.get("tokens_saved_measured_floor")
+        .and_then(|v| v.as_i64())
         .unwrap_or(0)
         .max(0) as u64
 }

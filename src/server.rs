@@ -253,9 +253,18 @@ impl Forge {
             "lens_run",
             serde_json::json!({ "language": req.language, "code_bytes": req.code.len() }),
         );
+        // Piped stdin never enters context either (the whole point of `lens_run`
+        // over pasting data inline); credit it like a volunteered op, capped at
+        // the plausible-slice floor since stdin has no path/extension for the
+        // classifier to reason about. A no-stdin run that reads files inline
+        // stays uncredited by design (raw_in == returned).
+        let stdin_credit = req
+            .stdin
+            .as_ref()
+            .map_or(0u64, |s| (s.len() as u64).min(obs::credit::vol_floor()));
         match darkroom::run(req, &self.repo_dir, &self.store, self.max_inline).await {
             Ok(resp) => {
-                let raw_in = resp.stdout_bytes as u64;
+                let raw_in = resp.stdout_bytes as u64 + stdin_credit;
                 let returned = (resp.stdout.len() + resp.stderr.len()) as u64;
                 let outcome = if resp.timed_out { "timed_out" } else { "ok" };
                 let note = if resp.timed_out {
@@ -1491,6 +1500,64 @@ mod tests {
             .await;
         let after = Graph::load(&f.graph_file()).unwrap().nodes.len();
         assert_eq!(after, before, "graph must not be clobbered by a bad path");
+    }
+
+    /// Piped `stdin` never enters context, so `lens_run` must credit it (floor-capped)
+    /// toward `tokens_saved_est`, on top of the existing stdout-offload credit.
+    #[tokio::test]
+    async fn lens_run_credits_piped_stdin_floor_capped() {
+        let (f, _dir) = forge(8192);
+        let stdin = "x".repeat(40 * 1024);
+        f.lens_run(Parameters(ExecuteRequest {
+            language: "bash".into(),
+            code: "echo hi".into(),
+            timeout_secs: 30,
+            stdin: Some(stdin),
+        }))
+        .await
+        .unwrap();
+
+        let rec = last_op_record(&f);
+        assert_eq!(rec.tool, "lens_run");
+        // raw_bytes_in = stdout_bytes + min(stdin_len, vol_floor()); "echo hi" produces
+        // a tiny, untruncated stdout with no stderr, so bytes_returned == stdout_bytes
+        // and cancels out of the savings formula, leaving exactly the floor-capped
+        // stdin credit — proving the 40 KB stdin was capped, not credited in full.
+        let vol_floor = obs::credit::vol_floor();
+        assert_eq!(
+            rec.raw_bytes_in,
+            rec.bytes_returned + vol_floor.min(40 * 1024),
+            "stdin credit must floor-cap at vol_floor(), not the full 40 KB"
+        );
+        let expected = ((rec.raw_bytes_in as i64 - rec.bytes_returned as i64).max(0)) / 4;
+        assert_eq!(rec.tokens_saved_est, expected);
+    }
+
+    /// A no-stdin `lens_run` that reads files inline stays uncredited by design
+    /// (raw_in == returned, since the darkroom never sees data lens didn't already
+    /// hand it).
+    #[tokio::test]
+    async fn lens_run_no_stdin_records_zero_savings() {
+        let (f, _dir) = forge(8192);
+        f.lens_run(Parameters(ExecuteRequest {
+            language: "bash".into(),
+            code: "echo hi".into(),
+            timeout_secs: 30,
+            stdin: None,
+        }))
+        .await
+        .unwrap();
+
+        let rec = last_op_record(&f);
+        assert_eq!(rec.tool, "lens_run");
+        assert_eq!(rec.tokens_saved_est, 0);
+    }
+
+    /// Read back the most recently appended `OpRecord` from this Forge's `ops.log`.
+    fn last_op_record(f: &Forge) -> obs::OpRecord {
+        let raw = std::fs::read_to_string(f.data_dir.join("ops.log")).unwrap();
+        let last = raw.lines().last().expect("at least one op recorded");
+        serde_json::from_str(last).unwrap()
     }
 
     #[tokio::test]

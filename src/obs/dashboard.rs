@@ -750,6 +750,7 @@ async function tick(){
   document.getElementById('status').textContent=(sl?sl+' · ':'')+winLabel()+(d.session?(' · '+d.session):'')+' · '+(d.activity&&d.activity.sessions||0)+' session(s)';
 
   const savedMcp=(d.tokens_saved_mcp!==undefined?d.tokens_saved_mcp:d.tokens_saved_est);
+  const measuredFloor=d.tokens_saved_measured_floor||0;
   // Windowed sparklines: the backend buckets the selected window [since, now];
   // diff the cumulative buckets for per-bucket throughput, and divide the window
   // total by window-minutes for the rate label.
@@ -815,11 +816,11 @@ async function tick(){
       `<span>saved <b>${humanCount(dSaved)}</b>tok</span>`+
       `<span>avg <b>${pct.toFixed(1)}%</b></span>`+
       `<span class="dim2">since opened</span>`;
-    document.getElementById('savedTop').textContent='≈ '+humanCount((d.tokens_saved_mcp||0)+dSaved)+' tok';
+    document.getElementById('savedTop').textContent=humanCount(measuredFloor)+' measured · ~'+humanCount((d.tokens_saved_mcp||0)+dSaved)+' classified';
     savedTotal=(d.tokens_saved_mcp||0)+dSaved; renderCost();
   } else {
     document.getElementById('rtkCards').innerHTML='<span class="dim2">not installed — run lens rtk install</span>';
-    document.getElementById('savedTop').textContent='≈ '+humanCount(savedMcp)+' tok';
+    document.getElementById('savedTop').textContent=humanCount(measuredFloor)+' measured · ~'+humanCount(savedMcp)+' classified';
     savedTotal=savedMcp; renderCost();
   }
 

@@ -99,6 +99,7 @@ pub fn sync() -> Result<()> {
         bytes_returned: 0,
         // RTK's OWN delta — do not divide by 4 / re-estimate.
         tokens_saved_est: delta_saved,
+        credit_class: "neutral".into(),
         store_ref: None,
         duration_ms: 0,
         lock_wait_ms: 0,

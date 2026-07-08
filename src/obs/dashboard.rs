@@ -208,6 +208,15 @@ fn route(target: &str, dir: &Path, session: Option<&str>) -> (u16, &'static str,
                             })
                             .take(30)
                             .collect();
+                        // grep-scope routing counters are per-repo (bump_stat never
+                        // writes the global home store), so the global view sums them
+                        // across every known project instead of reading the empty home
+                        // store the rest of this snapshot came from.
+                        if query_param(query, "scope") == Some("global") {
+                            let dirs: Vec<PathBuf> =
+                                real.iter().map(|p| Path::new(p).join(".lens")).collect();
+                            v["grep_scope"] = super::stats::grep_scope_aggregate(&dirs);
+                        }
                         v["projects"] = serde_json::json!(real);
                     }
                 }
@@ -447,6 +456,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <div class="panel"><h2>by mechanism</h2><div class="mech" id="byMech"></div></div>
     <div class="panel"><h2>RTK shell savings</h2><div class="mech" id="rtkCards"></div></div>
   </div>
+  <div class="seclabel"><b>grep-scope deny</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="gsMode">—</span></div>
+  <div class="panel"><div class="mech" id="grepScope"></div></div>
   <div class="seclabel"><b>applied value</b> &middot; benchmark rates &times; your live ops &middot; <span id="avNote">estimated, not measured this session</span></div>
   <div class="panel"><div class="av" id="appliedValue"></div></div>
   <div class="seclabel"><b>session activity</b> &middot; built-in tools (Read / Edit / Bash) via hooks &middot; not token savings</div>
@@ -811,6 +822,29 @@ async function tick(){
     document.getElementById('savedTop').textContent='≈ '+humanCount(savedMcp)+' tok';
     savedTotal=savedMcp; renderCost();
   }
+
+  // Grep-scope deny plane: cumulative store counters (not windowed). Classification
+  // of greps seen + what tool ran right after a would-deny. Shows deny_next_* once
+  // the deny fires (flag on), else the shadow_next_* proxy. The stage-3 go signal is
+  // the lens share of the follow-up (target >=55%, shellgrep <25%).
+  const gs=d.grep_scope||{}, sn=gs.shadow_next||{}, dn=gs.deny_next||{};
+  const sum=o=>(o.lens||0)+(o.grep||0)+(o.shellgrep||0)+(o.other||0);
+  const denyTot=sum(dn), nx=denyTot>0?dn:sn, nxTot=denyTot>0?denyTot:sum(sn);
+  const pct=n=>nxTot>0?Math.round((n||0)/nxTot*100)+'%':'—';
+  document.getElementById('gsMode').textContent=denyTot>0?'flag ON · deny firing':'shadow · flag off';
+  document.getElementById('grepScope').innerHTML=
+    `<span>broad <b>${gs.broad||0}</b></span>`+
+    `<span>single <b>${gs.single||0}</b></span>`+
+    `<span>unknown <b>${gs.unknown||0}</b></span>`+
+    `<span>would-deny <b>${gs.would_deny||0}</b></span>`+
+    `<span class="dim2">|</span>`+
+    `<span>next&rarr;lens <b>${nx.lens||0}</b></span>`+
+    `<span>grep <b>${nx.grep||0}</b></span>`+
+    `<span>shellgrep <b>${nx.shellgrep||0}</b></span>`+
+    `<span>other <b>${nx.other||0}</b></span>`+
+    `<span class="dim2">|</span>`+
+    `<span>adoption <b>${pct(nx.lens)}</b> <span class="dim2">go&ge;55%</span></span>`+
+    `<span>shellgrep <b>${pct(nx.shellgrep)}</b> <span class="dim2">go&lt;25%</span></span>`;
 
   // Applied value — benchmark per-op rates × your live op counts. Estimates only;
   // never folded into savedTotal / the $ headline. Time = round-trips × RT_SECONDS.

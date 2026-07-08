@@ -73,6 +73,7 @@ pub fn render_snapshot(snap: &Value, width: u16, color: Theme, rate: f64, rt_sec
     section("TOOLS", tool_table(snap, inner, mini, color), &mut out);
     section("BY MECHANISM", mechanism_lines(snap, inner, color), &mut out);
     section("RTK SHELL", rtk_lines(snap, inner, color), &mut out);
+    section("GREP-SCOPE DENY", grep_scope_lines(snap, inner, color), &mut out);
     section("SESSION ACTIVITY", activity_lines(snap, inner, color), &mut out);
     section("APPLIED VALUE", applied_value_lines(snap, rt_seconds, color), &mut out);
     out.push_str(&footer(snap, w, color));
@@ -295,6 +296,38 @@ fn rtk_lines(snap: &Value, _inner: usize, _color: Theme) -> Vec<String> {
     } else {
         vec!["not installed — run `lens rtk install`".to_string()]
     }
+}
+
+/// Grep-scope deny plane (dark-launch decision aid): cumulative store counters, not
+/// windowed. Classifies greps seen (broad/single/unknown) + `would-deny`, then what
+/// tool ran right after a would-deny — `deny_next_*` once the deny fires, else the
+/// `shadow_next_*` proxy. The stage-3 go signal is the lens share of the follow-up
+/// (target ≥55%, shellgrep <25%).
+fn grep_scope_lines(snap: &Value, inner: usize, _color: Theme) -> Vec<String> {
+    let gs = &snap["grep_scope"];
+    let gi = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    let sum = |v: &Value| gi(v, "lens") + gi(v, "grep") + gi(v, "shellgrep") + gi(v, "other");
+    let deny_tot = sum(&gs["deny_next"]);
+    let (nx, nx_tot, mode) = if deny_tot > 0 {
+        (&gs["deny_next"], deny_tot, "flag ON")
+    } else {
+        (&gs["shadow_next"], sum(&gs["shadow_next"]), "shadow")
+    };
+    let pct = |n: i64| if nx_tot > 0 { format!("{}%", n * 100 / nx_tot) } else { "—".to_string() };
+    let items = vec![
+        format!("mode {mode}"),
+        format!("broad {}", gi(gs, "broad")),
+        format!("single {}", gi(gs, "single")),
+        format!("unknown {}", gi(gs, "unknown")),
+        format!("would-deny {}", gi(gs, "would_deny")),
+        format!("next→lens {}", gi(nx, "lens")),
+        format!("grep {}", gi(nx, "grep")),
+        format!("shellgrep {}", gi(nx, "shellgrep")),
+        format!("other {}", gi(nx, "other")),
+        format!("adoption {} (go ≥55%)", pct(gi(nx, "lens"))),
+        format!("shellgrep {} (go <25%)", pct(gi(nx, "shellgrep"))),
+    ];
+    flow(&items, inner, " · ")
 }
 
 /// Session activity (built-in tools via hooks) + an event sparkline + categories.

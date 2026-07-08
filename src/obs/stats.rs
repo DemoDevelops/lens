@@ -265,8 +265,60 @@ pub const SNAPSHOT_DIMENSIONS: &[&str] = &[
     "applied_value",
     "rtk",
     "activity",
+    "grep_scope",
     "store_size",
 ];
+
+/// The flat grep-scope routing counters, in a stable order. The routing hook
+/// writes these per-repo (`bump_stat` into `<repo>/.lens/store.db`), never a global
+/// mirror, so both the per-repo `grep_scope` block and the global cross-repo view
+/// read exactly these keys.
+const GREP_SCOPE_KEYS: &[&str] = &[
+    "grep_scope_single",
+    "grep_scope_broad",
+    "grep_scope_unknown",
+    "grep_scope_would_deny",
+    "shadow_next_lens",
+    "shadow_next_grep",
+    "shadow_next_shellgrep",
+    "shadow_next_other",
+    "deny_next_lens",
+    "deny_next_grep",
+    "deny_next_shellgrep",
+    "deny_next_other",
+];
+
+/// Build the `grep_scope` snapshot block by summing the routing counters across
+/// `dirs`: one dir for a single repo, every project's `.lens` for the global view.
+/// Missing store / absent key reads as 0. `single/broad/unknown` classify greps
+/// seen; `would_deny` counts broad greps that hit the gate; the `*_next` blocks
+/// record what tool ran right after a would-deny (`deny_next_*` once the deny
+/// fires, `shadow_next_*` while it is only shadow-counted).
+pub fn grep_scope_aggregate(dirs: &[PathBuf]) -> serde_json::Value {
+    let mut sum: BTreeMap<&str, i64> = GREP_SCOPE_KEYS.iter().map(|k| (*k, 0)).collect();
+    for dir in dirs {
+        if let Ok(store) = Store::open(dir) {
+            for k in GREP_SCOPE_KEYS {
+                *sum.get_mut(k).unwrap() += store.get_stat(k).unwrap_or(0);
+            }
+        }
+    }
+    let g = |k: &str| sum[k];
+    serde_json::json!({
+        "single": g("grep_scope_single"),
+        "broad": g("grep_scope_broad"),
+        "unknown": g("grep_scope_unknown"),
+        "would_deny": g("grep_scope_would_deny"),
+        "shadow_next": {
+            "lens": g("shadow_next_lens"), "grep": g("shadow_next_grep"),
+            "shellgrep": g("shadow_next_shellgrep"), "other": g("shadow_next_other"),
+        },
+        "deny_next": {
+            "lens": g("deny_next_lens"), "grep": g("deny_next_grep"),
+            "shellgrep": g("deny_next_shellgrep"), "other": g("deny_next_other"),
+        },
+    })
+}
 
 /// Aggregate `ops.log` (optionally scoped to a session) into a JSON snapshot —
 /// the shape the web dashboard polls. Cumulative; rate/throughput is the client's
@@ -407,6 +459,11 @@ pub fn snapshot_json_since(
             .unwrap_or_else(|_| vec![0i64; BUCKETS]),
     );
 
+    // Grep-scope deny plane (dark-launch decision aid): the routing counters for this
+    // one data dir. Cumulative, not windowed. The global scope re-aggregates across
+    // every repo in the dashboard route (the counters are per-repo, never mirrored).
+    let grep_scope = grep_scope_aggregate(std::slice::from_ref(&dir.to_path_buf()));
+
     serde_json::json!({
         "ts": super::iso8601_now(),
         "ops": t.ops,
@@ -428,6 +485,7 @@ pub fn snapshot_json_since(
         "by_mechanism": by_mechanism,
         "applied_value": applied_value,
         "rtk": rtk_snapshot(),
+        "grep_scope": grep_scope,
         "store_size": store_size,
         "index_chunks": index_chunks,
         "graph_nodes": graph_nodes,
@@ -856,5 +914,34 @@ esac
         for key in SNAPSHOT_DIMENSIONS {
             assert!(snap.get(*key).is_some(), "snapshot missing dimension key '{key}'");
         }
+    }
+
+    #[test]
+    fn grep_scope_aggregate_sums_across_repos() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let sa = Store::open(a.path()).unwrap();
+        sa.bump_stat("grep_scope_broad", 3).unwrap();
+        sa.bump_stat("deny_next_lens", 2).unwrap();
+        let sb = Store::open(b.path()).unwrap();
+        sb.bump_stat("grep_scope_broad", 4).unwrap();
+        sb.bump_stat("deny_next_shellgrep", 1).unwrap();
+
+        // One dir = that repo alone.
+        let solo = grep_scope_aggregate(&[a.path().to_path_buf()]);
+        assert_eq!(solo["broad"], json!(3));
+        assert_eq!(solo["deny_next"]["lens"], json!(2));
+
+        // Many dirs (the global view) = the cross-repo sum; missing keys read 0.
+        let all = grep_scope_aggregate(&[a.path().to_path_buf(), b.path().to_path_buf()]);
+        assert_eq!(all["broad"], json!(7));
+        assert_eq!(all["deny_next"]["lens"], json!(2));
+        assert_eq!(all["deny_next"]["shellgrep"], json!(1));
+        assert_eq!(all["single"], json!(0));
+
+        // Absent store contributes nothing (no panic).
+        let missing = tempdir().unwrap();
+        let none = grep_scope_aggregate(&[missing.path().join("nope")]);
+        assert_eq!(none["broad"], json!(0));
     }
 }

@@ -187,12 +187,85 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             }
             let tool = input.tool_name.clone().unwrap_or_default();
             let ti = input.tool_input.clone().unwrap_or(json!({}));
+            let mcp_ready = routing::mcp_ready(&data_dir);
+
+            // Follower proxy, for EVERY tool: consume a pending shadow/deny
+            // marker armed by the PREVIOUS Grep's scope check below (the
+            // compliant next step after a grep-scope deny/shadow may be any
+            // tool, not just another Grep). Classed on the CURRENT tool so
+            // the counters show what actually ran next. `take` zeroes the
+            // marker on read, so this fires at most once per arm.
+            let is_lens_toolsearch = tool == "ToolSearch"
+                && ti
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .is_some_and(|q| q.contains("lens"));
+            let class = if tool.starts_with("mcp__lens__") || is_lens_toolsearch {
+                "lens"
+            } else if tool == "Grep" {
+                "grep"
+            } else if tool == "Bash"
+                && ti.get("command").and_then(Value::as_str).is_some_and(|c| {
+                    c.split_whitespace()
+                        .any(|t| matches!(t, "grep" | "egrep" | "rg"))
+                })
+            {
+                "shellgrep"
+            } else {
+                "other"
+            };
+            let shadow_pending =
+                routing::throttle::take(&data_dir, &session_id, "scope-shadow-pending");
+            let deny_pending =
+                routing::throttle::take(&data_dir, &session_id, "scope-deny-pending");
+            let stats_store = crate::store::Store::open(&data_dir).ok();
+            if shadow_pending {
+                if let Some(s) = &stats_store {
+                    let _ = s.bump_stat(&format!("shadow_next_{class}"), 1);
+                }
+            }
+            if deny_pending {
+                if let Some(s) = &stats_store {
+                    let _ = s.bump_stat(&format!("deny_next_{class}"), 1);
+                }
+            }
+
+            // Grep-scope shadow counters: classify this Grep's path scope, and
+            // on a broad scope that would trip the deny gate, arm the marker
+            // the follower proxy above consumes on the NEXT tool call.
+            if tool == "Grep" {
+                let scope = routing::grep_scope(ti.get("path").and_then(Value::as_str));
+                if let Some(s) = &stats_store {
+                    let key = match scope {
+                        routing::GrepScope::SingleFile => "grep_scope_single",
+                        routing::GrepScope::Broad => "grep_scope_broad",
+                        routing::GrepScope::Unknown => "grep_scope_unknown",
+                    };
+                    let _ = s.bump_stat(key, 1);
+                }
+                if scope == routing::GrepScope::Broad
+                    && level.steers()
+                    && mcp_ready
+                    && routing::index_present(&data_dir)
+                {
+                    if let Some(s) = &stats_store {
+                        let _ = s.bump_stat("grep_scope_would_deny", 1);
+                    }
+                    let pending_key = if routing::grep_scope_deny_enabled() {
+                        "scope-deny-pending"
+                    } else {
+                        "scope-shadow-pending"
+                    };
+                    routing::throttle::bump(&data_dir, &session_id, pending_key);
+                }
+            }
+
             let bin = std::env::current_exe()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| "lens".to_string());
             let rc = routing::RouteCtx {
                 level,
-                mcp_ready: routing::mcp_ready(&data_dir),
+                mcp_ready,
                 bin: &bin,
                 data_dir: &data_dir,
                 session_id: &session_id,
@@ -221,9 +294,11 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 .is_some_and(|server| server.contains("lens"));
             if is_lens || matches!(tool.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
                 routing::throttle::reset(&data_dir, &session_id, "read-code");
-                // Also disarm the first-Grep deny: a lens call answered the
-                // find/trace question, so a follow-up Grep is no longer drift.
+                // Also disarm the first-Grep and grep-scope denies: a lens call
+                // answered the find/trace question, so a follow-up Grep is no
+                // longer drift.
                 routing::throttle::reset(&data_dir, &session_id, "grep-first");
+                routing::throttle::reset(&data_dir, &session_id, "grep-scope");
             }
             // An edit that invalidates stored lens snapshots of the file gets a
             // one-line supersession notice (once per session+file). Fires at every
@@ -265,12 +340,23 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 let raws = extract::extract_user_events(&prompt);
                 let events = attribute(raws, &session_id, &project_str, ts, "UserPromptSubmit");
                 store.insert_events(&events)?;
+                let level = routing::Level::from_env();
+                // Arm the grep-scope deny for this prompt when the dark-launch
+                // flag is on: a broad Grep becomes deniable regardless of
+                // whether the prompt itself reads as find/trace-shaped (unlike
+                // grep-first, grep-scope is gated on the call's scope, not the
+                // prompt's phrasing, so it must arm independently of the
+                // find/trace branch below). `bump` just increments; the Grep
+                // arm's `take` zeroes the whole count in one shot, so repeated
+                // arming per prompt can't stack denies.
+                if level.steers() && routing::grep_scope_deny_enabled() {
+                    routing::throttle::bump(&data_dir, &session_id, "grep-scope");
+                }
                 // Find/trace prompts get the tool mapping injected HERE, at the
                 // decision point: first-tool choice is made from what's in
                 // context before the first call, which PreToolUse nudges are
                 // too late for (measured: find/trace tasks stayed Grep-first
                 // on SessionStart steering alone).
-                let level = routing::Level::from_env();
                 if level.nudges() && routing::prompt_wants_find_trace(&prompt) {
                     // Arm the one-shot first-Grep deny for this prompt (the
                     // Grep arm in `routing::route_inner` consumes it; any

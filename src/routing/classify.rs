@@ -204,6 +204,33 @@ pub fn is_structurally_bounded(cmd: &str) -> bool {
     classify(cmd) == Risk::Safe
 }
 
+/// Scope of a Grep call's `path` input, feeding the grep-scope deny gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrepScope {
+    /// `path` stats to a single file: a targeted lookup, never denied.
+    SingleFile,
+    /// No `path` (repo-wide), or `path` stats to a directory.
+    Broad,
+    /// `path` set but its metadata is unreadable (ENOENT, permission error, …).
+    /// Passthrough bias: ambiguity never counts as [`GrepScope::Broad`].
+    Unknown,
+}
+
+/// Classify a Grep call's `path` input: `None` (repo-wide search) => Broad; a
+/// real file => SingleFile; a real directory => Broad; anything unreadable
+/// (ENOENT, permission error, …) => Unknown. Exactly one `metadata` syscall,
+/// no other I/O.
+pub fn grep_scope(path: Option<&str>) -> GrepScope {
+    let Some(p) = path else {
+        return GrepScope::Broad;
+    };
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_file() => GrepScope::SingleFile,
+        Ok(_) => GrepScope::Broad,
+        Err(_) => GrepScope::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +331,37 @@ mod tests {
         assert_eq!(classify("git log -20 --oneline"), Risk::Safe);
         assert_eq!(classify("git log --oneline"), Risk::Warn);
         assert_eq!(classify("git log"), Risk::Warn);
+    }
+
+    // ── grep_scope ───────────────────────────────────────────────────────
+    use tempfile::tempdir;
+
+    #[test]
+    fn grep_scope_none_is_broad() {
+        assert_eq!(grep_scope(None), GrepScope::Broad);
+    }
+
+    #[test]
+    fn grep_scope_real_file_is_single_file() {
+        let d = tempdir().unwrap();
+        let f = d.path().join("a.rs");
+        std::fs::write(&f, "").unwrap();
+        assert_eq!(grep_scope(Some(f.to_str().unwrap())), GrepScope::SingleFile);
+    }
+
+    #[test]
+    fn grep_scope_real_dir_is_broad() {
+        let d = tempdir().unwrap();
+        assert_eq!(grep_scope(Some(d.path().to_str().unwrap())), GrepScope::Broad);
+    }
+
+    #[test]
+    fn grep_scope_nonexistent_path_is_unknown() {
+        let d = tempdir().unwrap();
+        let missing = d.path().join("nope.rs");
+        assert_eq!(
+            grep_scope(Some(missing.to_str().unwrap())),
+            GrepScope::Unknown
+        );
     }
 }

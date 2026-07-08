@@ -18,6 +18,21 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_lens")
 }
 
+/// Seed a populated `index.db` in `data_dir` so `routing::index_present` returns
+/// true. The armed-Grep deny gate (grep-first and grep-scope) only fires against
+/// a populated index — the Tantivy-era `file_manifest` manifest table — so a test
+/// that drives the real binary and asserts an armed deny must first make its
+/// tempdir look like a real indexed repo (the in-crate `seed_index` fixture is
+/// `#[cfg(test)]` and unreachable from this integration crate).
+fn seed_index(data_dir: &Path) {
+    let conn = rusqlite::Connection::open(data_dir.join("index.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS file_manifest(path TEXT PRIMARY KEY, mtime INTEGER NOT NULL);
+         INSERT OR REPLACE INTO file_manifest(path, mtime) VALUES ('src/f0.rs', 123);",
+    )
+    .unwrap();
+}
+
 /// Run `lens hook claude <event>` with `payload` on stdin under a clean,
 /// explicit routing env. Returns (trimmed stdout, parsed JSON or Null).
 fn run_hook(
@@ -748,6 +763,8 @@ fn greps_share_the_deny_counter_and_edits_reset_it() {
 #[test]
 fn find_trace_prompt_arms_a_one_shot_deny_on_the_first_grep() {
     let d = tempfile::tempdir().unwrap();
+    // The deny gate now requires a populated index; make the tempdir look indexed.
+    seed_index(d.path());
     let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
     let prompt = json!({
         "session_id": "s10",

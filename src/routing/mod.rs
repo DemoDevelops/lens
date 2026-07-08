@@ -13,6 +13,11 @@
 //!     into `lens wrap -- <cmd>` so its output is offloaded losslessly.
 //!   * **full** — both steer and wrap.
 //!
+//! Under steer/full a broad-scope Grep (its `path` spans a directory or the whole
+//! repo, see [`grep_scope`]) is denied at most once per prompt toward a lens call —
+//! gated on a populated index ([`index_present`]) — via the always-on first-Grep
+//! deny and the dark-launched grep-scope deny ([`grep_scope_deny_enabled`]).
+//!
 //! Safety rails: MCP-redirect decisions (WebFetch deny, curl/build rewrites) are
 //! gated on [`mcp_ready`] via [`mcp_redirect`] so the agent is never sent to a dead
 //! tool (nudges + sub-agent injection fire regardless); and stateful shell commands
@@ -27,7 +32,7 @@ mod classify;
 mod log;
 pub mod throttle;
 
-pub use classify::is_structurally_bounded;
+pub use classify::{grep_scope, is_structurally_bounded, GrepScope};
 
 /// Active routing level, parsed from `LENS_ROUTING`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,7 +252,12 @@ pub const PROMPT_INTENT_NUDGE: &str = "<lens_hint>\n  Find/trace question — an
 /// every prompt-level hint — this is the Serena FORBIDDEN pattern applied at
 /// the exact decision point. One-shot: the marker is consumed before the deny
 /// returns, so the same Grep passes on retry.
-pub const GREP_FIRST_DENY_REASON: &str = "This prompt is a find/trace question — answer it with one lens call instead of a grep chain. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_links. How does A reach B: lens_path. A file's shape: lens_skeleton(path). This fires once per prompt — the same Grep will pass if you re-run it, but the lens call answers in one step.";
+pub const GREP_FIRST_DENY_REASON: &str = "This prompt is a find/trace question — answer it with one lens call instead of a grep chain. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_links. How does A reach B: lens_path. A file's shape: lens_skeleton(path). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_search,lens_symbol,lens_links,lens_path,lens_skeleton\"). This fires once per prompt — the same Grep will pass if you re-run it, but the lens call answers in one step.";
+/// Shown when a Grep whose `path` spans a directory or the whole repo is denied
+/// under the grep-scope gate (`LENS_GREP_SCOPE_DENY`, dark-launch — see
+/// [`grep_scope_deny_enabled`]). Same shape as [`GREP_FIRST_DENY_REASON`] but
+/// keyed on the call's scope rather than the prompt's phrasing.
+pub const GREP_SCOPE_DENY_REASON: &str = "This grep spans a directory or the whole repo — one lens call answers it without the grep→Read chain. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_links. How does A reach B: lens_path. A file's shape: lens_skeleton(path). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_search,lens_symbol,lens_links,lens_path,lens_skeleton\"). This fires at most once per prompt — the same Grep will pass if you re-run it.";
 
 /// Whether a user prompt reads as a find/trace question worth the
 /// [`PROMPT_INTENT_NUDGE`]. High-precision substrings only — firing on every
@@ -363,16 +373,41 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             if !ctx.level.nudges() {
                 return Decision::Passthrough;
             }
-            // First Grep after a find/trace-shaped prompt: deny once with the
-            // intent mapping. `take` is last in the chain so the marker stays
-            // armed when a gate blocks (e.g. MCP not ready yet), and it is
-            // consumed BEFORE the deny returns, so the retry passes.
-            if ctx.level.steers()
+            // Scope-gated Grep deny: a broad-scope Grep (path spanning a dir or
+            // the whole repo) can be denied once per prompt toward a lens call.
+            // Two mechanisms share ONE deny budget — the always-on first-Grep
+            // deny (armed by a find/trace prompt) and the dark-launched
+            // grep-scope deny (armed each prompt while steering). The gate needs
+            // a populated index so we never send the agent to a search that
+            // can't answer. Each `take` runs LAST in its chain so a blocked gate
+            // keeps the marker armed; on a deny BOTH markers are consumed and the
+            // `read-code` counter is reset so the verbatim retry always passes.
+            let scope = grep_scope(tool_input.get("path").and_then(Value::as_str));
+            if scope == GrepScope::Broad
+                && ctx.level.steers()
                 && ctx.mcp_ready
-                && grep_first_deny_enabled()
-                && throttle::take(ctx.data_dir, ctx.session_id, "grep-first")
+                && index_present(ctx.data_dir)
             {
-                return Decision::Deny(GREP_FIRST_DENY_REASON.to_string());
+                let first = grep_first_deny_enabled()
+                    && throttle::take(ctx.data_dir, ctx.session_id, "grep-first");
+                let scoped = !first
+                    && grep_scope_deny_enabled()
+                    && throttle::take(ctx.data_dir, ctx.session_id, "grep-scope");
+                if first || scoped {
+                    // One Grep deny per prompt across both mechanisms: consume the
+                    // other marker and reset the lookup counter so the verbatim
+                    // retry always passes (the reason strings promise it).
+                    if first {
+                        throttle::take(ctx.data_dir, ctx.session_id, "grep-scope");
+                    }
+                    throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
+                    let reason = if first {
+                        GREP_FIRST_DENY_REASON
+                    } else {
+                        GREP_SCOPE_DENY_REASON
+                    };
+                    return Decision::Deny(reason.to_string());
+                }
             }
             if let Some(d) = inspect_escalation(ctx) {
                 return d;
@@ -508,6 +543,13 @@ fn read_deny_threshold() -> u64 {
 /// deny without a recompile (the per-mechanism ablation knob). On by default.
 fn grep_first_deny_enabled() -> bool {
     std::env::var("LENS_GREP_FIRST_DENY").map_or(true, |v| v.trim() != "0")
+}
+/// Grep-scope deny dark-launch switch: `LENS_GREP_SCOPE_DENY=1` enables it.
+/// Default OFF (unlike [`grep_first_deny_enabled`]'s default-ON kill-switch) —
+/// this mechanism is being dark-launched on a subset of machines before any
+/// default-on flip, so the polarity is intentionally the opposite one.
+pub fn grep_scope_deny_enabled() -> bool {
+    std::env::var("LENS_GREP_SCOPE_DENY").is_ok_and(|v| v.trim() == "1")
 }
 
 /// Grep result-size (bytes) above which the result is a "flood" worth steering to
@@ -994,6 +1036,37 @@ pub fn mcp_ready(data_dir: &Path) -> bool {
         },
         Err(_) => false,
     }
+}
+/// Is the content index populated? Read-only check: opens `<data_dir>/index.db`
+/// and looks for at least one row in the `file_manifest` table — the Tantivy-era
+/// populated-index signal (SQLite now holds only the mtime manifest + a backend
+/// version marker; the pre-Tantivy FTS5 `chunks` table is dropped on every
+/// `Index::open`, see `src/index/schema.rs`). ANY error (missing file, missing
+/// table, empty result) reads as not present — a grep-scope gate must never
+/// assume search will answer when the index isn't there yet. Deliberately a raw
+/// read-only `rusqlite` open, never `Index::open`: the latter's `init()` runs a
+/// DROP/VACUUM migration on open, which must never fire on the routing hot path.
+pub fn index_present(data_dir: &Path) -> bool {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        data_dir.join("index.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return false;
+    };
+    conn.query_row("SELECT 1 FROM file_manifest LIMIT 1", [], |_| Ok(()))
+        .is_ok()
+}
+/// Test fixture: seed `<dir>/index.db` with a populated `file_manifest` table so
+/// [`index_present`] reads true. `pub(crate)` so T2's grep-scope-arm tests
+/// (same crate, different module) can reuse it.
+#[cfg(test)]
+pub(crate) fn seed_index(dir: &Path) {
+    let conn = rusqlite::Connection::open(dir.join("index.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS file_manifest (path TEXT PRIMARY KEY, mtime INTEGER NOT NULL);
+         INSERT INTO file_manifest (path, mtime) VALUES ('src/f0.rs', 123);",
+    )
+    .unwrap();
 }
 
 /// The authoritative tool-selection directive injected at `SessionStart` while
@@ -1594,6 +1667,10 @@ mod tests {
         // lookups must share one counter, denying the 4th call.
         let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
         let d = tempdir().unwrap();
+        // Populate the index so the broad Greps here reach the shared lookup
+        // counter through the (now index-gated) scope block rather than being
+        // skipped for lack of an index.
+        seed_index(d.path());
         let ctx = rc(Level::Steer, true, d.path());
         let grep = json!({"pattern": "include_bodies"});
         let code = json!({"file_path": "src/server.rs"});
@@ -1651,11 +1728,20 @@ mod tests {
     // run in parallel.
     static READ_DENY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // Serializes tests that toggle `LENS_GREP_SCOPE_DENY` (mirrors
+    // `READ_DENY_ENV_LOCK`). The one test that needs both a stable
+    // `LENS_GREP_FIRST_DENY` and a toggled `LENS_GREP_SCOPE_DENY` acquires
+    // READ_DENY_ENV_LOCK first, then SCOPE_ENV_LOCK — never the reverse.
+    static SCOPE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn armed_first_grep_denies_once_and_respects_gates() {
         let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
         std::env::remove_var("LENS_GREP_FIRST_DENY");
         let d = tempdir().unwrap();
+        // The scope gate now requires a populated index; seed one so the armed
+        // grep-first deny (this test's subject) can still fire on a broad Grep.
+        seed_index(d.path());
         let ctx = rc(Level::Full, true, d.path());
         let g = json!({"pattern": "deny_threshold"});
 
@@ -1686,6 +1772,192 @@ mod tests {
         throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
         std::env::set_var("LENS_GREP_FIRST_DENY", "0");
         assert!(!matches!(route("Grep", &g, &ctx), Decision::Deny(_)));
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+    }
+
+    // ── route(): grep-scope gate + shared one-per-prompt deny budget ────────
+
+    #[test]
+    fn single_file_grep_leaves_grep_first_armed() {
+        // A Grep scoped to a real file is SingleFile → passthrough bias: the
+        // scope block is skipped entirely, so an armed grep-first survives and a
+        // later broad Grep still fires it.
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+        let d = tempdir().unwrap();
+        seed_index(d.path());
+        let ctx = rc(Level::Full, true, d.path());
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
+
+        let file = d.path().join("real.rs");
+        std::fs::write(&file, "fn x() {}").unwrap();
+        let single = json!({"pattern": "x", "path": file.to_str().unwrap()});
+        assert!(
+            !matches!(route("Grep", &single, &ctx), Decision::Deny(_)),
+            "single-file grep must never hit the scope deny"
+        );
+
+        // The grep-first marker survived → the following broad Grep IS denied.
+        let broad = json!({"pattern": "x"});
+        assert!(
+            matches!(route("Grep", &broad, &ctx), Decision::Deny(_)),
+            "broad grep after the single-file one fires the still-armed grep-first deny"
+        );
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+    }
+
+    #[test]
+    fn grep_first_retry_passes_even_at_counter_threshold() {
+        // Double-deny regression: at read-code=3 with grep-first armed, the
+        // grep-first deny must reset read-code so the verbatim retry isn't then
+        // caught by the inspect-escalation deny at 4.
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+        std::env::remove_var("LENS_READ_DENY_THRESHOLD");
+        let d = tempdir().unwrap();
+        seed_index(d.path());
+        let ctx = rc(Level::Full, true, d.path());
+        // Prime the shared lookup counter to 3 (one below the deny threshold).
+        for _ in 0..3 {
+            throttle::bump(ctx.data_dir, ctx.session_id, "read-code");
+        }
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
+
+        let broad = json!({"pattern": "x"});
+        match route("Grep", &broad, &ctx) {
+            Decision::Deny(reason) => assert!(
+                reason.contains("find/trace"),
+                "the grep-first deny fires, not the counter deny: {reason}"
+            ),
+            other => panic!("expected the armed grep-first deny, got {other:?}"),
+        }
+        // Verbatim retry: read-code was reset by the deny and grep-first is
+        // consumed → neither deny fires.
+        assert!(
+            !matches!(route("Grep", &broad, &ctx), Decision::Deny(_)),
+            "the verbatim retry must pass (read-code reset, grep-first consumed)"
+        );
+        std::env::remove_var("LENS_READ_DENY_THRESHOLD");
+    }
+
+    #[test]
+    fn scope_deny_fires_once_per_arm_and_respects_flag() {
+        // grep-scope deny in isolation: OFF by default, ON only under the flag,
+        // one deny per arm, verbatim retry passes, re-arming denies again.
+        let _guard = SCOPE_ENV_LOCK.lock().unwrap();
+        let d = tempdir().unwrap();
+        seed_index(d.path());
+        let ctx = rc(Level::Full, true, d.path());
+        let broad = json!({"pattern": "x"});
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-scope");
+
+        // Flag off → never denies (marker untouched).
+        std::env::remove_var("LENS_GREP_SCOPE_DENY");
+        assert!(
+            !matches!(route("Grep", &broad, &ctx), Decision::Deny(_)),
+            "flag off → no scope deny"
+        );
+
+        // Flag on → the armed grep-scope deny fires once with its own reason.
+        std::env::set_var("LENS_GREP_SCOPE_DENY", "1");
+        match route("Grep", &broad, &ctx) {
+            Decision::Deny(reason) => assert_eq!(reason, GREP_SCOPE_DENY_REASON),
+            other => panic!("armed grep-scope deny should fire, got {other:?}"),
+        }
+        // Consumed → retry passes.
+        assert!(
+            !matches!(route("Grep", &broad, &ctx), Decision::Deny(_)),
+            "grep-scope consumed → retry passes"
+        );
+        // Re-arm → denies again.
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-scope");
+        assert!(
+            matches!(route("Grep", &broad, &ctx), Decision::Deny(_)),
+            "re-arming grep-scope denies again"
+        );
+        std::env::remove_var("LENS_GREP_SCOPE_DENY");
+    }
+
+    #[test]
+    fn grep_first_deny_consumes_scope_marker() {
+        // Both markers armed + flag on: exactly ONE deny (grep-first wins) that
+        // also consumes the grep-scope marker, so the verbatim retry passes.
+        // Needs a stable LENS_GREP_FIRST_DENY (READ_DENY_ENV_LOCK) and a set
+        // LENS_GREP_SCOPE_DENY (SCOPE_ENV_LOCK); acquire in that order.
+        let _read_guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        let _scope_guard = SCOPE_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+        std::env::set_var("LENS_GREP_SCOPE_DENY", "1");
+        let d = tempdir().unwrap();
+        seed_index(d.path());
+        let ctx = rc(Level::Full, true, d.path());
+        let broad = json!({"pattern": "x"});
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-scope");
+
+        match route("Grep", &broad, &ctx) {
+            Decision::Deny(reason) => assert_eq!(reason, GREP_FIRST_DENY_REASON),
+            other => panic!("grep-first should win the single deny, got {other:?}"),
+        }
+        // Both markers consumed by the one deny → retry passes (no second deny).
+        assert!(
+            !matches!(route("Grep", &broad, &ctx), Decision::Deny(_)),
+            "the single deny consumed both markers → retry passes"
+        );
+        std::env::remove_var("LENS_GREP_SCOPE_DENY");
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+    }
+
+    #[test]
+    fn deny_requires_populated_index() {
+        // No populated index → the scope gate short-circuits BEFORE the throttle
+        // take, so an armed grep-first is neither fired nor consumed.
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+        let d = tempdir().unwrap(); // no index.db
+        let ctx = rc(Level::Full, true, d.path());
+        let broad = json!({"pattern": "x"});
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
+        assert!(
+            !index_present(ctx.data_dir),
+            "precondition: the tempdir has no populated index"
+        );
+        assert!(
+            !matches!(route("Grep", &broad, &ctx), Decision::Deny(_)),
+            "no populated index → the scope block is skipped, no deny"
+        );
+        // The marker survived: seeding the index and grepping now denies.
+        seed_index(d.path());
+        assert!(
+            matches!(route("Grep", &broad, &ctx), Decision::Deny(_)),
+            "grep-first was never consumed (take unreached) → now it denies"
+        );
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+    }
+
+    #[test]
+    fn unknown_scope_passes() {
+        // A nonexistent path classifies as Unknown → passthrough bias, never
+        // denied, even with grep-first armed and the index populated. The marker
+        // survives (scope != Broad short-circuits the block).
+        let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LENS_GREP_FIRST_DENY");
+        let d = tempdir().unwrap();
+        seed_index(d.path());
+        let ctx = rc(Level::Full, true, d.path());
+        let ghost = d.path().join("does-not-exist");
+        let unknown = json!({"pattern": "x", "path": ghost.to_str().unwrap()});
+        throttle::bump(ctx.data_dir, ctx.session_id, "grep-first");
+        assert!(
+            !matches!(route("Grep", &unknown, &ctx), Decision::Deny(_)),
+            "Unknown scope must pass through"
+        );
+        // grep-first was not consumed → a broad Grep now denies.
+        let broad = json!({"pattern": "x"});
+        assert!(
+            matches!(route("Grep", &broad, &ctx), Decision::Deny(_)),
+            "Unknown scope left grep-first armed"
+        );
         std::env::remove_var("LENS_GREP_FIRST_DENY");
     }
 
@@ -2045,6 +2317,31 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(!mcp_ready(d.path()));
         std::env::remove_var("LENS_MCP_TTL");
+    }
+
+    // ── index_present ─────────────────────────────────────────────────────
+    #[test]
+    fn index_present_false_when_db_missing() {
+        let d = tempdir().unwrap();
+        assert!(!index_present(d.path()));
+    }
+
+    #[test]
+    fn index_present_false_when_file_manifest_empty() {
+        let d = tempdir().unwrap();
+        let conn = rusqlite::Connection::open(d.path().join("index.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS file_manifest (path TEXT PRIMARY KEY, mtime INTEGER NOT NULL);",
+        )
+        .unwrap();
+        assert!(!index_present(d.path()));
+    }
+
+    #[test]
+    fn index_present_true_when_populated() {
+        let d = tempdir().unwrap();
+        seed_index(d.path());
+        assert!(index_present(d.path()));
     }
 
     // ── session_block ──────────────────────────────────────────────────────

@@ -24,6 +24,7 @@
 //! (anything that mutates shell state — `cd`, `export`, assignments, …) are always
 //! passed through untouched, because rewriting them would silently change behavior.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -31,7 +32,7 @@ use serde_json::{json, Value};
 mod classify;
 mod log;
 pub mod throttle;
-mod reroute;
+pub(crate) mod reroute;
 
 pub use classify::{grep_scope, is_structurally_bounded, GrepScope};
 
@@ -190,6 +191,11 @@ pub struct RouteCtx<'a> {
     /// True when RTK owns Bash (see [`crate::rtk::rtk_active`]); makes [`route`]
     /// pass Bash through so RTK's hook and lens's never double-wrap.
     pub rtk_active: bool,
+    /// Code-file Reads this session since the last `lens_map`/`lens_overview`
+    /// call — the read-overview (rovr) rail's counter. Fed by the session hook
+    /// from the `reads-since-map` throttle counter on Read events; 0 at every
+    /// other construction site.
+    pub reads_since_map: u64,
 }
 
 // ── Reason / nudge prose (original wording) ────────────────────────────────
@@ -397,10 +403,13 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 if first || scoped {
                     // One Grep deny per prompt across both mechanisms: consume the
                     // other marker and reset the lookup counter so the verbatim
-                    // retry always passes (the reason strings promise it).
+                    // retry always passes (the reason strings promise it). The
+                    // reroute grep-symbol deny shares the same budget — spend its
+                    // one-shot too so the retry can't be denied twice.
                     if first {
                         throttle::take(ctx.data_dir, ctx.session_id, "grep-scope");
                     }
+                    throttle::mark(ctx.data_dir, ctx.session_id, "grep-symbol");
                     throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
                     let reason = if first {
                         GREP_FIRST_DENY_REASON
@@ -408,6 +417,37 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                         GREP_SCOPE_DENY_REASON
                     };
                     return Decision::Deny(reason.to_string());
+                }
+            }
+            // Reroute rail 1a (gsym): a Grep whose pattern is itself a symbol
+            // lookup — a definition shape (`fn foo`) or a bare identifier — is
+            // denied once per session toward lens_symbol/lens_find. Dark-launched
+            // behind LENS_GREP_SYMBOL_DENY with the scope deny's gates. The
+            // `nudge_once` runs LAST so a blocked gate never spends the one-shot;
+            // on a deny the other grep markers are consumed and the lookup
+            // counter reset so the verbatim retry always passes.
+            let pat = tool_input.get("pattern").and_then(Value::as_str).unwrap_or("");
+            if grep_symbol_deny_enabled()
+                && ctx.level.steers()
+                && ctx.mcp_ready
+                && reroute::grep_symbol::symbol_grep(pat).is_some()
+                && index_present(ctx.data_dir)
+                && nudge_once(ctx, "grep-symbol")
+            {
+                throttle::take(ctx.data_dir, ctx.session_id, "grep-first");
+                throttle::take(ctx.data_dir, ctx.session_id, "grep-scope");
+                throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
+                return Decision::Deny(reroute::grep_symbol::reason(pat));
+            }
+            // Reroute rail 2b (gast): a syntax-shaped pattern (an impl block, an
+            // attribute, a method call, …) gets a one-shot nudge carrying the
+            // translated tree-sitter query. Context only, never blocks
+            // (LENS_GREP_AST_NUDGE, same gates).
+            if grep_ast_nudge_enabled() && ctx.level.nudges() && ctx.mcp_ready {
+                if let Some(hint) = reroute::grep_ast::syntax_shape(pat) {
+                    if index_present(ctx.data_dir) && nudge_once(ctx, "grep-ast") {
+                        return Decision::Context(reroute::grep_ast::nudge(&hint));
+                    }
                 }
             }
             if let Some(d) = inspect_escalation(ctx) {
@@ -432,6 +472,40 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 agent_inject(tool_input, ctx)
             } else {
                 Decision::Passthrough
+            }
+        }
+        // Reroute rail 2a (elink): an Edit that touches a symbol's DECLARATION
+        // line, when that symbol has >=K callers in the graph, gets a lens_links
+        // nudge (once per session+symbol) so the blast radius is visible before
+        // the signature changes. Context only — a state-changing Edit is NEVER
+        // denied. Dark-launched behind LENS_EDIT_LINKS_NUDGE; the graph load is
+        // last so the flag-off default costs nothing.
+        "Edit" | "MultiEdit" => {
+            if !(edit_links_nudge_enabled()
+                && ctx.level.nudges()
+                && ctx.mcp_ready
+                && index_present(ctx.data_dir))
+            {
+                return Decision::Passthrough;
+            }
+            let Some(sym) = edited_decl_symbol(tool, tool_input) else {
+                return Decision::Passthrough;
+            };
+            let key = format!("elink:{sym}");
+            if throttle::fired(ctx.data_dir, ctx.session_id, &key) {
+                return Decision::Passthrough;
+            }
+            let Ok(graph) = crate::discovery::graph::Graph::load(&ctx.data_dir.join("graph.json"))
+            else {
+                return Decision::Passthrough;
+            };
+            let k = reroute::edit_callers::min_callers();
+            match reroute::edit_callers::caller_nudge(&graph, &sym, k) {
+                Some(msg) => {
+                    throttle::mark(ctx.data_dir, ctx.session_id, &key);
+                    Decision::Context(msg)
+                }
+                None => Decision::Passthrough,
             }
         }
         // External (non-lens) MCP tools return large payloads (channel history,
@@ -553,6 +627,65 @@ pub fn grep_scope_deny_enabled() -> bool {
     std::env::var("LENS_GREP_SCOPE_DENY").is_ok_and(|v| v.trim() == "1")
 }
 
+// ── Reroute-rail dark-launch switches ───────────────────────────────────────
+// One per rail (see `reroute` for the counter-key contract), all with the
+// grep-scope polarity: `=1` enables, default OFF, independently reversible.
+
+/// Grep-symbol deny rail (`gsym`): `LENS_GREP_SYMBOL_DENY=1` enables it.
+pub fn grep_symbol_deny_enabled() -> bool {
+    std::env::var("LENS_GREP_SYMBOL_DENY").is_ok_and(|v| v.trim() == "1")
+}
+/// Read-skeleton deny rail (`rskel`): `LENS_READ_SKELETON_DENY=1` enables it.
+pub fn read_skeleton_deny_enabled() -> bool {
+    std::env::var("LENS_READ_SKELETON_DENY").is_ok_and(|v| v.trim() == "1")
+}
+/// Bash-aggregate nudge rail (`bagg`): `LENS_BASH_AGG_NUDGE=1` enables it.
+pub fn bash_agg_nudge_enabled() -> bool {
+    std::env::var("LENS_BASH_AGG_NUDGE").is_ok_and(|v| v.trim() == "1")
+}
+/// Edit-callers nudge rail (`elink`): `LENS_EDIT_LINKS_NUDGE=1` enables it.
+pub fn edit_links_nudge_enabled() -> bool {
+    std::env::var("LENS_EDIT_LINKS_NUDGE").is_ok_and(|v| v.trim() == "1")
+}
+/// Grep-ast nudge rail (`gast`): `LENS_GREP_AST_NUDGE=1` enables it.
+pub fn grep_ast_nudge_enabled() -> bool {
+    std::env::var("LENS_GREP_AST_NUDGE").is_ok_and(|v| v.trim() == "1")
+}
+/// Read-overview nudge rail (`rovr`): `LENS_READ_OVERVIEW_NUDGE=1` enables it.
+pub fn read_overview_nudge_enabled() -> bool {
+    std::env::var("LENS_READ_OVERVIEW_NUDGE").is_ok_and(|v| v.trim() == "1")
+}
+
+/// The symbol whose declaration this Edit/MultiEdit touches, or `None`. Edit
+/// carries `old_string`/`new_string` at the top level; MultiEdit carries an
+/// `edits[]` array — the first decl-touching edit wins. Shared by the elink
+/// arm in [`route_inner`] and the hook's shadow-counter plane so the live and
+/// would-fire derivations can never drift apart.
+pub(crate) fn edited_decl_symbol(tool: &str, tool_input: &Value) -> Option<String> {
+    let symbol_of = |edit: &Value| {
+        let old = edit.get("old_string")?.as_str()?;
+        let new = edit.get("new_string").and_then(Value::as_str).unwrap_or("");
+        reroute::edit_callers::edited_symbol(old, new)
+    };
+    match tool {
+        "Edit" => symbol_of(tool_input),
+        "MultiEdit" => tool_input.get("edits")?.as_array()?.iter().find_map(symbol_of),
+        _ => None,
+    }
+}
+
+/// The read-skeleton rail's `edited` set for one Read: contains `path` iff an
+/// edit to it was recorded this session (the PostToolUse hook marks
+/// `editpath:{path}` on Edit/MultiEdit/Write). Shared by [`read_decision`] and
+/// the hook's shadow-counter plane.
+pub(crate) fn edited_paths_for(data_dir: &Path, session_id: &str, path: &str) -> HashSet<String> {
+    let mut edited = HashSet::new();
+    if throttle::fired(data_dir, session_id, &format!("editpath:{path}")) {
+        edited.insert(path.to_string());
+    }
+    edited
+}
+
 /// Grep result-size (bytes) above which the result is a "flood" worth steering to
 /// lens_search, overridable via `LENS_GREP_FLOOD_BYTES` (so an A/B can disable it
 /// by setting it very high). Default 16384: comfortably above lens_search's flat
@@ -575,6 +708,42 @@ fn grep_flood_bytes() -> usize {
 fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     if !ctx.level.nudges() {
         return Decision::Passthrough;
+    }
+    let path = tool_input["file_path"].as_str().unwrap_or("");
+    // Reroute rail 1b (rskel): a whole, unedited code-file Read is denied once
+    // per session toward lens_skeleton (LENS_READ_SKELETON_DENY, the scope
+    // deny's gates). Runs BEFORE the escalation so the two denies can't stack;
+    // `nudge_once` runs last so a blocked gate never spends the one-shot, and
+    // the deny resets the lookup counter so the verbatim retry always passes.
+    if read_skeleton_deny_enabled()
+        && ctx.level.steers()
+        && ctx.mcp_ready
+        && index_present(ctx.data_dir)
+    {
+        let has_offset_or_limit =
+            tool_input.get("offset").is_some() || tool_input.get("limit").is_some();
+        let edited = edited_paths_for(ctx.data_dir, ctx.session_id, path);
+        if reroute::read_skeleton::read_is_skeletonizable(path, has_offset_or_limit, &edited)
+            && nudge_once(ctx, "read-skeleton")
+        {
+            throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
+            return Decision::Deny(reroute::read_skeleton::reason(path));
+        }
+    }
+    // Reroute rail 2c (rovr): the Nth code Read with no repo map yet gets a
+    // one-shot lens_overview nudge (LENS_READ_OVERVIEW_NUDGE). The count is
+    // fed by the hook via `ctx.reads_since_map`, zeroed by any
+    // lens_map/lens_overview call; level is already gated above (nudges).
+    if read_overview_nudge_enabled()
+        && ctx.mcp_ready
+        && reroute::read_overview::overview_due(
+            ctx.reads_since_map,
+            reroute::read_overview::threshold(),
+        )
+        && index_present(ctx.data_dir)
+        && nudge_once(ctx, "read-overview")
+    {
+        return Decision::Context(reroute::read_overview::nudge(ctx.reads_since_map));
     }
     let is_code = tool_input["file_path"]
         .as_str()
@@ -672,14 +841,35 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 reason: WRAP_REASON.to_string(),
                 updated_input: updated,
             }
+        } else if let Some(d) = bash_agg_nudge(cmd, ctx) {
+            d
         } else if ctx.level.nudges() && nudge_once(ctx, "bash") {
             Decision::Context(BASH_NUDGE.to_string())
         } else {
             Decision::Passthrough
         }
+    } else if let Some(d) = bash_agg_nudge(cmd, ctx) {
+        d
     } else {
         Decision::Passthrough
     }
+}
+
+/// Reroute rail 1c (bagg): a one-shot Context nudge for a Bash pipeline that
+/// counts, sorts, or reshapes data — the transform belongs in `lens_run`'s
+/// darkroom (LENS_BASH_AGG_NUDGE, the scope deny's gates). Slotted only where
+/// [`bash_decision`] would otherwise emit the generic nudge or pass through:
+/// the wrap rewrite and the net/build redirects keep priority, and a
+/// state-changing command never reaches this (the stateful check runs first).
+/// `nudge_once` runs last so a blocked gate never spends the one-shot.
+fn bash_agg_nudge(cmd: &str, ctx: &RouteCtx) -> Option<Decision> {
+    (bash_agg_nudge_enabled()
+        && ctx.level.nudges()
+        && ctx.mcp_ready
+        && reroute::bash_aggregate::is_data_aggregate(cmd)
+        && index_present(ctx.data_dir)
+        && nudge_once(ctx, "bash-agg"))
+    .then(|| Decision::Context(reroute::bash_aggregate::reason()))
 }
 
 /// Redirect a context-flooding network or build command: replace it with an `echo`
@@ -1352,6 +1542,7 @@ mod tests {
             data_dir: dir,
             session_id: sid,
             rtk_active: false,
+            reads_since_map: 0,
         }
     }
 
@@ -1490,6 +1681,7 @@ mod tests {
             data_dir: d.path(),
             session_id: "sess-1",
             rtk_active: true,
+            reads_since_map: 0,
         };
         assert_eq!(
             route("Bash", &json!({"command": "find . -type f"}), &active),

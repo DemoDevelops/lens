@@ -4,6 +4,7 @@
 //!
 //! Per rail, `bump_stat` keys are `{p}_would_fire` and `{p}_next_{class}` where
 //! `class ∈ {lens|grep|read|bash|edit|other}`.
+//! `{p}_shadow_next_{class}` is the shadow-arm follower (rail flag OFF); `{p}_next_{class}` is the live-arm one.
 //!
 //! Prefixes:
 //! - `grep_symbol` → `gsym`

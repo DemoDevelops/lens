@@ -127,6 +127,49 @@ fn supersession_notice(
     ))
 }
 
+/// Six-class follower split for the reroute-rail counter plane
+/// (`{p}_next_{class}` / `{p}_shadow_next_{class}`): which tool the agent
+/// reached for on the event AFTER a rail's would-fire. `lens` covers both a
+/// direct lens MCP call and a ToolSearch that loads lens tools (the bootstrap
+/// step IS the compliant next move for a rail's deny/nudge). Distinct from the
+/// grep-scope plane's 4-class split above, which stays untouched.
+fn follower_class6(tool: &str, tool_input: &Value) -> &'static str {
+    let is_lens_toolsearch = tool == "ToolSearch"
+        && tool_input
+            .get("query")
+            .and_then(Value::as_str)
+            .is_some_and(|q| q.contains("lens"));
+    if tool.starts_with("mcp__lens__") || is_lens_toolsearch {
+        "lens"
+    } else if tool == "Grep" {
+        "grep"
+    } else if tool == "Read" {
+        "read"
+    } else if tool == "Bash" {
+        "bash"
+    } else if matches!(tool, "Edit" | "MultiEdit" | "Write") {
+        "edit"
+    } else {
+        "other"
+    }
+}
+
+/// Would the elink rail fire on this Edit/MultiEdit? The classifier half of
+/// the shadow-counter derivation: a decl-touching edit whose symbol has >=K
+/// callers in the graph. The graph load is guarded (a missing/unreadable
+/// `graph.json` is a silent no) and only reached when a declaration was
+/// actually touched, so non-decl edits never pay for it.
+fn elink_would_fire(data_dir: &Path, tool: &str, tool_input: &Value) -> bool {
+    let Some(sym) = crate::routing::edited_decl_symbol(tool, tool_input) else {
+        return false;
+    };
+    let Ok(graph) = crate::discovery::graph::Graph::load(&data_dir.join("graph.json")) else {
+        return false;
+    };
+    let k = crate::routing::reroute::edit_callers::min_callers();
+    crate::routing::reroute::edit_callers::caller_nudge(&graph, &sym, k).is_some()
+}
+
 /// Nearest enclosing repo root at or above `start`: the deepest ancestor that
 /// holds a `.git` entry, or — failing that — one that already holds a
 /// `.lens` data dir. `.git` is preferred so a pre-existing stray `.lens`
@@ -229,6 +272,26 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                     let _ = s.bump_stat(&format!("deny_next_{class}"), 1);
                 }
             }
+            // Reroute-rail follower proxy (same consume-then-arm shape, six
+            // rails, 6-class follower split — the grep-scope plane above keeps
+            // its own 4-class split untouched). A pending marker armed by the
+            // PREVIOUS event's would-fire is consumed here and classed on the
+            // CURRENT tool: `{p}_next_{class}` for a live arm (rail flag ON),
+            // `{p}_shadow_next_{class}` for a shadow arm (flag OFF).
+            let class6 = follower_class6(&tool, &ti);
+            for p in ["gsym", "rskel", "bagg", "elink", "gast", "rovr"] {
+                if routing::throttle::take(&data_dir, &session_id, &format!("{p}-live-pending")) {
+                    if let Some(s) = &stats_store {
+                        let _ = s.bump_stat(&format!("{p}_next_{class6}"), 1);
+                    }
+                }
+                if routing::throttle::take(&data_dir, &session_id, &format!("{p}-shadow-pending"))
+                {
+                    if let Some(s) = &stats_store {
+                        let _ = s.bump_stat(&format!("{p}_shadow_next_{class6}"), 1);
+                    }
+                }
+            }
 
             // Grep-scope shadow counters: classify this Grep's path scope, and
             // on a broad scope that would trip the deny gate, arm the marker
@@ -260,6 +323,119 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 }
             }
 
+            // Rail 2c feed: count code-file Reads since the last repo-map call.
+            // Any lens_map/lens_overview zeroes it; the count rides into
+            // RouteCtx so the rovr rail can fire on the Nth mapless read.
+            let reads_since_map = if tool == "Read" {
+                let is_code = ti
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .and_then(|p| {
+                        Path::new(p)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .map(str::to_ascii_lowercase)
+                    })
+                    .is_some_and(|ext| {
+                        crate::discovery::extract::spec_for_extension(&ext).is_some()
+                    });
+                if is_code {
+                    routing::throttle::bump(&data_dir, &session_id, "reads-since-map")
+                } else {
+                    0
+                }
+            } else if matches!(
+                tool.as_str(),
+                "mcp__lens__lens_map" | "mcp__lens__lens_overview"
+            ) {
+                routing::throttle::reset(&data_dir, &session_id, "reads-since-map");
+                0
+            } else {
+                0
+            };
+
+            // Reroute-rail shadow counters (six rails, grep-scope shape):
+            // re-derive each rail's would-fire on THIS event with the same
+            // classifier + gates route_inner uses, bump `{p}_would_fire`
+            // regardless of the rail's flag, and arm the live/shadow follower
+            // marker the loop above consumes on the NEXT event.
+            {
+                let arm = |prefix: &str, enabled: bool| {
+                    if let Some(s) = &stats_store {
+                        let _ = s.bump_stat(&format!("{prefix}_would_fire"), 1);
+                    }
+                    let pk = if enabled {
+                        format!("{prefix}-live-pending")
+                    } else {
+                        format!("{prefix}-shadow-pending")
+                    };
+                    routing::throttle::bump(&data_dir, &session_id, &pk);
+                };
+                match tool.as_str() {
+                    "Grep" => {
+                        let pat = ti.get("pattern").and_then(Value::as_str).unwrap_or("");
+                        let gsym = level.steers()
+                            && routing::reroute::grep_symbol::symbol_grep(pat).is_some();
+                        let gast = level.nudges()
+                            && routing::reroute::grep_ast::syntax_shape(pat).is_some();
+                        if (gsym || gast) && mcp_ready && routing::index_present(&data_dir) {
+                            if gsym {
+                                arm("gsym", routing::grep_symbol_deny_enabled());
+                            }
+                            if gast {
+                                arm("gast", routing::grep_ast_nudge_enabled());
+                            }
+                        }
+                    }
+                    "Read" => {
+                        let path = ti.get("file_path").and_then(Value::as_str).unwrap_or("");
+                        let has_offset_or_limit =
+                            ti.get("offset").is_some() || ti.get("limit").is_some();
+                        let edited = routing::edited_paths_for(&data_dir, &session_id, path);
+                        let rskel = level.steers()
+                            && routing::reroute::read_skeleton::read_is_skeletonizable(
+                                path,
+                                has_offset_or_limit,
+                                &edited,
+                            );
+                        let rovr = level.nudges()
+                            && routing::reroute::read_overview::overview_due(
+                                reads_since_map,
+                                routing::reroute::read_overview::threshold(),
+                            );
+                        if (rskel || rovr) && mcp_ready && routing::index_present(&data_dir) {
+                            if rskel {
+                                arm("rskel", routing::read_skeleton_deny_enabled());
+                            }
+                            if rovr {
+                                arm("rovr", routing::read_overview_nudge_enabled());
+                            }
+                        }
+                    }
+                    "Bash" => {
+                        let cmd = ti.get("command").and_then(Value::as_str).unwrap_or("");
+                        if level.nudges()
+                            && routing::reroute::bash_aggregate::is_data_aggregate(cmd)
+                            && mcp_ready
+                            && routing::index_present(&data_dir)
+                        {
+                            arm("bagg", routing::bash_agg_nudge_enabled());
+                        }
+                    }
+                    // Graph load only on Edit events, guarded — see
+                    // `elink_would_fire`.
+                    "Edit" | "MultiEdit"
+                        if level.nudges()
+                            && mcp_ready
+                            && routing::index_present(&data_dir)
+                            && elink_would_fire(&data_dir, &tool, &ti) =>
+                    {
+                        arm("elink", routing::edit_links_nudge_enabled());
+                    }
+                    _ => {}
+                }
+            }
+
             let bin = std::env::current_exe()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| "lens".to_string());
@@ -270,6 +446,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 data_dir: &data_dir,
                 session_id: &session_id,
                 rtk_active: crate::rtk::rtk_active(&data_dir),
+                reads_since_map,
             };
             let decision = routing::route(&tool, &ti, &rc);
             Ok(routing::to_hook_json(&decision).to_string())
@@ -300,6 +477,14 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 routing::throttle::reset(&data_dir, &session_id, "grep-first");
                 routing::throttle::reset(&data_dir, &session_id, "grep-scope");
             }
+            // Record the edited path so the read-skeleton rail leaves later
+            // Reads of this file alone (Read-before-the-next-Edit is the right
+            // tool, not drift — see `reroute::read_skeleton`).
+            if matches!(tool.as_str(), "Edit" | "MultiEdit" | "Write") {
+                if let Some(p) = ti.get("file_path").and_then(Value::as_str) {
+                    routing::throttle::mark(&data_dir, &session_id, &format!("editpath:{p}"));
+                }
+            }
             // An edit that invalidates stored lens snapshots of the file gets a
             // one-line supersession notice (once per session+file). Fires at every
             // routing level: it is a correctness signal about content already in
@@ -323,6 +508,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                     data_dir: &data_dir,
                     session_id: &session_id,
                     rtk_active: false,
+                    reads_since_map: 0,
                 };
                 let decision = routing::post_route(&tool, &resp, &rc);
                 return Ok(routing::to_post_hook_json(&decision).to_string());

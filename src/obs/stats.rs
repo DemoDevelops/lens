@@ -265,6 +265,7 @@ pub const SNAPSHOT_DIMENSIONS: &[&str] = &[
     "applied_value",
     "rtk",
     "activity",
+    "grep_scope",
     "store_size",
 ];
 
@@ -407,6 +408,31 @@ pub fn snapshot_json_since(
             .unwrap_or_else(|_| vec![0i64; BUCKETS]),
     );
 
+    // Grep-scope deny plane (dark-launch decision aid). Cumulative store counters,
+    // not windowed/session-scoped: the deny is a per-repo signal, so these read the
+    // same store.db `stats` the routing hook writes. `single/broad/unknown` classify
+    // greps seen; `would_deny` counts broad greps that hit the gate; the `*_next`
+    // blocks record what tool ran right after a would-deny (`deny_next_*` when the
+    // deny actually fired, `shadow_next_*` when it was only shadow-counted).
+    let grep_scope = {
+        let store = Store::open(dir).ok();
+        let g = |k: &str| store.as_ref().and_then(|s| s.get_stat(k).ok()).unwrap_or(0);
+        serde_json::json!({
+            "single": g("grep_scope_single"),
+            "broad": g("grep_scope_broad"),
+            "unknown": g("grep_scope_unknown"),
+            "would_deny": g("grep_scope_would_deny"),
+            "shadow_next": {
+                "lens": g("shadow_next_lens"), "grep": g("shadow_next_grep"),
+                "shellgrep": g("shadow_next_shellgrep"), "other": g("shadow_next_other"),
+            },
+            "deny_next": {
+                "lens": g("deny_next_lens"), "grep": g("deny_next_grep"),
+                "shellgrep": g("deny_next_shellgrep"), "other": g("deny_next_other"),
+            },
+        })
+    };
+
     serde_json::json!({
         "ts": super::iso8601_now(),
         "ops": t.ops,
@@ -428,6 +454,7 @@ pub fn snapshot_json_since(
         "by_mechanism": by_mechanism,
         "applied_value": applied_value,
         "rtk": rtk_snapshot(),
+        "grep_scope": grep_scope,
         "store_size": store_size,
         "index_chunks": index_chunks,
         "graph_nodes": graph_nodes,

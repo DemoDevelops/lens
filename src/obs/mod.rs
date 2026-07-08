@@ -13,8 +13,10 @@
 //! read these files back; they are separate processes whose stdout is their own.
 
 pub mod dashboard;
+pub mod pricing;
 pub mod stats;
 pub mod tui;
+pub mod usage;
 pub mod value_model;
 pub mod verify;
 

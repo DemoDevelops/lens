@@ -247,6 +247,18 @@ fn invoke_claude(task: &Task, mcp_config: &Path) -> Result<String, String> {
             cmd.args(["--settings", settings.as_str()]);
         }
     }
+    // Pin the headless model/effort when set (the harness otherwise inherits the
+    // config default). Kept as dedicated vars so LENS_BENCH_MODEL stays the label.
+    if let Ok(m) = std::env::var("LENS_TOOLSEL_MODEL") {
+        if !m.is_empty() {
+            cmd.args(["--model", m.as_str()]);
+        }
+    }
+    if let Ok(e) = std::env::var("LENS_TOOLSEL_EFFORT") {
+        if !e.is_empty() {
+            cmd.args(["--effort", e.as_str()]);
+        }
+    }
     cmd.args(["--allowedTools", "Read Grep Glob Bash mcp__lens"])
         .args(["--output-format", "stream-json"])
         .arg("--verbose")

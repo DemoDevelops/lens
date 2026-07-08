@@ -81,6 +81,10 @@ path = "benchmarks/acceptance/run_acceptance.rs"
 name = "bench_toolsel"
 path = "benchmarks/toolsel/run_toolsel.rs"
 
+[[bin]]
+name = "run_intent_judge"
+path = "benchmarks/toolsel/run_intent_judge.rs"
+
 [dependencies]
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync"] }

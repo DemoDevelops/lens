@@ -1,0 +1,44 @@
+You are auditing tool selection in a coding agent. The agent works inside a
+single repository and has, alongside the primitive tools (Read, Grep, Bash,
+Edit/Write, Glob), a code-intelligence MCP server called "lens".
+
+The lens tools, and when each is the strictly better fit than a primitive:
+- lens_symbol   : jump to where a NAMED symbol (function / type / const) is
+                  defined. Beats Grep-for-an-identifier and Read-to-find-a-def.
+- lens_links    : list the callers / callees of a symbol ("who calls X", "what
+                  does X call", "where is X used"). Beats grepping for call sites.
+- lens_path     : show how one symbol reaches another (the call path A -> B).
+                  Beats hand-tracing across files with Read.
+- lens_grep_ast : match a SYNTAX shape (impl blocks, attributes like #[tool],
+                  signatures, `-> Result`, `async fn`). Matches syntax, not text,
+                  so it has none of Grep's comment/string false positives.
+- lens_skeleton : return a code file's structure (signatures + types, bodies
+                  elided) in one call, instead of Reading the whole file.
+- lens_overview : orient in an unfamiliar repo (top symbols + how it is wired)
+                  before reading anything.
+- lens_find     : find a symbol by what it DOES when its name is unknown.
+
+Here is one decision the agent made.
+
+Most recent user request:
+{{USER_TEXT}}
+
+Prior tool calls in this session (oldest first, most recent last):
+{{PRIOR_CALLS}}
+
+The tool the agent chose:
+{{CHOSEN_TOOL}}
+with input:
+{{CHOSEN_INPUT}}
+
+Question: which SINGLE lens tool would have fit THIS decision better than the
+primitive the agent chose?
+- If the primitive was already the right call (a genuine full-text search with
+  no symbol/syntax target, a state-changing edit, a shell command with no lens
+  equivalent, reading a file the agent is about to edit), answer `none`.
+- If the agent should simply have reasoned/answered with no tool call at all,
+  answer `reason-instead-of-query`.
+
+Reply with EXACTLY ONE token, on a single line, no punctuation and no
+explanation. It MUST be one of:
+lens_symbol lens_links lens_path lens_grep_ast lens_skeleton lens_overview lens_find none reason-instead-of-query

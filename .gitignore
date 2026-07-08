@@ -3,3 +3,5 @@
 /.ctxforge/
 /dev/
 /artifacts/
+/benchmarks/toolsel/results/intent_miss.json
+/benchmarks/toolsel/results/intent_mined_cases.json

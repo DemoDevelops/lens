@@ -31,6 +31,7 @@ use serde_json::{json, Value};
 mod classify;
 mod log;
 pub mod throttle;
+mod reroute;
 
 pub use classify::{grep_scope, is_structurally_bounded, GrepScope};
 

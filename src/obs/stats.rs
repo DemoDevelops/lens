@@ -485,6 +485,55 @@ pub fn snapshot_json_since(
     // every repo in the dashboard route (the counters are per-repo, never mirrored).
     let grep_scope = grep_scope_aggregate(std::slice::from_ref(&dir.to_path_buf()));
 
+    // "Actual Usage" plane: real per-model token/turn/cost mix from Claude Code's
+    // own JSONL transcripts, for the same window/scope as everything above.
+    // Model-mix weighting (Level A, the dashboard plan's locked design):
+    // `OpRecord` carries no model, so the window's `tokens_saved_est` is split
+    // across models by each model's share of assistant turns, then priced at
+    // that model's input rate (estimated/uncached-equiv). `dir` is already the
+    // caller's resolved scope (route()'s "global" branch passes home_root()
+    // itself; a repo branch passes `<repo>/.lens`), so cwd_filter falls out of
+    // that without a new parameter: the global home root gets no cwd
+    // restriction (it spans every repo); a `.lens` dir restricts to its parent.
+    let cwd_filter: Option<PathBuf> = if crate::rtk::home_root().as_deref() == Some(dir) {
+        None
+    } else {
+        dir.file_name()
+            .and_then(|f| f.to_str())
+            .filter(|f| *f == ".lens")
+            .and(dir.parent())
+            .map(Path::to_path_buf)
+    };
+    let usage = super::usage::read_usage(since, until, cwd_filter.as_deref());
+    let total_turns: u64 = usage.iter().map(|m| m.turns).sum();
+    let actual_usage: Vec<serde_json::Value> = usage
+        .iter()
+        .map(|m| {
+            let price = super::pricing::price_for(&m.model);
+            let consumed_usd = m.input as f64 / 1e6 * price.input
+                + m.output as f64 / 1e6 * price.output
+                + m.cache_read as f64 / 1e6 * price.cache_read
+                + m.cache_creation as f64 / 1e6 * price.input;
+            let share = if total_turns > 0 {
+                m.turns as f64 / total_turns as f64
+            } else {
+                0.0
+            };
+            let saved_tokens = t.tokens_saved_est as f64 * share;
+            let saved_usd = saved_tokens / 1e6 * price.input;
+            serde_json::json!({
+                "model": m.model,
+                "turns": m.turns,
+                "input": m.input,
+                "output": m.output,
+                "cache_read": m.cache_read,
+                "consumed_usd": consumed_usd,
+                "saved_tokens": saved_tokens,
+                "saved_usd": saved_usd,
+            })
+        })
+        .collect();
+
     serde_json::json!({
         "ts": super::iso8601_now(),
         "ops": t.ops,
@@ -506,6 +555,8 @@ pub fn snapshot_json_since(
         "by_tool": by_tool,
         "by_mechanism": by_mechanism,
         "applied_value": applied_value,
+        "actual_usage": actual_usage,
+        "price_table": super::pricing::price_table(),
         "rtk": rtk_snapshot(),
         "grep_scope": grep_scope,
         "store_size": store_size,
@@ -1057,5 +1108,92 @@ esac
         let missing = tempdir().unwrap();
         let none = grep_scope_aggregate(&[missing.path().join("nope")]);
         assert_eq!(none["broad"], json!(0));
+    }
+
+    /// One JSONL line for the "Actual Usage" fixture: a single-turn assistant
+    /// message for `model`, under `cwd`, with the given token counts.
+    fn usage_line(model: &str, cwd: &Path, input: u64, output: u64) -> String {
+        json!({
+            "message": {"model": model, "usage": {
+                "input_tokens": input, "output_tokens": output,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+            }},
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "cwd": cwd.display().to_string(),
+            "isSidechain": false,
+        })
+        .to_string()
+    }
+
+    /// `actual_usage`/`price_table` are computed from real Claude Code JSONL
+    /// transcripts (T1) priced by the const table (T2), bolted onto the
+    /// existing `ops.log`-derived snapshot. Proves: (a) per-model
+    /// `consumed_usd`/`saved_usd` match hand-computed values, (b) `price_table`
+    /// is present and non-empty, (c) every pre-existing top-level key survives
+    /// (regression guard).
+    #[test]
+    fn actual_usage_and_price_table_match_hand_computed_values() {
+        // CLAUDE_CONFIG_DIR is process-global; serialize with the other
+        // env-mutating tests in this crate (see usage.rs's with_fixture).
+        let _g = crate::rtk::env_test_lock();
+        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+
+        // A repo-shaped data dir (`<repo>/.lens`) so snapshot_json_since derives
+        // cwd_filter = Some(repo_dir), not the unscoped global None.
+        let root = tempdir().unwrap();
+        let repo_dir = root.path().join("myrepo");
+        let lens_dir = repo_dir.join(".lens");
+        std::fs::create_dir_all(&lens_dir).unwrap();
+
+        // Known ops.log record: raw=4100, returned=100 -> tokens_saved_est=1000.
+        OpLog::open(&lens_dir)
+            .start("lens_run", json!({}))
+            .finish(4100, 100, Some("r".into()), "ok", "", None);
+
+        // Known Claude Code usage fixture: one sonnet turn, one haiku turn, both
+        // under repo_dir, so total_turns=2 and each model's mix share is 0.5.
+        let claude_config = tempdir().unwrap();
+        let proj = claude_config.path().join("projects").join("sess1");
+        std::fs::create_dir_all(&proj).unwrap();
+        let lines = [
+            usage_line("claude-sonnet-5", &repo_dir, 100_000, 50_000),
+            usage_line("claude-haiku-4-5", &repo_dir, 200_000, 100_000),
+        ]
+        .join("\n");
+        std::fs::write(proj.join("usage.jsonl"), lines).unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", claude_config.path());
+
+        let snap = snapshot_json_since(&lens_dir, None, None, None);
+
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+
+        // (a) per-model consumed_usd/saved_usd match hand-computed values.
+        let au = snap["actual_usage"].as_array().expect("actual_usage is an array");
+        let sonnet = au.iter().find(|m| m["model"] == json!("claude-sonnet-5")).unwrap();
+        let haiku = au.iter().find(|m| m["model"] == json!("claude-haiku-4-5")).unwrap();
+
+        // sonnet: 100_000/1e6*3.0 (input) + 50_000/1e6*15.0 (output) = 0.3 + 0.75 = 1.05
+        assert!((sonnet["consumed_usd"].as_f64().unwrap() - 1.05).abs() < 1e-9);
+        // haiku: 200_000/1e6*1.0 (input) + 100_000/1e6*5.0 (output) = 0.2 + 0.5 = 0.7
+        assert!((haiku["consumed_usd"].as_f64().unwrap() - 0.7).abs() < 1e-9);
+
+        // Even mix (1 turn each of 2) -> each model gets half of the 1000 saved
+        // tokens, priced at its own input rate.
+        assert!((sonnet["saved_tokens"].as_f64().unwrap() - 500.0).abs() < 1e-9);
+        assert!((sonnet["saved_usd"].as_f64().unwrap() - 500.0 / 1e6 * 3.0).abs() < 1e-9);
+        assert!((haiku["saved_tokens"].as_f64().unwrap() - 500.0).abs() < 1e-9);
+        assert!((haiku["saved_usd"].as_f64().unwrap() - 500.0 / 1e6 * 1.0).abs() < 1e-9);
+
+        // (b) price_table is present and non-empty.
+        let table = snap["price_table"].as_array().expect("price_table is an array");
+        assert!(!table.is_empty());
+
+        // (c) pre-existing top-level keys all survive (regression guard).
+        for key in ["tokens_saved_est", "by_tool", "applied_value", "activity"] {
+            assert!(snap.get(key).is_some(), "snapshot missing pre-existing key '{key}'");
+        }
     }
 }

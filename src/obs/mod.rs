@@ -14,8 +14,10 @@
 
 pub mod credit;
 pub mod dashboard;
+pub mod pricing;
 pub mod stats;
 pub mod tui;
+pub mod usage;
 pub mod value_model;
 pub mod verify;
 

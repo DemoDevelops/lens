@@ -287,6 +287,7 @@ pub const SNAPSHOT_DIMENSIONS: &[&str] = &[
     "rtk",
     "activity",
     "grep_scope",
+    "reroute",
     "store_size",
 ];
 
@@ -339,6 +340,59 @@ pub fn grep_scope_aggregate(dirs: &[PathBuf]) -> serde_json::Value {
             "shellgrep": g("deny_next_shellgrep"), "other": g("deny_next_other"),
         },
     })
+}
+
+/// The six lens tool-routing rail prefixes (contract: `routing/reroute/mod.rs`
+/// `PREFIX_*` consts). Kept as our own literal list rather than importing those
+/// consts — this module only reads the store keys they name, not the classifiers.
+pub const REROUTE_PREFIXES: [&str; 6] = ["gsym", "rskel", "bagg", "elink", "gast", "rovr"];
+
+/// Classes a rail's follower counter can land in: `{p}_next_{class}` /
+/// `{p}_shadow_next_{class}`, per the shared counter-key contract.
+const REROUTE_CLASSES: &[&str] = &["lens", "grep", "read", "bash", "edit", "other"];
+
+/// Sum one rail's counters (`{p}_would_fire`, `{p}_next_*`, `{p}_shadow_next_*`) across
+/// `dirs` — the same `Store::open(dir).get_stat(k)` summation [`grep_scope_aggregate`]
+/// uses — then shape them into `{ would_fire, next: {class: count, ...}, shadow_next:
+/// {class: count, ...} }`. Missing store / absent key reads as 0.
+fn reroute_rail_aggregate(dirs: &[PathBuf], p: &str) -> serde_json::Value {
+    let keys: Vec<String> = std::iter::once(format!("{p}_would_fire"))
+        .chain(REROUTE_CLASSES.iter().map(|c| format!("{p}_next_{c}")))
+        .chain(REROUTE_CLASSES.iter().map(|c| format!("{p}_shadow_next_{c}")))
+        .collect();
+    let mut sum: BTreeMap<&str, i64> = keys.iter().map(|k| (k.as_str(), 0)).collect();
+    for dir in dirs {
+        if let Ok(store) = Store::open(dir) {
+            for k in &keys {
+                *sum.get_mut(k.as_str()).unwrap() += store.get_stat(k).unwrap_or(0);
+            }
+        }
+    }
+    let g = |k: &str| sum[k];
+    let classes = |kind: &str| -> serde_json::Value {
+        let mut m = serde_json::Map::new();
+        for c in REROUTE_CLASSES {
+            m.insert((*c).to_string(), serde_json::json!(g(&format!("{p}_{kind}_{c}"))));
+        }
+        serde_json::Value::Object(m)
+    };
+    serde_json::json!({
+        "would_fire": g(&format!("{p}_would_fire")),
+        "next": classes("next"),
+        "shadow_next": classes("shadow_next"),
+    })
+}
+
+/// Build the `reroute` snapshot block: one entry per rail in [`REROUTE_PREFIXES`],
+/// each shaped by [`reroute_rail_aggregate`]. Exactly parallel to
+/// [`grep_scope_aggregate`] — one dir for a single repo, every project's `.lens` for
+/// the global view.
+pub fn reroute_aggregate(dirs: &[PathBuf]) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    for p in REROUTE_PREFIXES {
+        obj.insert(p.to_string(), reroute_rail_aggregate(dirs, p));
+    }
+    serde_json::Value::Object(obj)
 }
 
 /// Aggregate `ops.log` (optionally scoped to a session) into a JSON snapshot —
@@ -484,6 +538,10 @@ pub fn snapshot_json_since(
     // one data dir. Cumulative, not windowed. The global scope re-aggregates across
     // every repo in the dashboard route (the counters are per-repo, never mirrored).
     let grep_scope = grep_scope_aggregate(std::slice::from_ref(&dir.to_path_buf()));
+    // Reroute rail plane (dark-launch decision aid, one per rail): same per-repo,
+    // cumulative shape as grep_scope above; the global scope re-aggregates the same
+    // way (see dashboard.rs's `scope=global` branch).
+    let reroute = reroute_aggregate(std::slice::from_ref(&dir.to_path_buf()));
 
     // "Actual Usage" plane: real per-model token/turn/cost mix from Claude Code's
     // own JSONL transcripts, for the same window/scope as everything above.
@@ -559,6 +617,7 @@ pub fn snapshot_json_since(
         "price_table": super::pricing::price_table(),
         "rtk": rtk_snapshot(),
         "grep_scope": grep_scope,
+        "reroute": reroute,
         "store_size": store_size,
         "index_chunks": index_chunks,
         "graph_nodes": graph_nodes,
@@ -1194,6 +1253,39 @@ esac
         // (c) pre-existing top-level keys all survive (regression guard).
         for key in ["tokens_saved_est", "by_tool", "applied_value", "activity"] {
             assert!(snap.get(key).is_some(), "snapshot missing pre-existing key '{key}'");
+        }
+    }
+
+    #[test]
+    fn reroute_aggregate_sums_across_repos_and_rails() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let sa = Store::open(a.path()).unwrap();
+        sa.bump_stat("gsym_would_fire", 5).unwrap();
+        sa.bump_stat("gsym_next_lens", 3).unwrap();
+        sa.bump_stat("rskel_shadow_next_read", 2).unwrap();
+        let sb = Store::open(b.path()).unwrap();
+        sb.bump_stat("gsym_would_fire", 5).unwrap();
+        sb.bump_stat("gsym_next_lens", 4).unwrap();
+
+        // One dir = that repo alone; every rail + class key present even at zero.
+        let solo = reroute_aggregate(&[a.path().to_path_buf()]);
+        assert_eq!(solo["gsym"]["would_fire"], json!(5));
+        assert_eq!(solo["gsym"]["next"]["lens"], json!(3));
+        assert_eq!(solo["rskel"]["shadow_next"]["read"], json!(2));
+        assert_eq!(solo["bagg"]["would_fire"], json!(0));
+        assert_eq!(solo["elink"]["next"]["other"], json!(0));
+
+        // Many dirs (the global view) = the cross-repo sum.
+        let all = reroute_aggregate(&[a.path().to_path_buf(), b.path().to_path_buf()]);
+        assert_eq!(all["gsym"]["would_fire"], json!(10));
+        assert_eq!(all["gsym"]["next"]["lens"], json!(7));
+
+        // Absent store contributes nothing (no panic); every declared rail is present.
+        let missing = tempdir().unwrap();
+        let none = reroute_aggregate(&[missing.path().join("nope")]);
+        for p in REROUTE_PREFIXES {
+            assert_eq!(none[p]["would_fire"], json!(0), "rail {p} should default to 0");
         }
     }
 }

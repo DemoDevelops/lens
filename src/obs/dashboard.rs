@@ -216,6 +216,7 @@ fn route(target: &str, dir: &Path, session: Option<&str>) -> (u16, &'static str,
                             let dirs: Vec<PathBuf> =
                                 real.iter().map(|p| Path::new(p).join(".lens")).collect();
                             v["grep_scope"] = super::stats::grep_scope_aggregate(&dirs);
+                            v["reroute"] = super::stats::reroute_aggregate(&dirs);
                         }
                         v["projects"] = serde_json::json!(real);
                     }
@@ -458,6 +459,18 @@ const INDEX_HTML: &str = r##"<!doctype html>
   </div>
   <div class="seclabel"><b>grep-scope deny</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="gsMode">—</span></div>
   <div class="panel"><div class="mech" id="grepScope"></div></div>
+  <div class="seclabel"><b>grep→symbol</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrGsymMode">—</span></div>
+  <div class="panel"><div class="mech" id="rrGsym"></div></div>
+  <div class="seclabel"><b>read→skeleton</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrRskelMode">—</span></div>
+  <div class="panel"><div class="mech" id="rrRskel"></div></div>
+  <div class="seclabel"><b>bash→lens_run</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrBaggMode">—</span></div>
+  <div class="panel"><div class="mech" id="rrBagg"></div></div>
+  <div class="seclabel"><b>edit→links</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrElinkMode">—</span></div>
+  <div class="panel"><div class="mech" id="rrElink"></div></div>
+  <div class="seclabel"><b>grep→ast</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrGastMode">—</span></div>
+  <div class="panel"><div class="mech" id="rrGast"></div></div>
+  <div class="seclabel"><b>read→overview</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrRovrMode">—</span></div>
+  <div class="panel"><div class="mech" id="rrRovr"></div></div>
   <div class="seclabel"><b>applied value</b> &middot; benchmark rates &times; your live ops &middot; <span id="avNote">estimated, not measured this session</span></div>
   <div class="panel"><div class="av" id="appliedValue"></div></div>
   <div class="seclabel"><b>session activity</b> &middot; built-in tools (Read / Edit / Bash) via hooks &middot; not token savings</div>
@@ -731,6 +744,39 @@ function compbar(label,raw,ret,maxraw){
   const retW=ret/maxraw*100, savW=Math.max(0,(raw-ret)/maxraw*100), pct=raw>0?Math.round((raw-ret)/raw*100):0;
   return `<div class="hbar"><span class="lbl">${label}</span><span class="track"><span class="fill" style="width:${retW}%"></span><span class="fill dim" style="width:${savW}%"></span></span><span class="val">${pct}%</span></div>`;
 }
+// Reroute rail plane (dark-launch decision aid, one card per rail): same shape as
+// grep-scope above, generalized so all six share one renderer. `deny:true` rails
+// (gsym/rskel) additionally show the counter-invisibility guard (re-grep / re-read
+// rate, go <25%); the other four are nudge rails and show only the landed-rate line,
+// labelled nudge→lens instead of adoption.
+const REROUTE_RAILS=[
+  {p:'gsym',mode:'rrGsymMode',box:'rrGsym',deny:true,guard:'grep'},
+  {p:'rskel',mode:'rrRskelMode',box:'rrRskel',deny:true,guard:'read'},
+  {p:'bagg',mode:'rrBaggMode',box:'rrBagg',deny:false},
+  {p:'elink',mode:'rrElinkMode',box:'rrElink',deny:false},
+  {p:'gast',mode:'rrGastMode',box:'rrGast',deny:false},
+  {p:'rovr',mode:'rrRovrMode',box:'rrRovr',deny:false},
+];
+function renderReroute(rail,r){
+  r=r||{};
+  const next=r.next||{}, shadow=r.shadow_next||{};
+  const sum=o=>(o.lens||0)+(o.grep||0)+(o.read||0)+(o.bash||0)+(o.edit||0)+(o.other||0);
+  const liveTot=sum(next), nx=liveTot>0?next:shadow, nxTot=liveTot>0?liveTot:sum(shadow);
+  const pct=n=>nxTot>0?Math.round((n||0)/nxTot*100)+'%':'—';
+  document.getElementById(rail.mode).textContent=liveTot>0?'flag ON · firing':'shadow · flag off';
+  document.getElementById(rail.box).innerHTML=
+    `<span>would-fire <b>${r.would_fire||0}</b></span>`+
+    `<span class="dim2">|</span>`+
+    `<span>next&rarr;lens <b>${nx.lens||0}</b></span>`+
+    `<span>grep <b>${nx.grep||0}</b></span>`+
+    `<span>read <b>${nx.read||0}</b></span>`+
+    `<span>bash <b>${nx.bash||0}</b></span>`+
+    `<span>edit <b>${nx.edit||0}</b></span>`+
+    `<span>other <b>${nx.other||0}</b></span>`+
+    `<span class="dim2">|</span>`+
+    `<span>${rail.deny?'adoption':'nudge&rarr;lens'} <b>${pct(nx.lens)}</b> <span class="dim2">go&ge;55%</span></span>`+
+    (rail.deny?`<span>${rail.guard} <b>${pct(nx[rail.guard])}</b> <span class="dim2">go&lt;25%</span></span>`:'');
+}
 function setStale(){
   document.getElementById('dot').classList.add('stale');
   document.getElementById('status').textContent='disconnected — retrying';
@@ -846,6 +892,10 @@ async function tick(){
     `<span class="dim2">|</span>`+
     `<span>adoption <b>${pct(nx.lens)}</b> <span class="dim2">go&ge;55%</span></span>`+
     `<span>shellgrep <b>${pct(nx.shellgrep)}</b> <span class="dim2">go&lt;25%</span></span>`;
+
+  // Reroute rails — one card per rail, same decision-aid shape as grep-scope above.
+  const rr=d.reroute||{};
+  REROUTE_RAILS.forEach(rail=>renderReroute(rail, rr[rail.p]));
 
   // Applied value — benchmark per-op rates × your live op counts. Estimates only;
   // never folded into savedTotal / the $ headline. Time = round-trips × RT_SECONDS.
@@ -1059,5 +1109,47 @@ mod tests {
         for key in SNAPSHOT_DIMENSIONS {
             assert!(snap.get(*key).is_some(), "snapshot missing dimension key '{key}'");
         }
+    }
+
+    /// The six reroute-rail panels are structural clones of the grep-scope card: same
+    /// seclabel + panel shape, one per rail, with the two deny rails (gsym, rskel)
+    /// additionally wired for the counter-invisibility guard. Drives the real serving
+    /// path (`route`) rather than comparing against a hand-built HTML string.
+    #[test]
+    fn reroute_rail_panels_mirror_grep_scope_card_shape() {
+        let dir = tempdir().unwrap();
+        let (status, ct, body) = route("/", dir.path(), None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("html"));
+
+        // Per-rail seclabel title + mode span id + content div id + REROUTE_RAILS entry.
+        let rails: [(&str, &str, &str, &str); 6] = [
+            ("grep→symbol", "rrGsymMode", "rrGsym", "gsym"),
+            ("read→skeleton", "rrRskelMode", "rrRskel", "rskel"),
+            ("bash→lens_run", "rrBaggMode", "rrBagg", "bagg"),
+            ("edit→links", "rrElinkMode", "rrElink", "elink"),
+            ("grep→ast", "rrGastMode", "rrGast", "gast"),
+            ("read→overview", "rrRovrMode", "rrRovr", "rovr"),
+        ];
+        for (title, mode_id, box_id, prefix) in rails {
+            assert!(body.contains(title), "panel title '{title}' missing");
+            assert!(body.contains(&format!("id=\"{mode_id}\"")), "mode span '{mode_id}' missing");
+            assert!(body.contains(&format!("id=\"{box_id}\"")), "content div '{box_id}' missing");
+            assert!(body.contains(&format!("p:'{prefix}'")), "REROUTE_RAILS entry for '{prefix}' missing");
+        }
+        // Deny rails carry their guard wiring; nudge rails explicitly opt out.
+        assert!(body.contains("deny:true,guard:'grep'"), "gsym deny+guard flag missing");
+        assert!(body.contains("deny:true,guard:'read'"), "rskel deny+guard flag missing");
+        assert!(body.contains("deny:false"), "at least one nudge rail flag missing");
+
+        // Shared render logic: flag-state tokens, next→lens split, adoption/nudge
+        // landed-rate line (go ≥55%), and the deny-rail guard (go <25%).
+        assert!(body.contains("flag ON · firing"));
+        assert!(body.contains("shadow · flag off"));
+        assert!(body.contains("next&rarr;lens"));
+        assert!(body.contains("go&ge;55%"));
+        assert!(body.contains("go&lt;25%"));
+        assert!(body.contains("nudge&rarr;lens"));
+        assert!(body.contains("d.reroute"), "tick() must read the reroute snapshot plane");
     }
 }

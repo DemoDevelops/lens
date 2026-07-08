@@ -74,6 +74,12 @@ pub fn render_snapshot(snap: &Value, width: u16, color: Theme, rate: f64, rt_sec
     section("BY MECHANISM", mechanism_lines(snap, inner, color), &mut out);
     section("RTK SHELL", rtk_lines(snap, inner, color), &mut out);
     section("GREP-SCOPE DENY", grep_scope_lines(snap, inner, color), &mut out);
+    section("GREP→SYMBOL", reroute_lines(snap, "gsym", Some("grep"), inner), &mut out);
+    section("READ→SKELETON", reroute_lines(snap, "rskel", Some("read"), inner), &mut out);
+    section("BASH→LENS_RUN", reroute_lines(snap, "bagg", None, inner), &mut out);
+    section("EDIT→LINKS", reroute_lines(snap, "elink", None, inner), &mut out);
+    section("GREP→AST", reroute_lines(snap, "gast", None, inner), &mut out);
+    section("READ→OVERVIEW", reroute_lines(snap, "rovr", None, inner), &mut out);
     section("SESSION ACTIVITY", activity_lines(snap, inner, color), &mut out);
     section("APPLIED VALUE", applied_value_lines(snap, rt_seconds, color), &mut out);
     out.push_str(&footer(snap, w, color));
@@ -329,6 +335,44 @@ fn grep_scope_lines(snap: &Value, inner: usize, _color: Theme) -> Vec<String> {
         format!("adoption {} (go ≥55%)", pct(gi(nx, "lens"))),
         format!("shellgrep {} (go <25%)", pct(gi(nx, "shellgrep"))),
     ];
+    flow(&items, inner, " · ")
+}
+
+/// Reroute rail plane (dark-launch decision aid): generalizes [`grep_scope_lines`] to
+/// any of the six `lens_reroute_rails` classifiers (contract: `routing/reroute/mod.rs`).
+/// Reads `snap["reroute"][prefix]`; the live-arm total (not the env var) decides shadow
+/// vs flag-on, the same inference grep-scope uses. `guard_class` is `Some(class)` for
+/// the two deny rails (the counter-invisibility escape hatch to watch, go <25%) and
+/// `None` for the four nudge rails, which show only the landed-rate line (labelled
+/// `nudge→lens` rather than `adoption`).
+fn reroute_lines(snap: &Value, prefix: &str, guard_class: Option<&str>, inner: usize) -> Vec<String> {
+    let r = &snap["reroute"][prefix];
+    let gi = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    let sum = |v: &Value| {
+        gi(v, "lens") + gi(v, "grep") + gi(v, "read") + gi(v, "bash") + gi(v, "edit") + gi(v, "other")
+    };
+    let live_tot = sum(&r["next"]);
+    let (nx, nx_tot, mode) = if live_tot > 0 {
+        (&r["next"], live_tot, "flag ON")
+    } else {
+        (&r["shadow_next"], sum(&r["shadow_next"]), "shadow")
+    };
+    let pct = |n: i64| if nx_tot > 0 { format!("{}%", n * 100 / nx_tot) } else { "—".to_string() };
+    let landed = if guard_class.is_some() { "adoption" } else { "nudge→lens" };
+    let mut items = vec![
+        format!("mode {mode}"),
+        format!("would-fire {}", gi(r, "would_fire")),
+        format!("next→lens {}", gi(nx, "lens")),
+        format!("grep {}", gi(nx, "grep")),
+        format!("read {}", gi(nx, "read")),
+        format!("bash {}", gi(nx, "bash")),
+        format!("edit {}", gi(nx, "edit")),
+        format!("other {}", gi(nx, "other")),
+        format!("{landed} {} (go ≥55%)", pct(gi(nx, "lens"))),
+    ];
+    if let Some(gc) = guard_class {
+        items.push(format!("{gc} {} (go <25%)", pct(gi(nx, gc))));
+    }
     flow(&items, inner, " · ")
 }
 
@@ -1134,5 +1178,100 @@ mod tests {
         assert!(matches!(ThemeKind::parse("70s"), Some(ThemeKind::Seventies)));
         assert!(matches!(ThemeKind::parse("SEVENTIES"), Some(ThemeKind::Seventies)));
         assert!(ThemeKind::parse("blue").is_none());
+    }
+
+    /// Drives the `reroute_lines` line-builder directly: a deny rail (flag ON, with
+    /// its guard) and a nudge rail (shadow, no guard) — same live-vs-shadow inference
+    /// and pct math as `grep_scope_lines`.
+    #[test]
+    fn reroute_lines_computes_mode_and_guard_directly() {
+        let mut snap = serde_json::json!({});
+        snap["reroute"] = serde_json::json!({
+            "gsym": {
+                "would_fire": 10,
+                "next": {"lens": 8, "grep": 2, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "shadow_next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0}
+            },
+            "bagg": {
+                "would_fire": 5,
+                "next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "shadow_next": {"lens": 3, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 1}
+            }
+        });
+
+        let gsym = reroute_lines(&snap, "gsym", Some("grep"), 200).join(" ");
+        assert!(gsym.contains("mode flag ON"));
+        assert!(gsym.contains("would-fire 10"));
+        assert!(gsym.contains("next→lens 8"));
+        assert!(gsym.contains("adoption 80% (go ≥55%)"));
+        assert!(gsym.contains("grep 20% (go <25%)"));
+
+        let bagg = reroute_lines(&snap, "bagg", None, 200).join(" ");
+        assert!(bagg.contains("mode shadow"));
+        assert!(bagg.contains("nudge→lens 75% (go ≥55%)"));
+        assert!(!bagg.contains("go <25%"), "nudge rails carry no guard line");
+    }
+
+    /// Full-frame parity check: all six reroute-rail sections render alongside
+    /// GREP-SCOPE DENY, each with its title, flag-state mode, next→{class} split, and
+    /// landed-rate line; the two deny rails (gsym, rskel) also carry their guard.
+    /// Mixes flag-ON and shadow rails so both inference branches are exercised.
+    #[test]
+    fn render_full_has_every_reroute_rail() {
+        let mut snap = seeded_snap();
+        snap["reroute"] = serde_json::json!({
+            "gsym": {
+                "would_fire": 10,
+                "next": {"lens": 8, "grep": 2, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "shadow_next": {"lens": 1, "grep": 1, "read": 0, "bash": 0, "edit": 0, "other": 0}
+            },
+            "rskel": {
+                "would_fire": 6,
+                "next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "shadow_next": {"lens": 4, "grep": 0, "read": 2, "bash": 0, "edit": 0, "other": 0}
+            },
+            "bagg": {
+                "would_fire": 5,
+                "next": {"lens": 4, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 1},
+                "shadow_next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0}
+            },
+            "elink": {
+                "would_fire": 4,
+                "next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "shadow_next": {"lens": 3, "grep": 0, "read": 0, "bash": 0, "edit": 1, "other": 0}
+            },
+            "gast": {
+                "would_fire": 3,
+                "next": {"lens": 3, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "shadow_next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0}
+            },
+            "rovr": {
+                "would_fire": 4,
+                "next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "shadow_next": {"lens": 2, "grep": 0, "read": 2, "bash": 0, "edit": 0, "other": 0}
+            }
+        });
+
+        let out = render_snapshot(&snap, 100, Theme::OFF, 5.0, 4.0);
+
+        for title in [
+            "GREP→SYMBOL", "READ→SKELETON", "BASH→LENS_RUN", "EDIT→LINKS", "GREP→AST", "READ→OVERVIEW",
+        ] {
+            assert!(out.contains(title), "missing panel title {title}");
+        }
+        // gsym: flag ON (live next nonzero), 80% adoption, 20% grep guard.
+        assert!(out.contains("mode flag ON"));
+        assert!(out.contains("next→lens 8"));
+        assert!(out.contains("adoption 80% (go ≥55%)"));
+        assert!(out.contains("grep 20% (go <25%)"));
+        // rskel: shadow (live next all zero, falls back), 66% adoption, 33% read guard.
+        assert!(out.contains("mode shadow"));
+        assert!(out.contains("adoption 66% (go ≥55%)"));
+        assert!(out.contains("read 33% (go <25%)"));
+        // Nudge rails: landed-rate line labelled nudge→lens, no guard.
+        assert!(out.contains("nudge→lens 80% (go ≥55%)")); // bagg (flag ON)
+        assert!(out.contains("nudge→lens 75% (go ≥55%)")); // elink (shadow)
+        assert!(out.contains("nudge→lens 100% (go ≥55%)")); // gast (flag ON)
+        assert!(out.contains("nudge→lens 50% (go ≥55%)")); // rovr (shadow)
     }
 }

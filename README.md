@@ -173,6 +173,8 @@ lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio
 
 **Graph (`lens_map` / `lens_symbol` / `lens_find` / `lens_links` / `lens_path`).** `lens_map` parses [supported files](SUPPORTED.md) with tree-sitter and builds a deterministic structural graph (functions, types, modules, and their calls/imports/contains edges) in `.lens/graph.json`. The query tools walk that graph, so "who calls X" or "how does A reach B" is a graph lookup instead of a pile of file reads.
 
+**Warmup (`lens warmup` / `lens watch`).** The graph and index build lazily on the first tool call that needs them. To pay that cost up front, run `lens warmup [path]` before you start; to keep both fresh as you edit, run `lens watch [path]` (debounced re-index on file changes). Both write into the same `.lens/` dir the server reads, so a running server picks up the changes on its next query with no restart.
+
 **Session continuity.** The lifecycle hooks capture events into a store, each tagged priority 1 (critical) to 4 (low). At `PreCompact`, lens builds a priority-tiered resume snapshot within a small byte budget; at `SessionStart` it re-injects a Session Guide. This survives compaction at a fraction of the Context Mode plugin's token cost.
 
 **Routing.** A PreToolUse policy, gated by `LENS_ROUTING`, decides whether to pass, nudge, rewrite, or deny each tool call:

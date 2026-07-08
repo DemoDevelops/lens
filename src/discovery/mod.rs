@@ -16,7 +16,7 @@ use ignore::WalkBuilder;
 use rayon::prelude::*;
 use tree_sitter::Tree;
 
-use extract::FileExtract;
+use extract::{FileExtract, MdLink, MdLinkKind};
 use graph::{Graph, Node};
 
 use crate::tools::DiscoverResponse;
@@ -125,6 +125,9 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
     // Raw, cross-file relationships resolved after all nodes exist.
     let mut pending_calls: Vec<(String, String)> = Vec::new();
     let mut pending_imports: Vec<(String, String, usize, String)> = Vec::new(); // (module_id, seg, line, lang)
+    let mut pending_md_links: Vec<(String, MdLink)> = Vec::new(); // (linking module_id, link)
+    let mut pending_tags: Vec<(String, String)> = Vec::new(); // (module_id, tag)
+    let mut pending_aliases: Vec<(String, String)> = Vec::new(); // (declaring module_id, alias)
 
     for FileResult { lang_name, fx, .. } in file_results {
         langs_used.insert(lang_name.clone());
@@ -141,6 +144,15 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         pending_calls.extend(fx.calls);
         for (seg, line) in fx.imports {
             pending_imports.push((module_id.clone(), seg, line, lang_name.clone()));
+        }
+        for link in fx.md_links {
+            pending_md_links.push((module_id.clone(), link));
+        }
+        for tag in fx.md_tags {
+            pending_tags.push((module_id.clone(), tag));
+        }
+        for alias in fx.md_aliases {
+            pending_aliases.push((module_id.clone(), alias));
         }
     }
 
@@ -280,6 +292,23 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         }
     }
 
+    // Frontmatter `tags:` become shared `kind:"tag"` nodes (one per distinct tag
+    // name across the whole graph — [`Graph::add_node`] dedups by id, which for a tag
+    // is derived from the name) with a `tagged` edge from each declaring module.
+    // Markdown-only: `pending_tags` is empty for a pure code repo.
+    for (module_id, tag) in pending_tags {
+        let tag_node = Node::new(&tag, "tag", &tag, 1, "markdown");
+        let tag_id = tag_node.id.clone();
+        graph.add_node(tag_node);
+        graph.add_edge(&module_id, &tag_id, "tagged");
+    }
+
+    // Resolve markdown cross-doc links into `imports` edges. Markdown-only:
+    // `pending_md_links` is empty for a pure code repo, so this is a no-op there and
+    // the code graph stays byte-identical to before this pass existed. Frontmatter
+    // `aliases:` feed name-based (wikilink/reference) resolution.
+    resolve_md_links(&mut graph, pending_md_links, pending_aliases);
+
     // Deterministic ordering of the persisted graph.
     graph.nodes.sort_by(|a, b| a.id.cmp(&b.id));
     graph
@@ -295,6 +324,364 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
     };
 
     DiscoverOutcome { graph, response }
+}
+
+/// Resolve markdown cross-doc links into `imports` edges, and `#anchor`s into edges
+/// to the specific HEADING node they target. Runs ONLY over markdown links
+/// (`pending_md_links` is empty for a code-only repo), so it never perturbs the code
+/// graph. Two resolution rules, chosen by link syntax:
+///
+/// * `Inline` (`[t](path)`): the path is resolved RELATIVE to the linking file's
+///   directory and matched EXACTLY against a module node's rel-path name — a
+///   universally safe, path-based match. `index.md`'s `[deploy](./deploy.md)` links
+///   to the `deploy.md` module node itself, not a bare `deploy` stub.
+/// * `Wikilink` (`[[note]]`): the target basename is matched against every markdown
+///   module's file stem AND against frontmatter `aliases:` keys (so `[[oldname]]`
+///   also resolves to a module declaring `oldname` as an alias); on a collision it
+///   links ALL matches, in deterministic id order.
+/// * `Embed` (`![[note]]`): resolved exactly like a `Wikilink` (stem/alias/anchor),
+///   but emitted as an `embeds` edge instead of `imports`.
+///
+/// Path-based matching keys off each module's `.file` (its rel path, which never
+/// changes) rather than its display `.name`, so a frontmatter `title:` can rename a
+/// module without breaking inline/wikilink resolution.
+///
+/// A link matching nothing keeps a synthetic `import` stub node (the "unresolved
+/// link" marker) so the edge still has a real endpoint.
+///
+/// When a link carries a `#anchor`, the edge targets the specific HEADING node in
+/// the resolved file whose GitHub slug ([`slug`]) matches the anchor, instead of the
+/// module node — `[[arch#Overview]]` links to arch.md's `Overview` heading, not
+/// arch.md itself. A same-doc anchor (`[jump](#setup)`, empty target) resolves
+/// within the LINKING file. If the anchor doesn't match any heading in the resolved
+/// file, the pass falls back to the module-level edge (never drops the link).
+fn resolve_md_links(
+    graph: &mut Graph,
+    pending_md_links: Vec<(String, MdLink)>,
+    pending_aliases: Vec<(String, String)>,
+) {
+    if pending_md_links.is_empty() {
+        return;
+    }
+
+    // Index the markdown module nodes: by exact rel-path (inline resolution) and by
+    // file stem (wikilink resolution). Also index every heading node by (file,
+    // slug(name)) so an anchored link can find its specific heading. Built into
+    // owned Strings so the immutable borrow of `graph.nodes` is released before the
+    // graph is mutated below.
+    let mut module_by_path: HashMap<String, String> = HashMap::new();
+    let mut modules_by_stem: HashMap<String, Vec<String>> = HashMap::new();
+    let mut module_file: HashMap<String, String> = HashMap::new();
+    let mut headings_by_file_slug: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for n in &graph.nodes {
+        if n.language != "markdown" {
+            continue;
+        }
+        if n.kind == "module" {
+            // Key path-based lookups off `.file` (the rel path), NOT `.name`: a
+            // frontmatter `title:` renames `.name`, but the rel path a link resolves
+            // to is stable. `.file == .name` for a module with no title.
+            module_by_path.insert(n.file.clone(), n.id.clone());
+            modules_by_stem
+                .entry(file_stem(&n.file).to_string())
+                .or_default()
+                .push(n.id.clone());
+            module_file.insert(n.id.clone(), n.file.clone());
+        } else if n.kind == "heading" {
+            headings_by_file_slug
+                .entry((n.file.clone(), slug(&n.name)))
+                .or_default()
+                .push(n.id.clone());
+        }
+    }
+    for ids in modules_by_stem.values_mut() {
+        ids.sort();
+    }
+    for ids in headings_by_file_slug.values_mut() {
+        ids.sort();
+    }
+
+    // Alias basename -> declaring module ids, keyed by the same file-stem
+    // normalization the link side uses, so a `[[oldname]]` (or a reference resolving
+    // to a bare `oldname`) also reaches the module that declares that alias.
+    let mut alias_index: HashMap<String, Vec<String>> = HashMap::new();
+    for (module_id, alias) in pending_aliases {
+        alias_index
+            .entry(file_stem(&alias).to_string())
+            .or_default()
+            .push(module_id);
+    }
+    for ids in alias_index.values_mut() {
+        ids.sort();
+        ids.dedup();
+    }
+
+    // Compute the edges and stubs first, then apply them, so no read borrow of the
+    // graph is held across a mutation.
+    let mut edges: Vec<(String, String)> = Vec::new();
+    let mut stubs: Vec<(String, String, usize)> = Vec::new(); // (from_module, stub_name, line)
+    // Transclusion embeds resolve exactly like wikilinks but drain to `embeds` edges,
+    // so they collect separately.
+    let mut embed_edges: Vec<(String, String)> = Vec::new();
+    let mut embed_stubs: Vec<(String, String, usize)> = Vec::new();
+    for (module_id, link) in pending_md_links {
+        let file = match module_file.get(&module_id) {
+            Some(f) => f.as_str(),
+            None => continue,
+        };
+        let dir = parent_dir(file);
+        match link.kind {
+            MdLinkKind::Inline => {
+                if link.target.is_empty() {
+                    // Same-doc `#anchor` link: resolve within the linking file.
+                    if let Some(heads) =
+                        resolve_anchor_headings(&headings_by_file_slug, file, link.anchor.as_deref())
+                    {
+                        for h in heads {
+                            if *h != module_id {
+                                edges.push((module_id.clone(), h.clone()));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let canonical = resolve_relative(dir, &link.target);
+                match module_by_path.get(&canonical) {
+                    Some(target) if *target != module_id => {
+                        let target_file =
+                            module_file.get(target).map(String::as_str).unwrap_or_default();
+                        match resolve_anchor_headings(
+                            &headings_by_file_slug,
+                            target_file,
+                            link.anchor.as_deref(),
+                        ) {
+                            Some(heads) => {
+                                edges.extend(heads.iter().map(|h| (module_id.clone(), h.clone())))
+                            }
+                            None => edges.push((module_id.clone(), target.clone())),
+                        }
+                    }
+                    Some(_) => {
+                        // Link to self: only meaningful with an anchor, resolved in
+                        // this file; an anchorless self-link stays a no-op.
+                        if let Some(heads) =
+                            resolve_anchor_headings(&headings_by_file_slug, file, link.anchor.as_deref())
+                        {
+                            for h in heads {
+                                if *h != module_id {
+                                    edges.push((module_id.clone(), h.clone()));
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        // Exact path missed. A reference/inline target that is a bare
+                        // alias name (no matching file) still resolves via the alias
+                        // index; otherwise it stays an unresolved-link stub.
+                        let stem = file_stem(&canonical).to_string();
+                        match alias_index.get(&stem) {
+                            Some(ids) => {
+                                for target in ids {
+                                    if *target == module_id {
+                                        continue;
+                                    }
+                                    let target_file = module_file
+                                        .get(target)
+                                        .map(String::as_str)
+                                        .unwrap_or_default();
+                                    match resolve_anchor_headings(
+                                        &headings_by_file_slug,
+                                        target_file,
+                                        link.anchor.as_deref(),
+                                    ) {
+                                        Some(heads) => edges.extend(
+                                            heads.iter().map(|h| (module_id.clone(), h.clone())),
+                                        ),
+                                        None => edges.push((module_id.clone(), target.clone())),
+                                    }
+                                }
+                            }
+                            None => stubs.push((module_id.clone(), canonical, link.line)),
+                        }
+                    }
+                }
+            }
+            // A wikilink (`[[note]]`) resolves by file stem/alias to an `imports`
+            // edge; a transclusion embed (`![[note]]`) resolves identically but to an
+            // `embeds` edge — same logic, different drain target.
+            MdLinkKind::Wikilink => resolve_wikilike(
+                &module_id,
+                file,
+                &link,
+                &modules_by_stem,
+                &alias_index,
+                &module_file,
+                &headings_by_file_slug,
+                &mut edges,
+                &mut stubs,
+            ),
+            MdLinkKind::Embed => resolve_wikilike(
+                &module_id,
+                file,
+                &link,
+                &modules_by_stem,
+                &alias_index,
+                &module_file,
+                &headings_by_file_slug,
+                &mut embed_edges,
+                &mut embed_stubs,
+            ),
+            // Reference is resolved as Inline at extraction, never constructed here.
+            MdLinkKind::Reference => {}
+        }
+    }
+
+    for (from, name, line) in stubs {
+        let stub = Node::new(&name, "import", &name, line, "markdown");
+        let sid = stub.id.clone();
+        graph.add_node(stub);
+        graph.add_edge(&from, &sid, "imports");
+    }
+    // An unmatched embed keeps the same unresolved-link `import` stub marker as the
+    // other link kinds, but its edge stays `embeds` so the link's syntax is preserved.
+    for (from, name, line) in embed_stubs {
+        let stub = Node::new(&name, "import", &name, line, "markdown");
+        let sid = stub.id.clone();
+        graph.add_node(stub);
+        graph.add_edge(&from, &sid, "embeds");
+    }
+    for (from, to) in edges {
+        graph.add_edge(&from, &to, "imports");
+    }
+    for (from, to) in embed_edges {
+        graph.add_edge(&from, &to, "embeds");
+    }
+}
+
+/// Resolve a wikilink-shaped target (`[[note]]` / `![[note]]`) by file stem and
+/// declared alias, identically for a `Wikilink` and an `Embed`; only the edge KIND
+/// the caller drains `edges`/`stubs` with differs. Union the stem and alias matches,
+/// dedup, and link every one in deterministic id order; an `#anchor` narrows to the
+/// specific heading node; a self-target resolves its anchor within the linking file;
+/// a total miss pushes an unresolved-link stub. Resolved endpoints go to `edges`,
+/// misses to `stubs`, so the caller emits each with the right edge kind.
+#[allow(clippy::too_many_arguments)]
+fn resolve_wikilike(
+    module_id: &str,
+    file: &str,
+    link: &MdLink,
+    modules_by_stem: &HashMap<String, Vec<String>>,
+    alias_index: &HashMap<String, Vec<String>>,
+    module_file: &HashMap<String, String>,
+    headings_by_file_slug: &HashMap<(String, String), Vec<String>>,
+    edges: &mut Vec<(String, String)>,
+    stubs: &mut Vec<(String, String, usize)>,
+) {
+    if link.target.is_empty() {
+        return;
+    }
+    let stem = file_stem(&link.target).to_string();
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(ids) = modules_by_stem.get(&stem) {
+        targets.extend(ids.iter().cloned());
+    }
+    if let Some(ids) = alias_index.get(&stem) {
+        targets.extend(ids.iter().cloned());
+    }
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        stubs.push((module_id.to_string(), link.target.clone(), link.line));
+        return;
+    }
+    for target in &targets {
+        if target.as_str() == module_id {
+            if let Some(heads) =
+                resolve_anchor_headings(headings_by_file_slug, file, link.anchor.as_deref())
+            {
+                for h in heads {
+                    if h.as_str() != module_id {
+                        edges.push((module_id.to_string(), h.clone()));
+                    }
+                }
+            }
+            continue;
+        }
+        let target_file = module_file.get(target).map(String::as_str).unwrap_or_default();
+        match resolve_anchor_headings(headings_by_file_slug, target_file, link.anchor.as_deref()) {
+            Some(heads) => edges.extend(heads.iter().map(|h| (module_id.to_string(), h.clone()))),
+            None => edges.push((module_id.to_string(), target.clone())),
+        }
+    }
+}
+
+/// Heading ids in `file` whose GitHub [`slug`] matches `anchor`, or `None` if
+/// `anchor` is absent or matches no heading in that file — the caller's cue to fall
+/// back to a module-level edge instead of dropping the link.
+fn resolve_anchor_headings<'a>(
+    headings_by_file_slug: &'a HashMap<(String, String), Vec<String>>,
+    file: &str,
+    anchor: Option<&str>,
+) -> Option<&'a Vec<String>> {
+    let anchor = anchor?;
+    headings_by_file_slug.get(&(file.to_string(), slug(anchor)))
+}
+
+/// The directory portion of a `/`-separated relative path (`sub/util.md` -> `sub`,
+/// `index.md` -> ``).
+fn parent_dir(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[..i],
+        None => "",
+    }
+}
+
+/// Resolve a `/`-separated relative `target` against `dir`, collapsing `.`/`..`
+/// components. `("", "./deploy.md")` -> `deploy.md`; `("sub", "../util.md")` ->
+/// `util.md`; `("sub", "peer.md")` -> `sub/peer.md`.
+fn resolve_relative(dir: &str, target: &str) -> String {
+    let mut stack: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    for comp in target.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    stack.join("/")
+}
+
+/// The file stem of a `/`-separated path: its last component with a trailing `.md`
+/// or `.markdown` extension removed (`sub/util.md` -> `util`, `arch` -> `arch`).
+fn file_stem(path: &str) -> &str {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    base.strip_suffix(".md")
+        .or_else(|| base.strip_suffix(".markdown"))
+        .unwrap_or(base)
+}
+
+/// GitHub-style heading slug: lowercase, drop punctuation (keep `-`), spaces become
+/// `-`, and consecutive `-` collapse to one. `slug("Overview") == "overview"`;
+/// `slug("My Setup!") == "my-setup"`.
+fn slug(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev_dash = false;
+    for ch in text.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            out.push(lower);
+            prev_dash = false;
+        } else if (lower == '-' || lower.is_whitespace()) && !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 /// Cheap staleness signature for the graph: every supported source file under
@@ -568,6 +955,358 @@ mod tests {
         assert!(out.response.languages.contains(&"rust".to_string()));
         // a calls edge between main and helper exists
         assert!(out.graph.edges.iter().any(|e| e.kind == "calls"));
+    }
+
+    /// T1 core: markdown inline and wikilink links must resolve to the REAL target
+    /// MODULE nodes (connect-the-docs), not collapse onto bare-name `import` stubs.
+    #[test]
+    fn markdown_links_resolve_to_module_nodes() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("index.md"),
+            "# Index\n\nSee [deploy](./deploy.md) and [[arch#Overview]].\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("deploy.md"),
+            "# Deploy\n\nBack to [home](./index.md).\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("arch.md"), "# Arch\n\n## Overview\n").unwrap();
+
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let module_id = |file: &str| -> String {
+            g.nodes
+                .iter()
+                .find(|n| n.kind == "module" && n.file == file)
+                .unwrap_or_else(|| panic!("no module node for {file}"))
+                .id
+                .clone()
+        };
+        let idx = module_id("index.md");
+        let dep = module_id("deploy.md");
+        let arch = module_id("arch.md");
+        let has_import = |from: &str, to: &str| {
+            g.edges
+                .iter()
+                .any(|e| e.kind == "imports" && e.from == from && e.to == to)
+        };
+
+        // Inline `[deploy](./deploy.md)` -> the real deploy.md MODULE node.
+        assert!(
+            has_import(&idx, &dep),
+            "index.md -> deploy.md import missing; edges={:?}",
+            g.edges
+        );
+        // Wikilink `[[arch#Overview]]` -> arch.md's `Overview` HEADING node (T4: the
+        // anchor resolves to the specific heading, not the module).
+        let overview = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == "heading" && n.file == "arch.md" && n.name == "Overview")
+            .unwrap_or_else(|| panic!("no Overview heading node in arch.md; nodes={:?}", g.nodes))
+            .id
+            .clone();
+        assert!(
+            has_import(&idx, &overview),
+            "index.md -> arch.md#Overview heading import missing; edges={:?}",
+            g.edges
+        );
+        assert!(
+            !has_import(&idx, &arch),
+            "an anchored link that resolves to a heading must not ALSO edge to the module"
+        );
+        // Backlink `[home](./index.md)` from deploy.md -> index.md.
+        assert!(
+            has_import(&dep, &idx),
+            "deploy.md -> index.md backlink missing; edges={:?}",
+            g.edges
+        );
+
+        // Every link resolved, so no synthetic bare-name `import` stub was minted.
+        let stubs: Vec<&str> = g
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "import")
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(
+            stubs.is_empty(),
+            "resolved markdown links must not leave import stubs; got {stubs:?}"
+        );
+    }
+
+    /// T4: a link's `#anchor` resolves to the specific HEADING node (matched by
+    /// GitHub slug), not the module — for both a wikilink (`[[arch#Overview]]`) and
+    /// an inline link (`[x](arch.md#overview)`) — and a same-doc anchor
+    /// (`[jump](#setup)`) resolves within the linking file itself.
+    #[test]
+    fn markdown_anchors_resolve_to_heading_nodes() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("index.md"),
+            "# Index\n\nSee [[arch#Overview]], [x](arch.md#overview), and [jump](#setup).\n\n\
+             ## Setup\n\nSetup content.\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("arch.md"), "# Arch\n\n## Overview\n").unwrap();
+
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let module_id = |file: &str| -> String {
+            g.nodes
+                .iter()
+                .find(|n| n.kind == "module" && n.file == file)
+                .unwrap_or_else(|| panic!("no module node for {file}"))
+                .id
+                .clone()
+        };
+        let heading_id = |file: &str, name: &str| -> String {
+            g.nodes
+                .iter()
+                .find(|n| n.kind == "heading" && n.file == file && n.name == name)
+                .unwrap_or_else(|| panic!("no heading node {name:?} in {file}"))
+                .id
+                .clone()
+        };
+        let has_import = |from: &str, to: &str| {
+            g.edges
+                .iter()
+                .any(|e| e.kind == "imports" && e.from == from && e.to == to)
+        };
+
+        let idx = module_id("index.md");
+        let arch = module_id("arch.md");
+        let arch_overview = heading_id("arch.md", "Overview");
+        let idx_setup = heading_id("index.md", "Setup");
+
+        // Both `[[arch#Overview]]` and `[x](arch.md#overview)` land on arch.md's
+        // Overview HEADING node, not the arch MODULE node.
+        assert!(
+            has_import(&idx, &arch_overview),
+            "index.md -> arch.md#Overview heading edge missing; edges={:?}",
+            g.edges
+        );
+        assert!(
+            !has_import(&idx, &arch),
+            "an anchored link that resolves to a heading must not ALSO edge to the module"
+        );
+
+        // Same-doc `[jump](#setup)` resolves within index.md itself.
+        assert!(
+            has_import(&idx, &idx_setup),
+            "index.md -> #setup same-doc heading edge missing; edges={:?}",
+            g.edges
+        );
+    }
+
+    /// T5: frontmatter drives three graph facts. `title:` renames the module node;
+    /// `tags:` mints a shared `kind:"tag"` node with a `tagged` edge; `aliases:` lets
+    /// a `[[oldname]]` from another note resolve to the aliased module (an `imports`
+    /// edge), even though no file is named `oldname`.
+    #[test]
+    fn markdown_frontmatter_title_tags_aliases() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("note.md"),
+            "---\ntitle: My Note\ntags: [alpha]\naliases: [oldname]\n---\n# Body\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("other.md"),
+            "# Other\n\nSee [[oldname]].\n",
+        )
+        .unwrap();
+
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let module_id = |file: &str| -> String {
+            g.nodes
+                .iter()
+                .find(|n| n.kind == "module" && n.file == file)
+                .unwrap_or_else(|| panic!("no module node for {file}"))
+                .id
+                .clone()
+        };
+        let note = module_id("note.md");
+        let other = module_id("other.md");
+
+        // `title:` renamed the module node (its `.file` stays note.md).
+        let note_name = g.node(&note).unwrap().name.clone();
+        assert_eq!(note_name, "My Note", "title must rename the module node");
+
+        // `tags: [alpha]` -> a shared `kind:"tag"` node + a `tagged` edge from note.
+        let tag = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == "tag" && n.name == "alpha")
+            .unwrap_or_else(|| panic!("no tag node `alpha`; nodes={:?}", g.nodes))
+            .id
+            .clone();
+        assert!(
+            g.edges
+                .iter()
+                .any(|e| e.kind == "tagged" && e.from == note && e.to == tag),
+            "note.md -> tag `alpha` `tagged` edge missing; edges={:?}",
+            g.edges
+        );
+
+        // `aliases: [oldname]` -> `[[oldname]]` in other.md resolves to note.md.
+        assert!(
+            g.edges
+                .iter()
+                .any(|e| e.kind == "imports" && e.from == other && e.to == note),
+            "other.md -> note.md alias `imports` edge missing; edges={:?}",
+            g.edges
+        );
+        // The alias link resolved to a real module, so no bare-name stub was minted.
+        assert!(
+            !g.nodes.iter().any(|n| n.kind == "import" && n.name == "oldname"),
+            "alias link must not leave an `oldname` import stub; nodes={:?}",
+            g.nodes
+        );
+    }
+
+    /// T6(a): a transclusion embed `![[deploy]]` resolves to the target MODULE node
+    /// via an `embeds`-kind edge (not `imports`), leaving no bare-name stub.
+    #[test]
+    fn markdown_embed_resolves_to_embeds_edge() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("notes.md"),
+            "# Notes\n\nSee the guide:\n\n![[deploy]]\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("deploy.md"), "# Deploy\n").unwrap();
+
+        let g = discover(dir.path(), None).unwrap().graph;
+        let module_id = |file: &str| -> String {
+            g.nodes
+                .iter()
+                .find(|n| n.kind == "module" && n.file == file)
+                .unwrap_or_else(|| panic!("no module node for {file}"))
+                .id
+                .clone()
+        };
+        let notes = module_id("notes.md");
+        let dep = module_id("deploy.md");
+        let has_edge = |from: &str, to: &str, kind: &str| {
+            g.edges
+                .iter()
+                .any(|e| e.kind == kind && e.from == from && e.to == to)
+        };
+
+        assert!(
+            has_edge(&notes, &dep, "embeds"),
+            "notes.md -> deploy.md `embeds` edge missing; edges={:?}",
+            g.edges
+        );
+        // An embed is an `embeds` edge, never an `imports` edge.
+        assert!(
+            !has_edge(&notes, &dep, "imports"),
+            "an embed must not also produce an imports edge; edges={:?}",
+            g.edges
+        );
+        // The embed resolved to a real module, so no stub node was minted.
+        assert!(
+            !g.nodes.iter().any(|n| n.kind == "import"),
+            "resolved embed must not leave an import stub; nodes={:?}",
+            g.nodes
+        );
+    }
+
+    /// T6(b): an inline `#alpha` hashtag in prose mints a shared `kind:"tag"` node and
+    /// a `tagged` edge from the note, reusing the same path as frontmatter tags.
+    #[test]
+    fn markdown_inline_tag_makes_tagged_edge() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("notes.md"),
+            "# Notes\n\nSome #alpha findings worth keeping.\n",
+        )
+        .unwrap();
+
+        let g = discover(dir.path(), None).unwrap().graph;
+        let notes = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == "module" && n.file == "notes.md")
+            .unwrap()
+            .id
+            .clone();
+        let tag = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == "tag" && n.name == "alpha")
+            .unwrap_or_else(|| panic!("no tag node `alpha`; nodes={:?}", g.nodes))
+            .id
+            .clone();
+        assert!(
+            g.edges
+                .iter()
+                .any(|e| e.kind == "tagged" && e.from == notes && e.to == tag),
+            "notes.md -> tag `alpha` `tagged` edge missing; edges={:?}",
+            g.edges
+        );
+    }
+
+    /// THE T6 no-regression gate (graph half): a plain CommonMark note (an inline
+    /// link + headings, but NO `[[`, NO `![[`, NO `#tag`) contributes ZERO `tagged`
+    /// and ZERO `embeds` edges. This proves PKM name-based resolution never engages on
+    /// a plain repo. (The extract half lives in `discovery::extract`.)
+    #[test]
+    fn markdown_plain_note_has_no_pkm_edges() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("plain.md"),
+            "# Plain CommonMark\n\nA normal inline link to [architecture](./arch.md).\n\n\
+             ## Content\n\nRegular prose with no special hashtag syntax for tags.\n\n\
+             ## Structure\n\n- Item one\n- Item two\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("arch.md"), "# Arch\n\nArchitecture notes.\n").unwrap();
+
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        assert!(
+            !g.edges.iter().any(|e| e.kind == "tagged"),
+            "a plain note must contribute no `tagged` edges; edges={:?}",
+            g.edges
+        );
+        assert!(
+            !g.edges.iter().any(|e| e.kind == "embeds"),
+            "a plain note must contribute no `embeds` edges; edges={:?}",
+            g.edges
+        );
+        assert!(
+            !g.nodes.iter().any(|n| n.kind == "tag"),
+            "a plain note must mint no `tag` nodes; nodes={:?}",
+            g.nodes
+        );
+        // Sanity: the plain inline link still resolves to the real arch.md module
+        // (standard CommonMark is owned by lens; only PKM syntax is gated off).
+        let plain = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == "module" && n.file == "plain.md")
+            .unwrap()
+            .id
+            .clone();
+        let arch = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == "module" && n.file == "arch.md")
+            .unwrap()
+            .id
+            .clone();
+        assert!(
+            g.edges
+                .iter()
+                .any(|e| e.kind == "imports" && e.from == plain && e.to == arch),
+            "plain.md -> arch.md inline `imports` edge missing; edges={:?}",
+            g.edges
+        );
     }
 
     #[test]

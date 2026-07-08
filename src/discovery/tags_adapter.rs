@@ -424,6 +424,11 @@ fn extract_tags_from_tree(
         calls,
         imports,
         contains,
+        // Cross-doc links, tags, and aliases are markdown-only concepts; tags-based
+        // languages carry none.
+        md_links: Vec::new(),
+        md_tags: Vec::new(),
+        md_aliases: Vec::new(),
     })
 }
 

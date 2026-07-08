@@ -12,6 +12,7 @@
 //! The `lens stats` / `lens verify` CLI subcommands ([`stats`], [`verify`])
 //! read these files back; they are separate processes whose stdout is their own.
 
+pub mod credit;
 pub mod dashboard;
 pub mod stats;
 pub mod tui;
@@ -54,6 +55,12 @@ pub struct OpRecord {
     pub raw_bytes_in: u64,
     pub bytes_returned: u64,
     pub tokens_saved_est: i64,
+    /// How `raw_bytes_in` was credited toward `tokens_saved_est`:
+    /// `"context_bound" | "volunteered" | "neutral"` (see `credit::CreditClass`).
+    /// `#[serde(default)]` so pre-existing log lines (written before this field
+    /// existed) still parse, just with an empty string.
+    #[serde(default)]
+    pub credit_class: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub store_ref: Option<String>,
     pub duration_ms: u64,
@@ -306,7 +313,9 @@ impl OpHandle {
         let lock_wait_ms = LOCK_WAIT_MS
             .load(Ordering::Relaxed)
             .saturating_sub(self.lock_wait_base);
-        let tokens_saved_est = ((raw_bytes_in as i64 - bytes_returned as i64).max(0)) / 4;
+        let class = credit::classify(self.tool, &self.input_summary, raw_bytes_in);
+        let credited = credit::credited_raw(class, raw_bytes_in);
+        let tokens_saved_est = ((credited as i64 - bytes_returned as i64).max(0)) / 4;
         let pid = std::process::id();
         let rec = OpRecord {
             ts: iso8601_now(),
@@ -323,6 +332,7 @@ impl OpHandle {
             raw_bytes_in,
             bytes_returned,
             tokens_saved_est,
+            credit_class: class.as_str().to_string(),
             store_ref,
             duration_ms,
             lock_wait_ms,
@@ -512,6 +522,29 @@ mod tests {
         assert_eq!(rec.bytes_returned, 100);
         assert_eq!(rec.tokens_saved_est, (8000 - 100) / 4);
         assert_eq!(rec.store_ref.as_deref(), Some("abc"));
+
+        // A volunteered op (data file handed to the darkroom, not intercepted
+        // context) is credited only up to the plausible-slice floor, while a
+        // context-bound op (source file, stands in for a would-be Read) is
+        // credited in full — both derived by the shared classifier in finish().
+        let raw_huge = 5 * 1024 * 1024u64;
+        let returned = 100u64;
+        log.start("lens_run_file", json!({"path": "x.log"}))
+            .finish(raw_huge, returned, None, "ok", "", None);
+        log.start("lens_run_file", json!({"path": "src/main.rs"}))
+            .finish(raw_huge, returned, None, "ok", "", None);
+        let raw = std::fs::read_to_string(dir.path().join("ops.log")).unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let log_rec: OpRecord = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(log_rec.credit_class, "volunteered");
+        assert_eq!(log_rec.tokens_saved_est, (32_768i64 - returned as i64) / 4);
+        let rs_rec: OpRecord = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(rs_rec.credit_class, "context_bound");
+        assert_eq!(
+            rs_rec.tokens_saved_est,
+            (raw_huge as i64 - returned as i64) / 4
+        );
     }
 
     #[test]

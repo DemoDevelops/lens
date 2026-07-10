@@ -46,6 +46,40 @@ pub fn reason() -> String {
     "<context_guidance>\n  <tip>\n    This pipeline counts, sorts, or reshapes data — run it inside lens_run(language=\"shell\", code=\"...\") instead of Bash: the shell pipeline executes in the darkroom and only what you print comes back, so the raw rows never land in context. If lens_run isn't loaded yet, load it first: ToolSearch(query: \"select:lens_run,lens_recall\").\n  </tip>\n</context_guidance>".to_string()
 }
 
+/// Deny reason for a Bash `cmd` [`is_data_aggregate`] identified as a
+/// counting/sorting/reshaping pipeline: names the exact `lens_run` call with
+/// `cmd` embedded as its `code` arg, includes the `ToolSearch` bootstrap line
+/// in case the lens tools aren't loaded yet, and promises the one-shot: a
+/// verbatim retry of the same command passes.
+///
+/// ## Precision note
+///
+/// `is_data_aggregate` is a lexical regex match over the raw command text,
+/// not a semantic one, so it is **not clearly safe to hard-deny by default**.
+/// Two failure modes:
+///
+/// 1. **Session-state coupling.** Unlike a Grep/Read lookup, a Bash pipeline
+///    can depend on this shell session's live state (an exported env var
+///    from an earlier command, the current `cd`'d directory) and can feed a
+///    later Bash step (`VAR=$(git status | wc -l)`, `if [ $(uniq -c ...) ]`).
+///    `lens_run`'s darkroom is a fresh subprocess with none of that state, so
+///    denying can silently break a workflow a nudge would only advise
+///    against.
+/// 2. **Substring false positives.** The regexes match anywhere in the raw
+///    text (`grep -c`, `| jq`, …), so a matching substring inside a quoted
+///    string or a longer non-aggregate command (e.g. an `echo` that merely
+///    mentions `grep -c`) still classifies as an aggregate.
+///
+/// Recommendation: T3 should gate the bagg deny conservatively — leave the
+/// existing nudge ([`reason`]) as the default arm, and not flip
+/// `LENS_BASH_AGG_NUDGE` off in favor of the deny without further
+/// false-positive measurement (T4).
+pub fn deny_reason(cmd: &str) -> String {
+    format!(
+        "This Bash pipeline counts, sorts, or reshapes data (\"{cmd}\") — run it inside the darkroom instead of Bash: lens_run(language=\"shell\", code=\"{cmd}\"). Only what you print comes back, so the raw rows never land in context. If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_run,lens_recall\"). This fires once per prompt — the same command will pass if you re-run it verbatim."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +108,12 @@ mod tests {
     #[test]
     fn reason_names_lens_run() {
         assert!(reason().contains("lens_run"));
+    }
+
+    #[test]
+    fn deny_reason_names_lens_run_and_promises_retry() {
+        let r = deny_reason("git status | wc -l");
+        assert!(r.contains("lens_run"));
+        assert!(r.contains("will pass if you re-run it verbatim"));
     }
 }

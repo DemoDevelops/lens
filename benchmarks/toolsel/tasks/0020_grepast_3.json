@@ -1,0 +1,9 @@
+{
+  "id": "0020_grepast_3",
+  "prompt": "In `src/routing/`, find every function returning `-> Result`. Do not modify anything.",
+  "expected_tools": [
+    "lens_grep_ast"
+  ],
+  "score": "first_tool",
+  "source": "mined:dd404bca"
+}

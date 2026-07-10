@@ -1,0 +1,9 @@
+{
+  "id": "0018_grepast_1",
+  "prompt": "In `src/server.rs`, find every `#[tool]` attribute and list the function each one decorates. Do not modify anything.",
+  "expected_tools": [
+    "lens_grep_ast"
+  ],
+  "score": "first_tool",
+  "source": "mined:d36dc6ed"
+}

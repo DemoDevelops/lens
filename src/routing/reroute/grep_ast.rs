@@ -55,33 +55,57 @@ fn shapes() -> &'static Shapes {
     })
 }
 
+/// Undoes the two regex idioms that hide a syntax shape from the [`shapes`]
+/// regexes: `pattern` is itself a regex (it's a Grep argument), so the model
+/// often spells a shape as regex idiom rather than literal source form —
+/// escaping metacharacters (`#\[tool\]`, `\.clone\(\)`) or spelling a gap as
+/// `.*`/`.+`/`\s+` (`impl.*Forge`, `impl\s+Forge`). Stripping the backslash
+/// before `[ ] ( ) { } .` undoes the first; collapsing regex gaps and runs of
+/// literal spaces to a single space undoes the second, so `impl.*Forge`,
+/// `impl\s+Forge`, and `impl Forge` all normalize to the same shape. The raw
+/// `pattern` is kept for anything user-facing — this is only for matching.
+fn normalize_pattern(pattern: &str) -> String {
+    static ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
+    let escape_re =
+        ESCAPE_RE.get_or_init(|| Regex::new(r"\\([\[\](){}.])").expect("escape regex"));
+    let unescaped = escape_re.replace_all(pattern, "$1");
+
+    static GAP_RE: OnceLock<Regex> = OnceLock::new();
+    let gap_re = GAP_RE.get_or_init(|| Regex::new(r"(?:\.\*|\.\+|\\s\+| +)+").expect("gap regex"));
+    gap_re.replace_all(&unescaped, " ").into_owned()
+}
+
 /// Does `pattern` (a Grep search string) describe a Rust syntax shape that
 /// `lens_grep_ast` answers directly, instead of matching it as plain text?
 /// Checked most-specific first (impl/attribute/async fn/trait/for-in) before
 /// the generic method-call/return-arrow shapes, so a pattern that could read
 /// as several shapes reports its most useful one. Plain text (`"error
-/// message"`) returns `None`.
+/// message"`) returns `None`. Matched against [`normalize_pattern`]'s output,
+/// not the raw pattern, so regex-escaped or regex-gapped shapes are caught
+/// too.
 pub fn syntax_shape(pattern: &str) -> Option<AstHint> {
+    let normalized = normalize_pattern(pattern);
+    let normalized = normalized.as_str();
     let s = shapes();
-    if let Some(c) = s.impl_block.captures(pattern) {
+    if let Some(c) = s.impl_block.captures(normalized) {
         return Some(AstHint::ImplBlock(c[1].to_string()));
     }
-    if let Some(c) = s.attribute.captures(pattern) {
+    if let Some(c) = s.attribute.captures(normalized) {
         return Some(AstHint::Attribute(c[1].to_string()));
     }
-    if s.async_fn.is_match(pattern) {
+    if s.async_fn.is_match(normalized) {
         return Some(AstHint::AsyncFn);
     }
-    if s.trait_def.is_match(pattern) {
+    if s.trait_def.is_match(normalized) {
         return Some(AstHint::TraitDef);
     }
-    if s.for_in.is_match(pattern) {
+    if s.for_in.is_match(normalized) {
         return Some(AstHint::ForIn);
     }
-    if s.method_call.is_match(pattern) {
+    if s.method_call.is_match(normalized) {
         return Some(AstHint::MethodCall);
     }
-    if pattern.contains("->") {
+    if normalized.contains("->") {
         return Some(AstHint::ReturnArrow);
     }
     None
@@ -120,6 +144,18 @@ pub fn nudge(hint: &AstHint) -> String {
     let query = query_for(hint);
     format!(
         "This grep pattern describes Rust syntax, not text to search for — grep also matches it inside comments and string literals, where the shape doesn't apply. lens_grep_ast matches real syntax nodes instead: lens_grep_ast(language=\"rust\", query=\"{query}\"). If lens_grep_ast isn't loaded yet: ToolSearch(query: \"select:lens_grep_ast\")."
+    )
+}
+
+/// Deny reason for a Grep `pattern` [`syntax_shape`] identified as a Rust
+/// syntax shape: names the exact `lens_grep_ast` call with the translated
+/// query, offers the `ToolSearch` bootstrap in case the lens tools aren't
+/// loaded yet, and promises the retry passes (mirrors the shape of
+/// `grep_symbol::reason`).
+pub fn deny_reason(hint: &AstHint) -> String {
+    let query = query_for(hint);
+    format!(
+        "This grep pattern describes Rust syntax, not text to search for — grep also matches it inside comments and string literals, where the shape doesn't apply. Answer it with lens_grep_ast(language=\"rust\", query=\"{query}\") instead. If lens_grep_ast isn't loaded yet, load it first: ToolSearch(query: \"select:lens_grep_ast\"). This fires once per prompt — the same grep will pass if you re-run it verbatim."
     )
 }
 
@@ -173,6 +209,45 @@ mod tests {
     #[test]
     fn return_arrow_shape() {
         assert_eq!(syntax_shape("-> Result<()>"), Some(AstHint::ReturnArrow));
+    }
+
+    #[test]
+    fn escaped_impl_block_shape() {
+        assert_eq!(
+            syntax_shape("impl.*Forge"),
+            Some(AstHint::ImplBlock("Forge".to_string()))
+        );
+    }
+
+    #[test]
+    fn escaped_attribute_shape() {
+        assert_eq!(
+            syntax_shape(r"#\[tool\]"),
+            Some(AstHint::Attribute("tool".to_string()))
+        );
+    }
+
+    #[test]
+    fn escaped_method_call_shape() {
+        assert_eq!(syntax_shape(r"\.clone\(\)"), Some(AstHint::MethodCall));
+    }
+
+    #[test]
+    fn escaped_whitespace_gap_impl_block_shape() {
+        assert_eq!(
+            syntax_shape(r"impl\s+Forge"),
+            Some(AstHint::ImplBlock("Forge".to_string()))
+        );
+    }
+
+    #[test]
+    fn deny_reason_names_tool_query_and_retry_promise() {
+        let hint = AstHint::ImplBlock("Forge".to_string());
+        let r = deny_reason(&hint);
+        assert!(r.contains("lens_grep_ast"), "{r}");
+        assert!(r.contains("impl_item"), "{r}");
+        assert!(r.contains("\"Forge\""), "{r}");
+        assert!(r.contains("re-run it"), "{r}");
     }
 
     #[test]

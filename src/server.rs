@@ -403,7 +403,7 @@ impl Forge {
     /// Skeletonize a source file: signatures + nesting, executable bodies elided,
     /// the full text stored so any body is one `lens_recall` away.
     #[tool(
-        description = "Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to `…`. Far fewer tokens than reading the whole file, and the full text is stored so any elided body is one lens_recall away (use the returned retrieve_ref). Pass `include_bodies` with definition names to get those bodies back verbatim in the same response, without a second call. Do not Read a code file just to see its structure — use this first; use Read only when about to Edit."
+        description = "Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to `…`. Far fewer tokens than reading the whole file, and the full text is stored so any elided body is one lens_recall away (use the returned retrieve_ref). Pass `include_bodies` with definition names to get those bodies back verbatim in the same response, without a second call. Pass `with_lines: true` to prefix each signature with its `L{n}:` source line for exact citations. Do not Read a code file just to see its structure — use this first; use Read only when about to Edit."
     )]
     async fn lens_skeleton(
         &self,
@@ -431,9 +431,12 @@ impl Forge {
             return Err(ToolFailure::recoverable(msg));
         };
         let language = spec.name.to_string();
-        let Some(skeleton) =
-            crate::discovery::skeleton::skeletonize(&content, &spec, req.include_bodies.as_deref())
-        else {
+        let Some(skeleton) = crate::discovery::skeleton::skeletonize(
+            &content,
+            &spec,
+            req.include_bodies.as_deref(),
+            req.with_lines.unwrap_or(false),
+        ) else {
             let msg = format!("could not parse {} for skeleton; use Read", p.display());
             op.finish(0, 0, None, "error", msg.clone(), None);
             return Err(ToolFailure::recoverable(msg));
@@ -1863,6 +1866,7 @@ mod tests {
             .lens_skeleton(Parameters(crate::tools::SkeletonRequest {
                 path: file.display().to_string(),
                 include_bodies: None,
+                with_lines: None,
             }))
             .await
             .unwrap()
@@ -1913,6 +1917,7 @@ mod tests {
             .lens_skeleton(Parameters(crate::tools::SkeletonRequest {
                 path: file.display().to_string(),
                 include_bodies: None,
+                with_lines: None,
             }))
             .await
             .unwrap()

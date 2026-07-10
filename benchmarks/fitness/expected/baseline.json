@@ -1,5 +1,5 @@
 {
-  "overall_token_savings_pct": 53.83235867446394,
+  "overall_token_savings_pct": 51.81286549707602,
   "per_workload": [
     {
       "workload": "Code search (results across files)",
@@ -11,7 +11,7 @@
     },
     {
       "workload": "File read (skeleton + recall)",
-      "token_savings_pct": 56.77804944308612
+      "token_savings_pct": 49.74191795707688
     },
     {
       "workload": "Issue triage (structured payload)",

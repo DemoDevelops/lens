@@ -95,6 +95,10 @@ pub struct SkeletonRequest {
     /// file are silently ignored.
     #[serde(default)]
     pub include_bodies: Option<Vec<String>>,
+    /// When true, prefix each definition's signature line with `L{n}: ` (its
+    /// 1-indexed source line) so callers can cite exact locations. Default false.
+    #[serde(default)]
+    pub with_lines: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

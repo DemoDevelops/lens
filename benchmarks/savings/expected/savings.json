@@ -47,10 +47,10 @@
     "workload": "File read (skeleton + recall)",
     "mechanism": "skeleton",
     "before_bytes": 15915,
-    "after_bytes": 5785,
+    "after_bytes": 6681,
     "before_tokens": 3681,
-    "after_tokens": 1591,
-    "savings_pct": 64,
+    "after_tokens": 1850,
+    "savings_pct": 58,
     "baseline": "Agent reads each source file in full to understand its structure.",
     "detail": "12 files reduced to tree-sitter skeletons; full text recoverable via lens_recall (one ref/file)"
   }

@@ -218,16 +218,6 @@ fn route(target: &str, dir: &Path, session: Option<&str>) -> (u16, &'static str,
                             })
                             .take(30)
                             .collect();
-                        // grep-scope routing counters are per-repo (bump_stat never
-                        // writes the global home store), so the global view sums them
-                        // across every known project instead of reading the empty home
-                        // store the rest of this snapshot came from.
-                        if query_param(query, "scope") == Some("global") {
-                            let dirs: Vec<PathBuf> =
-                                real.iter().map(|p| Path::new(p).join(".lens")).collect();
-                            v["grep_scope"] = super::stats::grep_scope_aggregate(&dirs);
-                            v["reroute"] = super::stats::reroute_aggregate(&dirs);
-                        }
                         v["projects"] = serde_json::json!(real);
                     }
                 }
@@ -467,20 +457,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <div class="panel"><h2>by mechanism</h2><div class="mech" id="byMech"></div></div>
     <div class="panel"><h2>RTK shell savings</h2><div class="mech" id="rtkCards"></div></div>
   </div>
-  <div class="seclabel"><b>grep-scope deny</b> &middot; live &middot; flag=0 disables &middot; <span id="gsScope">cumulative, all sessions</span> &middot; <span id="gsMode">—</span></div>
-  <div class="panel"><div class="mech" id="grepScope"></div></div>
-  <div class="seclabel"><b>grep→symbol</b> &middot; live &middot; flag=0 disables &middot; <span id="rrGsymScope">cumulative, all sessions</span> &middot; <span id="rrGsymMode">—</span></div>
-  <div class="panel"><div class="mech" id="rrGsym"></div></div>
-  <div class="seclabel"><b>read→skeleton</b> &middot; live &middot; flag=0 disables &middot; <span id="rrRskelScope">cumulative, all sessions</span> &middot; <span id="rrRskelMode">—</span></div>
-  <div class="panel"><div class="mech" id="rrRskel"></div></div>
-  <div class="seclabel"><b>bash→lens_run</b> &middot; live &middot; flag=0 disables &middot; <span id="rrBaggScope">cumulative, all sessions</span> &middot; <span id="rrBaggMode">—</span></div>
-  <div class="panel"><div class="mech" id="rrBagg"></div></div>
-  <div class="seclabel"><b>edit→links</b> &middot; live &middot; flag=0 disables &middot; <span id="rrElinkScope">cumulative, all sessions</span> &middot; <span id="rrElinkMode">—</span></div>
-  <div class="panel"><div class="mech" id="rrElink"></div></div>
-  <div class="seclabel"><b>grep→ast</b> &middot; live &middot; flag=0 disables &middot; <span id="rrGastScope">cumulative, all sessions</span> &middot; <span id="rrGastMode">—</span></div>
-  <div class="panel"><div class="mech" id="rrGast"></div></div>
-  <div class="seclabel"><b>read→overview</b> &middot; live &middot; flag=0 disables &middot; <span id="rrRovrScope">cumulative, all sessions</span> &middot; <span id="rrRovrMode">—</span></div>
-  <div class="panel"><div class="mech" id="rrRovr"></div></div>
   <div class="seclabel"><b>applied value</b> &middot; benchmark rates &times; your live ops &middot; <span id="avNote">estimated, not measured this session</span></div>
   <div class="panel"><div class="av" id="appliedValue"></div></div>
   <div class="seclabel"><b>session activity</b> &middot; built-in tools (Read / Edit / Bash) via hooks &middot; not token savings</div>
@@ -799,47 +775,6 @@ function compbar(label,raw,ret,maxraw){
   const retW=ret/maxraw*100, savW=Math.max(0,(raw-ret)/maxraw*100), pct=raw>0?Math.round((raw-ret)/raw*100):0;
   return `<div class="hbar"><span class="lbl">${label}</span><span class="track"><span class="fill" style="width:${retW}%"></span><span class="fill dim" style="width:${savW}%"></span></span><span class="val">${pct}%</span></div>`;
 }
-// Reroute rail plane (live by default, one card per rail): same shape as grep-scope
-// above, generalized so all six share one renderer. Every rail carries both a nudge
-// and a deny arm; `deny:true` rails (gsym/rskel) additionally show the
-// counter-invisibility guard (re-grep / re-read rate, go <25%); the other four show
-// only the landed-rate line, labelled nudge→lens instead of adoption.
-const REROUTE_RAILS=[
-  {p:'gsym',mode:'rrGsymMode',box:'rrGsym',scope:'rrGsymScope',deny:true,guard:'grep'},
-  {p:'rskel',mode:'rrRskelMode',box:'rrRskel',scope:'rrRskelScope',deny:true,guard:'read'},
-  {p:'bagg',mode:'rrBaggMode',box:'rrBagg',scope:'rrBaggScope',deny:false},
-  {p:'elink',mode:'rrElinkMode',box:'rrElink',scope:'rrElinkScope',deny:false},
-  {p:'gast',mode:'rrGastMode',box:'rrGast',scope:'rrGastScope',deny:false},
-  {p:'rovr',mode:'rrRovrMode',box:'rrRovr',scope:'rrRovrScope',deny:false},
-];
-// `epoch_stamp` (unix secs, 0 = never stamped) comes from the aggregate JSON
-// (`grep_scope`/each `reroute[prefix]` block); once `lens stats --epoch` has run,
-// the rail panel's scope note switches from "cumulative, all sessions" to the
-// clean promotion window's start date.
-function scopeLabelForEpoch(epochStamp){
-  return epochStamp?('since '+new Date(epochStamp*1000).toISOString().slice(0,10)):'cumulative, all sessions';
-}
-function renderReroute(rail,r){
-  r=r||{};
-  const next=r.next||{}, shadow=r.shadow_next||{};
-  const sum=o=>(o.lens||0)+(o.grep||0)+(o.read||0)+(o.bash||0)+(o.edit||0)+(o.other||0);
-  const liveTot=sum(next), nx=liveTot>0?next:shadow, nxTot=liveTot>0?liveTot:sum(shadow);
-  const pct=n=>nxTot>0?Math.round((n||0)/nxTot*100)+'%':'—';
-  document.getElementById(rail.mode).textContent=liveTot>0?'live · firing':'shadow · operator-disabled';
-  document.getElementById(rail.scope).textContent=scopeLabelForEpoch(r.epoch_stamp);
-  document.getElementById(rail.box).innerHTML=
-    `<span>would-fire <b>${r.would_fire||0}</b></span>`+
-    `<span class="dim2">|</span>`+
-    `<span>next&rarr;lens <b>${nx.lens||0}</b></span>`+
-    `<span>grep <b>${nx.grep||0}</b></span>`+
-    `<span>read <b>${nx.read||0}</b></span>`+
-    `<span>bash <b>${nx.bash||0}</b></span>`+
-    `<span>edit <b>${nx.edit||0}</b></span>`+
-    `<span>other <b>${nx.other||0}</b></span>`+
-    `<span class="dim2">|</span>`+
-    `<span>${rail.deny?'adoption':'nudge&rarr;lens'} <b>${pct(nx.lens)}</b> <span class="dim2">go&ge;55%</span></span>`+
-    (rail.deny?`<span>${rail.guard} <b>${pct(nx[rail.guard])}</b> <span class="dim2">go&lt;25%</span></span>`:'');
-}
 function setStale(){
   document.getElementById('dot').classList.add('stale');
   document.getElementById('status').textContent='disconnected — retrying';
@@ -934,34 +869,6 @@ async function tick(){
     document.getElementById('savedTop').textContent=humanCount(measuredFloor)+' measured · ~'+humanCount(savedMcp)+' classified';
     savedTotal=savedMcp; renderCost();
   }
-
-  // Grep-scope deny plane: cumulative store counters (not windowed). Classification
-  // of greps seen + what tool ran right after a would-deny. Shows deny_next_* once
-  // the deny fires (live), else the shadow_next_* proxy. The stage-3 go signal is
-  // the lens share of the follow-up (target >=55%, shellgrep <25%).
-  const gs=d.grep_scope||{}, sn=gs.shadow_next||{}, dn=gs.deny_next||{};
-  const sum=o=>(o.lens||0)+(o.grep||0)+(o.shellgrep||0)+(o.other||0);
-  const denyTot=sum(dn), nx=denyTot>0?dn:sn, nxTot=denyTot>0?denyTot:sum(sn);
-  const pct=n=>nxTot>0?Math.round((n||0)/nxTot*100)+'%':'—';
-  document.getElementById('gsMode').textContent=denyTot>0?'live · deny firing':'shadow · operator-disabled';
-  document.getElementById('gsScope').textContent=scopeLabelForEpoch(gs.epoch_stamp);
-  document.getElementById('grepScope').innerHTML=
-    `<span>broad <b>${gs.broad||0}</b></span>`+
-    `<span>single <b>${gs.single||0}</b></span>`+
-    `<span>unknown <b>${gs.unknown||0}</b></span>`+
-    `<span>would-deny <b>${gs.would_deny||0}</b></span>`+
-    `<span class="dim2">|</span>`+
-    `<span>next&rarr;lens <b>${nx.lens||0}</b></span>`+
-    `<span>grep <b>${nx.grep||0}</b></span>`+
-    `<span>shellgrep <b>${nx.shellgrep||0}</b></span>`+
-    `<span>other <b>${nx.other||0}</b></span>`+
-    `<span class="dim2">|</span>`+
-    `<span>adoption <b>${pct(nx.lens)}</b> <span class="dim2">go&ge;55%</span></span>`+
-    `<span>shellgrep <b>${pct(nx.shellgrep)}</b> <span class="dim2">go&lt;25%</span></span>`;
-
-  // Reroute rails — one card per rail, same decision-aid shape as grep-scope above.
-  const rr=d.reroute||{};
-  REROUTE_RAILS.forEach(rail=>renderReroute(rail, rr[rail.p]));
 
   // Applied value — benchmark per-op rates × your live op counts. Estimates only;
   // never folded into savedTotal / the $ headline. Time = round-trips × RT_SECONDS.
@@ -1192,111 +1099,6 @@ mod tests {
         }
     }
 
-    /// The six reroute-rail panels are structural clones of the grep-scope card: same
-    /// seclabel + panel shape, one per rail, with gsym/rskel additionally wired for
-    /// the counter-invisibility guard. Drives the real serving path (`route`) rather
-    /// than comparing against a hand-built HTML string.
-    #[test]
-    fn reroute_rail_panels_mirror_grep_scope_card_shape() {
-        let dir = tempdir().unwrap();
-        let (status, ct, body) = route("/", dir.path(), None);
-        assert_eq!(status, 200);
-        assert!(ct.contains("html"));
-
-        // Per-rail seclabel title + mode span id + scope span id + content div id +
-        // REROUTE_RAILS entry.
-        let rails: [(&str, &str, &str, &str, &str); 6] = [
-            ("grep→symbol", "rrGsymMode", "rrGsymScope", "rrGsym", "gsym"),
-            (
-                "read→skeleton",
-                "rrRskelMode",
-                "rrRskelScope",
-                "rrRskel",
-                "rskel",
-            ),
-            (
-                "bash→lens_run",
-                "rrBaggMode",
-                "rrBaggScope",
-                "rrBagg",
-                "bagg",
-            ),
-            (
-                "edit→links",
-                "rrElinkMode",
-                "rrElinkScope",
-                "rrElink",
-                "elink",
-            ),
-            ("grep→ast", "rrGastMode", "rrGastScope", "rrGast", "gast"),
-            (
-                "read→overview",
-                "rrRovrMode",
-                "rrRovrScope",
-                "rrRovr",
-                "rovr",
-            ),
-        ];
-        for (title, mode_id, scope_id, box_id, prefix) in rails {
-            assert!(body.contains(title), "panel title '{title}' missing");
-            assert!(
-                body.contains(&format!("id=\"{mode_id}\"")),
-                "mode span '{mode_id}' missing"
-            );
-            assert!(
-                body.contains(&format!("id=\"{scope_id}\"")),
-                "scope span '{scope_id}' missing"
-            );
-            assert!(
-                body.contains(&format!("id=\"{box_id}\"")),
-                "content div '{box_id}' missing"
-            );
-            assert!(
-                body.contains(&format!("p:'{prefix}'")),
-                "REROUTE_RAILS entry for '{prefix}' missing"
-            );
-            assert!(
-                body.contains(&format!("scope:'{scope_id}'")),
-                "REROUTE_RAILS scope binding for '{prefix}' missing"
-            );
-        }
-        // Every rail scope note defaults to "cumulative, all sessions" until an epoch
-        // is stamped (T4); the grep-scope card carries the same default.
-        assert!(body.contains("id=\"gsScope\">cumulative, all sessions<"));
-        for (_, _, scope_id, _, _) in rails {
-            assert!(
-                body.contains(&format!("id=\"{scope_id}\">cumulative, all sessions<")),
-                "scope span '{scope_id}' should default to the cumulative label"
-            );
-        }
-        // Guarded rails carry their guard wiring; the rest explicitly opt out.
-        assert!(
-            body.contains("deny:true,guard:'grep'"),
-            "gsym deny+guard flag missing"
-        );
-        assert!(
-            body.contains("deny:true,guard:'read'"),
-            "rskel deny+guard flag missing"
-        );
-        assert!(
-            body.contains("deny:false"),
-            "at least one unguarded rail flag missing"
-        );
-
-        // Shared render logic: live/shadow mode tokens, next→lens split, adoption/nudge
-        // landed-rate line (go ≥55%), and the guarded-rail guard (go <25%).
-        assert!(body.contains("live · firing"));
-        assert!(body.contains("shadow · operator-disabled"));
-        assert!(body.contains("next&rarr;lens"));
-        assert!(body.contains("go&ge;55%"));
-        assert!(body.contains("go&lt;25%"));
-        assert!(body.contains("nudge&rarr;lens"));
-        assert!(
-            body.contains("d.reroute"),
-            "tick() must read the reroute snapshot plane"
-        );
-    }
-
     /// The "Actual Usage" dropdown mode (T4): the page markup offers it, and a served
     /// `/api/stats` body carries the T3 payload it renders from. `CLAUDE_CONFIG_DIR` is
     /// pointed at a fresh tempdir with no `projects/` subdir, so `usage::read_usage`
@@ -1325,12 +1127,11 @@ mod tests {
         assert!(body.contains("\"price_table\""));
     }
 
-    /// Counter epochs (T4): `/api/stats` surfaces `epoch_stamp` on the `grep_scope`
-    /// block and on every `reroute` rail, and the served page wires
-    /// `scopeLabelForEpoch` to swap the "cumulative, all sessions" note for
-    /// "since <date>" once a nonzero stamp comes back.
+    /// Counter epochs: `/api/stats` surfaces `epoch_stamp` on the `grep_scope`
+    /// block and on every `reroute` rail (`lens stats --epoch` consumes them; the
+    /// panels that rendered them were removed once the rails went default-ON).
     #[test]
-    fn epoch_stamp_present_in_json_and_wired_in_page_js() {
+    fn epoch_stamp_present_in_json() {
         let dir = tempdir().unwrap();
         let (status, ct, body) = route("/api/stats", dir.path(), None);
         assert_eq!(status, 200);
@@ -1348,19 +1149,5 @@ mod tests {
                 "rail {p} epoch_stamp missing"
             );
         }
-
-        let (_, _, page) = route("/", dir.path(), None);
-        assert!(
-            page.contains("scopeLabelForEpoch"),
-            "since-label helper must be in the page"
-        );
-        assert!(
-            page.contains("r.epoch_stamp"),
-            "renderReroute must read epoch_stamp"
-        );
-        assert!(
-            page.contains("gs.epoch_stamp"),
-            "grep-scope block must read epoch_stamp"
-        );
     }
 }

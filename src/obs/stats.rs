@@ -296,8 +296,6 @@ pub const SNAPSHOT_DIMENSIONS: &[&str] = &[
     "applied_value",
     "rtk",
     "activity",
-    "grep_scope",
-    "reroute",
     "store_size",
 ];
 
@@ -865,12 +863,6 @@ pub(crate) fn human_count(n: u64) -> String {
     } else {
         n.to_string()
     }
-}
-
-/// `YYYY-MM-DD` for a unix-seconds epoch stamp — the date half of
-/// [`super::iso8601_secs`], used by the TUI's "since <date>" rail-panel titles.
-pub(crate) fn epoch_date(secs: i64) -> String {
-    super::iso8601_secs(secs)[..10].to_string()
 }
 
 #[cfg(test)]

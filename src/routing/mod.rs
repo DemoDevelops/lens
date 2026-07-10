@@ -410,6 +410,13 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                         throttle::take(ctx.data_dir, ctx.session_id, "grep-scope");
                     }
                     throttle::mark(ctx.data_dir, ctx.session_id, "grep-symbol");
+                    // Neutralize the gast deny too when it can fire, so the same
+                    // prompt never denies twice (gast is session-scoped and does
+                    // not gate on the prompt markers). Gated so it is inert (and
+                    // byte-identical to master) while the gast deny flag is off.
+                    if grep_ast_deny_enabled() {
+                        throttle::mark(ctx.data_dir, ctx.session_id, "grep-ast");
+                    }
                     throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
                     let reason = if first {
                         GREP_FIRST_DENY_REASON
@@ -436,13 +443,39 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             {
                 throttle::take(ctx.data_dir, ctx.session_id, "grep-first");
                 throttle::take(ctx.data_dir, ctx.session_id, "grep-scope");
+                // Neutralize the gast deny too (see the scope-deny branch above):
+                // gated so it stays byte-identical to master while gast is off.
+                if grep_ast_deny_enabled() {
+                    throttle::mark(ctx.data_dir, ctx.session_id, "grep-ast");
+                }
                 throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
                 return Decision::Deny(reroute::grep_symbol::reason(pat));
             }
-            // Reroute rail 2b (gast): a syntax-shaped pattern (an impl block, an
-            // attribute, a method call, …) gets a one-shot nudge carrying the
-            // translated tree-sitter query. Context only, never blocks
-            // (LENS_GREP_AST_NUDGE, same gates).
+            // Reroute rail 2b (gast) DENY: a syntax-shaped pattern (an impl
+            // block, an attribute, a method call, …) is denied once per session
+            // toward lens_grep_ast's tree-sitter query. Placed AFTER the gsym
+            // deny and BEFORE the gast nudge; dark-launched behind
+            // LENS_GREP_AST_DENY with the scope deny's gates, so the nudge below
+            // stays reachable when the deny flag is off. Mirrors the gsym deny:
+            // `nudge_once` runs LAST so a blocked gate never spends the one-shot;
+            // on a deny the shared prompt markers are consumed and the peer gsym
+            // rail neutralized (mark "grep-symbol") so no prompt denies twice,
+            // and the read-code reset lets the verbatim retry pass.
+            if grep_ast_deny_enabled() && ctx.level.steers() && ctx.mcp_ready {
+                if let Some(hint) = reroute::grep_ast::syntax_shape(pat) {
+                    if index_present(ctx.data_dir) && nudge_once(ctx, "grep-ast") {
+                        throttle::take(ctx.data_dir, ctx.session_id, "grep-first");
+                        throttle::take(ctx.data_dir, ctx.session_id, "grep-scope");
+                        throttle::mark(ctx.data_dir, ctx.session_id, "grep-symbol");
+                        throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
+                        return Decision::Deny(reroute::grep_ast::deny_reason(&hint));
+                    }
+                }
+            }
+            // Reroute rail 2b (gast) NUDGE: a syntax-shaped pattern (an impl
+            // block, an attribute, a method call, …) gets a one-shot nudge
+            // carrying the translated tree-sitter query. Context only, never
+            // blocks (LENS_GREP_AST_NUDGE, same gates).
             if grep_ast_nudge_enabled() && ctx.level.nudges() && ctx.mcp_ready {
                 if let Some(hint) = reroute::grep_ast::syntax_shape(pat) {
                     if index_present(ctx.data_dir) && nudge_once(ctx, "grep-ast") {
@@ -643,6 +676,10 @@ pub fn read_skeleton_deny_enabled() -> bool {
 pub fn bash_agg_nudge_enabled() -> bool {
     std::env::var("LENS_BASH_AGG_NUDGE").is_ok_and(|v| v.trim() == "1")
 }
+/// Bash-aggregate deny rail (`bagg`): `LENS_BASH_AGG_DENY=1` enables it.
+pub fn bash_agg_deny_enabled() -> bool {
+    std::env::var("LENS_BASH_AGG_DENY").is_ok_and(|v| v.trim() == "1")
+}
 /// Edit-callers nudge rail (`elink`): `LENS_EDIT_LINKS_NUDGE=1` enables it.
 pub fn edit_links_nudge_enabled() -> bool {
     std::env::var("LENS_EDIT_LINKS_NUDGE").is_ok_and(|v| v.trim() == "1")
@@ -650,6 +687,10 @@ pub fn edit_links_nudge_enabled() -> bool {
 /// Grep-ast nudge rail (`gast`): `LENS_GREP_AST_NUDGE=1` enables it.
 pub fn grep_ast_nudge_enabled() -> bool {
     std::env::var("LENS_GREP_AST_NUDGE").is_ok_and(|v| v.trim() == "1")
+}
+/// Grep-ast deny rail (`gast`): `LENS_GREP_AST_DENY=1` enables it.
+pub fn grep_ast_deny_enabled() -> bool {
+    std::env::var("LENS_GREP_AST_DENY").is_ok_and(|v| v.trim() == "1")
 }
 /// Read-overview nudge rail (`rovr`): `LENS_READ_OVERVIEW_NUDGE=1` enables it.
 pub fn read_overview_nudge_enabled() -> bool {
@@ -836,6 +877,28 @@ fn bash_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     // ignore the advisory. Skip both.
     if classify::classify(cmd) == classify::Risk::Safe {
         return Decision::Passthrough;
+    }
+    // Reroute rail 1c (bagg) DENY: a data-aggregate pipeline (`wc -l`,
+    // `sort | uniq`, …) is denied once per session toward `lens_run`'s darkroom.
+    // Placed BEFORE the wrap rewrite below so at `full` (where `wraps()` would
+    // otherwise rewrite it first) the deny still reaches. Dark-launched behind
+    // LENS_BASH_AGG_DENY, gated on `steers()` like the grep deny rails. Kept
+    // CONSERVATIVE per T2's precision note (the classifier is lexical: shell
+    // session-state coupling and substring FPs), so the LENS_BASH_AGG_NUDGE
+    // nudge stays the default arm and the deny only pre-empts the wrap when its
+    // own flag is on. The stateful check above already guarantees a
+    // state-changing command never reaches here. `nudge_once` runs LAST so a
+    // blocked gate never spends the one-shot; consuming it is what lets the
+    // verbatim retry fall through and pass (Bash has no read-code-style counter
+    // to reset, unlike the grep deny rails).
+    if bash_agg_deny_enabled()
+        && ctx.level.steers()
+        && ctx.mcp_ready
+        && reroute::bash_aggregate::is_data_aggregate(cmd)
+        && index_present(ctx.data_dir)
+        && nudge_once(ctx, "bash-agg")
+    {
+        return Decision::Deny(reroute::bash_aggregate::deny_reason(cmd));
     }
     if is_wrappable_segs(&segs) {
         if ctx.level.wraps() {

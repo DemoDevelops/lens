@@ -1,0 +1,9 @@
+{
+  "id": "0019_grepast_2",
+  "prompt": "In `src/store/mod.rs`, find every function whose signature returns `-> Result`. Do not modify anything.",
+  "expected_tools": [
+    "lens_grep_ast"
+  ],
+  "score": "first_tool",
+  "source": "mined:37d401a9"
+}

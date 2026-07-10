@@ -1,0 +1,9 @@
+{
+  "id": "0017_bashagg_4",
+  "prompt": "Using a shell command, list every task file under `benchmarks/toolsel/tasks/` with its file size in bytes, reshaped into two columns (size then filename) with `awk`. Do not modify anything.",
+  "expected_tools": [
+    "lens_run"
+  ],
+  "score": "first_tool",
+  "source": "mined:b3df0180"
+}

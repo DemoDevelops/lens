@@ -1,0 +1,9 @@
+{
+  "id": "0014_bashagg_1",
+  "prompt": "Using a shell command, how many call sites does `bump_stat` have across `src/`? Do not modify anything.",
+  "expected_tools": [
+    "lens_run"
+  ],
+  "score": "first_tool",
+  "source": "mined:34fe18fa"
+}

@@ -52,8 +52,10 @@ fn run_hook(
         .env_remove("LENS_GREP_SYMBOL_DENY")
         .env_remove("LENS_READ_SKELETON_DENY")
         .env_remove("LENS_BASH_AGG_NUDGE")
+        .env_remove("LENS_BASH_AGG_DENY")
         .env_remove("LENS_EDIT_LINKS_NUDGE")
         .env_remove("LENS_GREP_AST_NUDGE")
+        .env_remove("LENS_GREP_AST_DENY")
         .env_remove("LENS_READ_OVERVIEW_NUDGE")
         .env_remove("LENS_EDIT_LINKS_MIN_CALLERS")
         .env_remove("LENS_READ_OVERVIEW_THRESHOLD")
@@ -977,6 +979,83 @@ fn grep_ast_nudge_translates_syntax_shapes_once() {
 }
 
 #[test]
+fn grep_ast_deny_fires_once_with_flag_and_stays_quiet_off() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_GREP_AST_DENY", "1")];
+
+    // An escaped/regex-form syntax-shaped Grep (the recall-fix case) denies
+    // toward the translated lens_grep_ast query, once per session.
+    let p = grep_payload(d.path(), "gastdeny1", r"impl.*Forge");
+    let (_, first) = run_hook("PreToolUse", &p, &envs, d.path());
+    assert!(is_deny(&first), "escaped syntax-shaped Grep must deny with the flag on: {first}");
+    let reason = first["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.contains("lens_grep_ast")
+            && reason.contains("impl_item")
+            && reason.contains("\"Forge\"")
+            && reason.contains("ToolSearch"),
+        "deny reason names the translated lens_grep_ast query + bootstrap: {reason}"
+    );
+    // One-shot: the verbatim retry passes (never denied again).
+    let (_, second) = run_hook("PreToolUse", &p, &envs, d.path());
+    assert!(!is_deny(&second), "retried syntax Grep must pass: {second}");
+
+    // Flag off (the dark-launch default): the same escaped pattern never denies.
+    let d2 = tempfile::tempdir().unwrap();
+    seed_index(d2.path());
+    let poff = grep_payload(d2.path(), "gastdeny2", r"impl.*Forge");
+    let (_, off) = run_hook("PreToolUse", &poff, &FULL_UP, d2.path());
+    assert!(!is_deny(&off), "flag off must never deny: {off}");
+
+    // Flag on but MCP down: the blocked gate must NOT spend the one-shot; the
+    // same session denies once the server is reachable.
+    let d3 = tempfile::tempdir().unwrap();
+    seed_index(d3.path());
+    let down = [
+        ("LENS_ROUTING", "full"),
+        ("LENS_ROUTING_MCP", "down"),
+        ("LENS_GREP_AST_DENY", "1"),
+    ];
+    let up = [FULL_UP[0], FULL_UP[1], ("LENS_GREP_AST_DENY", "1")];
+    let p3 = grep_payload(d3.path(), "gastdeny3", r"impl.*Forge");
+    let (_, gated) = run_hook("PreToolUse", &p3, &down, d3.path());
+    assert!(!is_deny(&gated), "mcp down must gate the deny: {gated}");
+    let (_, after) = run_hook("PreToolUse", &p3, &up, d3.path());
+    assert!(is_deny(&after), "gate-blocked one-shot must survive to fire later: {after}");
+}
+
+#[test]
+fn grep_ast_deny_resets_read_code_so_the_retry_passes() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_GREP_AST_DENY", "1")];
+    let sess = "gastreset";
+
+    // Drive the shared read-code lookup counter up with plain, non-syntax greps
+    // that bump the counter but never deny (the 4th consecutive lookup is the
+    // inspect_escalation deny threshold).
+    let plain = grep_payload(d.path(), sess, "error message");
+    for _ in 0..3 {
+        run_hook("PreToolUse", &plain, &envs, d.path());
+    }
+
+    // A syntax-shaped grep now gast-denies, which resets read-code to zero.
+    let syn = grep_payload(d.path(), sess, r"impl.*Forge");
+    let (_, denied) = run_hook("PreToolUse", &syn, &envs, d.path());
+    assert!(is_deny(&denied), "syntax grep must gast-deny: {denied}");
+
+    // The verbatim retry must NOT be re-denied: the gast deny is one-shot AND it
+    // reset read-code, so the retry can't trip inspect_escalation's 4th-lookup
+    // deny. Without the reset the counter would sit at 3 and the retry would hit
+    // n=4 and deny.
+    let (_, retry) = run_hook("PreToolUse", &syn, &envs, d.path());
+    assert!(!is_deny(&retry), "verbatim gast retry must pass (read-code reset): {retry}");
+}
+
+#[test]
 fn read_skeleton_deny_fires_once_and_spares_edited_and_bounded_reads() {
     let d = tempfile::tempdir().unwrap();
     seed_index(d.path());
@@ -1094,6 +1173,61 @@ fn bash_agg_nudge_fires_at_steer_wrap_keeps_priority_at_full() {
         !context_of(&gated).contains("reshapes data"),
         "mcp down must gate the bagg nudge: {gated}"
     );
+}
+
+#[test]
+fn bash_agg_deny_fires_before_wrap_with_flag_and_wraps_off() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let agg = "find . -name '*.rs' | wc -l";
+
+    // At full the bagg deny sits BEFORE the wrap rewrite, so with the flag on the
+    // aggregate pipeline is DENIED toward lens_run (pre-empting the wrap), once.
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_BASH_AGG_DENY", "1")];
+    let p = bash_payload(d.path(), "baggdeny1", agg);
+    let (_, first) = run_hook("PreToolUse", &p, &envs, d.path());
+    assert!(is_deny(&first), "aggregate Bash must deny with the flag on, pre-empting wrap: {first}");
+    let reason = first["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.contains("lens_run") && reason.contains("re-run it verbatim"),
+        "deny reason names lens_run + the retry promise: {reason}"
+    );
+    // One-shot: the verbatim retry is not re-denied (at full it wraps instead).
+    let (_, second) = run_hook("PreToolUse", &p, &envs, d.path());
+    assert!(!is_deny(&second), "retried aggregate Bash must pass: {second}");
+
+    // Flag off (the dark-launch default): at full the aggregate is WRAPPED, never
+    // denied, byte-identical to master's behavior.
+    let d2 = tempfile::tempdir().unwrap();
+    seed_index(d2.path());
+    let p2 = bash_payload(d2.path(), "baggdeny2", agg);
+    let (_, wrapped) = run_hook("PreToolUse", &p2, &FULL_UP, d2.path());
+    assert!(!is_deny(&wrapped), "flag off must never deny: {wrapped}");
+    assert_eq!(
+        wrapped["hookSpecificOutput"]["permissionDecision"], "allow",
+        "flag off at full still wraps the aggregate: {wrapped}"
+    );
+    assert!(
+        wrapped["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("wrap -- "),
+        "the aggregate is wrapped, not denied, when the flag is off: {wrapped}"
+    );
+
+    // MCP down gates the deny (a rail must never send the agent to a dead tool).
+    let d3 = tempfile::tempdir().unwrap();
+    seed_index(d3.path());
+    let down = [
+        ("LENS_ROUTING", "full"),
+        ("LENS_ROUTING_MCP", "down"),
+        ("LENS_BASH_AGG_DENY", "1"),
+    ];
+    let p3 = bash_payload(d3.path(), "baggdeny3", agg);
+    let (_, gated) = run_hook("PreToolUse", &p3, &down, d3.path());
+    assert!(!is_deny(&gated), "mcp down must gate the bagg deny: {gated}");
 }
 
 #[test]

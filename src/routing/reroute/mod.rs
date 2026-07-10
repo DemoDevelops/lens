@@ -17,10 +17,16 @@
 //! Env flags (all default OFF):
 //! - `LENS_GREP_SYMBOL_DENY`
 //! - `LENS_READ_SKELETON_DENY`
-//! - `LENS_BASH_AGG_NUDGE`
+//! - `LENS_BASH_AGG_NUDGE` / `LENS_BASH_AGG_DENY`
 //! - `LENS_EDIT_LINKS_NUDGE`
-//! - `LENS_GREP_AST_NUDGE`
+//! - `LENS_GREP_AST_NUDGE` / `LENS_GREP_AST_DENY`
 //! - `LENS_READ_OVERVIEW_NUDGE`
+//!
+//! The `bagg` and `gast` rails each carry BOTH a nudge and a deny flag,
+//! dark-launched independently. The deny arm fires under `Level::steers` (the
+//! nudge arm under `Level::nudges`) and reuses the SAME `{p}_would_fire` /
+//! `{p}_next_{class}` counter keys as the nudge arm — the `bagg`/`gast` prefix
+//! identifies the rail; the flag chooses nudge vs deny.
 
 pub mod grep_symbol;
 pub mod read_skeleton;

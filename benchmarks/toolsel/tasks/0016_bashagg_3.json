@@ -1,0 +1,9 @@
+{
+  "id": "0016_bashagg_3",
+  "prompt": "Using a shell command, list every distinct `LENS_` environment variable flag referenced in `src/routing/reroute/`, with a count of how many times each one appears, most frequent first. Do not modify anything.",
+  "expected_tools": [
+    "lens_run"
+  ],
+  "score": "first_tool",
+  "source": "mined:9be999b7"
+}

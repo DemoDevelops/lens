@@ -1,0 +1,9 @@
+{
+  "id": "0015_bashagg_2",
+  "prompt": "Using a shell command, how many files under `src/routing/` contain the string `Decision::Context`? Do not modify anything.",
+  "expected_tools": [
+    "lens_run"
+  ],
+  "score": "first_tool",
+  "source": "mined:54b27a69"
+}

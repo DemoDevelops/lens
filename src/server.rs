@@ -23,8 +23,8 @@ const DEFAULT_MAX_INLINE: usize = 8 * 1024;
 /// `readOnlyHint` annotation in `list_tools` so Claude Code can auto-approve them (an
 /// unattended agent otherwise stalls on a permission prompt), and `lens setup`
 /// pre-approves them in the permission allowlist. Shared with [`crate::setup`] so the
-/// two never drift. The write tools (lens_run, lens_run_file, lens_index, lens_map) are
-/// intentionally absent.
+/// two never drift. The write tools live in [`WRITE_TOOLS`] and are intentionally
+/// absent here so they never get a `readOnlyHint`.
 pub const READ_ONLY_TOOLS: [&str; 10] = [
     "lens_search",
     "lens_overview",
@@ -37,6 +37,13 @@ pub const READ_ONLY_TOOLS: [&str; 10] = [
     "lens_find",
     "lens_grep_ast",
 ];
+
+/// The lens tools that execute code (in the darkroom subprocess) or write the
+/// index/graph. No `readOnlyHint` — but `lens setup` still pre-approves them in the
+/// permission allowlist: modes that honor allow rules while prompting for everything
+/// else (notably plan mode) would otherwise stall a session on every lens_run/lens_map
+/// call. Shared with [`crate::setup`] so the two never drift.
+pub const WRITE_TOOLS: [&str; 4] = ["lens_run", "lens_run_file", "lens_index", "lens_map"];
 
 /// Appended to the `lens_search`/`lens_overview` descriptions so the model knows the
 /// recovery path before it ever hits a transient index/graph lock (Bug B).
@@ -1401,6 +1408,27 @@ mod tests {
     use crate::store::compress;
     use crate::tools::NodeView;
     use tempfile::tempdir;
+
+    /// Every registered MCP tool must appear in READ_ONLY_TOOLS or WRITE_TOOLS, so the
+    /// `lens setup` permission allowlist can never silently miss a tool (a missed tool
+    /// prompts on every call in plan mode).
+    #[test]
+    fn every_tool_is_classified_for_the_allowlist() {
+        let registered: std::collections::BTreeSet<String> = Forge::tool_router()
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let classified: std::collections::BTreeSet<String> = READ_ONLY_TOOLS
+            .iter()
+            .chain(WRITE_TOOLS.iter())
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            registered, classified,
+            "every #[tool] must be listed in READ_ONLY_TOOLS or WRITE_TOOLS"
+        );
+    }
 
     fn forge(max_inline: usize) -> (Forge, tempfile::TempDir) {
         let dir = tempdir().unwrap();

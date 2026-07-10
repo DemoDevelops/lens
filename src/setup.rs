@@ -18,7 +18,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
 use crate::rtk;
-use crate::server::READ_ONLY_TOOLS;
+use crate::server::{READ_ONLY_TOOLS, WRITE_TOOLS};
 use crate::session;
 
 /// Routing levels accepted by `--routing` (mirrors `routing::Level::parse`).
@@ -104,10 +104,10 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     set_routing(&settings, &opts.routing).context("setting routing level")?;
     say(&format!("Set routing level: {}", opts.routing));
 
-    // 5b. Pre-approve the read-only lens tools so an unattended agent is never blocked
-    //     on a permission prompt for a pure-read call.
-    allow_readonly_tools(&settings).context("allow-listing read-only tools")?;
-    say("Allow-listed read-only lens tools.");
+    // 5b. Pre-approve the lens tools so an agent is never blocked on a permission
+    //     prompt for a lens call (plan mode prompts for any MCP tool not allow-listed).
+    allow_lens_tools(&settings).context("allow-listing lens tools")?;
+    say("Allow-listed lens tools.");
 
     // 6. PATH — so `lens` works as a bare command in new shells.
     let path_added = ensure_on_path(&opts.bin_dir);
@@ -282,12 +282,13 @@ fn set_routing(settings: &Path, level: &str) -> Result<()> {
     write_json(settings, &root)
 }
 
-/// Merge `permissions.allow` entries `mcp__lens__<tool>` for the read-only lens tools
-/// into `settings`, preserving existing entries (idempotent, no duplicates). Claude
-/// Code then auto-runs a read-only lens call instead of prompting, so an unattended
-/// agent never stalls on a permission dialog (Bug B). The tool list is
-/// [`READ_ONLY_TOOLS`], shared with the server's `list_tools` annotations.
-fn allow_readonly_tools(settings: &Path) -> Result<()> {
+/// Merge `permissions.allow` entries `mcp__lens__<tool>` for every lens tool into
+/// `settings`, preserving existing entries (idempotent, no duplicates). Claude Code
+/// then auto-runs a lens call instead of prompting, so an unattended agent never
+/// stalls on a permission dialog (Bug B) — including in plan mode, which honors allow
+/// rules but prompts for any unlisted MCP tool. The tool lists are
+/// [`READ_ONLY_TOOLS`] + [`WRITE_TOOLS`], shared with the server so they never drift.
+fn allow_lens_tools(settings: &Path) -> Result<()> {
     let mut root = read_json(settings)?;
     if !root.is_object() {
         root = json!({});
@@ -306,8 +307,17 @@ fn allow_readonly_tools(settings: &Path) -> Result<()> {
         *allow = json!([]);
     }
     let arr = allow.as_array_mut().unwrap();
-    for tool in READ_ONLY_TOOLS {
+    for tool in READ_ONLY_TOOLS.iter().chain(WRITE_TOOLS.iter()) {
         let entry = Value::from(format!("mcp__lens__{tool}"));
+        if !arr.contains(&entry) {
+            arr.push(entry);
+        }
+    }
+    // The bundled slash commands (/dashboard, /warmup) and the update nudge have the
+    // model run the lens CLI via Bash, and /dashboard probes its local port with curl;
+    // pre-approve those too so no lens flow ever stalls on a permission prompt.
+    for rule in ["Bash(lens:*)", "Bash(curl -s http://127.0.0.1:*)"] {
+        let entry = Value::from(rule);
         if !arr.contains(&entry) {
             arr.push(entry);
         }
@@ -764,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_readonly_tools_merges_and_is_idempotent() {
+    fn allow_lens_tools_merges_and_is_idempotent() {
         let dir = tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         std::fs::write(
@@ -773,7 +783,7 @@ mod tests {
         )
         .unwrap();
 
-        allow_readonly_tools(&settings).unwrap();
+        allow_lens_tools(&settings).unwrap();
         let root = read_json(&settings).unwrap();
         let allow = root["permissions"]["allow"].as_array().unwrap();
         assert!(
@@ -781,10 +791,22 @@ mod tests {
             "read-only search tool must be allow-listed"
         );
         assert!(allow.iter().any(|v| v == "mcp__lens__lens_overview"));
+        for tool in WRITE_TOOLS {
+            let entry = format!("mcp__lens__{tool}");
+            assert!(
+                allow.iter().any(|v| v == entry.as_str()),
+                "write tool {tool} must be allow-listed (plan mode prompts otherwise)"
+            );
+        }
+        assert!(
+            allow.iter().any(|v| v == "Bash(lens:*)"),
+            "lens CLI must be allow-listed for the bundled slash commands"
+        );
+        assert!(allow.iter().any(|v| v == "Bash(curl -s http://127.0.0.1:*)"));
         assert_eq!(root["env"]["EXISTING"], "1", "other keys preserved");
 
         // Re-running must not duplicate entries.
-        allow_readonly_tools(&settings).unwrap();
+        allow_lens_tools(&settings).unwrap();
         let root2 = read_json(&settings).unwrap();
         let count = root2["permissions"]["allow"]
             .as_array()

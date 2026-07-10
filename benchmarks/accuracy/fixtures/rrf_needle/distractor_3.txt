@@ -1,0 +1,3 @@
+Incident log. connection pool exhausted at 03:14. retry scheduled with backoff.
+connection pool exhausted again at 03:22. retry with backoff. connection pool
+exhausted at 03:40. retry, backoff, retry, backoff.

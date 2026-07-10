@@ -29,6 +29,8 @@
     "lens_index",
     "lens_links",
     "lens_map",
+    "lens_memory_query",
+    "lens_memory_record",
     "lens_overview",
     "lens_path",
     "lens_recall",

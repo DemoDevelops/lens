@@ -25,6 +25,20 @@ pub fn grep_ast(
     language: Option<&str>,
     limit: usize,
 ) -> Result<Vec<AstMatch>> {
+    grep_ast_filtered(root, query, language, limit, None)
+}
+
+/// As [`grep_ast`], but when `only_capture` is given only captures with that name
+/// produce matches. The compiled `$META`-pattern path uses this: its queries
+/// capture the whole pattern as `@match` plus bookkeeping captures (`@c0`, ...)
+/// that feed `#eq?` predicates and must not surface as results.
+pub fn grep_ast_filtered(
+    root: &Path,
+    query: &str,
+    language: Option<&str>,
+    limit: usize,
+    only_capture: Option<&str>,
+) -> Result<Vec<AstMatch>> {
     if !root.exists() {
         anyhow::bail!("grep_ast root does not exist: {}", root.display());
     }
@@ -106,6 +120,11 @@ pub fn grep_ast(
         let mut it = cursor.matches(&q, tree.root_node(), src);
         while let Some(m) = it.next() {
             for cap in m.captures {
+                if let Some(want) = only_capture {
+                    if q.capture_names()[cap.index as usize] != want {
+                        continue;
+                    }
+                }
                 let node = cap.node;
                 let line = node.start_position().row + 1;
                 let text: String = node.utf8_text(src).unwrap_or("").chars().take(120).collect();

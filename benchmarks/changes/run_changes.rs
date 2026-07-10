@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 use lens::discovery::{self, query as gquery};
 use lens::index::Index;
-use lens::session::{snapshot, store::SessionStore, Event};
+use lens::session::{query_memory, record_memory, snapshot, store::SessionStore, Event};
 use lens::store::compress;
 
 fn bench_root() -> PathBuf {
@@ -1165,6 +1165,287 @@ fn gate_c19() -> (String, bool) {
     (s, pass)
 }
 
+// --- C20: RRF fusion lifts a buried graph-central file (L43) ----------------
+
+/// Prose query carrying no strong compound identifiers (so `LENS_IDENT_RERANK`
+/// is a no-op here), spread across the terms `hub.rs`'s doc comment mentions
+/// once each. Five text distractors repeat every term densely, so plain
+/// BM25 + rerank scores them well above `hub.rs`.
+const C20_QUERY: &str = "connection pool exhausted retry backoff";
+const C20_CENTRAL: &str = "hub.rs";
+
+/// (rank of `C20_CENTRAL` under plain `Index::search`, rank under
+/// `Index::search_fused` with the fixture's own graph as `file_ranks`) for
+/// `C20_QUERY` over `fixtures/rrf`. `file_ranks` is built exactly like
+/// `Forge::file_ranks` (server.rs): per-file sum of `Graph::importance()`,
+/// ranked desc, ties by path asc. `hub.rs` is called and imported by all five
+/// `caller_*.rs` files, so it is the fixture's single most central file; the
+/// distractors are `.txt` (no tags_adapter spec), so `discover` never turns
+/// them into graph nodes and they get no `file_ranks` entry at all.
+fn measure_c20() -> (usize, usize) {
+    let fixture = changes_fixture("rrf");
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap().with_repo_root(&fixture);
+    index.index_path(&fixture, true).unwrap();
+
+    let plain = index.search(&[C20_QUERY.to_string()], 5).unwrap();
+    let plain_rank = c18_rank(&plain.results[0].hits, C20_CENTRAL);
+
+    let graph = discovery::discover(&fixture, None).unwrap().graph;
+    let importance = graph.importance();
+    let mut per_file: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for node in &graph.nodes {
+        if let Some(score) = importance.get(&node.id) {
+            *per_file.entry(node.file.as_str()).or_insert(0.0) += *score;
+        }
+    }
+    let mut files: Vec<(&str, f64)> = per_file.into_iter().collect();
+    files.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    let file_ranks: std::collections::HashMap<String, usize> = files
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (path, _score))| (path.to_string(), rank))
+        .collect();
+
+    let fused = index
+        .search_fused(&[C20_QUERY.to_string()], 5, &file_ranks)
+        .unwrap();
+    let fused_rank = c18_rank(&fused.results[0].hits, C20_CENTRAL);
+    (plain_rank, fused_rank)
+}
+
+fn gate_c20() -> (String, bool) {
+    let (plain_rank, fused_rank) = measure_c20();
+    // ABSOLUTE: `plain_rank` proves the fixture genuinely buries `hub.rs`
+    // outside the top 5 without fusion (0 = not in the top 5 at all), so the
+    // lift below is a real recall win, not a no-op on corpus luck.
+    // Trip-proof: `search_fused` reads `LENS_RRF` PER CALL (see `ranked_search`),
+    // so an outer `LENS_RRF=0` degrades `fused_rank` back to the plain-rank
+    // outcome and this gate alone goes FAIL; no other gate passes a non-empty
+    // `file_ranks` map, so C1-C19 are unaffected either way.
+    let buried = plain_rank == 0 || plain_rank > 5;
+    let lifted = (1..=5).contains(&fused_rank);
+    let pass = buried && lifted;
+    let plain_label = if plain_rank == 0 {
+        "outside top 5".to_string()
+    } else {
+        plain_rank.to_string()
+    };
+    let fused_label = if fused_rank == 0 {
+        "outside top 5".to_string()
+    } else {
+        fused_rank.to_string()
+    };
+    let s = format!(
+        "## C20 - RRF fusion lifts a buried graph-central file (L43)\n\nQuery `\"{C20_QUERY}\"` over `fixtures/rrf`: `{C20_CENTRAL}` mentions every term once (weak prose match) but is imported and called by all five `caller_*.rs` files (highest graph importance in the fixture); five `.txt` distractors repeat every term densely and carry no graph node at all. Plain `Index::search` rank of `{C20_CENTRAL}`: **{plain_label}**; RRF-fused rank: **{fused_label}**. Gate (absolute, trip-proof via `LENS_RRF=0`): plain rank is outside the top 5 AND the fused rank is within it.\n"
+    );
+    (s, pass)
+}
+
+// --- C21: $META pattern / hand-written S-expression parity (L41) ------------
+
+/// A `$META` pattern, its target language, and an INDEPENDENT hand-written
+/// tree-sitter S-expression a human would write for the same match (not
+/// derived from `compile_pattern`). Both queries capture the matched node as
+/// `@match`, so running each through `grep_ast_filtered(..., Some("match"))`
+/// reports the same granularity on both sides and path+line sets are directly
+/// comparable.
+struct C21Row {
+    label: &'static str,
+    pattern: &'static str,
+    lang: &'static str,
+    oracle: &'static str,
+}
+
+const C21_ROWS: [C21Row; 4] = [
+    C21Row {
+        label: "$X.unwrap()",
+        pattern: "$X.unwrap()",
+        lang: "rust",
+        oracle: "((call_expression function: (field_expression field: (field_identifier) @method) arguments: (arguments)) @match (#eq? @method \"unwrap\"))",
+    },
+    C21Row {
+        label: "print($X)",
+        pattern: "print($X)",
+        lang: "python",
+        oracle: "((call function: (identifier) @fn arguments: (argument_list (_))) @match (#eq? @fn \"print\"))",
+    },
+    C21Row {
+        label: "$A.map($F)",
+        pattern: "$A.map($F)",
+        lang: "typescript",
+        oracle: "((call_expression function: (member_expression property: (property_identifier) @method) arguments: (arguments (_))) @match (#eq? @method \"map\"))",
+    },
+    C21Row {
+        label: "$X == $X",
+        pattern: "$X == $X",
+        lang: "rust",
+        oracle: "((binary_expression left: (_) @l operator: \"==\" right: (_) @r) @match (#eq? @l @r))",
+    },
+];
+
+/// A deliberately-WRONG oracle for the trip-proof: same compiled pattern as the
+/// `print($X)` row, but the hand-written query requires a function name that
+/// never appears in the fixture, so its match set is empty while the compiled
+/// one is not. C21's own self-test asserts the parity checker DETECTS this
+/// mismatch instead of silently reporting a match.
+const C21_TRIP_ROW: C21Row = C21Row {
+    label: "print($X) [deliberately wrong oracle]",
+    pattern: "print($X)",
+    lang: "python",
+    oracle: "((call function: (identifier) @fn arguments: (argument_list (_))) @match (#eq? @fn \"printz\"))",
+};
+
+/// A (path, line) match set, sorted and deduped.
+type C21MatchSet = std::collections::BTreeSet<(String, usize)>;
+
+/// Sorted (path, line) match set for `query`, run through the same
+/// `only_capture` filtered path both the compiled and hand-written queries use.
+fn c21_match_set(fixture: &Path, query: &str, lang: &str) -> C21MatchSet {
+    lens::discovery::structural::grep_ast_filtered(
+        fixture,
+        query,
+        Some(lang),
+        200,
+        Some(lens::discovery::pattern::MATCH_CAPTURE),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|m| (m.path, m.line))
+    .collect()
+}
+
+/// (compiled match set, hand-written oracle match set) for one row over
+/// `fixtures/metapattern`.
+fn c21_sets(fixture: &Path, row: &C21Row) -> (C21MatchSet, C21MatchSet) {
+    let spec = lens::discovery::tags_adapter::any_spec_for_language(row.lang).unwrap();
+    let compiled = lens::discovery::pattern::compile_pattern(row.pattern, &spec).unwrap();
+    let compiled_set = c21_match_set(fixture, &compiled, row.lang);
+    let oracle_set = c21_match_set(fixture, row.oracle, row.lang);
+    (compiled_set, oracle_set)
+}
+
+fn gate_c21() -> (String, bool) {
+    let fixture = changes_fixture("metapattern");
+
+    let mut rows_detail = String::new();
+    let mut all_real_parity = true;
+    for row in &C21_ROWS {
+        let (compiled_set, oracle_set) = c21_sets(&fixture, row);
+        let parity = compiled_set == oracle_set && !compiled_set.is_empty();
+        all_real_parity &= parity;
+        rows_detail.push_str(&format!(
+            "| `{}` ({}) | {} | {} | {} |\n",
+            row.label,
+            row.lang,
+            compiled_set.len(),
+            oracle_set.len(),
+            if parity { "yes" } else { "NO" },
+        ));
+    }
+
+    // Trip-proof (internal self-test, not part of the real-row pass condition):
+    // a deliberately-wrong oracle must be DETECTED as non-parity, proving the
+    // checker isn't neutered (e.g. always trivially reporting a match).
+    let (trip_compiled, trip_oracle) = c21_sets(&fixture, &C21_TRIP_ROW);
+    let trip_mismatch_detected = trip_compiled != trip_oracle && !trip_compiled.is_empty();
+
+    let pass = all_real_parity && trip_mismatch_detected;
+    let s = format!(
+        "## C21 - $META pattern / hand-written S-expression parity (L41)\n\nFor each labeled `$META` pattern over `fixtures/metapattern` (rust/python/typescript files with real match sites AND decoy comments/strings that superficially mention the pattern text), `compile_pattern`'s output and an INDEPENDENT hand-written tree-sitter S-expression are each run through `grep_ast_filtered(..., only_capture: \"match\")` and their (path, line) match sets compared.\n\n| pattern | compiled matches | oracle matches | parity |\n| --- | ---: | ---: | :---: |\n{rows_detail}\nTrip-proof: a deliberately-wrong oracle for `print($X)` (requires a function name that never appears) - compiled **{}** matches vs wrong-oracle **{}** matches, mismatch correctly detected: **{}**.\n\nGate (absolute): every real row's match sets are IDENTICAL and non-empty, AND the trip-proof row's mismatch is detected.\n",
+        trip_compiled.len(),
+        trip_oracle.len(),
+        if trip_mismatch_detected { "yes" } else { "NO (checker neutered)" },
+    );
+    (s, pass)
+}
+
+// --- C22: cross-session memory record/query roundtrip (L42) -----------------
+/// Two durable facts recorded under the same project, and a query that
+/// overlaps only the first fact's tokens.
+const C22_PROJECT: &str = "/bench/c22";
+const C22_ITEM_A: (&str, &str) = ("decision", "adopt RRF fusion for lens_search ranking");
+const C22_ITEM_B: (&str, &str) = ("constraint", "never vendor ast-grep for pattern compiler");
+const C22_QUERY: &str = "RRF fusion ranking";
+
+/// (roundtrip ok, token-overlap query ranks item A first, FTS mirror
+/// searchable, FTS-neutered trip-proof detected, wrong-project trip-proof
+/// detected) for the L42 memory API over a temp data dir, exercising the SAME
+/// `record_memory` / `query_memory` lib fns the `lens_memory_record` /
+/// `lens_memory_query` tool handlers call.
+fn measure_c22() -> (bool, bool, bool, bool, bool) {
+    let dir = tempfile::tempdir().unwrap();
+
+    // "Session A": record two durable items via the exact lib fn the tool calls.
+    let store_a = SessionStore::open(dir.path()).unwrap();
+    let index_a = Index::open(dir.path()).unwrap();
+    record_memory(&store_a, &index_a, C22_PROJECT, C22_ITEM_A.0, C22_ITEM_A.1).unwrap();
+    record_memory(&store_a, &index_a, C22_PROJECT, C22_ITEM_B.0, C22_ITEM_B.1).unwrap();
+
+    // "Session B": fresh `SessionStore`/`Index` handles over the SAME data dir
+    // (each `record_memory` call above stamped its own `mcp-<unix_secs>` session
+    // id), simulating a new session reading what a prior session recorded.
+    let store_b = SessionStore::open(dir.path()).unwrap();
+    let index_b = Index::open(dir.path()).unwrap();
+
+    let all = query_memory(&store_b, C22_PROJECT, None, 20).unwrap();
+    let roundtrip_ok = all.len() == 2
+        && all.contains(&(C22_ITEM_A.0.to_string(), C22_ITEM_A.1.to_string()))
+        && all.contains(&(C22_ITEM_B.0.to_string(), C22_ITEM_B.1.to_string()));
+
+    let ranked = query_memory(&store_b, C22_PROJECT, Some(C22_QUERY), 20).unwrap();
+    let ranked_first_ok = ranked
+        .first()
+        .map(|(c, t)| c == C22_ITEM_A.0 && t == C22_ITEM_A.1)
+        .unwrap_or(false);
+
+    let hits = index_b.search(&[C22_ITEM_A.1.to_string()], 5).unwrap();
+    let fts_hit_ok = hits.results[0]
+        .hits
+        .iter()
+        .any(|h| h.path == format!("session://memory/{}", C22_ITEM_A.0));
+
+    // Trip-proof 1: a DISTINCT, fresh `Index` over its OWN empty temp dir never
+    // received the mirror records `record_memory` wrote above, so searching it
+    // for the same text must come back empty - proving the FTS check above is
+    // not vacuously true.
+    let neutered_dir = tempfile::tempdir().unwrap();
+    let neutered_index = Index::open(neutered_dir.path()).unwrap();
+    let neutered_hits = neutered_index
+        .search(&[C22_ITEM_A.1.to_string()], 5)
+        .unwrap();
+    let fts_neutered_empty = neutered_hits.results[0].hits.is_empty();
+
+    // Trip-proof 2: querying a project DIFFERENT from the one recorded under
+    // must come back empty - proving `query_memory` is actually project-scoped.
+    let wrong_project = query_memory(&store_b, "/bench/c22-wrong-project", None, 20).unwrap();
+    let wrong_project_empty = wrong_project.is_empty();
+
+    (
+        roundtrip_ok,
+        ranked_first_ok,
+        fts_hit_ok,
+        fts_neutered_empty,
+        wrong_project_empty,
+    )
+}
+
+fn gate_c22() -> (String, bool) {
+    let (roundtrip_ok, ranked_first_ok, fts_hit_ok, fts_neutered_empty, wrong_project_empty) =
+        measure_c22();
+    let pass =
+        roundtrip_ok && ranked_first_ok && fts_hit_ok && fts_neutered_empty && wrong_project_empty;
+    let s = format!(
+        "## C22 - cross-session memory record/query roundtrip (L42)\n\n\"Session A\" records two durable items (`{}` / `{}`) via `record_memory` against a temp data dir; a fresh \"session B\" (new `SessionStore`/`Index` handles over the same dir) reads them back via `query_memory`. Roundtrip returns both items: **{roundtrip_ok}**. A token-overlap query (`\"{C22_QUERY}\"`) ranks the matching item first: **{ranked_first_ok}**. The FTS mirror under `session://memory/<category>` is searchable via `Index::search`: **{fts_hit_ok}**.\n\nTrip-proof: a DISTINCT fresh `Index` that never received the mirror records finds nothing for the same text (the FTS check is not vacuous): **{fts_neutered_empty}**. Querying a WRONG project returns no items (`query_memory` is project-scoped): **{wrong_project_empty}**.\n\nGate (absolute): roundtrip + ranking + FTS-search all pass, AND both trip-proofs correctly detect their respective breakage.\n",
+        C22_ITEM_A.0, C22_ITEM_B.0,
+    );
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -1237,6 +1518,12 @@ fn main() -> anyhow::Result<()> {
     println!("{s18}");
     let (s19, c19_ok) = gate_c19();
     println!("{s19}");
+    let (s20, c20_ok) = gate_c20();
+    println!("{s20}");
+    let (s21, c21_ok) = gate_c21();
+    println!("{s21}");
+    let (s22, c22_ok) = gate_c22();
+    println!("{s22}");
 
     println!("\n## Gates");
     let gates = [
@@ -1259,6 +1546,9 @@ fn main() -> anyhow::Result<()> {
         ("C17 knapsack overview keeps ≥30 important hubs within 2000 tokens", c17_ok),
         ("C18 proximity span lifts adjacent-terms target to rank 1", c18_ok),
         ("C19 identifier boost lifts def-file to rank 1", c19_ok),
+        ("C20 RRF fusion lifts buried graph-central file to top 5", c20_ok),
+        ("C21 pattern/S-expression parity + trip-proof detects mismatch", c21_ok),
+        ("C22 memory record/query roundtrip + trip-proofs detect breakage", c22_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });

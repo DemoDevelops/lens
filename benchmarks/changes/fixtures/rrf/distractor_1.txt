@@ -1,0 +1,4 @@
+Runbook note: connection pool exhausted, retry after backoff.
+Symptom: connection pool exhausted. Remedy: retry with backoff.
+When the connection pool exhausted alert fires, retry using backoff.
+Escalate if retry and backoff do not clear the connection pool exhausted state.

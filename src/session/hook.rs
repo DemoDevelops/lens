@@ -662,6 +662,14 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
     }
 }
 
+/// Bootstrap hint for the durable-memory MCP tools, appended to every fresh
+/// SessionStart (not just when memory already exists) so a session discovers
+/// them even on a brand-new project with nothing recorded yet.
+const MEMORY_TOOLS_HINT: &str = "(Durable project memory across sessions: \
+    ToolSearch(query: \"select:lens_memory_query,lens_memory_record\"), then \
+    lens_memory_query() to read it or lens_memory_record(category, text) to add \
+    a decision/constraint/rejected-approach/rule.)";
+
 /// SessionStart logic per lifecycle source. Returns the additionalContext to
 /// inject (empty string for startup/clear).
 fn session_start(
@@ -726,10 +734,15 @@ fn session_start(
             // Re-inject durable project memory (decisions/constraints/rules captured in
             // prior sessions) so a fresh session resumes with them despite the clear.
             let memory = snapshot::render_project_memory(&store.project_memory(project_str)?);
-            Ok(match repo_map_block(data_dir) {
+            let body = match repo_map_block(data_dir) {
                 Some(block) if memory.is_empty() => block,
                 Some(block) => format!("{memory}\n\n{block}"),
                 None => memory,
+            };
+            Ok(if body.is_empty() {
+                MEMORY_TOOLS_HINT.to_string()
+            } else {
+                format!("{body}\n\n{MEMORY_TOOLS_HINT}")
             })
         }
         _ => Ok(String::new()), // "clear" and unknown — no injection

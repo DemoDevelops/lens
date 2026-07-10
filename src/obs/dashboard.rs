@@ -506,7 +506,9 @@ const TOOL_DESC={
   lens_skeleton:"Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to '...'. Far fewer tokens than reading the whole file; full text is one lens_recall away. Use this instead of Read to see a file's shape; include_bodies returns chosen bodies inline.",
   lens_grep_ast:"Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds real calls without the false positives grep hits in comments or strings. Returns path:line matches. For plain-text search use lens_search instead.",
   lens_overview:"Token-budgeted repo overview: the most structurally important symbols (PageRank-ranked) with their callers and callees, as much as fits a token budget. A high-signal map of a codebase at fixed cost. For one file's structure use lens_skeleton instead.",
-  lens_stats:"Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo."
+  lens_stats:"Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo.",
+  lens_memory_record:"Save one durable note (a decision, constraint, rejected approach, or rule) that outlives the session and comes back on the next SessionStart; also lands in the search index.",
+  lens_memory_query:"Pull back durable notes saved earlier: the whole running list, or the closest matches to a query when one is given."
 };
 let rtkBase=null;
 // Custom dropdown: a styled button + listbox. Native <select> option menus are drawn by

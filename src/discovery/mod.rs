@@ -3,6 +3,7 @@
 
 pub mod extract;
 pub mod graph;
+pub mod pattern;
 pub mod query;
 pub mod skeleton;
 pub mod structural;

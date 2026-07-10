@@ -62,6 +62,14 @@ pub struct Treatment {
     /// Find: top-K budget for the `find` graph_op (how many ranked matches survive
     /// before their neighbors are pulled in). Defaults to 3.
     pub limit: Option<usize>,
+    /// RRF fusion (L43): when true, the `queries` search is run through
+    /// `Index::search_fused` with a per-file graph-importance rank built the
+    /// same way as `Forge::file_ranks` (server.rs) / gate C20, instead of plain
+    /// `Index::search`. `LENS_RRF` (read per call by `search_fused`) then
+    /// toggles fusion on/off for the same task. Defaults to false, so every
+    /// existing `queries` task is unaffected.
+    #[serde(default)]
+    pub graph_fused: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,11 +264,42 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
     // Search.
     if let Some(queries) = &t.queries {
         let data = tempfile::tempdir()?;
-        let index = Index::open(data.path())?;
+        let mut index = Index::open(data.path())?;
+        let fixture = accuracy_root().join(&task.fixtures[0]);
+        if t.graph_fused {
+            index = index.with_repo_root(&fixture);
+        }
         for f in &task.fixtures {
             index.index_path(&accuracy_root().join(f), true)?;
         }
-        let resp = index.search(queries, 5)?;
+        let resp = if t.graph_fused {
+            // Per-file graph-importance rank, built exactly like `Forge::file_ranks`
+            // (server.rs) / gate C20 (benchmarks/changes/run_changes.rs): sum
+            // `Graph::importance()` over each file's nodes, rank desc, ties by
+            // path asc.
+            let graph = discovery::discover(&fixture, None)?.graph;
+            let importance = graph.importance();
+            let mut per_file: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+            for node in &graph.nodes {
+                if let Some(score) = importance.get(&node.id) {
+                    *per_file.entry(node.file.as_str()).or_insert(0.0) += *score;
+                }
+            }
+            let mut files: Vec<(&str, f64)> = per_file.into_iter().collect();
+            files.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(b.0))
+            });
+            let file_ranks: std::collections::HashMap<String, usize> = files
+                .into_iter()
+                .enumerate()
+                .map(|(rank, (path, _score))| (path.to_string(), rank))
+                .collect();
+            index.search_fused(queries, 5, &file_ranks)?
+        } else {
+            index.search(queries, 5)?
+        };
         return Ok(serde_json::to_string_pretty(&resp)?);
     }
     // Discovery.

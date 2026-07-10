@@ -311,9 +311,18 @@ pub struct GrepAstRequest {
     /// File or directory to search (default ".").
     #[serde(default = "default_dot")]
     pub path: String,
-    /// A tree-sitter query (S-expression). Node kinds are language-specific, e.g.
+    /// A raw tree-sitter query (S-expression). Node kinds are language-specific, e.g.
     /// `(call_expression function: (field_expression field: (field_identifier) @m))`.
-    pub query: String,
+    /// Set exactly one of `query` or `pattern`.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// A code pattern with `$UPPERCASE` metavariables, compiled to a tree-sitter
+    /// query in-server: write the shape as real code, e.g. `$X.unwrap()` (rust),
+    /// `print($X)` (python), `$A.map($F)` (typescript). A repeated metavariable
+    /// must match equal text. Requires `language`. Set exactly one of `query` or
+    /// `pattern`.
+    #[serde(default)]
+    pub pattern: Option<String>,
     /// Language the query targets: any graph-supported language (the 6 hand-written
     /// rust, python, javascript, typescript, go, swift, plus the tags-adapter set
     /// c, cpp, csharp, java, kotlin, scala, ruby, php, lua, bash; see SUPPORTED.md).
@@ -349,6 +358,50 @@ pub struct GrepAstResponse {
 /// Empty input for tools that take no parameters.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct EmptyRequest {}
+
+// ---------------------------------------------------------------------------
+// lens_memory_record / lens_memory_query (durable project memory)
+// ---------------------------------------------------------------------------
+
+fn default_memory_limit() -> usize {
+    20
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MemoryRecordRequest {
+    /// Durable memory category: decision | constraint | rejected-approach | rule.
+    pub category: String,
+    /// The text to remember.
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MemoryRecordResponse {
+    pub recorded: bool,
+    pub category: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MemoryQueryRequest {
+    /// Optional text to rank durable memory by (case-insensitive token overlap
+    /// against category + text). Omit for the full list, newest last.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Max items returned (default 20).
+    #[serde(default = "default_memory_limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MemoryItem {
+    pub category: String,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MemoryQueryResponse {
+    pub items: Vec<MemoryItem>,
+}
 
 // ---------------------------------------------------------------------------
 // lens_stats

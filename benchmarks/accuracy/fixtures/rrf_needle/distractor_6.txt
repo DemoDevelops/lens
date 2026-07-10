@@ -1,0 +1,3 @@
+Alert playbook: connection pool exhausted breach triggers an automatic retry.
+connection pool exhausted, connection pool exhausted, retry, retry, backoff,
+backoff, connection pool exhausted.

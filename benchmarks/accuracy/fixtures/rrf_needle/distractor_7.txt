@@ -1,0 +1,3 @@
+Support macro: tell the customer the connection pool exhausted error clears
+after a retry with backoff. connection pool exhausted, retry with backoff,
+connection pool exhausted, retry with backoff, connection pool exhausted.

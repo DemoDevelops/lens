@@ -1,7 +1,7 @@
 //! MCP server wiring: the `Forge` handler holds shared state and exposes every
 //! lens tool. Tool bodies delegate to the feature modules.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -13,6 +13,7 @@ use crate::darkroom;
 use crate::discovery::{self, graph::Graph, query as gquery};
 use crate::index::Index;
 use crate::obs::{self, OpLog};
+use crate::session::{self, store::SessionStore};
 use crate::store::Store;
 use crate::tools::*;
 
@@ -25,7 +26,7 @@ const DEFAULT_MAX_INLINE: usize = 8 * 1024;
 /// pre-approves them in the permission allowlist. Shared with [`crate::setup`] so the
 /// two never drift. The write tools live in [`WRITE_TOOLS`] and are intentionally
 /// absent here so they never get a `readOnlyHint`.
-pub const READ_ONLY_TOOLS: [&str; 10] = [
+pub const READ_ONLY_TOOLS: [&str; 11] = [
     "lens_search",
     "lens_overview",
     "lens_recall",
@@ -36,6 +37,7 @@ pub const READ_ONLY_TOOLS: [&str; 10] = [
     "lens_stats",
     "lens_find",
     "lens_grep_ast",
+    "lens_memory_query",
 ];
 
 /// The lens tools that execute code (in the darkroom subprocess) or write the
@@ -43,7 +45,13 @@ pub const READ_ONLY_TOOLS: [&str; 10] = [
 /// permission allowlist: modes that honor allow rules while prompting for everything
 /// else (notably plan mode) would otherwise stall a session on every lens_run/lens_map
 /// call. Shared with [`crate::setup`] so the two never drift.
-pub const WRITE_TOOLS: [&str; 4] = ["lens_run", "lens_run_file", "lens_index", "lens_map"];
+pub const WRITE_TOOLS: [&str; 5] = [
+    "lens_run",
+    "lens_run_file",
+    "lens_index",
+    "lens_map",
+    "lens_memory_record",
+];
 
 /// Appended to the `lens_search`/`lens_overview` descriptions so the model knows the
 /// recovery path before it ever hits a transient index/graph lock (Bug B).
@@ -594,7 +602,11 @@ impl Forge {
             op.finish(0, 0, None, "error", "auto-index failed", None);
             return Err(e.into());
         }
-        match self.index.search(&req.queries, req.limit_per_query) {
+        let file_ranks = self.file_ranks();
+        match self
+            .index
+            .search_fused(&req.queries, req.limit_per_query, &file_ranks)
+        {
             Ok(resp) => {
                 let returned = obs::json_len(&resp);
                 let hits: usize = resp.results.iter().map(|r| r.hits.len()).sum();
@@ -781,16 +793,55 @@ impl Forge {
         &self,
         Parameters(req): Parameters<GrepAstRequest>,
     ) -> Result<Json<GrepAstResponse>, ToolFailure> {
+        // Which input path drives this call: a raw S-expression or a $META pattern.
+        let mode = match (&req.query, &req.pattern) {
+            (Some(_), None) => "query",
+            (None, Some(_)) => "pattern",
+            _ => "invalid",
+        };
         let op = self.ops.start(
             "lens_grep_ast",
-            serde_json::json!({ "path": req.path, "language": req.language, "limit": req.limit }),
+            serde_json::json!({
+                "path": req.path, "language": req.language, "limit": req.limit, "mode": mode,
+            }),
         );
+        // Resolve to a tree-sitter query: raw queries pass through; a pattern is
+        // compiled, and only its `@match` capture may surface as results.
+        let resolved: Result<(String, Option<&'static str>), String> =
+            match (&req.query, &req.pattern) {
+                (Some(q), None) => Ok((q.clone(), None)),
+                (None, Some(p)) => match req.language.as_deref() {
+                    None => Err("pattern requires language".into()),
+                    Some(lang) => {
+                        match crate::discovery::tags_adapter::any_spec_for_language(lang) {
+                            None => Err(format!("unsupported language '{lang}'")),
+                            Some(spec) => crate::discovery::pattern::compile_pattern(p, &spec)
+                                .map(|q| (q, Some(crate::discovery::pattern::MATCH_CAPTURE)))
+                                .map_err(|e| e.to_string()),
+                        }
+                    }
+                },
+                (Some(_), Some(_)) => {
+                    Err("set exactly one of `query` or `pattern` (both were given)".into())
+                }
+                (None, None) => {
+                    Err("set exactly one of `query` or `pattern` (neither was given)".into())
+                }
+            };
+        let (query, only_capture) = match resolved {
+            Ok(v) => v,
+            Err(msg) => {
+                op.finish(0, 0, None, "error", msg.clone(), None);
+                return Err(ToolFailure::plain(msg));
+            }
+        };
         let root = self.resolve_unescaped(&req.path);
-        match crate::discovery::structural::grep_ast(
+        match crate::discovery::structural::grep_ast_filtered(
             &root,
-            &req.query,
+            &query,
             req.language.as_deref(),
             req.limit,
+            only_capture,
         ) {
             Ok(matches) => {
                 let truncated = matches.len() >= req.limit;
@@ -841,6 +892,87 @@ impl Forge {
             None,
         );
         Ok(Json(resp))
+    }
+
+    /// Record a durable project-memory item (decision/constraint/rejected-approach/
+    /// rule), carried across sessions unlike the live per-session event log.
+    #[tool(
+        description = "Record durable project memory (category: decision | constraint | rejected-approach | rule) that survives across sessions, unlike the live event log. Also indexed for lens_search under session://memory/<category>."
+    )]
+    async fn lens_memory_record(
+        &self,
+        Parameters(req): Parameters<MemoryRecordRequest>,
+    ) -> Result<Json<MemoryRecordResponse>, ToolFailure> {
+        let op = self.ops.start(
+            "lens_memory_record",
+            serde_json::json!({ "category": req.category }),
+        );
+        let session_store = match SessionStore::open(&self.data_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                return Err(ToolFailure::recoverable(e.to_string()));
+            }
+        };
+        let project = self.repo_dir.to_string_lossy().to_string();
+        match session::record_memory(&session_store, &self.index, &project, &req.category, &req.text)
+        {
+            Ok(()) => {
+                let raw_in = req.text.len() as u64;
+                let note = format!("recorded {} memory item", req.category);
+                let explain = self.ops.explain(|| note.clone());
+                op.finish(raw_in, 0, None, "ok", note, explain);
+                Ok(Json(MemoryRecordResponse {
+                    recorded: true,
+                    category: req.category,
+                }))
+            }
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                Err(ToolFailure::plain(e.to_string()))
+            }
+        }
+    }
+
+    /// Read durable project memory, optionally ranked by relevance to a query.
+    #[tool(
+        description = "Read durable project memory (decisions, constraints, rejected approaches, rules) recorded across sessions. Give `query` to rank by token overlap; omit it for the full list, newest last."
+    )]
+    async fn lens_memory_query(
+        &self,
+        Parameters(req): Parameters<MemoryQueryRequest>,
+    ) -> Result<Json<MemoryQueryResponse>, ToolFailure> {
+        let op = self.ops.start(
+            "lens_memory_query",
+            serde_json::json!({ "query": req.query, "limit": req.limit }),
+        );
+        let session_store = match SessionStore::open(&self.data_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                return Err(ToolFailure::recoverable(e.to_string()));
+            }
+        };
+        let project = self.repo_dir.to_string_lossy().to_string();
+        match session::query_memory(&session_store, &project, req.query.as_deref(), req.limit) {
+            Ok(items) => {
+                let resp = MemoryQueryResponse {
+                    items: items
+                        .into_iter()
+                        .map(|(category, text)| MemoryItem { category, text })
+                        .collect(),
+                };
+                let returned = obs::json_len(&resp);
+                let note = format!("{} items", resp.items.len());
+                let explain = self.ops.explain(|| note.clone());
+                op.finish(returned, returned, None, "ok", note, explain);
+                Ok(Json(resp))
+            }
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                Err(ToolFailure::recoverable(e.to_string()))
+            }
+        }
     }
 }
 
@@ -991,6 +1123,41 @@ impl Forge {
     /// Path to the persisted structural graph file.
     fn graph_file(&self) -> PathBuf {
         self.data_dir.join("graph.json")
+    }
+
+    /// Per-file RRF rank map (stored path -> rank, 0 = most graph-central) for the
+    /// `lens_search` fusion stage. Built ONLY from an already-persisted `graph.json`;
+    /// an absent (or unreadable) graph yields an empty map, so fusion is a no-op and
+    /// discovery is NEVER triggered from a search. Per-file score = sum of
+    /// [`Graph::importance`] over the file's nodes; files are ranked by score desc,
+    /// ties by path asc.
+    fn file_ranks(&self) -> HashMap<String, usize> {
+        let graph_file = self.graph_file();
+        if !graph_file.exists() {
+            return HashMap::new();
+        }
+        let graph = match Graph::load(&graph_file) {
+            Ok(g) => g,
+            Err(_) => return HashMap::new(),
+        };
+        let importance = graph.importance();
+        let mut per_file: HashMap<&str, f64> = HashMap::new();
+        for node in &graph.nodes {
+            if let Some(score) = importance.get(&node.id) {
+                *per_file.entry(node.file.as_str()).or_insert(0.0) += *score;
+            }
+        }
+        let mut files: Vec<(&str, f64)> = per_file.into_iter().collect();
+        files.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(b.0))
+        });
+        files
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (path, _score))| (path.to_string(), rank))
+            .collect()
     }
 
     /// Staleness manifest for the graph (mtimes of supported source files).
@@ -1531,6 +1698,72 @@ mod tests {
             .await;
         let after = Graph::load(&f.graph_file()).unwrap().nodes.len();
         assert_eq!(after, before, "graph must not be clobbered by a bad path");
+    }
+
+    fn grep_ast_req(
+        query: Option<&str>,
+        pattern: Option<&str>,
+        language: Option<&str>,
+    ) -> GrepAstRequest {
+        GrepAstRequest {
+            path: ".".into(),
+            query: query.map(String::from),
+            pattern: pattern.map(String::from),
+            language: language.map(String::from),
+            limit: 100,
+        }
+    }
+
+    /// `lens_grep_ast` takes exactly one of `query` / `pattern`, and `pattern`
+    /// requires `language`; each violation is a clear ToolFailure.
+    #[tokio::test]
+    async fn grep_ast_param_errors_are_clear() {
+        let (f, _dir) = forge_with_source();
+        let Err(both) = f
+            .lens_grep_ast(Parameters(grep_ast_req(
+                Some("(identifier) @x"),
+                Some("$X.unwrap()"),
+                Some("rust"),
+            )))
+            .await
+        else {
+            panic!("query+pattern together must error")
+        };
+        assert!(both.message.contains("exactly one"), "{}", both.message);
+
+        let Err(neither) = f
+            .lens_grep_ast(Parameters(grep_ast_req(None, None, Some("rust"))))
+            .await
+        else {
+            panic!("neither query nor pattern must error")
+        };
+        assert!(neither.message.contains("exactly one"), "{}", neither.message);
+
+        let Err(no_lang) = f
+            .lens_grep_ast(Parameters(grep_ast_req(None, Some("$X.unwrap()"), None)))
+            .await
+        else {
+            panic!("pattern without language must error")
+        };
+        assert!(
+            no_lang.message.contains("pattern requires language"),
+            "{}",
+            no_lang.message
+        );
+    }
+
+    /// End-to-end pattern path: `$X()` compiles, runs through the grep engine,
+    /// and surfaces only the `@match` capture (one hit per call site).
+    #[tokio::test]
+    async fn grep_ast_pattern_path_matches_end_to_end() {
+        let (f, _dir) = forge_with_source();
+        let resp = f
+            .lens_grep_ast(Parameters(grep_ast_req(None, Some("$F()"), Some("rust"))))
+            .await
+            .unwrap();
+        // lib.rs has exactly one zero-argument call: `helper()`.
+        assert_eq!(resp.0.matches.len(), 1, "{:?}", resp.0.matches);
+        assert!(resp.0.matches[0].text.contains("helper"), "{:?}", resp.0.matches);
     }
 
     /// Piped `stdin` never enters context, so `lens_run` must credit it (floor-capped)

@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
@@ -27,11 +27,13 @@ struct Filters {
 /// CLI entry: `args` is everything after `stats`.
 pub fn run_cli(args: &[String]) -> Result<()> {
     let mut watch = false;
+    let mut epoch = false;
     let mut filters = Filters::default();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--watch" => watch = true,
+            "--epoch" => epoch = true,
             "--session" => {
                 filters.session = args.get(i + 1).cloned();
                 i += 1;
@@ -47,7 +49,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             other => {
                 eprintln!("lens stats: unknown flag '{other}'");
                 eprintln!(
-                    "usage: lens stats [--watch] [--session <id>] [--since <iso8601>] [--last <n>]"
+                    "usage: lens stats [--watch] [--epoch] [--session <id>] [--since <iso8601>] [--last <n>]"
                 );
                 std::process::exit(2);
             }
@@ -56,6 +58,14 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     }
 
     let dir = data_dir();
+    if epoch {
+        // Stamp the rail counters' current values as the promotion-window baseline
+        // (idempotent: re-running moves the window forward). A one-shot admin action,
+        // not a report, so it prints a confirmation and exits rather than rendering.
+        stamp_epoch(&dir)?;
+        println!("lens stats: epoch stamped for {}", dir.display());
+        return Ok(());
+    }
     if watch {
         // Refresh until interrupted. ~1s cadence; re-reads counters each tick.
         loop {
@@ -318,11 +328,15 @@ const GREP_SCOPE_KEYS: &[&str] = &[
 /// fires, `shadow_next_*` while it is only shadow-counted).
 pub fn grep_scope_aggregate(dirs: &[PathBuf]) -> serde_json::Value {
     let mut sum: BTreeMap<&str, i64> = GREP_SCOPE_KEYS.iter().map(|k| (*k, 0)).collect();
+    let mut epoch_stamp: i64 = 0;
     for dir in dirs {
         if let Ok(store) = Store::open(dir) {
             for k in GREP_SCOPE_KEYS {
-                *sum.get_mut(k).unwrap() += store.get_stat(k).unwrap_or(0);
+                let raw = store.get_stat(k).unwrap_or(0);
+                let baseline = store.get_stat(&format!("epoch:{k}")).unwrap_or(0);
+                *sum.get_mut(k).unwrap() += (raw - baseline).max(0);
             }
+            epoch_stamp = epoch_stamp.max(store.get_stat("epoch:stamp").unwrap_or(0));
         }
     }
     let g = |k: &str| sum[k];
@@ -339,6 +353,7 @@ pub fn grep_scope_aggregate(dirs: &[PathBuf]) -> serde_json::Value {
             "lens": g("deny_next_lens"), "grep": g("deny_next_grep"),
             "shellgrep": g("deny_next_shellgrep"), "other": g("deny_next_other"),
         },
+        "epoch_stamp": epoch_stamp,
     })
 }
 
@@ -351,21 +366,67 @@ pub const REROUTE_PREFIXES: [&str; 6] = ["gsym", "rskel", "bagg", "elink", "gast
 /// `{p}_shadow_next_{class}`, per the shared counter-key contract.
 const REROUTE_CLASSES: &[&str] = &["lens", "grep", "read", "bash", "edit", "other"];
 
+/// Every rail counter key eligible for epoch-stamping: all [`GREP_SCOPE_KEYS`], plus
+/// each [`REROUTE_PREFIXES`] prefix's `{p}_would_fire` and `{p}_{next,shadow_next}_{class}`
+/// over [`REROUTE_CLASSES`], plus the `gsym_graph_miss` diagnostic (T2). Drives
+/// [`stamp_epoch`]'s snapshot; the read side (`grep_scope_aggregate` /
+/// `reroute_rail_aggregate`) looks up `epoch:{key}` per key it already sums, independent
+/// of this list's exact membership.
+fn rail_stat_keys() -> Vec<String> {
+    let mut keys: Vec<String> = GREP_SCOPE_KEYS.iter().map(|k| k.to_string()).collect();
+    for p in REROUTE_PREFIXES {
+        keys.push(format!("{p}_would_fire"));
+        for c in REROUTE_CLASSES {
+            keys.push(format!("{p}_next_{c}"));
+            keys.push(format!("{p}_shadow_next_{c}"));
+        }
+    }
+    keys.push("gsym_graph_miss".to_string());
+    keys
+}
+
+/// Stamp the current value of every [`rail_stat_keys`] counter as `epoch:{key}`, then
+/// `epoch:stamp` as now (unix seconds) — the clean promotion-window baseline `lens
+/// stats --epoch` sets. Idempotent: re-running moves the window forward to whatever
+/// the counters read at that moment. Read side (`grep_scope_aggregate` /
+/// `reroute_rail_aggregate`) subtracts `epoch:{key}` from the live value before
+/// summing, per dir, floored at 0.
+fn stamp_epoch(dir: &Path) -> Result<()> {
+    let store = Store::open(dir)?;
+    for key in rail_stat_keys() {
+        let current = store.get_stat(&key)?;
+        store.set_stat(&format!("epoch:{key}"), current)?;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    store.set_stat("epoch:stamp", now)?;
+    Ok(())
+}
+
 /// Sum one rail's counters (`{p}_would_fire`, `{p}_next_*`, `{p}_shadow_next_*`) across
 /// `dirs` — the same `Store::open(dir).get_stat(k)` summation [`grep_scope_aggregate`]
 /// uses — then shape them into `{ would_fire, next: {class: count, ...}, shadow_next:
-/// {class: count, ...} }`. Missing store / absent key reads as 0.
+/// {class: count, ...} }`. Missing store / absent key reads as 0. Per dir, each key's
+/// live value has its `epoch:{key}` baseline subtracted (floored at 0) before summing,
+/// same as `grep_scope_aggregate`; `epoch_stamp` carries the newest per-dir
+/// `epoch:stamp` (0 if no dir has ever been stamped).
 fn reroute_rail_aggregate(dirs: &[PathBuf], p: &str) -> serde_json::Value {
     let keys: Vec<String> = std::iter::once(format!("{p}_would_fire"))
         .chain(REROUTE_CLASSES.iter().map(|c| format!("{p}_next_{c}")))
         .chain(REROUTE_CLASSES.iter().map(|c| format!("{p}_shadow_next_{c}")))
         .collect();
     let mut sum: BTreeMap<&str, i64> = keys.iter().map(|k| (k.as_str(), 0)).collect();
+    let mut epoch_stamp: i64 = 0;
     for dir in dirs {
         if let Ok(store) = Store::open(dir) {
             for k in &keys {
-                *sum.get_mut(k.as_str()).unwrap() += store.get_stat(k).unwrap_or(0);
+                let raw = store.get_stat(k).unwrap_or(0);
+                let baseline = store.get_stat(&format!("epoch:{k}")).unwrap_or(0);
+                *sum.get_mut(k.as_str()).unwrap() += (raw - baseline).max(0);
             }
+            epoch_stamp = epoch_stamp.max(store.get_stat("epoch:stamp").unwrap_or(0));
         }
     }
     let g = |k: &str| sum[k];
@@ -380,6 +441,7 @@ fn reroute_rail_aggregate(dirs: &[PathBuf], p: &str) -> serde_json::Value {
         "would_fire": g(&format!("{p}_would_fire")),
         "next": classes("next"),
         "shadow_next": classes("shadow_next"),
+        "epoch_stamp": epoch_stamp,
     })
 }
 
@@ -803,6 +865,12 @@ pub(crate) fn human_count(n: u64) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// `YYYY-MM-DD` for a unix-seconds epoch stamp — the date half of
+/// [`super::iso8601_secs`], used by the TUI's "since <date>" rail-panel titles.
+pub(crate) fn epoch_date(secs: i64) -> String {
+    super::iso8601_secs(secs)[..10].to_string()
 }
 
 #[cfg(test)]
@@ -1287,5 +1355,79 @@ esac
         for p in REROUTE_PREFIXES {
             assert_eq!(none[p]["would_fire"], json!(0), "rail {p} should default to 0");
         }
+    }
+
+    /// `rail_stat_keys` covers every grep-scope key, every rail's `would_fire` +
+    /// `next`/`shadow_next` per class, and the `gsym_graph_miss` diagnostic — the full
+    /// set `--epoch` must baseline so no counter leaks pre-epoch history through.
+    #[test]
+    fn rail_stat_keys_covers_grep_scope_reroute_and_graph_miss() {
+        let keys = rail_stat_keys();
+        for k in GREP_SCOPE_KEYS {
+            assert!(keys.contains(&k.to_string()), "missing grep-scope key {k}");
+        }
+        for p in REROUTE_PREFIXES {
+            assert!(keys.contains(&format!("{p}_would_fire")), "missing {p}_would_fire");
+            for c in REROUTE_CLASSES {
+                assert!(keys.contains(&format!("{p}_next_{c}")), "missing {p}_next_{c}");
+                assert!(
+                    keys.contains(&format!("{p}_shadow_next_{c}")),
+                    "missing {p}_shadow_next_{c}"
+                );
+            }
+        }
+        assert!(keys.contains(&"gsym_graph_miss".to_string()));
+    }
+
+    /// The epoch mechanism end-to-end: bump a counter, stamp the baseline, bump again —
+    /// the aggregate must show only the post-stamp delta, floored at 0, with a nonzero
+    /// `epoch_stamp`. A dir that was never stamped aggregates its full cumulative value
+    /// unchanged (missing `epoch:{key}` reads as 0) and reports `epoch_stamp` 0.
+    #[test]
+    fn epoch_stamp_baseline_and_aggregate_subtraction() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.bump_stat("grep_scope_broad", 5).unwrap();
+        stamp_epoch(dir.path()).unwrap();
+        store.bump_stat("grep_scope_broad", 3).unwrap();
+
+        let agg = grep_scope_aggregate(&[dir.path().to_path_buf()]);
+        assert_eq!(agg["broad"], json!(3), "only the post-stamp delta should show");
+        assert!(agg["epoch_stamp"].as_i64().unwrap() > 0, "epoch_stamp must be stamped");
+
+        // Re-running --epoch moves the window forward (idempotent).
+        stamp_epoch(dir.path()).unwrap();
+        store.bump_stat("grep_scope_broad", 2).unwrap();
+        let agg2 = grep_scope_aggregate(&[dir.path().to_path_buf()]);
+        assert_eq!(agg2["broad"], json!(2));
+
+        // A dir never stamped aggregates its full cumulative total unchanged.
+        let plain = tempdir().unwrap();
+        Store::open(plain.path()).unwrap().bump_stat("grep_scope_broad", 4).unwrap();
+        let none = grep_scope_aggregate(&[plain.path().to_path_buf()]);
+        assert_eq!(none["broad"], json!(4), "unstamped dir keeps its full cumulative value");
+        assert_eq!(none["epoch_stamp"], json!(0));
+    }
+
+    /// The same epoch subtraction + `epoch_stamp` surfacing, but for a reroute rail
+    /// (`reroute_rail_aggregate` via `reroute_aggregate`) rather than grep-scope —
+    /// both consumers of the epoch mechanism must behave identically.
+    #[test]
+    fn epoch_stamp_subtracts_reroute_rail_counters_too() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.bump_stat("gsym_would_fire", 5).unwrap();
+        stamp_epoch(dir.path()).unwrap();
+        store.bump_stat("gsym_would_fire", 3).unwrap();
+
+        let agg = reroute_aggregate(&[dir.path().to_path_buf()]);
+        assert_eq!(agg["gsym"]["would_fire"], json!(3));
+        assert!(agg["gsym"]["epoch_stamp"].as_i64().unwrap() > 0);
+
+        let plain = tempdir().unwrap();
+        Store::open(plain.path()).unwrap().bump_stat("gsym_would_fire", 6).unwrap();
+        let none = reroute_aggregate(&[plain.path().to_path_buf()]);
+        assert_eq!(none["gsym"]["would_fire"], json!(6), "unstamped dir keeps full cumulative");
+        assert_eq!(none["gsym"]["epoch_stamp"], json!(0));
     }
 }

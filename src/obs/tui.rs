@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use serde_json::Value;
 
-use super::stats::{human_bytes, human_count, snapshot_json_since};
+use super::stats::{epoch_date, human_bytes, human_count, snapshot_json_since};
 
 /// Canonical lens MCP tools, always shown in the tool table (dimmed at 0 calls) so a
 /// dormant tool reads as unused, not absent. Mirrors `ADOPTION_TOOLS` in the web
@@ -73,13 +73,41 @@ pub fn render_snapshot(snap: &Value, width: u16, color: Theme, rate: f64, rt_sec
     section("TOOLS", tool_table(snap, inner, mini, color), &mut out);
     section("BY MECHANISM", mechanism_lines(snap, inner, color), &mut out);
     section("RTK SHELL", rtk_lines(snap, inner, color), &mut out);
-    section("GREP-SCOPE DENY", grep_scope_lines(snap, inner, color), &mut out);
-    section("GREP→SYMBOL", reroute_lines(snap, "gsym", Some("grep"), inner), &mut out);
-    section("READ→SKELETON", reroute_lines(snap, "rskel", Some("read"), inner), &mut out);
-    section("BASH→LENS_RUN", reroute_lines(snap, "bagg", None, inner), &mut out);
-    section("EDIT→LINKS", reroute_lines(snap, "elink", None, inner), &mut out);
-    section("GREP→AST", reroute_lines(snap, "gast", None, inner), &mut out);
-    section("READ→OVERVIEW", reroute_lines(snap, "rovr", None, inner), &mut out);
+    section(
+        &rail_title("GREP-SCOPE DENY", &snap["grep_scope"]["epoch_stamp"]),
+        grep_scope_lines(snap, inner, color),
+        &mut out,
+    );
+    section(
+        &rail_title("GREP→SYMBOL", &snap["reroute"]["gsym"]["epoch_stamp"]),
+        reroute_lines(snap, "gsym", Some("grep"), inner),
+        &mut out,
+    );
+    section(
+        &rail_title("READ→SKELETON", &snap["reroute"]["rskel"]["epoch_stamp"]),
+        reroute_lines(snap, "rskel", Some("read"), inner),
+        &mut out,
+    );
+    section(
+        &rail_title("BASH→LENS_RUN", &snap["reroute"]["bagg"]["epoch_stamp"]),
+        reroute_lines(snap, "bagg", None, inner),
+        &mut out,
+    );
+    section(
+        &rail_title("EDIT→LINKS", &snap["reroute"]["elink"]["epoch_stamp"]),
+        reroute_lines(snap, "elink", None, inner),
+        &mut out,
+    );
+    section(
+        &rail_title("GREP→AST", &snap["reroute"]["gast"]["epoch_stamp"]),
+        reroute_lines(snap, "gast", None, inner),
+        &mut out,
+    );
+    section(
+        &rail_title("READ→OVERVIEW", &snap["reroute"]["rovr"]["epoch_stamp"]),
+        reroute_lines(snap, "rovr", None, inner),
+        &mut out,
+    );
     section("SESSION ACTIVITY", activity_lines(snap, inner, color), &mut out);
     section("APPLIED VALUE", applied_value_lines(snap, rt_seconds, color), &mut out);
     out.push_str(&footer(snap, w, color));
@@ -303,6 +331,18 @@ fn rtk_lines(snap: &Value, _inner: usize, _color: Theme) -> Vec<String> {
         )]
     } else {
         vec!["not installed — run `lens rtk install`".to_string()]
+    }
+}
+
+/// A rail section's title, with " · since <YYYY-MM-DD>" appended once `epoch_stamp`
+/// (the `grep_scope`/`reroute[prefix]` aggregate field `lens stats --epoch` sets) is
+/// nonzero — the clean promotion window's start date, mirroring the web dashboard's
+/// "cumulative, all sessions" → "since <date>" swap. Unstamped (0/missing) leaves the
+/// title unchanged.
+fn rail_title(title: &str, epoch_stamp: &Value) -> String {
+    match epoch_stamp.as_i64() {
+        Some(ts) if ts > 0 => format!("{title} · since {}", epoch_date(ts)),
+        _ => title.to_string(),
     }
 }
 
@@ -988,6 +1028,7 @@ mod tests {
     use super::*;
     use crate::obs::stats::snapshot_json;
     use crate::obs::OpLog;
+    use serde_json::json;
     use tempfile::tempdir;
 
     /// Color-on theme for the ANSI-aware width tests (palette is irrelevant there).
@@ -1273,5 +1314,36 @@ mod tests {
         assert!(out.contains("nudge→lens 75% (go ≥55%)")); // elink (shadow)
         assert!(out.contains("nudge→lens 100% (go ≥55%)")); // gast (flag ON)
         assert!(out.contains("nudge→lens 50% (go ≥55%)")); // rovr (shadow)
+    }
+
+    /// Counter epochs (T4): a rail whose aggregate carries a nonzero `epoch_stamp`
+    /// renders "since <date>" appended to its section title; a rail with no stamp
+    /// (missing/0, the pre-epoch default) keeps its plain title. `1_700_000_000` is
+    /// the same known epoch `obs::iso8601_known_epochs` anchors to 2023-11-14.
+    #[test]
+    fn epoch_stamp_appends_since_date_to_rail_titles() {
+        let mut snap = seeded_snap();
+        snap["grep_scope"]["epoch_stamp"] = json!(1_700_000_000i64);
+        snap["reroute"] = json!({
+            "gsym": {
+                "would_fire": 0,
+                "next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "shadow_next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "epoch_stamp": 1_700_000_000i64
+            },
+            "rskel": {
+                "would_fire": 0,
+                "next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "shadow_next": {"lens": 0, "grep": 0, "read": 0, "bash": 0, "edit": 0, "other": 0},
+                "epoch_stamp": 0
+            }
+        });
+
+        let out = render_snapshot(&snap, 100, Theme::OFF, 5.0, 4.0);
+        assert!(out.contains("GREP-SCOPE DENY · since 2023-11-14"), "grep-scope title unchanged: {out}");
+        assert!(out.contains("GREP→SYMBOL · since 2023-11-14"), "gsym title unchanged: {out}");
+        // rskel has no stamp: title stays plain (no "· since" suffix).
+        assert!(out.contains("READ→SKELETON"));
+        assert!(!out.contains("READ→SKELETON · since"), "unstamped rail must keep its plain title");
     }
 }

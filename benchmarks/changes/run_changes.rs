@@ -1096,6 +1096,75 @@ fn gate_c18() -> (String, bool) {
     (s, pass)
 }
 
+// --- C19: identifier-rarity rerank (L39) -------------------------------------
+
+/// (query, file that MENTIONS the identifier, non-definition) pairs for
+/// `fixtures/identrank`. Each query mixes one strong compound identifier
+/// (snake_case or an internal lower->upper camel hump) with two prose words;
+/// the corpus also has 4 prose-heavy decoys with no matching identifier.
+const C19_CASES: [(&str, &str); 8] = [
+    ("doFetchBillingInfo call action", "billing_client.ts"),
+    ("mapCardError handler failure", "card_errors.ts"),
+    ("ShippingAddressConfirmationDialog screen flow", "shipping_dialog.tsx"),
+    ("parse_shard_header buffer offset", "shard_header.rs"),
+    ("retryConnectionBackoff timeout socket", "connection_backoff.rs"),
+    ("normalize_wallet_ledger balance entry", "wallet_ledger.rs"),
+    ("HydrateSessionTokenCache warm preload", "session_cache.ts"),
+    ("emitTelemetryBatch metric flush", "telemetry_batch.rs"),
+];
+
+/// 1-based rank (via `c18_rank`) of each `C19_CASES` expected file, under
+/// whatever `LENS_IDENT_RERANK` is ambient when called.
+fn c19_ranks(index: &Index) -> Vec<usize> {
+    C19_CASES
+        .iter()
+        .map(|(q, file)| {
+            let resp = index.search(&[q.to_string()], 10).unwrap();
+            let hits = &resp.results[0].hits;
+            c18_rank(hits, file)
+        })
+        .collect()
+}
+
+fn gate_c19() -> (String, bool) {
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap();
+    index.index_path(&changes_fixture("identrank"), true).unwrap();
+
+    // Primary measurement: ambient env, NOT forced. An outer
+    // `LENS_IDENT_RERANK=0` run naturally makes this boost-OFF.
+    let on_ranks = c19_ranks(&index);
+    let on = on_ranks.iter().filter(|&&r| r == 1).count();
+
+    // Internal trip-proof: force the boost off, measure, then restore the
+    // ambient value exactly. Gates run sequentially, so this mutation is safe.
+    let prev = std::env::var("LENS_IDENT_RERANK").ok();
+    std::env::set_var("LENS_IDENT_RERANK", "0");
+    let off_ranks = c19_ranks(&index);
+    match prev {
+        Some(v) => std::env::set_var("LENS_IDENT_RERANK", v),
+        None => std::env::remove_var("LENS_IDENT_RERANK"),
+    }
+    let off = off_ranks.iter().filter(|&&r| r == 1).count();
+
+    // ABSOLUTE: on >= 7 proves the boost lifts almost every mention file to
+    // rank 1; off < on proves disabling it genuinely costs rank-1 hits, i.e.
+    // the gate exercises the mechanism rather than passing on corpus luck.
+    let pass = on >= 7 && off < on;
+
+    let mut rows = String::new();
+    for (i, (q, file)) in C19_CASES.iter().enumerate() {
+        rows.push_str(&format!(
+            "| `{q}` | `{file}` | {} | {} |\n",
+            on_ranks[i], off_ranks[i]
+        ));
+    }
+    let s = format!(
+        "## C19 - identifier-rarity rerank (L39)\n\n8 mixed queries (`ident prose1 prose2`) over `fixtures/identrank`, each pairing a strong compound identifier with two prose words against 8 mention files and 4 prose-heavy decoys. Rank of the expected mention file, boost ON (ambient) vs boost OFF (`LENS_IDENT_RERANK=0`, internal trip-proof):\n\n| query | expected file | rank ON | rank OFF |\n|---|---|---|---|\n{rows}\nRank-1 hits: ON **{on}/8**, OFF **{off}/8**. Gate (absolute): on ≥ 7 and off < on.\n"
+    );
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -1166,6 +1235,8 @@ fn main() -> anyhow::Result<()> {
     println!("{s17}");
     let (s18, c18_ok) = gate_c18();
     println!("{s18}");
+    let (s19, c19_ok) = gate_c19();
+    println!("{s19}");
 
     println!("\n## Gates");
     let gates = [
@@ -1187,6 +1258,7 @@ fn main() -> anyhow::Result<()> {
         ("C16 subword search recall 10/10 (pure-Pascal 8/8)", c16_ok),
         ("C17 knapsack overview keeps ≥30 important hubs within 2000 tokens", c17_ok),
         ("C18 proximity span lifts adjacent-terms target to rank 1", c18_ok),
+        ("C19 identifier boost lifts def-file to rank 1", c19_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });

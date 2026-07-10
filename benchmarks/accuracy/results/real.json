@@ -17,12 +17,12 @@
       "treatment_tokens": 2418
     },
     {
-      "control_acc": 0.6666666666666666,
-      "control_tokens": 828,
+      "control_acc": 0.5,
+      "control_tokens": 1186,
       "mechanism": "search",
-      "n": 3,
+      "n": 4,
       "treatment_acc": 1.0,
-      "treatment_tokens": 1160
+      "treatment_tokens": 1802
     },
     {
       "control_acc": 0.0,
@@ -340,6 +340,26 @@
         "context_bytes": 1925,
         "correct": true,
         "tokens": 528
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "marker": null
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 358
+      },
+      "id": "0025_identrank_needle",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "marker": "SEALCODE_K9W2Q7"
+        },
+        "context_bytes": 2133,
+        "correct": true,
+        "tokens": 642
       }
     }
   ]

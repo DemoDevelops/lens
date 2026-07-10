@@ -1,0 +1,4 @@
+Status page copy: connection pool exhausted incidents auto-resolve once the
+retry with backoff succeeds. connection pool exhausted, retry with backoff,
+connection pool exhausted, retry with backoff, connection pool exhausted,
+retry with backoff.

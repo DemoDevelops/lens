@@ -17,12 +17,12 @@
       "treatment_tokens": 2418
     },
     {
-      "control_acc": 0.5,
-      "control_tokens": 1186,
+      "control_acc": 0.4,
+      "control_tokens": 1682,
       "mechanism": "search",
-      "n": 4,
+      "n": 5,
       "treatment_acc": 1.0,
-      "treatment_tokens": 1802
+      "treatment_tokens": 2342
     },
     {
       "control_acc": 0.0,
@@ -360,6 +360,26 @@
         "context_bytes": 2133,
         "correct": true,
         "tokens": 642
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "token": null
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 496
+      },
+      "id": "0026_rrf_prose_needle",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "token": "RRFCODE_T4X9Z2"
+        },
+        "context_bytes": 1776,
+        "correct": true,
+        "tokens": 540
       }
     }
   ]

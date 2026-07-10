@@ -1,0 +1,3 @@
+On-call guide: the connection pool exhausted signal means every retry needs a
+backoff. connection pool exhausted, connection pool exhausted, connection pool
+exhausted -- retry, retry, backoff, backoff.

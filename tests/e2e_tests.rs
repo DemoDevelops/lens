@@ -283,7 +283,7 @@ async fn read_only_tools_declare_annotation() {
     let tools = client.list_tools(Default::default()).await.unwrap();
 
     // The read-only tools (no code execution, no index/graph writes).
-    const READ_ONLY: [&str; 10] = [
+    const READ_ONLY: [&str; 11] = [
         "lens_search",
         "lens_overview",
         "lens_recall",
@@ -294,6 +294,7 @@ async fn read_only_tools_declare_annotation() {
         "lens_stats",
         "lens_find",
         "lens_grep_ast",
+        "lens_memory_query",
     ];
     for t in &tools.tools {
         let read_only = t.annotations.as_ref().and_then(|a| a.read_only_hint);

@@ -467,6 +467,11 @@ impl SessionStore {
     }
 }
 
+/// The durable memory categories [`memory_item`] recognizes below — the exact
+/// set `lens_memory_record` accepts. Kept in sync with the match arms by hand;
+/// [`memory_categories_are_exhaustive`] guards against the two drifting apart.
+pub const MEMORY_CATEGORIES: [&str; 4] = ["decision", "constraint", "rejected-approach", "rule"];
+
 /// Durable memory item for an event, or None if the category is not durable.
 /// Decisions/constraints/rejected approaches carry a `text`; rules carry a `path`.
 fn memory_item(e: &Event) -> Option<(&'static str, String)> {
@@ -732,6 +737,25 @@ mod tests {
         // ...and so does the machine-global mirror under home_root().
         let global = SessionStore::open(home.path()).unwrap();
         assert_eq!(global.events_for_session("mirror-uniq").unwrap().len(), 1);
+    }
+
+    /// Every category in `MEMORY_CATEGORIES` must actually be durable per
+    /// `memory_item`, and no other category may be. Guards the two from
+    /// drifting apart (a category added to one without the other silently
+    /// breaks either `lens_memory_record`'s validation or its FTS/DB write).
+    #[test]
+    fn memory_categories_are_exhaustive() {
+        for cat in MEMORY_CATEGORIES {
+            let e = ev("s1", "/p", cat, 1, 1);
+            let mut e = e;
+            e.payload = json!({"text": "t", "path": "p"});
+            assert!(
+                memory_item(&e).is_some(),
+                "{cat} is in MEMORY_CATEGORIES but memory_item does not recognize it"
+            );
+        }
+        let other = ev("s1", "/p", "not-a-memory-category", 1, 1);
+        assert!(memory_item(&other).is_none());
     }
 
     #[test]

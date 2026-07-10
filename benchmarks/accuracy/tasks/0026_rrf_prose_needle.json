@@ -1,0 +1,21 @@
+{
+  "id": "0026_rrf_prose_needle",
+  "prompt": "What audit token does the connection pool's eviction routine stamp on the reconciliation ledger?",
+  "fixtures": [
+    "fixtures/rrf_needle"
+  ],
+  "ground_truth": {
+    "token": "RRFCODE_T4X9Z2"
+  },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "evidence": [
+    "RRFCODE_T4X9Z2"
+  ],
+  "treatment": {
+    "queries": [
+      "connection pool exhausted retry backoff"
+    ],
+    "graph_fused": true
+  }
+}

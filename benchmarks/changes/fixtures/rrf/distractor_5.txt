@@ -1,0 +1,3 @@
+Postmortem summary: connection pool exhausted repeatedly. Each retry used an
+increasing backoff. connection pool exhausted, retry, backoff. connection pool
+exhausted, retry, backoff. connection pool exhausted, retry, backoff.

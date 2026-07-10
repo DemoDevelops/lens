@@ -259,14 +259,32 @@ impl Index {
     /// Run FTS search for each query. Alphanumeric queries take the BM25-ranked
     /// stemmed path; queries carrying structural punctuation (`std::fs`, `->`) route
     /// to the trigram path for literal-substring matching.
+    ///
+    /// Delegates to [`search_fused`](Index::search_fused) with an empty file-rank
+    /// map, so every existing caller sees exactly today's output.
     pub fn search(&self, queries: &[String], limit_per_query: usize) -> Result<SearchResponse> {
+        self.search_fused(queries, limit_per_query, &HashMap::new())
+    }
+
+    /// Like [`search`](Index::search), but fuses the text ranking with a per-file
+    /// graph-importance rank via reciprocal-rank fusion (RRF; see [`ranked_search`]).
+    /// `file_ranks` maps a stored file path (`rel_key` form) to its graph rank
+    /// (0 = most central). An empty map — or `LENS_RRF=0` — makes the output
+    /// byte-identical to [`search`](Index::search). Only the BM25/prose path fuses;
+    /// structural/trigram queries are unaffected.
+    pub fn search_fused(
+        &self,
+        queries: &[String],
+        limit_per_query: usize,
+        file_ranks: &HashMap<String, usize>,
+    ) -> Result<SearchResponse> {
         let store = self.store();
         let mut results = Vec::new();
         for query in queries {
             let hits = if is_structural(query) {
                 structural_search(store, query, limit_per_query)?
             } else {
-                ranked_search(store, query, limit_per_query)?
+                ranked_search(store, query, limit_per_query, file_ranks)?
             };
             results.push(QueryResult {
                 query: query.clone(),
@@ -321,7 +339,12 @@ const IDENT_BOOST: f64 = 3.0;
 /// Over-fetches a deeper BM25 pool (see `OVERFETCH_K`), re-ranks by the combined
 /// score, then truncates to `limit`, so proximity can lift an adjacent-terms chunk
 /// INTO the final top-L rather than only reordering the top-L BM25 already returned.
-fn ranked_search(store: &TantivyStore, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+fn ranked_search(
+    store: &TantivyStore,
+    query: &str,
+    limit: usize,
+    file_ranks: &HashMap<String, usize>,
+) -> Result<Vec<SearchHit>> {
     // Over-fetch a deeper BM25 pool than the caller asked for, so the proximity
     // re-rank below can pull a tight-span chunk ranked beyond L into the final top-L.
     let fetch = limit.saturating_mul(OVERFETCH_K).min(OVERFETCH_CAP);
@@ -381,6 +404,47 @@ fn ranked_search(store: &TantivyStore, query: &str, limit: usize) -> Result<Vec<
             .then_with(|| a.0.cmp(&b.0))
             .then_with(|| a.1.cmp(&b.1))
     });
+    // Reciprocal-rank fusion (RRF, k=60): blend the text rank just established above
+    // with a per-file graph-importance rank from the caller, so a structurally-central
+    // file the text rank buries just outside top-L is lifted INTO it.
+    // `fused(d) = 1/(60 + text_rank) + 1/(60 + file_rank)`, the second term only when
+    // the path is present in `file_ranks`. The switch is read PER CALL (default on,
+    // mirroring `LENS_IDENT_RERANK`). With an empty map or the switch off the block is
+    // skipped entirely, so the truncation below is byte-identical to pre-fusion output.
+    let rrf_on = std::env::var("LENS_RRF").map(|v| v != "0").unwrap_or(true);
+    if rrf_on && !file_ranks.is_empty() {
+        const RRF_K: f64 = 60.0;
+        // (fused_score, text_rank, path, chunk_id, snippet, text_score)
+        let mut fused: Vec<(f64, usize, String, String, String, f64)> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(text_rank, (path, chunk_id, snippet, score))| {
+                let mut f = 1.0 / (RRF_K + text_rank as f64);
+                if let Some(file_rank) = file_ranks.get(&path) {
+                    f += 1.0 / (RRF_K + *file_rank as f64);
+                }
+                (f, text_rank, path, chunk_id, snippet, score)
+            })
+            .collect();
+        // Fused score desc; tie-break text_rank asc, then path asc.
+        fused.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        // The reported score stays the text combined score (fusion reorders, it does
+        // not restate relevance), so an unfused hit's payload is unchanged.
+        return Ok(fused
+            .into_iter()
+            .take(limit)
+            .map(|(_fused, _text_rank, path, _chunk_id, snippet, score)| SearchHit {
+                path,
+                snippet,
+                score,
+            })
+            .collect());
+    }
     // Truncate the over-fetched, re-ranked pool back to the caller's limit.
     Ok(rows
         .into_iter()
@@ -1171,6 +1235,108 @@ mod tests {
         assert!(
             !top.ends_with("billing.rs"),
             "with the boost off, plain BM25 keeps the high-TF prose file on top, got {top}"
+        );
+    }
+
+    // ── RRF graph-importance fusion (L43) ───────────────────────────────────
+
+    /// Serializes the two `LENS_RRF`-sensitive tests so their process-global env
+    /// mutation cannot interleave. Every other test searches with an empty file-rank
+    /// map, so the fusion block is skipped regardless of `LENS_RRF` and a transient
+    /// value changes nothing for them.
+    static RRF_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn rrf_empty_map_or_off_is_byte_identical() {
+        let _guard = RRF_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Default ON (switch unset).
+        std::env::remove_var("LENS_RRF");
+        let data = tempdir().unwrap();
+        let src = corpus();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(src.path(), true).unwrap();
+
+        let queries = vec!["authenticate".to_string(), "pooling".to_string(), "add".to_string()];
+        let baseline = idx.search(&queries, 5).unwrap();
+
+        // (i) An empty file-rank map (fusion on by default) is byte-identical to search.
+        let empty = idx.search_fused(&queries, 5, &HashMap::new()).unwrap();
+        assert_eq!(
+            serde_json::to_string(&baseline).unwrap(),
+            serde_json::to_string(&empty).unwrap(),
+            "empty-map fused search must be byte-identical to plain search"
+        );
+
+        // (ii) A POPULATED map with the switch off is still byte-identical: it is the
+        // env kill switch, not the emptiness of the map, that neutralizes fusion.
+        let mut ranks: HashMap<String, usize> = HashMap::new();
+        for r in &baseline.results {
+            for (i, h) in r.hits.iter().enumerate() {
+                ranks.insert(h.path.clone(), i);
+            }
+        }
+        std::env::set_var("LENS_RRF", "0");
+        let off = idx.search_fused(&queries, 5, &ranks).unwrap();
+        // Restore BEFORE asserting so a failed assertion can't leak "0" into a later test.
+        std::env::remove_var("LENS_RRF");
+        assert_eq!(
+            serde_json::to_string(&baseline).unwrap(),
+            serde_json::to_string(&off).unwrap(),
+            "LENS_RRF=0 must produce byte-identical output even with a populated map"
+        );
+    }
+
+    #[test]
+    fn rrf_lifts_graph_central_file_into_top_l() {
+        let _guard = RRF_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LENS_RRF"); // default on
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        // central.rs mentions the prose query once, so BM25 buries it; six distractor
+        // files repeat the terms, so plain BM25 fills the whole top-5 with distractors.
+        fs::write(
+            dir.path().join("central.rs"),
+            "fn open_pool() {\n    // database connection\n    connect();\n}\n",
+        )
+        .unwrap();
+        for i in 0..6 {
+            fs::write(
+                dir.path().join(format!("distractor{i}.rs")),
+                "database connection database connection database connection database connection\n",
+            )
+            .unwrap();
+        }
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+
+        let query = "database connection";
+        // Recover central's stored path from a deep no-fusion fetch (it is in the
+        // over-fetched pool, just past top-5).
+        let deep = idx.search(&[query.to_string()], 50).unwrap();
+        let central_path = deep.results[0]
+            .hits
+            .iter()
+            .find(|h| h.path.ends_with("central.rs"))
+            .expect("central.rs must be in the candidate pool")
+            .path
+            .clone();
+
+        // Setup check: without fusion, central is outside top-5.
+        let base = idx.search(&[query.to_string()], 5).unwrap();
+        assert!(
+            !base.results[0].hits.iter().any(|h| h.path.ends_with("central.rs")),
+            "setup: central.rs must be buried outside top-5 without fusion, got {:?}",
+            base.results[0].hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>()
+        );
+
+        // With fusion and central ranked graph-central (rank 0), it is lifted to the top.
+        let mut file_ranks: HashMap<String, usize> = HashMap::new();
+        file_ranks.insert(central_path, 0);
+        let fused = idx.search_fused(&[query.to_string()], 5, &file_ranks).unwrap();
+        assert!(
+            fused.results[0].hits[0].path.ends_with("central.rs"),
+            "RRF must lift the graph-central file to rank 1, got {}",
+            fused.results[0].hits[0].path
         );
     }
 }

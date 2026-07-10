@@ -803,6 +803,11 @@ mod tests {
             "lens CLI must be allow-listed for the bundled slash commands"
         );
         assert!(allow.iter().any(|v| v == "Bash(curl -s http://127.0.0.1:*)"));
+        // Named regression checks for the memory tools: a rename or removal from
+        // WRITE_TOOLS/READ_ONLY_TOOLS must fail loudly here, not just silently drop
+        // out of the generic loop above.
+        assert!(allow.iter().any(|v| v == "mcp__lens__lens_memory_record"));
+        assert!(allow.iter().any(|v| v == "mcp__lens__lens_memory_query"));
         assert_eq!(root["env"]["EXISTING"], "1", "other keys preserved");
 
         // Re-running must not duplicate entries.

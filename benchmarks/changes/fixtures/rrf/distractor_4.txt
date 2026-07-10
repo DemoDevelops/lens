@@ -1,0 +1,3 @@
+FAQ: what happens when the connection pool exhausted state is reached? Answer:
+every client must retry with backoff. connection pool exhausted, retry with
+backoff, connection pool exhausted, retry with backoff.

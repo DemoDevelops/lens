@@ -3,11 +3,11 @@
 //! Rail 1c: a Bash command that counts, sorts, or reshapes data (`wc -l`,
 //! `sort | uniq`, `uniq -c`, a pipe into `jq`, `grep -c`, `awk '{...}'`) is a
 //! data transform that belongs inside `lens_run`'s darkroom, where only the
-//! printed answer returns to context. Unlike the deny-shaped rails, this is a
-//! `Decision::Context` nudge only — never a `Deny` — so a matching file-write
-//! shape (`cat >`, `tee`, a `>`/`>>` redirect, a heredoc) always disqualifies
-//! the match even when an aggregate signal also fires: a state-changing write
-//! must never be blocked.
+//! printed answer returns to context. [`nudge`] is the `Decision::Context`
+//! arm; [`deny_reason`] the deny arm (see its precision note). Either way a
+//! matching file-write shape (`cat >`, `tee`, a `>`/`>>` redirect, a heredoc)
+//! always disqualifies the match even when an aggregate signal also fires: a
+//! state-changing write must never be blocked or nudged.
 
 use std::sync::OnceLock;
 
@@ -42,7 +42,7 @@ pub fn is_data_aggregate(cmd: &str) -> bool {
 /// family) pointing an aggregate/reshape Bash pipeline at `lens_run`: the
 /// shell pipeline runs inside the darkroom, so its bulk output never lands in
 /// context — only what's printed comes back.
-pub fn reason() -> String {
+pub fn nudge() -> String {
     "<context_guidance>\n  <tip>\n    This pipeline counts, sorts, or reshapes data — run it inside lens_run(language=\"shell\", code=\"...\") instead of Bash: the shell pipeline executes in the darkroom and only what you print comes back, so the raw rows never land in context. If lens_run isn't loaded yet, load it first: ToolSearch(query: \"select:lens_run,lens_recall\").\n  </tip>\n</context_guidance>".to_string()
 }
 
@@ -70,10 +70,10 @@ pub fn reason() -> String {
 ///    string or a longer non-aggregate command (e.g. an `echo` that merely
 ///    mentions `grep -c`) still classifies as an aggregate.
 ///
-/// Recommendation: T3 should gate the bagg deny conservatively — leave the
-/// existing nudge ([`reason`]) as the default arm, and not flip
-/// `LENS_BASH_AGG_NUDGE` off in favor of the deny without further
-/// false-positive measurement (T4).
+/// Mitigation: the live gate keeps this deny conservative — it fires only
+/// while steering, only once per session (`nudge_once("bash-agg")`), never on
+/// a stateful or file-write-shaped command, and `LENS_BASH_AGG_DENY=0`
+/// kill-switches it independently of the nudge ([`nudge`]).
 pub fn deny_reason(cmd: &str) -> String {
     format!(
         "This Bash pipeline counts, sorts, or reshapes data (\"{cmd}\") — run it inside the darkroom instead of Bash: lens_run(language=\"shell\", code=\"{cmd}\"). Only what you print comes back, so the raw rows never land in context. If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_run,lens_recall\"). This fires once per prompt — the same command will pass if you re-run it verbatim."
@@ -106,8 +106,8 @@ mod tests {
     }
 
     #[test]
-    fn reason_names_lens_run() {
-        assert!(reason().contains("lens_run"));
+    fn nudge_names_lens_run() {
+        assert!(nudge().contains("lens_run"));
     }
 
     #[test]

@@ -14,26 +14,30 @@
 //! - `grep_ast` → `gast`
 //! - `read_overview` → `rovr`
 //!
-//! Env flags (all default OFF):
-//! - `LENS_GREP_SYMBOL_DENY`
-//! - `LENS_READ_SKELETON_DENY`
+//! Env flags — kill-switch polarity: every flag is ON by default and `=0`
+//! disables it (the `LENS_GREP_FIRST_DENY` pattern), one flag per arm:
+//! - `LENS_GREP_SYMBOL_NUDGE` / `LENS_GREP_SYMBOL_DENY`
+//! - `LENS_READ_SKELETON_NUDGE` / `LENS_READ_SKELETON_DENY`
 //! - `LENS_BASH_AGG_NUDGE` / `LENS_BASH_AGG_DENY`
-//! - `LENS_EDIT_LINKS_NUDGE`
+//! - `LENS_EDIT_LINKS_NUDGE` / `LENS_EDIT_LINKS_DENY`
 //! - `LENS_GREP_AST_NUDGE` / `LENS_GREP_AST_DENY`
-//! - `LENS_READ_OVERVIEW_NUDGE`
+//! - `LENS_READ_OVERVIEW_NUDGE` / `LENS_READ_OVERVIEW_DENY`
 //!
-//! The `bagg` and `gast` rails each carry BOTH a nudge and a deny flag,
-//! dark-launched independently. The deny arm fires under `Level::steers` (the
-//! nudge arm under `Level::nudges`) and reuses the SAME `{p}_would_fire` /
-//! `{p}_next_{class}` counter keys as the nudge arm — the `bagg`/`gast` prefix
-//! identifies the rail; the flag chooses nudge vs deny.
+//! Every rail carries BOTH a nudge and a deny arm. The deny arm fires under
+//! `Level::steers` (Steer|Full). The nudge arm fires only at `Level::Nudge`
+//! (`nudges() && !steers()`) for gsym/rskel/rovr/elink; the gast/bagg nudges
+//! keep their original `Level::nudges` gate, pre-empted at steering levels by
+//! their deny's shared one-shot key. Both arms of a rail share that rail's
+//! one-shot throttle key AND the SAME `{p}_would_fire` / `{p}_next_{class}`
+//! counter keys — the prefix identifies the rail; `{p}_shadow_next_{class}` is
+//! the follower counter when the operator has kill-switched the arm (`=0`).
 
-pub mod grep_symbol;
-pub mod read_skeleton;
 pub mod bash_aggregate;
 pub mod edit_callers;
 pub mod grep_ast;
+pub mod grep_symbol;
 pub mod read_overview;
+pub mod read_skeleton;
 
 /// Canonical prefix strings consumed by T8 (integration) and T9 (obs).
 #[allow(dead_code)]

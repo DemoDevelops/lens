@@ -218,6 +218,28 @@ fn supports_strict_mcp_config() -> bool {
     })
 }
 
+/// All 13 reroute-rail nudge/deny flags, now default-ON kill-switches
+/// (`=0` disables). Keep in sync with the flag matrix in
+/// `src/routing/reroute/mod.rs`. `LENS_GREP_FIRST_DENY` and the threshold
+/// vars (`LENS_READ_DENY_THRESHOLD`, `LENS_READ_OVERVIEW_THRESHOLD`,
+/// `LENS_EDIT_LINKS_MIN_CALLERS`) are unaffected by the polarity flip and
+/// are intentionally excluded.
+const REROUTE_RAIL_FLAGS: &[&str] = &[
+    "LENS_GREP_SCOPE_DENY",
+    "LENS_GREP_SYMBOL_DENY",
+    "LENS_GREP_SYMBOL_NUDGE",
+    "LENS_READ_SKELETON_DENY",
+    "LENS_READ_SKELETON_NUDGE",
+    "LENS_GREP_AST_NUDGE",
+    "LENS_GREP_AST_DENY",
+    "LENS_READ_OVERVIEW_NUDGE",
+    "LENS_READ_OVERVIEW_DENY",
+    "LENS_BASH_AGG_NUDGE",
+    "LENS_BASH_AGG_DENY",
+    "LENS_EDIT_LINKS_NUDGE",
+    "LENS_EDIT_LINKS_DENY",
+];
+
 /// One `claude -p` call for `task`, with the lens MCP server live via a temp
 /// `--mcp-config`. `cwd` is the repo root: the lens MCP server pins its cwd at
 /// spawn, so this is what makes it index this repo's tree. Wall-clock bounded
@@ -242,9 +264,19 @@ fn invoke_claude(task: &Task, mcp_config: &Path) -> Result<String, String> {
     // descriptions. The installed hooks point at the released binary; set
     // LENS_TOOLSEL_SETTINGS to a settings JSON that points them at the build
     // under test. Unset -> descriptions-only (the ablation baseline).
-    if let Ok(settings) = std::env::var("LENS_TOOLSEL_SETTINGS") {
-        if !settings.is_empty() {
-            cmd.args(["--settings", settings.as_str()]);
+    let settings = std::env::var("LENS_TOOLSEL_SETTINGS").unwrap_or_default();
+    if !settings.is_empty() {
+        cmd.args(["--settings", settings.as_str()]);
+    } else {
+        // Ablation baseline: no explicit settings override, so the child
+        // `claude` process falls back to whatever hooks are already
+        // registered in the ambient CLAUDE_CONFIG_DIR (e.g. `lens setup`'s
+        // installed routing hooks). Now that every reroute rail defaults to
+        // ON, that would silently let the rails fire in what's meant to be
+        // the descriptions-only arm. Pin them off explicitly; a treatment
+        // run wires rails via its own `LENS_TOOLSEL_SETTINGS` file instead.
+        for flag in REROUTE_RAIL_FLAGS {
+            cmd.env(flag, "0");
         }
     }
     // Pin the headless model/effort when set (the harness otherwise inherits the
@@ -497,7 +529,10 @@ mod tests {
     fn first_inspection_tool_not_in_expected_fails() {
         let tools = vec!["Read".to_string(), "mcp__lens__lens_skeleton".to_string()];
         let (normalized, pass) = score_first_tool(&tools, &["lens_skeleton".to_string()]);
-        assert!(!pass, "Read-first should fail even though lens_skeleton follows");
+        assert!(
+            !pass,
+            "Read-first should fail even though lens_skeleton follows"
+        );
         assert_eq!(normalized, vec!["Read", "lens_skeleton"]);
     }
 
@@ -628,7 +663,10 @@ mod tests {
     fn chain_metric_credits_recovery_within_window_and_fails_the_flood() {
         let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         // Grep → lens recovery inside the window: pass.
-        assert!(lens_within_window(&s(&["Grep", "mcp__lens__lens_skeleton"])));
+        assert!(lens_within_window(&s(&[
+            "Grep",
+            "mcp__lens__lens_skeleton"
+        ])));
         // The measured drift signature: fail.
         assert!(!lens_within_window(&s(&["Grep", "Read", "Read"])));
         // Lens engaged only AFTER the window (4th inspection call): fail.

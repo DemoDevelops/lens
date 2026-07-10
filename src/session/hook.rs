@@ -154,15 +154,23 @@ fn follower_class6(tool: &str, tool_input: &Value) -> &'static str {
     }
 }
 
-/// Would the elink rail fire on this Edit/MultiEdit? The classifier half of
-/// the shadow-counter derivation: a decl-touching edit whose symbol has >=K
-/// callers in the graph. The graph load is guarded (a missing/unreadable
-/// `graph.json` is a silent no) and only reached when a declaration was
-/// actually touched, so non-decl edits never pay for it.
-fn elink_would_fire(data_dir: &Path, tool: &str, tool_input: &Value) -> bool {
+/// Would a live elink arm fire on this Edit/MultiEdit? The classifier half of
+/// the follower-counter derivation: a decl-touching edit whose symbol has >=K
+/// callers in the graph AND whose `elink:{sym}` one-shot hasn't already been
+/// spent. The marker check gives the mirror the same one-shot the live arm has:
+/// once a live deny/nudge marks `elink:{sym}`, every later Edit of that symbol
+/// passes through, so it no longer "would fire" — without this the verbatim
+/// retry after an elink deny would double-count `elink_would_fire` and mis-arm
+/// a follower the live arm never emitted. The graph load is guarded (a missing/
+/// unreadable `graph.json` is a silent no) and only reached when a declaration
+/// was actually touched, so non-decl edits never pay for it.
+fn elink_would_fire(data_dir: &Path, session_id: &str, tool: &str, tool_input: &Value) -> bool {
     let Some(sym) = crate::routing::edited_decl_symbol(tool, tool_input) else {
         return false;
     };
+    if crate::routing::throttle::fired(data_dir, session_id, &format!("elink:{sym}")) {
+        return false;
+    }
     let Ok(graph) = crate::discovery::graph::Graph::load(&data_dir.join("graph.json")) else {
         return false;
     };
@@ -354,11 +362,19 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 0
             };
 
-            // Reroute-rail shadow counters (six rails, grep-scope shape):
+            // Reroute-rail follower counters (six rails, grep-scope shape):
             // re-derive each rail's would-fire on THIS event with the same
             // classifier + gates route_inner uses, bump `{p}_would_fire`
-            // regardless of the rail's flag, and arm the live/shadow follower
-            // marker the loop above consumes on the NEXT event.
+            // regardless of the rail's flags, and arm the live-vs-shadow
+            // follower marker the loop above consumes on the NEXT event. A rail
+            // is LIVE when EITHER of its arms would fire at the current level —
+            // the deny arm (under `steers()`) OR the nudge arm — so a deny-only
+            // config (nudge flag `=0`) still lands its follower in `{p}_next_*`,
+            // not `{p}_shadow_next_*`. gsym/rskel/rovr/elink nudges fire only at
+            // `Level::Nudge` (their deny owns the steering levels); gast/bagg
+            // nudges fire at every nudging level (their deny's shared one-shot
+            // key prevents a double-fire), so their live union drops the
+            // `!steers()` term — mirroring `route_inner` EXACTLY.
             {
                 let arm = |prefix: &str, enabled: bool| {
                     if let Some(s) = &stats_store {
@@ -371,10 +387,22 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                     };
                     routing::throttle::bump(&data_dir, &session_id, &pk);
                 };
+                // Live-arm union per rail, matching route_inner EXACTLY.
+                // gsym/rskel/rovr/elink nudges fire only at Level::Nudge.
+                let live_std = |deny: bool, nudge: bool| {
+                    (deny && level.steers()) || (nudge && level.nudges() && !level.steers())
+                };
+                // gast/bagg nudges fire at every nudging level (deny + nudge
+                // share a one-shot key, so no double-fire).
+                let live_gb =
+                    |deny: bool, nudge: bool| (deny && level.steers()) || (nudge && level.nudges());
                 match tool.as_str() {
                     "Grep" => {
                         let pat = ti.get("pattern").and_then(Value::as_str).unwrap_or("");
-                        let gsym_shape = level.steers()
+                        // Union level: gsym's nudge arm fires at Level::Nudge,
+                        // so the classifier gate widens to nudges() (was
+                        // steers() when gsym was deny-only).
+                        let gsym_shape = level.nudges()
                             && routing::reroute::grep_symbol::symbol_grep(pat).is_some();
                         let gast = level.nudges()
                             && routing::reroute::grep_ast::syntax_shape(pat).is_some();
@@ -386,14 +414,26 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                             let gsym = gsym_shape
                                 && routing::reroute::grep_symbol::graph_resolves(&data_dir, pat);
                             if gsym {
-                                arm("gsym", routing::grep_symbol_deny_enabled());
+                                arm(
+                                    "gsym",
+                                    live_std(
+                                        routing::grep_symbol_deny_enabled(),
+                                        routing::grep_symbol_nudge_enabled(),
+                                    ),
+                                );
                             } else if gsym_shape {
                                 if let Some(s) = &stats_store {
                                     let _ = s.bump_stat("gsym_graph_miss", 1);
                                 }
                             }
                             if gast {
-                                arm("gast", routing::grep_ast_nudge_enabled());
+                                arm(
+                                    "gast",
+                                    live_gb(
+                                        routing::grep_ast_deny_enabled(),
+                                        routing::grep_ast_nudge_enabled(),
+                                    ),
+                                );
                             }
                         }
                     }
@@ -404,8 +444,10 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                         let edited = routing::edited_paths_for(&data_dir, &session_id, path);
                         // Mirror read_decision's rskel gate EXACTLY (incl. the
                         // edit-intent exemption) so `rskel_would_fire` counts the
-                        // deny that actually fires, not a looser one.
-                        let rskel = level.steers()
+                        // arm that actually fires, not a looser one. Union level:
+                        // the rskel nudge arm fires at Level::Nudge, so widen to
+                        // nudges() (was steers() when rskel was deny-only).
+                        let rskel = level.nudges()
                             && !routing::rskel_edit_exempt(&data_dir, &session_id)
                             && routing::reroute::read_skeleton::read_is_skeletonizable(
                                 path,
@@ -419,10 +461,22 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                             );
                         if (rskel || rovr) && mcp_ready && routing::index_present(&data_dir) {
                             if rskel {
-                                arm("rskel", routing::read_skeleton_deny_enabled());
+                                arm(
+                                    "rskel",
+                                    live_std(
+                                        routing::read_skeleton_deny_enabled(),
+                                        routing::read_skeleton_nudge_enabled(),
+                                    ),
+                                );
                             }
                             if rovr {
-                                arm("rovr", routing::read_overview_nudge_enabled());
+                                arm(
+                                    "rovr",
+                                    live_std(
+                                        routing::read_overview_deny_enabled(),
+                                        routing::read_overview_nudge_enabled(),
+                                    ),
+                                );
                             }
                         }
                     }
@@ -433,18 +487,31 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                             && mcp_ready
                             && routing::index_present(&data_dir)
                         {
-                            arm("bagg", routing::bash_agg_nudge_enabled());
+                            arm(
+                                "bagg",
+                                live_gb(
+                                    routing::bash_agg_deny_enabled(),
+                                    routing::bash_agg_nudge_enabled(),
+                                ),
+                            );
                         }
                     }
                     // Graph load only on Edit events, guarded — see
-                    // `elink_would_fire`.
+                    // `elink_would_fire` (which also honors the `elink:{sym}`
+                    // one-shot the live deny/nudge consumes).
                     "Edit" | "MultiEdit"
                         if level.nudges()
                             && mcp_ready
                             && routing::index_present(&data_dir)
-                            && elink_would_fire(&data_dir, &tool, &ti) =>
+                            && elink_would_fire(&data_dir, &session_id, &tool, &ti) =>
                     {
-                        arm("elink", routing::edit_links_nudge_enabled());
+                        arm(
+                            "elink",
+                            live_std(
+                                routing::edit_links_deny_enabled(),
+                                routing::edit_links_nudge_enabled(),
+                            ),
+                        );
                     }
                     _ => {}
                 }
@@ -912,6 +979,13 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    // Serializes the two tests here that mutate process-global routing env
+    // (`LENS_ROUTING` / `LENS_ROUTING_MCP` / rail flags) so they can't race each
+    // other. No other lib test mutates `LENS_ROUTING`; the mod.rs `mcp_ready`
+    // test's `LENS_ROUTING_MCP` window is dodged by forcing the env override
+    // right before the read. Poison-tolerant so one panicking test can't cascade.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn run(event: &str, input: HookInput) -> (String, SessionStore, PathBuf) {
         let dir = input.project();
         let data_dir = super::super::resolve_data_dir(&dir);
@@ -1119,6 +1193,7 @@ mod tests {
         // the guide has to inject anyway, or the model never learns to use the ctx
         // tools. tempdir() has no server.pid, so mcp_ready is false here; the guide
         // must still appear. (LENS_ROUTING is read by no other test.)
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let prev = std::env::var("LENS_ROUTING").ok();
         std::env::set_var("LENS_ROUTING", "full");
@@ -1153,5 +1228,74 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(input.session_id(), "abc-123");
+    }
+
+    // T4 attribution fix: a deny-only config (nudge flag `=0`, deny arm ON by
+    // default) at a steering level must attribute the reroute follower to
+    // `gast_next_*` (LIVE), NOT `gast_shadow_next_*`. Before the fix the mirror
+    // armed on the NUDGE flag alone, so a deny-only gast landed in shadow.
+    #[test]
+    fn deny_only_rail_attributes_follower_live_not_shadow() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let data_dir = super::super::resolve_data_dir(dir.path());
+        std::fs::create_dir_all(&data_dir).unwrap();
+        crate::routing::seed_index(&data_dir); // index_present() == true
+
+        let prev_routing = std::env::var("LENS_ROUTING").ok();
+        let prev_mcp = std::env::var("LENS_ROUTING_MCP").ok();
+        let prev_nudge = std::env::var("LENS_GREP_AST_NUDGE").ok();
+        let prev_deny = std::env::var("LENS_GREP_AST_DENY").ok();
+        std::env::set_var("LENS_ROUTING", "full"); // steers()
+        std::env::set_var("LENS_ROUTING_MCP", "up"); // mcp_ready() == true
+        std::env::set_var("LENS_GREP_AST_NUDGE", "0"); // nudge arm OFF
+        std::env::remove_var("LENS_GREP_AST_DENY"); // deny arm ON (default)
+
+        // Event 1: a syntax-shaped Grep — the gast classifier hits and, because
+        // the deny arm is live at `full`, the mirror arms `gast-live-pending`.
+        let mut g = input_for(dir.path());
+        g.tool_name = Some("Grep".into());
+        g.tool_input = Some(json!({"pattern": "impl Forge"}));
+        handle("PreToolUse", &g).unwrap();
+
+        // Event 2: the compliant follower (a lens call). The follower proxy
+        // consumes `gast-live-pending` and bumps `gast_next_lens`.
+        let mut f = input_for(dir.path());
+        f.tool_name = Some("mcp__lens__lens_grep_ast".into());
+        f.tool_input = Some(json!({}));
+        handle("PreToolUse", &f).unwrap();
+
+        // Restore env before asserting (an assert panic must not leak state).
+        let restore = |k: &str, v: Option<String>| match v {
+            Some(v) => std::env::set_var(k, v),
+            None => std::env::remove_var(k),
+        };
+        restore("LENS_ROUTING", prev_routing);
+        restore("LENS_ROUTING_MCP", prev_mcp);
+        restore("LENS_GREP_AST_NUDGE", prev_nudge);
+        restore("LENS_GREP_AST_DENY", prev_deny);
+
+        let store = crate::store::Store::open(&data_dir).unwrap();
+        let sum = |prefix: &str| -> i64 {
+            ["lens", "grep", "read", "bash", "edit", "other"]
+                .iter()
+                .map(|c| store.get_stat(&format!("{prefix}_{c}")).unwrap())
+                .sum()
+        };
+        assert_eq!(
+            store.get_stat("gast_would_fire").unwrap(),
+            1,
+            "gast would-fire is counted exactly once"
+        );
+        assert_eq!(
+            sum("gast_next"),
+            1,
+            "deny-only gast follower must land LIVE (gast_next_*)"
+        );
+        assert_eq!(
+            sum("gast_shadow_next"),
+            0,
+            "deny-only gast follower must NOT land in shadow (gast_shadow_next_*)"
+        );
     }
 }

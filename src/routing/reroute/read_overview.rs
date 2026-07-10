@@ -33,6 +33,15 @@ pub fn nudge(reads_before_map: u64) -> String {
     )
 }
 
+/// Deny reason for the rail's steering arm — the same `lens_overview` guidance
+/// as [`nudge`], plus the one-shot promise: the deny resets the read counters,
+/// so the verbatim retry always passes.
+pub fn deny_reason(reads_before_map: u64) -> String {
+    format!(
+        "You've read {reads_before_map} files this session with no repo map — get the map in one call instead of reading file after file: lens_overview() returns a token-budgeted, PageRank-ranked map of the whole codebase (run lens_map() first if the graph hasn't been built yet). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_overview,lens_map,lens_symbol\"). This fires once per session — the same Read will pass if you re-run it verbatim."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,5 +66,13 @@ mod tests {
         let n = nudge(5);
         assert!(n.contains("lens_overview"));
         assert!(n.contains('5'));
+    }
+
+    #[test]
+    fn deny_reason_names_the_call_count_and_retry_promise() {
+        let r = deny_reason(5);
+        assert!(r.contains("lens_overview"));
+        assert!(r.contains('5'));
+        assert!(r.contains("will pass if you re-run it verbatim"));
     }
 }

@@ -3,10 +3,13 @@
 //! When an Edit touches a *declaration* line — a `fn`/`def`/`func`/`class`/
 //! `struct` signature — changing that signature can break every caller. We look
 //! the symbol up in the structural graph and, if it has at least K incoming
-//! `calls` edges (callers), emit a `Decision::Context` nudge pointing at
-//! `lens_links` so the editor sees the blast radius before committing. Pure and
-//! graph-backed; the once-per-(session, symbol) throttle and the
-//! `LENS_EDIT_LINKS_NUDGE` gate are wired later by T8.
+//! `calls` edges (callers), route the editor at `lens_links` so the blast
+//! radius is visible before committing: [`caller_nudge`] is the
+//! `Decision::Context` arm, [`deny_reason`] the one-shot deny arm (blocked at
+//! most once per symbol per session; the verbatim retry always passes). Pure
+//! and graph-backed; the once-per-(session, symbol) `elink:{sym}` throttle and
+//! the `LENS_EDIT_LINKS_NUDGE`/`LENS_EDIT_LINKS_DENY` gates live in
+//! `route_inner` (`src/routing/mod.rs`).
 //!
 //! Caller-edge direction: a `calls` edge is stored `from` = caller, `to` =
 //! callee (see [`crate::discovery::graph`]), so the callers of `sym` are the
@@ -40,12 +43,12 @@ pub fn edited_symbol(old_string: &str, _new_string: &str) -> Option<String> {
     decl_re().captures(old_string).map(|c| c[1].to_string())
 }
 
-/// Nudge toward `lens_links` when `sym` has at least `k` incoming `calls` edges
-/// (callers). Returns `None` when `sym` is absent from the graph or has fewer
-/// than `k` callers. A `calls` edge is stored `from` = caller, `to` = callee, so
-/// the callers are exactly the `calls` edges whose `to` resolves to a node named
-/// `sym` (there may be several such nodes — same name in different files/types).
-pub fn caller_nudge(graph: &Graph, sym: &str, k: usize) -> Option<String> {
+/// Number of incoming `calls` edges (callers) for `sym`, or `None` when `sym`
+/// is absent from the graph (distinct from an in-graph 0-caller symbol). A
+/// `calls` edge is stored `from` = caller, `to` = callee, so the callers are
+/// exactly the `calls` edges whose `to` resolves to a node named `sym` (there
+/// may be several such nodes — same name in different files/types).
+pub fn caller_count(graph: &Graph, sym: &str) -> Option<usize> {
     let target_ids: HashSet<&str> = graph
         .nodes
         .iter()
@@ -55,19 +58,39 @@ pub fn caller_nudge(graph: &Graph, sym: &str, k: usize) -> Option<String> {
     if target_ids.is_empty() {
         return None;
     }
-    let count = graph
-        .edges
-        .iter()
-        .filter(|e| e.kind == "calls" && target_ids.contains(e.to.as_str()))
-        .count();
-    if count < k {
-        return None;
-    }
+    Some(
+        graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == "calls" && target_ids.contains(e.to.as_str()))
+            .count(),
+    )
+}
+
+/// Nudge toward `lens_links` when `sym` has at least `k` incoming `calls` edges
+/// (callers). Returns `None` when `sym` is absent from the graph or has fewer
+/// than `k` callers (see [`caller_count`]).
+pub fn caller_nudge(graph: &Graph, sym: &str, k: usize) -> Option<String> {
+    let count = caller_count(graph, sym).filter(|&count| count >= k)?;
     Some(format!(
         "`{sym}` has {count} callers — run lens_links(\"{sym}\") before you change its \
          signature. If the lens tools aren't loaded yet, load them first: \
          ToolSearch(query: \"select:lens_links,lens_path\")."
     ))
+}
+
+/// Deny reason for the rail's steering arm — the same blast-radius guidance as
+/// [`caller_nudge`] with the real caller count, plus the one-shot promise: the
+/// `elink:{sym}` marker is set before the deny returns, so an Edit is blocked
+/// at most once per symbol per session and the verbatim retry always passes.
+pub fn deny_reason(sym: &str, callers: usize) -> String {
+    format!(
+        "`{sym}` has {callers} callers — its declaration is about to change, so see the \
+         blast radius first: lens_links(\"{sym}\") lists every caller in one call. If the \
+         lens tools aren't loaded yet, load them first: \
+         ToolSearch(query: \"select:lens_links,lens_path\"). This fires at most once per \
+         symbol per session — the same Edit will pass if you re-run it verbatim."
+    )
 }
 
 /// Minimum caller count that arms the nudge. `LENS_EDIT_LINKS_MIN_CALLERS`
@@ -111,8 +134,14 @@ mod tests {
         );
         let g = graph_with_callers(4);
         let nudge = caller_nudge(&g, "foo", 3).expect("4 callers >= k=3 must nudge");
-        assert!(nudge.contains('4'), "must embed the real caller count: {nudge}");
-        assert!(nudge.contains("lens_links"), "must name lens_links: {nudge}");
+        assert!(
+            nudge.contains('4'),
+            "must embed the real caller count: {nudge}"
+        );
+        assert!(
+            nudge.contains("lens_links"),
+            "must name lens_links: {nudge}"
+        );
         assert!(nudge.contains("foo"), "must name the symbol: {nudge}");
     }
 
@@ -147,6 +176,22 @@ mod tests {
         // `sym` isn't in the graph => None (distinct from an in-graph 0-caller).
         let g = graph_with_callers(4);
         assert_eq!(caller_nudge(&g, "missing", 3), None);
+        assert_eq!(caller_count(&g, "missing"), None);
+    }
+
+    #[test]
+    fn caller_count_reports_the_exact_count() {
+        let g = graph_with_callers(4);
+        assert_eq!(caller_count(&g, "foo"), Some(4));
+    }
+
+    #[test]
+    fn deny_reason_names_symbol_count_and_retry_promise() {
+        let r = deny_reason("foo", 4);
+        assert!(r.contains("lens_links(\"foo\")"), "{r}");
+        assert!(r.contains("4 callers"), "{r}");
+        assert!(r.contains("once per symbol per session"), "{r}");
+        assert!(r.contains("will pass if you re-run it verbatim"), "{r}");
     }
 
     #[test]

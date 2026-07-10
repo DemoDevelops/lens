@@ -4,12 +4,13 @@
 //! contract). [`symbol_grep`] recognizes a Grep `pattern` that is really a
 //! symbol lookup — a definition shape (`fn foo`, `class Bar`, …) or a bare
 //! identifier — the case the graph answers directly instead of a grep→Read
-//! chain. [`reason`] renders the one-shot deny text T8 attaches to the
+//! chain. [`deny_reason`] renders the one-shot deny text attached to the
 //! `Decision::Deny`, naming the exact lens call (with args) rather than a
 //! generic tool list — mirrors the shape of `GREP_FIRST_DENY_REASON`
 //! (`src/routing/mod.rs`: state the trigger, name the call, offer the
 //! `ToolSearch` bootstrap, note it's one-shot) but keyed on the call's pattern
-//! instead of the prompt's phrasing.
+//! instead of the prompt's phrasing. [`nudge`] is the same guidance phrased as
+//! a soft suggestion for the rail's `Level::Nudge` arm.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -90,7 +91,7 @@ pub fn symbol_grep(pattern: &str) -> Option<SymbolKind> {
 
 /// Best-effort identifier to embed as `lens_symbol(name="...")`, and whether
 /// it is a clean identifier (so `lens_symbol` alone suffices) or a fallback
-/// (so [`reason`] also offers `lens_find`, which takes a free-text query
+/// (so [`deny_reason`] also offers `lens_find`, which takes a free-text query
 /// instead of a name).
 fn extract_identifier(trimmed: &str) -> (String, bool) {
     if let Some(name) = def_re().captures(trimmed).and_then(|c| c.get(1)) {
@@ -130,7 +131,10 @@ fn name_value_contains(raw: &str, ident: &str) -> bool {
     let needle = b"\"name\":\"";
     let mut start = 0;
     while start < bytes.len() {
-        let Some(rel) = bytes[start..].windows(needle.len()).position(|w| w == needle) else {
+        let Some(rel) = bytes[start..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+        else {
             return false;
         };
         let value_start = start + rel + needle.len();
@@ -155,7 +159,7 @@ fn name_value_contains(raw: &str, ident: &str) -> bool {
 /// identifier (`lens_symbol` needs a name; `lens_find` takes a free-text query
 /// instead), and includes the `ToolSearch` bootstrap line in case the lens
 /// tools aren't loaded yet.
-pub fn reason(pattern: &str) -> String {
+pub fn deny_reason(pattern: &str) -> String {
     let trimmed = pattern.trim();
     let (ident, is_clean) = extract_identifier(trimmed);
     let mut out = format!(
@@ -168,6 +172,26 @@ pub fn reason(pattern: &str) -> String {
     }
     out.push_str(
         " If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_symbol,lens_find,lens_links\"). This fires once per prompt — the same grep will pass if you re-run it.",
+    );
+    out
+}
+
+/// Soft-suggestion Context nudge for a symbol-shaped Grep — the same
+/// `lens_symbol`/`lens_find` guidance as [`deny_reason`], phrased as a
+/// suggestion. Never blocks: the rail's `Level::Nudge` arm.
+pub fn nudge(pattern: &str) -> String {
+    let trimmed = pattern.trim();
+    let (ident, is_clean) = extract_identifier(trimmed);
+    let mut out = format!(
+        "This grep pattern looks like a symbol lookup (\"{trimmed}\") — one lens call answers it directly instead of a grep chain: lens_symbol(name=\"{ident}\")."
+    );
+    if !is_clean {
+        out.push_str(&format!(
+            " \"{trimmed}\" isn't a clean identifier and lens_symbol needs a name — lens_find(query=\"{trimmed}\") takes a free-text query instead."
+        ));
+    }
+    out.push_str(
+        " If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_symbol,lens_find,lens_links\").",
     );
     out
 }
@@ -199,10 +223,21 @@ mod tests {
     }
 
     #[test]
-    fn reason_names_lens_symbol_and_bootstraps_toolsearch() {
-        let r = reason("handle_connection");
+    fn deny_reason_names_lens_symbol_and_bootstraps_toolsearch() {
+        let r = deny_reason("handle_connection");
         assert!(r.contains("lens_symbol"));
         assert!(r.contains("ToolSearch"));
+    }
+
+    #[test]
+    fn nudge_suggests_without_blocking_language() {
+        let n = nudge("handle_connection");
+        assert!(n.contains("lens_symbol(name=\"handle_connection\")"));
+        assert!(n.contains("ToolSearch"));
+        assert!(
+            !n.contains("fires once per prompt"),
+            "the nudge is a suggestion, not a deny: {n}"
+        );
     }
 
     fn write_graph(dir: &std::path::Path, name: &str) {

@@ -17,8 +17,8 @@ fn extension(path: &str) -> Option<String> {
         .map(|e| e.to_ascii_lowercase())
 }
 
-/// Is this Read a whole, unedited code file — the shape [`reason`] answers with
-/// `lens_skeleton` instead of a full-file dump? True only when: `path` is a code
+/// Is this Read a whole, unedited code file — the shape [`deny_reason`] answers
+/// with `lens_skeleton` instead of a full-file dump? True only when: `path` is a code
 /// file ([`CODE_EXTENSIONS`]), the call has no `offset`/`limit` (an
 /// already-bounded Read is left alone), and `path` hasn't been edited yet this
 /// session (`edited`) — once a file has been edited, a further Read of it is
@@ -36,9 +36,18 @@ pub fn read_is_skeletonizable(
 /// Deny reason for a skeletonizable Read: mirrors
 /// [`crate::routing::GREP_FIRST_DENY_REASON`]'s shape, keyed on the Read's
 /// `path` instead of the prompt's phrasing.
-pub fn reason(path: &str) -> String {
+pub fn deny_reason(path: &str) -> String {
     format!(
         "This Read pulls in a whole code file you haven't edited — lens_skeleton answers it without the full-file dump. First: lens_skeleton(path=\"{path}\"). Need one function's body verbatim? lens_skeleton(path=\"{path}\", include_bodies=[\"the_fn\"]) returns it in the same call. Read is for when you're about to Edit (Edit must match exact bytes) — once you've edited this file this session, Read passes through untouched. If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_skeleton,lens_recall\")."
+    )
+}
+
+/// Soft-suggestion Context nudge for a skeletonizable Read — the same
+/// `lens_skeleton` guidance as [`deny_reason`], phrased as a suggestion.
+/// Never blocks: the rail's `Level::Nudge` arm.
+pub fn nudge(path: &str) -> String {
+    format!(
+        "This Read pulls in a whole code file you haven't edited — lens_skeleton(path=\"{path}\") shows its signatures and structure without the full-file dump, and lens_skeleton(path=\"{path}\", include_bodies=[\"the_fn\"]) returns any body you need verbatim in the same call. Read stays right when you're about to Edit (Edit must match exact bytes). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_skeleton,lens_recall\")."
     )
 }
 
@@ -87,9 +96,17 @@ mod tests {
     }
 
     #[test]
-    fn reason_names_the_skeleton_call_and_include_bodies() {
-        let r = reason("src/x.rs");
+    fn deny_reason_names_the_skeleton_call_and_include_bodies() {
+        let r = deny_reason("src/x.rs");
         assert!(r.contains("lens_skeleton"));
         assert!(r.contains("include_bodies"));
+    }
+
+    #[test]
+    fn nudge_names_the_skeleton_call_and_include_bodies() {
+        let n = nudge("src/x.rs");
+        assert!(n.contains("lens_skeleton(path=\"src/x.rs\""));
+        assert!(n.contains("include_bodies"));
+        assert!(n.contains("ToolSearch"));
     }
 }

@@ -51,7 +51,13 @@ const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█
 /// the target `width`, the `color` theme (palette + whether ANSI is emitted), the
 /// `$/M`-token `rate` for the money headline, and `rt_seconds` (seconds per avoided
 /// round-trip) for the applied-value time figure. `width < 56` ⇒ the mini layout.
-pub fn render_snapshot(snap: &Value, width: u16, color: Theme, rate: f64, rt_seconds: f64) -> String {
+pub fn render_snapshot(
+    snap: &Value,
+    width: u16,
+    color: Theme,
+    rate: f64,
+    rt_seconds: f64,
+) -> String {
     let w = (width as usize).clamp(24, 200);
     let mini = w < MINI_MAX;
     let inner = if mini { w } else { w.saturating_sub(4) };
@@ -71,7 +77,11 @@ pub fn render_snapshot(snap: &Value, width: u16, color: Theme, rate: f64, rt_sec
     section("STATS", stats_strip(snap, inner), &mut out);
     section("THROUGHPUT", throughput(snap, inner, color), &mut out);
     section("TOOLS", tool_table(snap, inner, mini, color), &mut out);
-    section("BY MECHANISM", mechanism_lines(snap, inner, color), &mut out);
+    section(
+        "BY MECHANISM",
+        mechanism_lines(snap, inner, color),
+        &mut out,
+    );
     section("RTK SHELL", rtk_lines(snap, inner, color), &mut out);
     section(
         &rail_title("GREP-SCOPE DENY", &snap["grep_scope"]["epoch_stamp"]),
@@ -108,8 +118,16 @@ pub fn render_snapshot(snap: &Value, width: u16, color: Theme, rate: f64, rt_sec
         reroute_lines(snap, "rovr", None, inner),
         &mut out,
     );
-    section("SESSION ACTIVITY", activity_lines(snap, inner, color), &mut out);
-    section("APPLIED VALUE", applied_value_lines(snap, rt_seconds, color), &mut out);
+    section(
+        "SESSION ACTIVITY",
+        activity_lines(snap, inner, color),
+        &mut out,
+    );
+    section(
+        "APPLIED VALUE",
+        applied_value_lines(snap, rt_seconds, color),
+        &mut out,
+    );
     out.push_str(&footer(snap, w, color));
     out.push('\n');
     out
@@ -213,16 +231,12 @@ fn throughput(snap: &Value, inner: usize, color: Theme) -> Vec<String> {
         )
     };
     vec![
-        line(
-            "saved/min",
-            "saved_buckets",
-            &|r| format!("{} tok/min", human_count(r.max(0) as u64)),
-        ),
-        line(
-            "bytes/min",
-            "bytes_buckets",
-            &|r| format!("{}/min", human_bytes(r.max(0) as u64)),
-        ),
+        line("saved/min", "saved_buckets", &|r| {
+            format!("{} tok/min", human_count(r.max(0) as u64))
+        }),
+        line("bytes/min", "bytes_buckets", &|r| {
+            format!("{}/min", human_bytes(r.max(0) as u64))
+        }),
     ]
 }
 
@@ -241,15 +255,26 @@ fn tool_table(snap: &Value, _inner: usize, mini: bool, color: Theme) -> Vec<Stri
         .map(|s| s.to_string())
         .chain(extras)
         .collect();
-    let get = |name: &str| by_tool.iter().find(|t| t["tool"].as_str() == Some(name)).cloned();
+    let get = |name: &str| {
+        by_tool
+            .iter()
+            .find(|t| t["tool"].as_str() == Some(name))
+            .cloned()
+    };
 
     let mut lines = Vec::new();
     if mini {
         // Narrow: tool + ops + saved only.
         for name in &names {
             let t = get(name);
-            let ops = t.as_ref().map(|t| t["ops"].as_i64().unwrap_or(0)).unwrap_or(0);
-            let saved = t.as_ref().map(|t| t["saved"].as_i64().unwrap_or(0)).unwrap_or(0);
+            let ops = t
+                .as_ref()
+                .map(|t| t["ops"].as_i64().unwrap_or(0))
+                .unwrap_or(0);
+            let saved = t
+                .as_ref()
+                .map(|t| t["saved"].as_i64().unwrap_or(0))
+                .unwrap_or(0);
             let row = format!("{name:<15}{ops:>5}  {saved:>8} tok");
             lines.push(if ops == 0 { dim(&row, color) } else { row });
         }
@@ -346,22 +371,29 @@ fn rail_title(title: &str, epoch_stamp: &Value) -> String {
     }
 }
 
-/// Grep-scope deny plane (dark-launch decision aid): cumulative store counters, not
-/// windowed. Classifies greps seen (broad/single/unknown) + `would-deny`, then what
-/// tool ran right after a would-deny — `deny_next_*` once the deny fires, else the
-/// `shadow_next_*` proxy. The stage-3 go signal is the lens share of the follow-up
-/// (target ≥55%, shellgrep <25%).
+/// Grep-scope deny plane (live by default; shadow means the operator disabled it via
+/// the flag): cumulative store counters, not windowed. Classifies greps seen
+/// (broad/single/unknown) + `would-deny`, then what tool ran right after a
+/// would-deny — `deny_next_*` once the deny fires, else the `shadow_next_*` proxy.
+/// The stage-3 go signal is the lens share of the follow-up (target ≥55%, shellgrep
+/// <25%).
 fn grep_scope_lines(snap: &Value, inner: usize, _color: Theme) -> Vec<String> {
     let gs = &snap["grep_scope"];
     let gi = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
     let sum = |v: &Value| gi(v, "lens") + gi(v, "grep") + gi(v, "shellgrep") + gi(v, "other");
     let deny_tot = sum(&gs["deny_next"]);
     let (nx, nx_tot, mode) = if deny_tot > 0 {
-        (&gs["deny_next"], deny_tot, "flag ON")
+        (&gs["deny_next"], deny_tot, "live")
     } else {
         (&gs["shadow_next"], sum(&gs["shadow_next"]), "shadow")
     };
-    let pct = |n: i64| if nx_tot > 0 { format!("{}%", n * 100 / nx_tot) } else { "—".to_string() };
+    let pct = |n: i64| {
+        if nx_tot > 0 {
+            format!("{}%", n * 100 / nx_tot)
+        } else {
+            "—".to_string()
+        }
+    };
     let items = vec![
         format!("mode {mode}"),
         format!("broad {}", gi(gs, "broad")),
@@ -378,27 +410,48 @@ fn grep_scope_lines(snap: &Value, inner: usize, _color: Theme) -> Vec<String> {
     flow(&items, inner, " · ")
 }
 
-/// Reroute rail plane (dark-launch decision aid): generalizes [`grep_scope_lines`] to
-/// any of the six `lens_reroute_rails` classifiers (contract: `routing/reroute/mod.rs`).
-/// Reads `snap["reroute"][prefix]`; the live-arm total (not the env var) decides shadow
-/// vs flag-on, the same inference grep-scope uses. `guard_class` is `Some(class)` for
-/// the two deny rails (the counter-invisibility escape hatch to watch, go <25%) and
-/// `None` for the four nudge rails, which show only the landed-rate line (labelled
-/// `nudge→lens` rather than `adoption`).
-fn reroute_lines(snap: &Value, prefix: &str, guard_class: Option<&str>, inner: usize) -> Vec<String> {
+/// Reroute rail plane (live by default; shadow means the operator disabled it via the
+/// flag): generalizes [`grep_scope_lines`] to any of the six `lens_reroute_rails`
+/// classifiers (contract: `routing/reroute/mod.rs`). Every rail carries both a nudge
+/// and a deny arm. Reads `snap["reroute"][prefix]`; the live-arm total (not the env
+/// var) decides shadow vs live, the same inference grep-scope uses. `guard_class` is
+/// `Some(class)` for gsym/rskel (the counter-invisibility escape hatch to watch, go
+/// <25%) and `None` for the other four rails, which show only the landed-rate line
+/// (labelled `nudge→lens` rather than `adoption`).
+fn reroute_lines(
+    snap: &Value,
+    prefix: &str,
+    guard_class: Option<&str>,
+    inner: usize,
+) -> Vec<String> {
     let r = &snap["reroute"][prefix];
     let gi = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
     let sum = |v: &Value| {
-        gi(v, "lens") + gi(v, "grep") + gi(v, "read") + gi(v, "bash") + gi(v, "edit") + gi(v, "other")
+        gi(v, "lens")
+            + gi(v, "grep")
+            + gi(v, "read")
+            + gi(v, "bash")
+            + gi(v, "edit")
+            + gi(v, "other")
     };
     let live_tot = sum(&r["next"]);
     let (nx, nx_tot, mode) = if live_tot > 0 {
-        (&r["next"], live_tot, "flag ON")
+        (&r["next"], live_tot, "live")
     } else {
         (&r["shadow_next"], sum(&r["shadow_next"]), "shadow")
     };
-    let pct = |n: i64| if nx_tot > 0 { format!("{}%", n * 100 / nx_tot) } else { "—".to_string() };
-    let landed = if guard_class.is_some() { "adoption" } else { "nudge→lens" };
+    let pct = |n: i64| {
+        if nx_tot > 0 {
+            format!("{}%", n * 100 / nx_tot)
+        } else {
+            "—".to_string()
+        }
+    };
+    let landed = if guard_class.is_some() {
+        "adoption"
+    } else {
+        "nudge→lens"
+    };
     let mut items = vec![
         format!("mode {mode}"),
         format!("would-fire {}", gi(r, "would_fire")),
@@ -462,10 +515,19 @@ fn applied_value_lines(snap: &Value, rt_seconds: f64, color: Theme) -> Vec<Strin
             "measured saved      {}",
             gold(&format!("{} tok", human_count(g("measured_tokens"))), color)
         ),
-        format!("est. counterfactual +{} tok", human_count(g("est_counterfactual_tokens"))),
+        format!(
+            "est. counterfactual +{} tok",
+            human_count(g("est_counterfactual_tokens"))
+        ),
         format!(
             "est. total avoided  {}",
-            bold(&gold(&format!("{} tok", human_count(g("est_total_tokens"))), color), color)
+            bold(
+                &gold(
+                    &format!("{} tok", human_count(g("est_total_tokens"))),
+                    color
+                ),
+                color
+            )
         ),
         format!(
             "round-trips avoided {}  {}",
@@ -587,7 +649,10 @@ pub fn sparkline(cumulative: &[i64], cells: usize) -> String {
     let deltas: Vec<i64> = if cumulative.len() < 2 {
         cumulative.to_vec()
     } else {
-        cumulative.windows(2).map(|w| (w[1] - w[0]).max(0)).collect()
+        cumulative
+            .windows(2)
+            .map(|w| (w[1] - w[0]).max(0))
+            .collect()
     };
     let groups = resample(&deltas, cells);
     let max = groups.iter().copied().max().unwrap_or(0);
@@ -663,7 +728,10 @@ fn panel(title: &str, lines: &[String], w: usize, color: Theme) -> String {
         out.push_str(&dim(" │", color));
         out.push('\n');
     }
-    out.push_str(&dim(&format!("└{}┘", "─".repeat(w.saturating_sub(2))), color));
+    out.push_str(&dim(
+        &format!("└{}┘", "─".repeat(w.saturating_sub(2))),
+        color,
+    ));
     out.push('\n');
     out
 }
@@ -772,7 +840,10 @@ pub enum ThemeKind {
 
 impl Theme {
     /// Color off (NO_COLOR or not a TTY): every role renders as plain text.
-    pub const OFF: Theme = Theme { on: false, kind: ThemeKind::Dark };
+    pub const OFF: Theme = Theme {
+        on: false,
+        kind: ThemeKind::Dark,
+    };
     pub fn new(on: bool, kind: ThemeKind) -> Theme {
         Theme { on, kind }
     }
@@ -965,9 +1036,9 @@ pub fn run(
         rebase_rtk(&mut snap, &mut rtk_base);
         let cols = term_cols();
         let width = match force_view {
-            Some(false) => 50,             // --mini: compact single column
-            Some(true) => cols.max(56),    // --full: framed layout at terminal width
-            None => cols,                  // auto: mini/full by width
+            Some(false) => 50,          // --mini: compact single column
+            Some(true) => cols.max(56), // --full: framed layout at terminal width
+            None => cols,               // auto: mini/full by width
         };
         let frame = render_snapshot(&snap, width, color, rate, rt_seconds);
         print!("\x1b[2J\x1b[H{frame}");
@@ -1009,7 +1080,11 @@ fn term_cols() -> u16 {
         .output()
     {
         if let Ok(s) = String::from_utf8(out.stdout) {
-            if let Some(cols) = s.split_whitespace().nth(1).and_then(|c| c.parse::<u16>().ok()) {
+            if let Some(cols) = s
+                .split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse::<u16>().ok())
+            {
                 if cols > 0 {
                     return cols;
                 }
@@ -1032,15 +1107,24 @@ mod tests {
     use tempfile::tempdir;
 
     /// Color-on theme for the ANSI-aware width tests (palette is irrelevant there).
-    const ON: Theme = Theme { on: true, kind: ThemeKind::Seventies };
+    const ON: Theme = Theme {
+        on: true,
+        kind: ThemeKind::Seventies,
+    };
 
     /// A snapshot with one op in each of three value dimensions, so every panel has
     /// content (and the scorecard carries non-zero `your_ops`).
     fn seeded_snap() -> Value {
         let dir = tempdir().unwrap();
         let log = OpLog::open(dir.path());
-        log.start("lens_run", serde_json::json!({}))
-            .finish(8000, 100, Some("a".into()), "ok", "", None);
+        log.start("lens_run", serde_json::json!({})).finish(
+            8000,
+            100,
+            Some("a".into()),
+            "ok",
+            "",
+            None,
+        );
         log.start("lens_search", serde_json::json!({}))
             .finish(50, 50, None, "ok", "", None);
         log.start("lens_symbol", serde_json::json!({}))
@@ -1101,7 +1185,10 @@ mod tests {
         assert!(out.contains("@ 4s/round-trip"), "time basis exposed");
         assert!(out.contains("by dimension"));
         assert!(out.contains("navigation"), "per-dimension breakdown");
-        assert!(out.contains("benchmark rates applied"), "applied-value note");
+        assert!(
+            out.contains("benchmark rates applied"),
+            "applied-value note"
+        );
         // Footer.
         assert!(out.contains("store "));
         assert!(out.contains("graph "));
@@ -1128,7 +1215,11 @@ mod tests {
         let snap = seeded_snap();
         let out = render_snapshot(&snap, 80, ON, 5.0, 4.0);
         for line in out.lines() {
-            assert!(vis_width(line) <= 80, "full line over width ({}): {line:?}", vis_width(line));
+            assert!(
+                vis_width(line) <= 80,
+                "full line over width ({}): {line:?}",
+                vis_width(line)
+            );
         }
     }
 
@@ -1141,7 +1232,11 @@ mod tests {
         let snap = snapshot_json(dir.path(), None);
         // 1,000,000 tokens saved @ $5/M ⇒ $5.00.
         let out = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0);
-        assert!(out.contains("$5.00 saved"), "expected $5.00 in: {}", out.lines().next().unwrap());
+        assert!(
+            out.contains("$5.00 saved"),
+            "expected $5.00 in: {}",
+            out.lines().next().unwrap()
+        );
     }
 
     #[test]
@@ -1150,10 +1245,13 @@ mod tests {
         // 3 navigation ops ⇒ measured round-trips; time = round-trips × rt_seconds.
         let log = OpLog::open(dir.path());
         for _ in 0..3 {
-            log.start("lens_symbol", serde_json::json!({})).finish(40, 40, None, "ok", "", None);
+            log.start("lens_symbol", serde_json::json!({}))
+                .finish(40, 40, None, "ok", "", None);
         }
         let snap = snapshot_json(dir.path(), None);
-        let rts = snap["applied_value"]["round_trips_avoided"].as_f64().unwrap();
+        let rts = snap["applied_value"]["round_trips_avoided"]
+            .as_f64()
+            .unwrap();
         assert!(rts > 6.0, "3 nav ops avoid >6 round-trips, got {rts}");
         // Doubling rt_seconds roughly doubles the rendered minutes; just assert both render.
         let a = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0);
@@ -1166,8 +1264,16 @@ mod tests {
         // Parity with the web ADOPTION_TOOLS list: same ten names.
         assert_eq!(ADOPTION_TOOLS.len(), 10);
         for t in [
-            "lens_run", "lens_run_file", "lens_search", "lens_index", "lens_map",
-            "lens_recall", "lens_symbol", "lens_links", "lens_path", "lens_find",
+            "lens_run",
+            "lens_run_file",
+            "lens_search",
+            "lens_index",
+            "lens_map",
+            "lens_recall",
+            "lens_symbol",
+            "lens_links",
+            "lens_path",
+            "lens_find",
         ] {
             assert!(ADOPTION_TOOLS.contains(&t), "{t} missing");
         }
@@ -1204,26 +1310,39 @@ mod tests {
         // Same role, different SGR code per palette; off ⇒ plain text either way.
         let g70 = gold("x", Theme::new(true, ThemeKind::Seventies));
         let gdk = gold("x", Theme::new(true, ThemeKind::Dark));
-        assert!(g70.contains("38;5;178"), "70s gold is harvest gold: {g70:?}");
+        assert!(
+            g70.contains("38;5;178"),
+            "70s gold is harvest gold: {g70:?}"
+        );
         assert!(gdk.contains("38;5;80"), "dark gold is teal: {gdk:?}");
         assert_ne!(g70, gdk);
         assert_eq!(gold("x", Theme::OFF), "x");
         // Whole-frame switch: dark renders teal titles, 70s renders avocado.
         let snap = seeded_snap();
         let dark = render_snapshot(&snap, 80, Theme::new(true, ThemeKind::Dark), 5.0, 4.0);
-        let seventies = render_snapshot(&snap, 80, Theme::new(true, ThemeKind::Seventies), 5.0, 4.0);
+        let seventies =
+            render_snapshot(&snap, 80, Theme::new(true, ThemeKind::Seventies), 5.0, 4.0);
         assert!(dark.contains("38;5;73"), "dark theme uses teal titles");
-        assert!(seventies.contains("38;5;107"), "70s theme uses avocado titles");
+        assert!(
+            seventies.contains("38;5;107"),
+            "70s theme uses avocado titles"
+        );
         // Parse accepts both spellings, rejects junk.
         assert!(matches!(ThemeKind::parse("dark"), Some(ThemeKind::Dark)));
-        assert!(matches!(ThemeKind::parse("70s"), Some(ThemeKind::Seventies)));
-        assert!(matches!(ThemeKind::parse("SEVENTIES"), Some(ThemeKind::Seventies)));
+        assert!(matches!(
+            ThemeKind::parse("70s"),
+            Some(ThemeKind::Seventies)
+        ));
+        assert!(matches!(
+            ThemeKind::parse("SEVENTIES"),
+            Some(ThemeKind::Seventies)
+        ));
         assert!(ThemeKind::parse("blue").is_none());
     }
 
-    /// Drives the `reroute_lines` line-builder directly: a deny rail (flag ON, with
-    /// its guard) and a nudge rail (shadow, no guard) — same live-vs-shadow inference
-    /// and pct math as `grep_scope_lines`.
+    /// Drives the `reroute_lines` line-builder directly: a guarded rail (live, with
+    /// its guard) and an unguarded rail (shadow, no guard) — same live-vs-shadow
+    /// inference and pct math as `grep_scope_lines`.
     #[test]
     fn reroute_lines_computes_mode_and_guard_directly() {
         let mut snap = serde_json::json!({});
@@ -1241,7 +1360,7 @@ mod tests {
         });
 
         let gsym = reroute_lines(&snap, "gsym", Some("grep"), 200).join(" ");
-        assert!(gsym.contains("mode flag ON"));
+        assert!(gsym.contains("mode live"));
         assert!(gsym.contains("would-fire 10"));
         assert!(gsym.contains("next→lens 8"));
         assert!(gsym.contains("adoption 80% (go ≥55%)"));
@@ -1254,9 +1373,9 @@ mod tests {
     }
 
     /// Full-frame parity check: all six reroute-rail sections render alongside
-    /// GREP-SCOPE DENY, each with its title, flag-state mode, next→{class} split, and
-    /// landed-rate line; the two deny rails (gsym, rskel) also carry their guard.
-    /// Mixes flag-ON and shadow rails so both inference branches are exercised.
+    /// GREP-SCOPE DENY, each with its title, live/shadow mode, next→{class} split, and
+    /// landed-rate line; gsym/rskel also carry their guard.
+    /// Mixes live and shadow rails so both inference branches are exercised.
     #[test]
     fn render_full_has_every_reroute_rail() {
         let mut snap = seeded_snap();
@@ -1296,12 +1415,17 @@ mod tests {
         let out = render_snapshot(&snap, 100, Theme::OFF, 5.0, 4.0);
 
         for title in [
-            "GREP→SYMBOL", "READ→SKELETON", "BASH→LENS_RUN", "EDIT→LINKS", "GREP→AST", "READ→OVERVIEW",
+            "GREP→SYMBOL",
+            "READ→SKELETON",
+            "BASH→LENS_RUN",
+            "EDIT→LINKS",
+            "GREP→AST",
+            "READ→OVERVIEW",
         ] {
             assert!(out.contains(title), "missing panel title {title}");
         }
-        // gsym: flag ON (live next nonzero), 80% adoption, 20% grep guard.
-        assert!(out.contains("mode flag ON"));
+        // gsym: live (live next nonzero), 80% adoption, 20% grep guard.
+        assert!(out.contains("mode live"));
         assert!(out.contains("next→lens 8"));
         assert!(out.contains("adoption 80% (go ≥55%)"));
         assert!(out.contains("grep 20% (go <25%)"));
@@ -1309,10 +1433,10 @@ mod tests {
         assert!(out.contains("mode shadow"));
         assert!(out.contains("adoption 66% (go ≥55%)"));
         assert!(out.contains("read 33% (go <25%)"));
-        // Nudge rails: landed-rate line labelled nudge→lens, no guard.
-        assert!(out.contains("nudge→lens 80% (go ≥55%)")); // bagg (flag ON)
+        // Unguarded rails: landed-rate line labelled nudge→lens, no guard.
+        assert!(out.contains("nudge→lens 80% (go ≥55%)")); // bagg (live)
         assert!(out.contains("nudge→lens 75% (go ≥55%)")); // elink (shadow)
-        assert!(out.contains("nudge→lens 100% (go ≥55%)")); // gast (flag ON)
+        assert!(out.contains("nudge→lens 100% (go ≥55%)")); // gast (live)
         assert!(out.contains("nudge→lens 50% (go ≥55%)")); // rovr (shadow)
     }
 
@@ -1340,10 +1464,19 @@ mod tests {
         });
 
         let out = render_snapshot(&snap, 100, Theme::OFF, 5.0, 4.0);
-        assert!(out.contains("GREP-SCOPE DENY · since 2023-11-14"), "grep-scope title unchanged: {out}");
-        assert!(out.contains("GREP→SYMBOL · since 2023-11-14"), "gsym title unchanged: {out}");
+        assert!(
+            out.contains("GREP-SCOPE DENY · since 2023-11-14"),
+            "grep-scope title unchanged: {out}"
+        );
+        assert!(
+            out.contains("GREP→SYMBOL · since 2023-11-14"),
+            "gsym title unchanged: {out}"
+        );
         // rskel has no stamp: title stays plain (no "· since" suffix).
         assert!(out.contains("READ→SKELETON"));
-        assert!(!out.contains("READ→SKELETON · since"), "unstamped rail must keep its plain title");
+        assert!(
+            !out.contains("READ→SKELETON · since"),
+            "unstamped rail must keep its plain title"
+        );
     }
 }

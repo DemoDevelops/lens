@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::data_dir;
+use super::pricing;
 use super::stats::snapshot_json_since;
 
 const DEFAULT_PORT: u16 = 7878;
@@ -74,11 +75,11 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             "--model" => {
                 let m = args.get(i + 1).cloned().unwrap_or_default();
                 rate = match m.to_lowercase().as_str() {
-                    "opus" => 5.0,
-                    "sonnet" => 3.0,
-                    "haiku" => 1.0,
+                    "opus" | "sonnet" | "haiku" | "fable" => pricing::price_for(&m).input,
                     other => {
-                        eprintln!("lens dashboard: unknown --model '{other}' (opus|sonnet|haiku)");
+                        eprintln!(
+                            "lens dashboard: unknown --model '{other}' (opus|sonnet|haiku|fable)"
+                        );
                         std::process::exit(2);
                     }
                 };
@@ -111,7 +112,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                 eprintln!("usage: lens dashboard [--port <n>] [--host <addr>] [--session <id>]");
                 eprintln!("       lens dashboard --tui [--global] [--all] [--today | --since <today|all|15m|1h|3h|2d>]");
                 eprintln!(
-                    "            [--interval <s>] [--rate <$/M> | --model opus|sonnet|haiku] [--rt-seconds <s>] [--theme dark|70s] [--mini|--full]"
+                    "            [--interval <s>] [--rate <$/M> | --model opus|sonnet|haiku|fable] [--rt-seconds <s>] [--theme dark|70s] [--mini|--full]"
                 );
                 std::process::exit(2);
             }
@@ -625,18 +626,45 @@ winFrom.addEventListener('change',commitRange);
 winTo.addEventListener('change',commitRange);
 
 // Cost estimate: "tokens saved" are context INPUT tokens you avoided sending, so price
-// them at the input rate. The header dropdown chooses the model; remembered in localStorage.
-const RATES=[{m:'Opus 4.8',r:5},{m:'Fable 5',r:10},{m:'Sonnet 5',r:3},{m:'Haiku 4.5',r:1}];
-let rateIdx=0;
-try{const s=localStorage.getItem('lens_rate_model');const i=RATES.findIndex(x=>x.m===s);if(i>=0)rateIdx=i;}catch(e){}
-let savedTotal=0, lastAv=null;
+// them at the input rate. The header dropdown chooses a specific model, or "Actual Usage"
+// (the real per-model mix from stats.actual_usage); remembered in localStorage.
+// RATES is server-sourced from stats.price_table (built once, on the first snapshot — see
+// buildRates), the single source of truth shared with the CLI's --model flag. MODEL_LABELS
+// maps price_table's canonical model key to a friendly display name, since price_table
+// itself carries only canonical keys. FALLBACK_RATES covers an older server payload with
+// no price_table, so the page still works.
+const MODEL_LABELS={'claude-opus-4-8':'Opus 4.8','claude-sonnet-5':'Sonnet 5','claude-haiku-4-5':'Haiku 4.5','claude-fable-5':'Fable 5'};
+const FALLBACK_RATES=[{m:'Opus 4.8',r:5},{m:'Fable 5',r:10},{m:'Sonnet 5',r:3},{m:'Haiku 4.5',r:1}];
+const ACTUAL='actual';
+let RATES=FALLBACK_RATES.slice();
+let ratesBuilt=false;
+let rateIdx=0, rateSel=null;
+try{const s=localStorage.getItem('lens_rate_model');if(s)rateSel=s;}catch(e){}
+let savedTotal=0, lastAv=null, lastActualUsage=[];
 function money(v){return '$'+(v>=1?v.toFixed(2):v>=0.01?v.toFixed(3):v.toFixed(4));}
 function renderCost(){
+  if(rateIdx===ACTUAL){
+    const total=lastActualUsage.reduce((s,m)=>s+(m.saved_usd||0),0);
+    document.getElementById('dollars').textContent=money(total)+' saved';
+    return;
+  }
   document.getElementById('dollars').textContent=money(savedTotal*RATES[rateIdx].r/1e6)+' saved';
 }
 // Applied-value plane. Rendered from a cached snapshot so switching model re-prices the
-// "est. value" total instantly (the token/round-trip figures are rate-independent).
+// "est. value" total instantly (the token/round-trip figures are rate-independent). In
+// "Actual Usage" mode this same panel instead shows a per-model breakdown from
+// stats.actual_usage: real per-model token mix, priced against the shared price table.
 function renderApplied(av){
+  if(rateIdx===ACTUAL){
+    document.getElementById('appliedValue').innerHTML=lastActualUsage.length
+      ?lastActualUsage.map(m=>{
+        const label=MODEL_LABELS[m.model]||m.model;
+        return `<div class="avrow"><span class="d">${label}</span><span class="x">saved ${humanCount(Math.round(m.saved_tokens||0))} tok / ${money(m.saved_usd||0)} &middot; spent ${money(m.consumed_usd||0)}</span></div>`;
+      }).join('')
+      :'<span class="dim2">no usage in window</span>';
+    document.getElementById('avNote').textContent='estimated · mix-weighted · uncached-equiv';
+    return;
+  }
   const rts=av.round_trips_avoided||0, x=RATES[rateIdx];
   document.getElementById('appliedValue').innerHTML=
     `<div class="avtot">`+
@@ -657,13 +685,29 @@ function renderApplied(av){
     }).join('');
   document.getElementById('avNote').textContent=(av.note||'')+(av.model?(' · '+av.model):'');
 }
-// Model picker: option value is the RATES index; prices the saved tokens at that model's
-// input $/M and re-renders the applied-value plane. Remembered by model name.
-const rateDD=makeDD(document.getElementById('rate'),'model to price saved tokens against');
-rateDD.set(RATES.map((x,i)=>({label:'$'+x.r+'/M · '+x.m,value:i})),rateIdx);
+// Model picker: option value is either "actual" (Actual Usage) or a RATES index, pricing
+// the saved tokens at that model's input $/M and re-rendering the applied-value plane.
+// Remembered by canonical model key (or "actual").
+const rateDD=makeDD(document.getElementById('rate'),'model to price saved tokens against, or the real per-model usage mix');
+// Populate RATES + the dropdown from the server's price_table on the first snapshot (see
+// tick()); falls back to FALLBACK_RATES if an older server omits price_table.
+function buildRates(priceTable){
+  if(Array.isArray(priceTable)&&priceTable.length){
+    RATES=priceTable.map(p=>({m:MODEL_LABELS[p.model]||p.model,r:p.input,key:p.model}));
+  }
+  const opts=[{label:'Actual Usage',value:ACTUAL}].concat(RATES.map((x,i)=>({label:'$'+x.r+'/M · '+x.m,value:i})));
+  if(rateSel===ACTUAL){
+    rateIdx=ACTUAL;
+  } else {
+    const i=RATES.findIndex(x=>x.key===rateSel||x.m===rateSel);
+    rateIdx=i>=0?i:0;
+  }
+  rateDD.set(opts,rateIdx);
+  ratesBuilt=true;
+}
 rateDD.onChange(function(v){
   rateIdx=v;
-  try{localStorage.setItem('lens_rate_model',RATES[rateIdx].m);}catch(e){}
+  try{localStorage.setItem('lens_rate_model',v===ACTUAL?ACTUAL:(RATES[v].key||RATES[v].m));}catch(e){}
   renderCost(); if(lastAv) renderApplied(lastAv);
 });
 renderCost();
@@ -735,6 +779,8 @@ async function tick(){
   // First snapshot carries the project list; build the repo picker, then refetch if
   // resolving the stored scope landed on a different repo than we just fetched.
   if(!scopeBuilt){ buildScope(d.projects,d.scope_repo); if(scope!==useScope){ tick(); return; } }
+  if(!ratesBuilt) buildRates(d.price_table);
+  lastActualUsage=d.actual_usage||[];
   const sl=scopeLabel();
   document.getElementById('status').textContent=(sl?sl+' · ':'')+winLabel()+(d.session?(' · '+d.session):'')+' · '+(d.activity&&d.activity.sessions||0)+' session(s)';
 
@@ -1024,5 +1070,33 @@ mod tests {
         for key in SNAPSHOT_DIMENSIONS {
             assert!(snap.get(*key).is_some(), "snapshot missing dimension key '{key}'");
         }
+    }
+
+    /// The "Actual Usage" dropdown mode (T4): the page markup offers it, and a served
+    /// `/api/stats` body carries the T3 payload it renders from. `CLAUDE_CONFIG_DIR` is
+    /// pointed at a fresh tempdir with no `projects/` subdir, so `usage::read_usage`
+    /// resolves no config dir and returns instantly instead of scanning this machine's
+    /// real `~/.claude` history (see usage.rs's `with_fixture` for the same idiom).
+    #[test]
+    fn actual_usage_dropdown_and_payload_keys_present() {
+        assert!(INDEX_HTML.contains("Actual Usage"));
+
+        let _g = crate::rtk::env_test_lock();
+        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let claude_config = tempdir().unwrap(); // no projects/ subdir -> read_usage is empty
+        std::env::set_var("CLAUDE_CONFIG_DIR", claude_config.path());
+
+        let dir = tempdir().unwrap();
+        let (status, ct, body) = route("/api/stats", dir.path(), None);
+
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+
+        assert_eq!(status, 200);
+        assert!(ct.contains("json"));
+        assert!(body.contains("\"actual_usage\""));
+        assert!(body.contains("\"price_table\""));
     }
 }

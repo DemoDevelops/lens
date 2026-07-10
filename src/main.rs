@@ -55,6 +55,14 @@ fn main() -> Result<()> {
         Some("rtk") => return lens::rtk::run_cli(&args[2..]),
         Some("warmup") => return lens::warmup::run_cli(&args[2..]),
         Some("watch") => return lens::warmup::run_watch_cli(&args[2..]),
+        Some("--version") | Some("-V") => {
+            println!("lens {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--help") | Some("-h") => {
+            print_usage();
+            return Ok(());
+        }
         _ => {}
     }
     // `--explain` is an alias for LENS_EXPLAIN=1 (opt-in per-op trace).
@@ -62,6 +70,27 @@ fn main() -> Result<()> {
         std::env::set_var("LENS_EXPLAIN", "1");
     }
     run_server()
+}
+
+fn print_usage() {
+    println!("lens — code graph + FTS index over a repo, exposed as an MCP server");
+    println!();
+    println!("USAGE:");
+    println!("    lens                        run the MCP stdio server (default)");
+    println!("    lens hook <platform> <event>");
+    println!("    lens session <install|uninstall|status>");
+    println!("    lens setup [--full]");
+    println!("    lens update");
+    println!("    lens warmup [path]");
+    println!("    lens watch [path]");
+    println!("    lens dashboard [--port <n>] [--tui ...]");
+    println!("    lens top                    alias for `dashboard --tui`");
+    println!("    lens stats [...]");
+    println!("    lens verify [...]");
+    println!("    lens wrap ...");
+    println!("    lens rtk ...");
+    println!("    lens --version, -V          print the version");
+    println!("    lens --help, -h             print this message");
 }
 
 #[tokio::main]
@@ -102,7 +131,13 @@ async fn run_server() -> Result<()> {
     let service = forge.serve(stdio()).await?;
     service.waiting().await?;
     if let Some(p) = &pidfile {
-        let _ = std::fs::remove_file(p);
+        // Only remove it if it's still ours: a second lens server sharing this data
+        // dir (same cwd, a different session) may have since overwritten it with its
+        // own pid, and that server is still alive — deleting on our own clean exit
+        // would falsely mark it unreachable to the routing layer's mcp_ready() gate.
+        if owns_heartbeat(p) {
+            let _ = std::fs::remove_file(p);
+        }
     }
     finalize_wal_files(&data_dir);
     Ok(())
@@ -149,6 +184,15 @@ fn heartbeat_path() -> Option<std::path::PathBuf> {
     };
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("server.pid"))
+}
+
+/// True if the heartbeat file's content is still this process's own pid — i.e. no
+/// other lens process sharing this data dir has since overwritten it.
+fn owns_heartbeat(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        == Some(std::process::id())
 }
 
 /// Best-effort write of the current pid; updates mtime so freshness checks pass.

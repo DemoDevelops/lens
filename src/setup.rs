@@ -285,9 +285,11 @@ fn set_routing(settings: &Path, level: &str) -> Result<()> {
 /// Merge `permissions.allow` entries `mcp__lens__<tool>` for every lens tool into
 /// `settings`, preserving existing entries (idempotent, no duplicates). Claude Code
 /// then auto-runs a lens call instead of prompting, so an unattended agent never
-/// stalls on a permission dialog (Bug B) — including in plan mode, which honors allow
-/// rules but prompts for any unlisted MCP tool. The tool lists are
-/// [`READ_ONLY_TOOLS`] + [`WRITE_TOOLS`], shared with the server so they never drift.
+/// stalls on a permission dialog (Bug B). Plan mode's MCP auto-deny runs before the
+/// allow-list check and ignores per-tool entries (anthropics/claude-code#12368);
+/// the confirmed workaround is a scoped wildcard, so `mcp__lens__*` is added too.
+/// The tool lists are [`READ_ONLY_TOOLS`] + [`WRITE_TOOLS`], shared with the server
+/// so they never drift.
 fn allow_lens_tools(settings: &Path) -> Result<()> {
     let mut root = read_json(settings)?;
     if !root.is_object() {
@@ -312,6 +314,10 @@ fn allow_lens_tools(settings: &Path) -> Result<()> {
         if !arr.contains(&entry) {
             arr.push(entry);
         }
+    }
+    let wildcard = Value::from("mcp__lens__*");
+    if !arr.contains(&wildcard) {
+        arr.push(wildcard);
     }
     // The bundled slash commands (/dashboard, /warmup) and the update nudge have the
     // model run the lens CLI via Bash, and /dashboard probes its local port with curl;
@@ -808,6 +814,10 @@ mod tests {
         // out of the generic loop above.
         assert!(allow.iter().any(|v| v == "mcp__lens__lens_memory_record"));
         assert!(allow.iter().any(|v| v == "mcp__lens__lens_memory_query"));
+        assert!(
+            allow.iter().any(|v| v == "mcp__lens__*"),
+            "wildcard must be allow-listed (plan mode ignores per-tool entries, anthropics/claude-code#12368)"
+        );
         assert_eq!(root["env"]["EXISTING"], "1", "other keys preserved");
 
         // Re-running must not duplicate entries.
@@ -820,6 +830,13 @@ mod tests {
             .filter(|v| *v == "mcp__lens__lens_search")
             .count();
         assert_eq!(count, 1, "re-run must not duplicate allow entries");
+        let wildcard_count = root2["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| *v == "mcp__lens__*")
+            .count();
+        assert_eq!(wildcard_count, 1, "re-run must not duplicate the wildcard entry");
     }
 
     #[test]

@@ -308,6 +308,47 @@ pub fn prompt_wants_find_trace(prompt: &str) -> bool {
     SHAPES.iter().any(|s| p.contains(s))
 }
 
+/// Whether a user prompt reads as an edit-intent request. Used to EXEMPT the
+/// pre-first-edit Read from the rskel skeleton-first deny: the harness mandates
+/// a Read before an Edit, so denying that Read would block a legitimate write
+/// path (measured: 4/16 live rskel denials were followed immediately by an
+/// Edit).
+///
+/// Find/trace WINS: a prompt that also reads as a find/trace question is never
+/// treated as edit-intent, because an investigation that ends in an edit still
+/// benefits from skeleton-first reading. High-precision and whole-token
+/// (word-boundary), so a substring like `additional` never counts as `add`.
+pub fn prompt_wants_edit(prompt: &str) -> bool {
+    if prompt_wants_find_trace(prompt) {
+        return false;
+    }
+    let p = prompt.to_ascii_lowercase();
+    p.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(token_is_edit_verb)
+}
+
+/// Whole-token test for an edit verb: its base form or a common inflection
+/// (`-s`, `-es`, `-ed`, `-d`, `-ing`, including the drop-final-`e` present
+/// participle like `removing`/`renaming`). Whole-token, never a substring, so
+/// `additional` is not `add` and `fixture` is not `fix`.
+fn token_is_edit_verb(tok: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "fix", "change", "edit", "update", "implement", "add", "remove", "rename", "refactor",
+        "rewrite", "delete", "patch",
+    ];
+    VERBS.iter().any(|v| {
+        if let Some(rest) = tok.strip_prefix(v) {
+            if matches!(rest, "" | "s" | "es" | "ed" | "d" | "ing") {
+                return true;
+            }
+        }
+        // drop-final-`e` present participle: remove→removing, rename→renaming.
+        v.strip_suffix('e')
+            .and_then(|stem| tok.strip_prefix(stem))
+            .is_some_and(|rest| rest == "ing")
+    })
+}
+
 /// Periodic guidance for external (non-lens) MCP tools whose payloads flood
 /// context.
 pub const EXTERNAL_MCP_NUDGE: &str = "<context_guidance>\n  <tip>\n    Other MCP tools tend to hand back large results — message history, file contents, search hits — and all of it lands in the transcript whole. When you mean to filter, count, or summarize that, route it through lens_run(language, code) and keep only the answer. If it's something you'll want to search later, lens_index it and query with lens_search.\n  </tip>\n</context_guidance>";
@@ -429,16 +470,19 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             // Reroute rail 1a (gsym): a Grep whose pattern is itself a symbol
             // lookup — a definition shape (`fn foo`) or a bare identifier — is
             // denied once per session toward lens_symbol/lens_find. Dark-launched
-            // behind LENS_GREP_SYMBOL_DENY with the scope deny's gates. The
-            // `nudge_once` runs LAST so a blocked gate never spends the one-shot;
-            // on a deny the other grep markers are consumed and the lookup
-            // counter reset so the verbatim retry always passes.
+            // behind LENS_GREP_SYMBOL_DENY with the scope deny's gates, plus
+            // `graph_resolves` so a lookup that would come up empty in the graph
+            // never gets denied toward it. The `nudge_once` runs LAST so a
+            // blocked gate never spends the one-shot; on a deny the other grep
+            // markers are consumed and the lookup counter reset so the verbatim
+            // retry always passes.
             let pat = tool_input.get("pattern").and_then(Value::as_str).unwrap_or("");
             if grep_symbol_deny_enabled()
                 && ctx.level.steers()
                 && ctx.mcp_ready
                 && reroute::grep_symbol::symbol_grep(pat).is_some()
                 && index_present(ctx.data_dir)
+                && reroute::grep_symbol::graph_resolves(ctx.data_dir, pat)
                 && nudge_once(ctx, "grep-symbol")
             {
                 throttle::take(ctx.data_dir, ctx.session_id, "grep-first");
@@ -727,6 +771,16 @@ pub(crate) fn edited_paths_for(data_dir: &Path, session_id: &str, path: &str) ->
     edited
 }
 
+/// The rskel deny's edit-intent exemption: true when the current prompt read as
+/// edit-intent (the `edit-intent` marker armed at UserPromptSubmit — see
+/// [`prompt_wants_edit`]). A pure, non-consuming read of the throttle marker.
+/// Shared by [`read_decision`] and the hook's shadow-counter plane so the live
+/// deny and the `rskel_would_fire` counter gate on the IDENTICAL condition and
+/// can never drift on the marker key.
+pub(crate) fn rskel_edit_exempt(data_dir: &Path, session_id: &str) -> bool {
+    throttle::armed(data_dir, session_id, "edit-intent")
+}
+
 /// Grep result-size (bytes) above which the result is a "flood" worth steering to
 /// lens_search, overridable via `LENS_GREP_FLOOD_BYTES` (so an A/B can disable it
 /// by setting it very high). Default 16384: comfortably above lens_search's flat
@@ -758,10 +812,13 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     // deny's gates). Runs BEFORE the escalation so the two denies can't stack;
     // `nudge_once` runs last so a blocked gate never spends the one-shot, and
     // the deny resets the lookup counter so the verbatim retry always passes.
+    // Exempt when the prompt read as edit-intent: the harness requires a Read
+    // before the first Edit, so skeleton-denying it would block the write path.
     if read_skeleton_deny_enabled()
         && ctx.level.steers()
         && ctx.mcp_ready
         && index_present(ctx.data_dir)
+        && !rskel_edit_exempt(ctx.data_dir, ctx.session_id)
     {
         let has_offset_or_limit =
             tool_input.get("offset").is_some() || tool_input.get("limit").is_some();

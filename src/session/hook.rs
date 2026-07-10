@@ -374,13 +374,23 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 match tool.as_str() {
                     "Grep" => {
                         let pat = ti.get("pattern").and_then(Value::as_str).unwrap_or("");
-                        let gsym = level.steers()
+                        let gsym_shape = level.steers()
                             && routing::reroute::grep_symbol::symbol_grep(pat).is_some();
                         let gast = level.nudges()
                             && routing::reroute::grep_ast::syntax_shape(pat).is_some();
-                        if (gsym || gast) && mcp_ready && routing::index_present(&data_dir) {
+                        if (gsym_shape || gast) && mcp_ready && routing::index_present(&data_dir) {
+                            // Same graph-resolution gate as route_inner: gsym's
+                            // would_fire counts exactly the deny that fires; a
+                            // classifier hit whose graph lookup dead-ends bumps
+                            // the diagnostic gsym_graph_miss counter instead.
+                            let gsym = gsym_shape
+                                && routing::reroute::grep_symbol::graph_resolves(&data_dir, pat);
                             if gsym {
                                 arm("gsym", routing::grep_symbol_deny_enabled());
+                            } else if gsym_shape {
+                                if let Some(s) = &stats_store {
+                                    let _ = s.bump_stat("gsym_graph_miss", 1);
+                                }
                             }
                             if gast {
                                 arm("gast", routing::grep_ast_nudge_enabled());
@@ -392,7 +402,11 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                         let has_offset_or_limit =
                             ti.get("offset").is_some() || ti.get("limit").is_some();
                         let edited = routing::edited_paths_for(&data_dir, &session_id, path);
+                        // Mirror read_decision's rskel gate EXACTLY (incl. the
+                        // edit-intent exemption) so `rskel_would_fire` counts the
+                        // deny that actually fires, not a looser one.
                         let rskel = level.steers()
+                            && !routing::rskel_edit_exempt(&data_dir, &session_id)
                             && routing::reroute::read_skeleton::read_is_skeletonizable(
                                 path,
                                 has_offset_or_limit,
@@ -537,6 +551,23 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 // arming per prompt can't stack denies.
                 if level.steers() && routing::grep_scope_deny_enabled() {
                     routing::throttle::bump(&data_dir, &session_id, "grep-scope");
+                }
+                // Arm or clear the rskel edit-intent exemption for THIS prompt.
+                // Prompt-scoped: every steering prompt either sets it (edit
+                // intent) or clears it (anything else), so a marker from a prior
+                // edit prompt can't leak forward and exempt a later unrelated
+                // Read. `read_decision`'s rskel gate reads it via
+                // `rskel_edit_exempt`. `bump` (not `mark`) is required: `mark`
+                // only inserts on a vacant key, so after a `reset` it is a
+                // silent no-op and would fail to re-arm on a neutral→edit prompt
+                // sequence. Placed before the find/trace early-return so it runs
+                // on every non-system prompt regardless of shape.
+                if level.steers() {
+                    if routing::prompt_wants_edit(&prompt) {
+                        routing::throttle::bump(&data_dir, &session_id, "edit-intent");
+                    } else {
+                        routing::throttle::reset(&data_dir, &session_id, "edit-intent");
+                    }
                 }
                 // Find/trace prompts get the tool mapping injected HERE, at the
                 // decision point: first-tool choice is made from what's in

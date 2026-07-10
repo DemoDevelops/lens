@@ -878,6 +878,17 @@ fn callers_graph_json() -> Value {
     })
 }
 
+/// A graph with a single node named `name` — enough for `graph_resolves`
+/// (the gsym rail's graph-resolution gate, T2) to find it.
+fn resolving_graph_json(name: &str) -> Value {
+    json!({
+        "nodes": [
+            {"id": "n1", "name": name, "kind": "function", "file": "a.rs", "line": 1, "language": "rust"},
+        ],
+        "edges": [],
+    })
+}
+
 fn is_deny(v: &Value) -> bool {
     v["hookSpecificOutput"]["permissionDecision"] == "deny"
 }
@@ -893,6 +904,11 @@ fn context_of(v: &Value) -> String {
 fn grep_symbol_deny_fires_once_with_flag_and_gates() {
     let d = tempfile::tempdir().unwrap();
     seed_index(d.path());
+    std::fs::write(
+        d.path().join("graph.json"),
+        resolving_graph_json("handle_connection").to_string(),
+    )
+    .unwrap();
     let envs = [FULL_UP[0], FULL_UP[1], ("LENS_GREP_SYMBOL_DENY", "1")];
     let p = grep_payload(d.path(), "gsym1", "fn handle_connection");
 
@@ -917,6 +933,11 @@ fn grep_symbol_deny_off_or_gated_stays_quiet() {
     // grep tip is spent the call renders byte-identical `{}`.
     let d = tempfile::tempdir().unwrap();
     seed_index(d.path());
+    std::fs::write(
+        d.path().join("graph.json"),
+        resolving_graph_json("handle_connection").to_string(),
+    )
+    .unwrap();
     let p = grep_payload(d.path(), "gsym2", "fn handle_connection");
     let (_, first) = run_hook("PreToolUse", &p, &FULL_UP, d.path());
     assert!(!is_deny(&first), "flag off must never deny: {first}");
@@ -939,6 +960,11 @@ fn grep_symbol_deny_off_or_gated_stays_quiet() {
 
     // Flag on but no populated index: no deny; seeding the index un-gates it.
     let d2 = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d2.path().join("graph.json"),
+        resolving_graph_json("handle_connection").to_string(),
+    )
+    .unwrap();
     let p4 = grep_payload(d2.path(), "gsym4", "fn handle_connection");
     let (_, noindex) = run_hook("PreToolUse", &p4, &up, d2.path());
     assert!(!is_deny(&noindex), "no index must gate the deny: {noindex}");
@@ -1352,6 +1378,11 @@ fn reroute_follower_counters_split_live_and_shadow() {
     // shadow marker; the NEXT event bumps {p}_shadow_next_{class}.
     let d = tempfile::tempdir().unwrap();
     seed_index(d.path());
+    std::fs::write(
+        d.path().join("graph.json"),
+        resolving_graph_json("handle_connection").to_string(),
+    )
+    .unwrap();
     let grep = grep_payload(d.path(), "fc1", "fn handle_connection");
     run_hook("PreToolUse", &grep, &FULL_UP, d.path());
     let read = read_payload(d.path(), "fc1", "src/server.rs");
@@ -1372,6 +1403,11 @@ fn reroute_follower_counters_split_live_and_shadow() {
     // Live arm (flag ON): the follower lands in {p}_next_{class} instead.
     let d2 = tempfile::tempdir().unwrap();
     seed_index(d2.path());
+    std::fs::write(
+        d2.path().join("graph.json"),
+        resolving_graph_json("handle_connection").to_string(),
+    )
+    .unwrap();
     let on = [FULL_UP[0], FULL_UP[1], ("LENS_GREP_SYMBOL_DENY", "1")];
     let grep2 = grep_payload(d2.path(), "fc2", "fn handle_connection");
     run_hook("PreToolUse", &grep2, &on, d2.path());
@@ -1389,6 +1425,11 @@ fn reroute_follower_counters_split_live_and_shadow() {
     // The compliant follower classes as `lens` (a lens MCP call).
     let d3 = tempfile::tempdir().unwrap();
     seed_index(d3.path());
+    std::fs::write(
+        d3.path().join("graph.json"),
+        resolving_graph_json("handle_connection").to_string(),
+    )
+    .unwrap();
     let grep3 = grep_payload(d3.path(), "fc3", "fn handle_connection");
     run_hook("PreToolUse", &grep3, &FULL_UP, d3.path());
     let lens_call = json!({
@@ -1411,5 +1452,121 @@ fn reroute_follower_counters_split_live_and_shadow() {
         store.get_stat("rskel_would_fire").unwrap(),
         1,
         "the follower Read itself would-fires the rskel rail"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T2: gsym deny gated on the symbol resolving in the graph — a classifier hit
+// whose graph lookup would dead-end never denies toward it.
+// ---------------------------------------------------------------------------
+#[test]
+fn grep_symbol_deny_gates_on_graph_resolution() {
+    // Graph present but lacking the ident: the classifier matches, but the
+    // deny never fires (a lens_symbol retry would come up empty).
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    std::fs::write(
+        d.path().join("graph.json"),
+        resolving_graph_json("some_other_symbol").to_string(),
+    )
+    .unwrap();
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_GREP_SYMBOL_DENY", "1")];
+    let p = grep_payload(d.path(), "gsymres1", "fn unresolved_symbol");
+    let (_, first) = run_hook("PreToolUse", &p, &envs, d.path());
+    assert!(!is_deny(&first), "graph lacking the ident must not deny: {first}");
+
+    // Ident present in the graph: the deny fires once.
+    let d2 = tempfile::tempdir().unwrap();
+    seed_index(d2.path());
+    std::fs::write(
+        d2.path().join("graph.json"),
+        resolving_graph_json("unresolved_symbol").to_string(),
+    )
+    .unwrap();
+    let p2 = grep_payload(d2.path(), "gsymres2", "fn unresolved_symbol");
+    let (_, second) = run_hook("PreToolUse", &p2, &envs, d2.path());
+    assert!(is_deny(&second), "graph containing the ident denies once: {second}");
+}
+
+// ---------------------------------------------------------------------------
+// T3: rskel edit-intent prompt exemption. An edit-shaped prompt arms the
+// `edit-intent` marker at UserPromptSubmit; the rskel deny then spares the
+// pre-first-edit Read (the harness mandates Read-before-Edit). Prompt-scoped:
+// every non-edit prompt re-clears it. Drives the real binary across the
+// UserPromptSubmit → PreToolUse process boundary (the marker survives via the
+// on-disk nudge log).
+// ---------------------------------------------------------------------------
+fn prompt_payload(dir: &Path, session: &str, prompt: &str) -> Value {
+    json!({
+        "session_id": session,
+        "cwd": dir.to_string_lossy(),
+        "prompt": prompt,
+    })
+}
+
+#[test]
+fn rskel_edit_intent_prompt_exempts_the_pre_edit_read() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_READ_SKELETON_DENY", "1")];
+    let sess = "rskeledit1";
+
+    // An edit-shaped prompt arms the edit-intent exemption for this session.
+    let prompt = prompt_payload(d.path(), sess, "Update the null check in src/server.rs");
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+
+    // The whole, unedited code-file Read that rskel would normally deny now
+    // passes through: the harness needs this Read before the Edit.
+    let read = read_payload(d.path(), sess, "src/server.rs");
+    let (_, v) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert!(
+        !is_deny(&v),
+        "an edit-intent prompt must exempt the pre-edit Read from the rskel deny: {v}"
+    );
+}
+
+#[test]
+fn rskel_denies_after_a_neutral_prompt_leaves_edit_intent_clear() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_READ_SKELETON_DENY", "1")];
+    let sess = "rskeledit2";
+
+    // A neutral prompt (neither edit- nor find/trace-shaped) clears edit-intent,
+    // so the rskel deny still fires on the whole-file Read.
+    let prompt = prompt_payload(d.path(), sess, "Summarize the project layout for me.");
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+
+    let read = read_payload(d.path(), sess, "src/server.rs");
+    let (_, v) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert!(is_deny(&v), "a neutral prompt must not exempt the Read: {v}");
+}
+
+#[test]
+fn rskel_edit_intent_is_recleared_by_a_later_non_edit_prompt() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_READ_SKELETON_DENY", "1")];
+    let sess = "rskeledit3";
+
+    // Edit-shaped prompt arms the exemption: the pre-edit Read passes (and,
+    // being exempt, never spends the rskel one-shot).
+    let edit_prompt = prompt_payload(d.path(), sess, "Refactor the deny gate in src/server.rs");
+    run_hook("UserPromptSubmit", &edit_prompt, &envs, d.path());
+    let read = read_payload(d.path(), sess, "src/server.rs");
+    let (_, armed_read) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert!(
+        !is_deny(&armed_read),
+        "edit-intent prompt must exempt the Read (marker armed): {armed_read}"
+    );
+
+    // A later NON-edit prompt re-clears the marker; the same Read now denies,
+    // proving the exemption is prompt-scoped, not sticky.
+    let neutral_prompt = prompt_payload(d.path(), sess, "Give me a short tour of the codebase.");
+    run_hook("UserPromptSubmit", &neutral_prompt, &envs, d.path());
+    let (_, denied) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert!(
+        is_deny(&denied),
+        "a non-edit prompt must re-clear edit-intent so rskel denies again: {denied}"
     );
 }

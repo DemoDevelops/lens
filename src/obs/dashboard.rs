@@ -458,19 +458,19 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <div class="panel"><h2>by mechanism</h2><div class="mech" id="byMech"></div></div>
     <div class="panel"><h2>RTK shell savings</h2><div class="mech" id="rtkCards"></div></div>
   </div>
-  <div class="seclabel"><b>grep-scope deny</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="gsMode">—</span></div>
+  <div class="seclabel"><b>grep-scope deny</b> &middot; dark-launch decision aid &middot; <span id="gsScope">cumulative, all sessions</span> &middot; <span id="gsMode">—</span></div>
   <div class="panel"><div class="mech" id="grepScope"></div></div>
-  <div class="seclabel"><b>grep→symbol</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrGsymMode">—</span></div>
+  <div class="seclabel"><b>grep→symbol</b> &middot; dark-launch decision aid &middot; <span id="rrGsymScope">cumulative, all sessions</span> &middot; <span id="rrGsymMode">—</span></div>
   <div class="panel"><div class="mech" id="rrGsym"></div></div>
-  <div class="seclabel"><b>read→skeleton</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrRskelMode">—</span></div>
+  <div class="seclabel"><b>read→skeleton</b> &middot; dark-launch decision aid &middot; <span id="rrRskelScope">cumulative, all sessions</span> &middot; <span id="rrRskelMode">—</span></div>
   <div class="panel"><div class="mech" id="rrRskel"></div></div>
-  <div class="seclabel"><b>bash→lens_run</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrBaggMode">—</span></div>
+  <div class="seclabel"><b>bash→lens_run</b> &middot; dark-launch decision aid &middot; <span id="rrBaggScope">cumulative, all sessions</span> &middot; <span id="rrBaggMode">—</span></div>
   <div class="panel"><div class="mech" id="rrBagg"></div></div>
-  <div class="seclabel"><b>edit→links</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrElinkMode">—</span></div>
+  <div class="seclabel"><b>edit→links</b> &middot; dark-launch decision aid &middot; <span id="rrElinkScope">cumulative, all sessions</span> &middot; <span id="rrElinkMode">—</span></div>
   <div class="panel"><div class="mech" id="rrElink"></div></div>
-  <div class="seclabel"><b>grep→ast</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrGastMode">—</span></div>
+  <div class="seclabel"><b>grep→ast</b> &middot; dark-launch decision aid &middot; <span id="rrGastScope">cumulative, all sessions</span> &middot; <span id="rrGastMode">—</span></div>
   <div class="panel"><div class="mech" id="rrGast"></div></div>
-  <div class="seclabel"><b>read→overview</b> &middot; dark-launch decision aid &middot; cumulative, all sessions &middot; <span id="rrRovrMode">—</span></div>
+  <div class="seclabel"><b>read→overview</b> &middot; dark-launch decision aid &middot; <span id="rrRovrScope">cumulative, all sessions</span> &middot; <span id="rrRovrMode">—</span></div>
   <div class="panel"><div class="mech" id="rrRovr"></div></div>
   <div class="seclabel"><b>applied value</b> &middot; benchmark rates &times; your live ops &middot; <span id="avNote">estimated, not measured this session</span></div>
   <div class="panel"><div class="av" id="appliedValue"></div></div>
@@ -794,13 +794,20 @@ function compbar(label,raw,ret,maxraw){
 // rate, go <25%); the other four are nudge rails and show only the landed-rate line,
 // labelled nudge→lens instead of adoption.
 const REROUTE_RAILS=[
-  {p:'gsym',mode:'rrGsymMode',box:'rrGsym',deny:true,guard:'grep'},
-  {p:'rskel',mode:'rrRskelMode',box:'rrRskel',deny:true,guard:'read'},
-  {p:'bagg',mode:'rrBaggMode',box:'rrBagg',deny:false},
-  {p:'elink',mode:'rrElinkMode',box:'rrElink',deny:false},
-  {p:'gast',mode:'rrGastMode',box:'rrGast',deny:false},
-  {p:'rovr',mode:'rrRovrMode',box:'rrRovr',deny:false},
+  {p:'gsym',mode:'rrGsymMode',box:'rrGsym',scope:'rrGsymScope',deny:true,guard:'grep'},
+  {p:'rskel',mode:'rrRskelMode',box:'rrRskel',scope:'rrRskelScope',deny:true,guard:'read'},
+  {p:'bagg',mode:'rrBaggMode',box:'rrBagg',scope:'rrBaggScope',deny:false},
+  {p:'elink',mode:'rrElinkMode',box:'rrElink',scope:'rrElinkScope',deny:false},
+  {p:'gast',mode:'rrGastMode',box:'rrGast',scope:'rrGastScope',deny:false},
+  {p:'rovr',mode:'rrRovrMode',box:'rrRovr',scope:'rrRovrScope',deny:false},
 ];
+// `epoch_stamp` (unix secs, 0 = never stamped) comes from the aggregate JSON
+// (`grep_scope`/each `reroute[prefix]` block); once `lens stats --epoch` has run,
+// the rail panel's scope note switches from "cumulative, all sessions" to the
+// clean promotion window's start date.
+function scopeLabelForEpoch(epochStamp){
+  return epochStamp?('since '+new Date(epochStamp*1000).toISOString().slice(0,10)):'cumulative, all sessions';
+}
 function renderReroute(rail,r){
   r=r||{};
   const next=r.next||{}, shadow=r.shadow_next||{};
@@ -808,6 +815,7 @@ function renderReroute(rail,r){
   const liveTot=sum(next), nx=liveTot>0?next:shadow, nxTot=liveTot>0?liveTot:sum(shadow);
   const pct=n=>nxTot>0?Math.round((n||0)/nxTot*100)+'%':'—';
   document.getElementById(rail.mode).textContent=liveTot>0?'flag ON · firing':'shadow · flag off';
+  document.getElementById(rail.scope).textContent=scopeLabelForEpoch(r.epoch_stamp);
   document.getElementById(rail.box).innerHTML=
     `<span>would-fire <b>${r.would_fire||0}</b></span>`+
     `<span class="dim2">|</span>`+
@@ -925,6 +933,7 @@ async function tick(){
   const denyTot=sum(dn), nx=denyTot>0?dn:sn, nxTot=denyTot>0?denyTot:sum(sn);
   const pct=n=>nxTot>0?Math.round((n||0)/nxTot*100)+'%':'—';
   document.getElementById('gsMode').textContent=denyTot>0?'flag ON · deny firing':'shadow · flag off';
+  document.getElementById('gsScope').textContent=scopeLabelForEpoch(gs.epoch_stamp);
   document.getElementById('grepScope').innerHTML=
     `<span>broad <b>${gs.broad||0}</b></span>`+
     `<span>single <b>${gs.single||0}</b></span>`+
@@ -1168,20 +1177,35 @@ mod tests {
         assert_eq!(status, 200);
         assert!(ct.contains("html"));
 
-        // Per-rail seclabel title + mode span id + content div id + REROUTE_RAILS entry.
-        let rails: [(&str, &str, &str, &str); 6] = [
-            ("grep→symbol", "rrGsymMode", "rrGsym", "gsym"),
-            ("read→skeleton", "rrRskelMode", "rrRskel", "rskel"),
-            ("bash→lens_run", "rrBaggMode", "rrBagg", "bagg"),
-            ("edit→links", "rrElinkMode", "rrElink", "elink"),
-            ("grep→ast", "rrGastMode", "rrGast", "gast"),
-            ("read→overview", "rrRovrMode", "rrRovr", "rovr"),
+        // Per-rail seclabel title + mode span id + scope span id + content div id +
+        // REROUTE_RAILS entry.
+        let rails: [(&str, &str, &str, &str, &str); 6] = [
+            ("grep→symbol", "rrGsymMode", "rrGsymScope", "rrGsym", "gsym"),
+            ("read→skeleton", "rrRskelMode", "rrRskelScope", "rrRskel", "rskel"),
+            ("bash→lens_run", "rrBaggMode", "rrBaggScope", "rrBagg", "bagg"),
+            ("edit→links", "rrElinkMode", "rrElinkScope", "rrElink", "elink"),
+            ("grep→ast", "rrGastMode", "rrGastScope", "rrGast", "gast"),
+            ("read→overview", "rrRovrMode", "rrRovrScope", "rrRovr", "rovr"),
         ];
-        for (title, mode_id, box_id, prefix) in rails {
+        for (title, mode_id, scope_id, box_id, prefix) in rails {
             assert!(body.contains(title), "panel title '{title}' missing");
             assert!(body.contains(&format!("id=\"{mode_id}\"")), "mode span '{mode_id}' missing");
+            assert!(body.contains(&format!("id=\"{scope_id}\"")), "scope span '{scope_id}' missing");
             assert!(body.contains(&format!("id=\"{box_id}\"")), "content div '{box_id}' missing");
             assert!(body.contains(&format!("p:'{prefix}'")), "REROUTE_RAILS entry for '{prefix}' missing");
+            assert!(
+                body.contains(&format!("scope:'{scope_id}'")),
+                "REROUTE_RAILS scope binding for '{prefix}' missing"
+            );
+        }
+        // Every rail scope note defaults to "cumulative, all sessions" until an epoch
+        // is stamped (T4); the grep-scope card carries the same default.
+        assert!(body.contains("id=\"gsScope\">cumulative, all sessions<"));
+        for (_, _, scope_id, _, _) in rails {
+            assert!(
+                body.contains(&format!("id=\"{scope_id}\">cumulative, all sessions<")),
+                "scope span '{scope_id}' should default to the cumulative label"
+            );
         }
         // Deny rails carry their guard wiring; nudge rails explicitly opt out.
         assert!(body.contains("deny:true,guard:'grep'"), "gsym deny+guard flag missing");
@@ -1225,5 +1249,27 @@ mod tests {
         assert!(ct.contains("json"));
         assert!(body.contains("\"actual_usage\""));
         assert!(body.contains("\"price_table\""));
+    }
+
+    /// Counter epochs (T4): `/api/stats` surfaces `epoch_stamp` on the `grep_scope`
+    /// block and on every `reroute` rail, and the served page wires
+    /// `scopeLabelForEpoch` to swap the "cumulative, all sessions" note for
+    /// "since <date>" once a nonzero stamp comes back.
+    #[test]
+    fn epoch_stamp_present_in_json_and_wired_in_page_js() {
+        let dir = tempdir().unwrap();
+        let (status, ct, body) = route("/api/stats", dir.path(), None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("json"));
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["grep_scope"]["epoch_stamp"], json!(0), "unstamped store reads 0");
+        for p in crate::obs::stats::REROUTE_PREFIXES {
+            assert_eq!(v["reroute"][p]["epoch_stamp"], json!(0), "rail {p} epoch_stamp missing");
+        }
+
+        let (_, _, page) = route("/", dir.path(), None);
+        assert!(page.contains("scopeLabelForEpoch"), "since-label helper must be in the page");
+        assert!(page.contains("r.epoch_stamp"), "renderReroute must read epoch_stamp");
+        assert!(page.contains("gs.epoch_stamp"), "grep-scope block must read epoch_stamp");
     }
 }

@@ -616,7 +616,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             // Prepend the routing tool-selection guide whenever nudges are active.
             // NOT gated on mcp_ready (unlike PreToolUse): at SessionStart the MCP
             // server is registered in the same config as this hook and is still
-            // booting, so its heartbeat (`server.pid`) usually isn't fresh yet. Gating
+            // booting, so its heartbeat file usually isn't written yet. Gating
             // here loses that race in every fresh session/worktree and suppresses the
             // guide for the whole session — the model then never learns to reach for
             // (or ToolSearch-load) the ctx tools. The guide is pure context, not a tool
@@ -1114,10 +1114,10 @@ mod tests {
     #[test]
     fn sessionstart_injects_routing_guide_even_when_mcp_not_ready() {
         // Regression: the SessionStart tool-selection guide must NOT be gated on a
-        // fresh server.pid. In a fresh worktree the MCP server is still booting when
-        // this hook fires, so server.pid isn't fresh yet (mcp_ready == false) — yet
+        // fresh heartbeat. In a fresh worktree the MCP server is still booting when
+        // this hook fires, so no heartbeat file exists yet (mcp_ready == false) — yet
         // the guide has to inject anyway, or the model never learns to use the ctx
-        // tools. tempdir() has no server.pid, so mcp_ready is false here; the guide
+        // tools. tempdir() has no heartbeats dir, so mcp_ready is false here; the guide
         // must still appear. (LENS_ROUTING is read by no other test.)
         let dir = tempdir().unwrap();
         let prev = std::env::var("LENS_ROUTING").ok();

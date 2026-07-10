@@ -429,16 +429,19 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             // Reroute rail 1a (gsym): a Grep whose pattern is itself a symbol
             // lookup — a definition shape (`fn foo`) or a bare identifier — is
             // denied once per session toward lens_symbol/lens_find. Dark-launched
-            // behind LENS_GREP_SYMBOL_DENY with the scope deny's gates. The
-            // `nudge_once` runs LAST so a blocked gate never spends the one-shot;
-            // on a deny the other grep markers are consumed and the lookup
-            // counter reset so the verbatim retry always passes.
+            // behind LENS_GREP_SYMBOL_DENY with the scope deny's gates, plus
+            // `graph_resolves` so a lookup that would come up empty in the graph
+            // never gets denied toward it. The `nudge_once` runs LAST so a
+            // blocked gate never spends the one-shot; on a deny the other grep
+            // markers are consumed and the lookup counter reset so the verbatim
+            // retry always passes.
             let pat = tool_input.get("pattern").and_then(Value::as_str).unwrap_or("");
             if grep_symbol_deny_enabled()
                 && ctx.level.steers()
                 && ctx.mcp_ready
                 && reroute::grep_symbol::symbol_grep(pat).is_some()
                 && index_present(ctx.data_dir)
+                && reroute::grep_symbol::graph_resolves(ctx.data_dir, pat)
                 && nudge_once(ctx, "grep-symbol")
             {
                 throttle::take(ctx.data_dir, ctx.session_id, "grep-first");

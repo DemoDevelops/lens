@@ -11,6 +11,7 @@
 //! `ToolSearch` bootstrap, note it's one-shot) but keyed on the call's pattern
 //! instead of the prompt's phrasing.
 
+use std::path::Path;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -101,6 +102,53 @@ fn extract_identifier(trimmed: &str) -> (String, bool) {
     (trimmed.to_string(), false)
 }
 
+/// True when `pat`'s extracted identifier resolves to a real graph node —
+/// i.e. `lens_symbol(name=ident)` would find something rather than coming up
+/// empty. Gates the gsym deny (`route_inner`'s `grep_symbol_deny_enabled`
+/// chain in `src/routing/mod.rs`) so it never redirects a Grep toward a lens
+/// lookup that dead-ends. A missing or unreadable `graph.json` (no graph
+/// built yet) is a NO — no architecture to check against means no deny.
+pub fn graph_resolves(data_dir: &Path, pat: &str) -> bool {
+    if symbol_grep(pat).is_none() {
+        return false;
+    }
+    let (ident, _) = extract_identifier(pat.trim());
+    let Ok(raw) = std::fs::read_to_string(data_dir.join("graph.json")) else {
+        return false;
+    };
+    name_value_contains(&raw, &ident)
+}
+
+/// Scan raw `graph.json` text for a `"name":"..."` value that contains
+/// `ident` case-insensitively, mirroring `Graph::find_by_name`'s substring
+/// semantics — without a serde parse of the (multi-MB) file. Walks byte
+/// occurrences of `"name":"` and reads each value to its closing UNESCAPED
+/// quote.
+fn name_value_contains(raw: &str, ident: &str) -> bool {
+    let ident_lower = ident.to_ascii_lowercase();
+    let bytes = raw.as_bytes();
+    let needle = b"\"name\":\"";
+    let mut start = 0;
+    while start < bytes.len() {
+        let Some(rel) = bytes[start..].windows(needle.len()).position(|w| w == needle) else {
+            return false;
+        };
+        let value_start = start + rel + needle.len();
+        let mut end = value_start;
+        while end < bytes.len() && !(bytes[end] == b'"' && bytes[end - 1] != b'\\') {
+            end += 1;
+        }
+        if raw[value_start..end.min(bytes.len())]
+            .to_ascii_lowercase()
+            .contains(&ident_lower)
+        {
+            return true;
+        }
+        start = end + 1;
+    }
+    false
+}
+
 /// Deny reason for a Grep `pattern` [`symbol_grep`] identified as a symbol
 /// lookup: names the exact `lens_symbol` call (with the extracted identifier
 /// as its arg), also offers `lens_find` when `pattern` isn't a clean
@@ -155,5 +203,43 @@ mod tests {
         let r = reason("handle_connection");
         assert!(r.contains("lens_symbol"));
         assert!(r.contains("ToolSearch"));
+    }
+
+    fn write_graph(dir: &std::path::Path, name: &str) {
+        std::fs::write(
+            dir.join("graph.json"),
+            format!(
+                r#"{{"nodes":[{{"id":"n1","name":"{name}","kind":"function","file":"a.rs","line":1,"language":"rust"}}],"edges":[]}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn graph_resolves_hits_def_and_bare_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        write_graph(dir.path(), "known_name");
+        assert!(graph_resolves(dir.path(), "fn known_name"));
+        assert!(graph_resolves(dir.path(), "known_name"));
+    }
+
+    #[test]
+    fn graph_resolves_false_on_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        write_graph(dir.path(), "other_name");
+        assert!(!graph_resolves(dir.path(), "known_name"));
+    }
+
+    #[test]
+    fn graph_resolves_false_without_graph_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!graph_resolves(dir.path(), "known_name"));
+    }
+
+    #[test]
+    fn graph_resolves_is_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        write_graph(dir.path(), "KNOWN_NAME");
+        assert!(graph_resolves(dir.path(), "known_name"));
     }
 }

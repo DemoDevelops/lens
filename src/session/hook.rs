@@ -374,13 +374,23 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 match tool.as_str() {
                     "Grep" => {
                         let pat = ti.get("pattern").and_then(Value::as_str).unwrap_or("");
-                        let gsym = level.steers()
+                        let gsym_shape = level.steers()
                             && routing::reroute::grep_symbol::symbol_grep(pat).is_some();
                         let gast = level.nudges()
                             && routing::reroute::grep_ast::syntax_shape(pat).is_some();
-                        if (gsym || gast) && mcp_ready && routing::index_present(&data_dir) {
+                        if (gsym_shape || gast) && mcp_ready && routing::index_present(&data_dir) {
+                            // Same graph-resolution gate as route_inner: gsym's
+                            // would_fire counts exactly the deny that fires; a
+                            // classifier hit whose graph lookup dead-ends bumps
+                            // the diagnostic gsym_graph_miss counter instead.
+                            let gsym = gsym_shape
+                                && routing::reroute::grep_symbol::graph_resolves(&data_dir, pat);
                             if gsym {
                                 arm("gsym", routing::grep_symbol_deny_enabled());
+                            } else if gsym_shape {
+                                if let Some(s) = &stats_store {
+                                    let _ = s.bump_stat("gsym_graph_miss", 1);
+                                }
                             }
                             if gast {
                                 arm("gast", routing::grep_ast_nudge_enabled());

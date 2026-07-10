@@ -22,7 +22,7 @@
       "token_savings_pct": 93.65580091132142
     }
   ],
-  "dep_count": 39,
+  "dep_count": 40,
   "tools": [
     "lens_find",
     "lens_grep_ast",

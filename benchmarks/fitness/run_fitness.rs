@@ -78,11 +78,18 @@ fn dep_count() -> anyhow::Result<usize> {
 
 /// Public MCP tool names, scraped from the `async fn lens_*` tool methods in
 /// src/server.rs. Reads the source (robust against internal-visibility changes)
-/// and relies on the project's `lens_*` tool-naming convention.
+/// and relies on the project's `lens_*` tool-naming convention. Stops at the
+/// `#[cfg(test)]` module so async test fns named `lens_*` are not counted as
+/// part of the public tool surface.
 fn tool_names() -> anyhow::Result<Vec<String>> {
     let src = std::fs::read_to_string(repo_root().join("src/server.rs"))?;
     let mut names = BTreeSet::new();
     for line in src.lines() {
+        // Real MCP tools are defined above the test module; stop there so test
+        // fns named `lens_*` do not inflate the surface (see G3 false positive).
+        if line.trim_start().starts_with("#[cfg(test)]") {
+            break;
+        }
         if let Some(idx) = line.find("async fn lens_") {
             let rest = &line[idx + "async fn ".len()..];
             let name: String = rest

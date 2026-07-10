@@ -402,7 +402,11 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                         let has_offset_or_limit =
                             ti.get("offset").is_some() || ti.get("limit").is_some();
                         let edited = routing::edited_paths_for(&data_dir, &session_id, path);
+                        // Mirror read_decision's rskel gate EXACTLY (incl. the
+                        // edit-intent exemption) so `rskel_would_fire` counts the
+                        // deny that actually fires, not a looser one.
                         let rskel = level.steers()
+                            && !routing::rskel_edit_exempt(&data_dir, &session_id)
                             && routing::reroute::read_skeleton::read_is_skeletonizable(
                                 path,
                                 has_offset_or_limit,
@@ -547,6 +551,23 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 // arming per prompt can't stack denies.
                 if level.steers() && routing::grep_scope_deny_enabled() {
                     routing::throttle::bump(&data_dir, &session_id, "grep-scope");
+                }
+                // Arm or clear the rskel edit-intent exemption for THIS prompt.
+                // Prompt-scoped: every steering prompt either sets it (edit
+                // intent) or clears it (anything else), so a marker from a prior
+                // edit prompt can't leak forward and exempt a later unrelated
+                // Read. `read_decision`'s rskel gate reads it via
+                // `rskel_edit_exempt`. `bump` (not `mark`) is required: `mark`
+                // only inserts on a vacant key, so after a `reset` it is a
+                // silent no-op and would fail to re-arm on a neutral→edit prompt
+                // sequence. Placed before the find/trace early-return so it runs
+                // on every non-system prompt regardless of shape.
+                if level.steers() {
+                    if routing::prompt_wants_edit(&prompt) {
+                        routing::throttle::bump(&data_dir, &session_id, "edit-intent");
+                    } else {
+                        routing::throttle::reset(&data_dir, &session_id, "edit-intent");
+                    }
                 }
                 // Find/trace prompts get the tool mapping injected HERE, at the
                 // decision point: first-tool choice is made from what's in

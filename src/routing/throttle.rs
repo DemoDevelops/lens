@@ -150,6 +150,22 @@ pub fn take(data_dir: &Path, session: &str, key: &str) -> bool {
     true
 }
 
+/// Non-consuming peek at a marker: true iff `(session, key)` has a positive
+/// count. Unlike [`take`] it neither consumes nor writes, so it reads the same
+/// value however many times it is called until a `reset`/`take` zeroes the
+/// count; unlike [`fired`], a reset-to-zero key reads as disarmed. For
+/// prompt-scoped latches (e.g. the rskel edit-intent exemption) that several
+/// gates in one event must read without one read disarming the others.
+pub fn armed(data_dir: &Path, session: &str, key: &str) -> bool {
+    let mut map = throttle().0.lock().unwrap();
+    let state = map.entry(data_dir.to_path_buf()).or_default();
+    ensure_loaded(state, data_dir);
+    state
+        .counts
+        .get(&(session.to_string(), key.to_string()))
+        .is_some_and(|&c| c > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +250,27 @@ mod tests {
             1,
             "a new process must honor the on-disk reset and count up from zero"
         );
+    }
+
+    #[test]
+    fn armed_peeks_without_consuming_unlike_take() {
+        let d = tempdir().unwrap();
+        // Disarmed until set; a reset-to-zero key reads as disarmed (unlike
+        // `fired`, which would still see the key).
+        assert!(!armed(d.path(), "s", "k"));
+        reset(d.path(), "s", "k");
+        assert!(!armed(d.path(), "s", "k"));
+        assert!(fired(d.path(), "s", "k"), "fired sees a reset-to-zero key");
+
+        // Once set, `armed` reads true REPEATEDLY — it never consumes.
+        bump(d.path(), "s", "k");
+        assert!(armed(d.path(), "s", "k"));
+        assert!(armed(d.path(), "s", "k"), "a second armed read must still be true");
+
+        // `take` consumes: the first read is true, the next false — and after
+        // it, `armed` reads false too.
+        assert!(take(d.path(), "s", "k"));
+        assert!(!take(d.path(), "s", "k"));
+        assert!(!armed(d.path(), "s", "k"));
     }
 }

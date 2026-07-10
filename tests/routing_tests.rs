@@ -1487,3 +1487,86 @@ fn grep_symbol_deny_gates_on_graph_resolution() {
     let (_, second) = run_hook("PreToolUse", &p2, &envs, d2.path());
     assert!(is_deny(&second), "graph containing the ident denies once: {second}");
 }
+
+// ---------------------------------------------------------------------------
+// T3: rskel edit-intent prompt exemption. An edit-shaped prompt arms the
+// `edit-intent` marker at UserPromptSubmit; the rskel deny then spares the
+// pre-first-edit Read (the harness mandates Read-before-Edit). Prompt-scoped:
+// every non-edit prompt re-clears it. Drives the real binary across the
+// UserPromptSubmit → PreToolUse process boundary (the marker survives via the
+// on-disk nudge log).
+// ---------------------------------------------------------------------------
+fn prompt_payload(dir: &Path, session: &str, prompt: &str) -> Value {
+    json!({
+        "session_id": session,
+        "cwd": dir.to_string_lossy(),
+        "prompt": prompt,
+    })
+}
+
+#[test]
+fn rskel_edit_intent_prompt_exempts_the_pre_edit_read() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_READ_SKELETON_DENY", "1")];
+    let sess = "rskeledit1";
+
+    // An edit-shaped prompt arms the edit-intent exemption for this session.
+    let prompt = prompt_payload(d.path(), sess, "Update the null check in src/server.rs");
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+
+    // The whole, unedited code-file Read that rskel would normally deny now
+    // passes through: the harness needs this Read before the Edit.
+    let read = read_payload(d.path(), sess, "src/server.rs");
+    let (_, v) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert!(
+        !is_deny(&v),
+        "an edit-intent prompt must exempt the pre-edit Read from the rskel deny: {v}"
+    );
+}
+
+#[test]
+fn rskel_denies_after_a_neutral_prompt_leaves_edit_intent_clear() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_READ_SKELETON_DENY", "1")];
+    let sess = "rskeledit2";
+
+    // A neutral prompt (neither edit- nor find/trace-shaped) clears edit-intent,
+    // so the rskel deny still fires on the whole-file Read.
+    let prompt = prompt_payload(d.path(), sess, "Summarize the project layout for me.");
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+
+    let read = read_payload(d.path(), sess, "src/server.rs");
+    let (_, v) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert!(is_deny(&v), "a neutral prompt must not exempt the Read: {v}");
+}
+
+#[test]
+fn rskel_edit_intent_is_recleared_by_a_later_non_edit_prompt() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = [FULL_UP[0], FULL_UP[1], ("LENS_READ_SKELETON_DENY", "1")];
+    let sess = "rskeledit3";
+
+    // Edit-shaped prompt arms the exemption: the pre-edit Read passes (and,
+    // being exempt, never spends the rskel one-shot).
+    let edit_prompt = prompt_payload(d.path(), sess, "Refactor the deny gate in src/server.rs");
+    run_hook("UserPromptSubmit", &edit_prompt, &envs, d.path());
+    let read = read_payload(d.path(), sess, "src/server.rs");
+    let (_, armed_read) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert!(
+        !is_deny(&armed_read),
+        "edit-intent prompt must exempt the Read (marker armed): {armed_read}"
+    );
+
+    // A later NON-edit prompt re-clears the marker; the same Read now denies,
+    // proving the exemption is prompt-scoped, not sticky.
+    let neutral_prompt = prompt_payload(d.path(), sess, "Give me a short tour of the codebase.");
+    run_hook("UserPromptSubmit", &neutral_prompt, &envs, d.path());
+    let (_, denied) = run_hook("PreToolUse", &read, &envs, d.path());
+    assert!(
+        is_deny(&denied),
+        "a non-edit prompt must re-clear edit-intent so rskel denies again: {denied}"
+    );
+}

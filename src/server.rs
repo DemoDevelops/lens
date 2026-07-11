@@ -555,6 +555,11 @@ impl Forge {
             serde_json::json!({ "path": req.path, "recursive": req.recursive }),
         );
         let root = self.resolve_unescaped(&req.path);
+        // A path that lives inside a nested git repo (not our own) is indexed into
+        // that repo's own `.lens`, never folded into the parent's index.
+        if let Some(nested_root) = self.enclosing_nested_repo(&root) {
+            return self.index_into_nested(op, &nested_root, &root, req.recursive);
+        }
         match self.index.index_path(&root, req.recursive) {
             Ok(resp) => {
                 if let Ok(total) = self.index.chunk_count() {
@@ -607,7 +612,8 @@ impl Forge {
             .index
             .search_fused(&req.queries, req.limit_per_query, &file_ranks)
         {
-            Ok(resp) => {
+            Ok(mut resp) => {
+                self.federate_nested_search(&mut resp, &req.queries, req.limit_per_query);
                 let returned = obs::json_len(&resp);
                 let hits: usize = resp.results.iter().map(|r| r.hits.len()).sum();
                 let note = format!("{} queries, {} hits", resp.results.len(), hits);
@@ -636,6 +642,11 @@ impl Forge {
         );
         let root = self.discover_root(&req.path);
         let langs = req.languages.as_deref();
+        // A path inside a nested git repo (not our own) builds into that repo's own
+        // `.lens/graph.json`, never touching the parent's graph or manifest.
+        if let Some(nested_root) = self.enclosing_nested_repo(&root) {
+            return self.map_into_nested(op, &nested_root, &root, langs);
+        }
         let outcome = match discovery::discover(&root, langs) {
             Ok(o) => o,
             Err(e) => {
@@ -1182,6 +1193,158 @@ impl Forge {
         }
     }
 
+    /// If `root` sits inside a git repo that is NOT this server's own `repo_dir`,
+    /// return that nested repo's root — the nearest ancestor of `root` (inclusive)
+    /// that owns a `.git`. Walks up to the filesystem root, stopping at the first
+    /// `.git` owner; returns `None` when the enclosing repo is our own `repo_dir`
+    /// (the normal case) or when no `.git` is found. A path-scoped `lens_map`/
+    /// `lens_index` that lands here builds into the nested repo's own `.lens`, never
+    /// the parent's. Deliberately a small local "walk up to `.git`", not
+    /// `session::hook::repo_root` (different module, different purpose).
+    fn enclosing_nested_repo(&self, root: &Path) -> Option<PathBuf> {
+        let repo_dir =
+            std::fs::canonicalize(&self.repo_dir).unwrap_or_else(|_| self.repo_dir.clone());
+        let start = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let mut cur: &Path = &start;
+        loop {
+            if cur == repo_dir {
+                return None; // reached our own repo root first: not a nested repo
+            }
+            if cur.join(".git").exists() {
+                return Some(cur.to_path_buf());
+            }
+            cur = cur.parent()?;
+        }
+    }
+
+    /// Build the graph for `root` (inside `nested_root`) and persist it straight to
+    /// the nested repo's own `.lens/graph.json`, never touching the parent's
+    /// `data_dir`/graph manifest — stats and staleness are the nested repo's concern,
+    /// so the full `finish_discovery` machinery is intentionally skipped here.
+    fn map_into_nested(
+        &self,
+        op: obs::OpHandle,
+        nested_root: &Path,
+        root: &Path,
+        langs: Option<&[String]>,
+    ) -> Result<Json<DiscoverResponse>, ToolFailure> {
+        let outcome = match discovery::discover(root, langs) {
+            Ok(o) => o,
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                return Err(ToolFailure::recoverable(e.to_string()));
+            }
+        };
+        let graph_path = nested_root.join(".lens").join("graph.json");
+        if let Err(e) = outcome.graph.save(&graph_path) {
+            op.finish(0, 0, None, "error", e.to_string(), None);
+            return Err(ToolFailure::recoverable(e.to_string()));
+        }
+        let returned = obs::json_len(&outcome.response);
+        let note = format!(
+            "{} nodes, {} edges, {} files parsed (nested repo {})",
+            outcome.response.nodes,
+            outcome.response.edges,
+            outcome.response.files_parsed,
+            nested_root.display()
+        );
+        let explain = self.ops.explain(|| note.clone());
+        op.finish(returned, returned, None, "ok", note, explain);
+        Ok(Json(outcome.response))
+    }
+
+    /// Index `root` (inside `nested_root`) through a throwaway index scoped to the
+    /// nested repo's own `.lens`, so its content never enters the parent's index and
+    /// the parent's stats/manifest are left untouched.
+    fn index_into_nested(
+        &self,
+        op: obs::OpHandle,
+        nested_root: &Path,
+        root: &Path,
+        recursive: bool,
+    ) -> Result<Json<IndexResponse>, ToolFailure> {
+        let nested_index = match Index::open(&nested_root.join(".lens")) {
+            Ok(i) => i.with_repo_root(nested_root),
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                return Err(ToolFailure::recoverable(e.to_string()));
+            }
+        };
+        match nested_index.index_path(root, recursive) {
+            Ok(resp) => {
+                let returned = obs::json_len(&resp);
+                let note = format!(
+                    "indexed {} files, {} chunks (nested repo {})",
+                    resp.files_indexed,
+                    resp.chunks,
+                    nested_root.display()
+                );
+                let explain = self.ops.explain(|| note.clone());
+                op.finish(returned, returned, None, "ok", note, explain);
+                Ok(Json(resp))
+            }
+            Err(e) => {
+                op.finish(0, 0, None, "error", e.to_string(), None);
+                Err(ToolFailure::recoverable(e.to_string()))
+            }
+        }
+    }
+
+    /// Fold each nested git repo's own FTS hits into `resp`, per query, so a search
+    /// from a parent folder still surfaces content from sibling repos that carry their
+    /// own `.lens/fts`. A nested repo does not share the parent's graph `file_ranks`
+    /// (its paths are its own), so it searches with an empty rank map. Each nested
+    /// hit's `path` is prefixed with the nested repo's parent-relative path so a reader
+    /// can tell which repo it came from (matching how the graph merge prefixes node
+    /// files). A missing/unreadable nested index is a silent no-op, preserving the
+    /// "a search never triggers an index build" invariant.
+    fn federate_nested_search(
+        &self,
+        resp: &mut SearchResponse,
+        queries: &[String],
+        limit_per_query: usize,
+    ) {
+        for nested_root in discovery::nested_repo_roots(&self.repo_dir) {
+            let data_dir = nested_root.join(".lens");
+            if !data_dir.join("fts").exists() {
+                continue;
+            }
+            let nested_index = match Index::open(&data_dir) {
+                Ok(i) => i.with_repo_root(&nested_root),
+                Err(_) => continue,
+            };
+            let nested = match nested_index.search_fused(queries, limit_per_query, &HashMap::new()) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let prefix = nested_root
+                .strip_prefix(&self.repo_dir)
+                .unwrap_or(&nested_root)
+                .to_string_lossy()
+                .to_string();
+            for (i, qr) in nested.results.into_iter().enumerate() {
+                let Some(target) = resp.results.get_mut(i) else {
+                    continue;
+                };
+                for mut hit in qr.hits {
+                    hit.path = format!("{prefix}/{}", hit.path);
+                    target.hits.push(hit);
+                }
+            }
+        }
+        // Re-rank each query's merged hits by score and cap back to the caller's
+        // limit. A no-nested-repo search leaves this a stable no-op: the parent hits
+        // are already score-desc and already within the limit.
+        for qr in &mut resp.results {
+            qr.hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            qr.hits.truncate(limit_per_query);
+        }
+    }
+
     /// Load the structural graph, building it on first use if discovery hasn't run
     /// yet (so graph queries work on any repo without an explicit lens_map).
     ///
@@ -1407,6 +1570,7 @@ impl Forge {
         Ok(discovery::DiscoverOutcome {
             graph: inc.graph,
             response: inc.response,
+            nested_repo_roots: Vec::new(),
         })
     }
 
@@ -2017,6 +2181,236 @@ mod tests {
                 .iter()
                 .any(|h| h.path.contains("gone.rs")),
             "deleted file must be pruned from the index"
+        );
+    }
+
+    // ── T4: nested-repo build redirection + search federation ──────────────
+
+    /// A path-scoped `lens_map`/`lens_index` that lands inside a nested git repo
+    /// (its own `.git`, no `.lens` yet) builds into THAT repo's own `.lens`, leaving
+    /// the parent's graph and index untouched.
+    #[tokio::test]
+    async fn nested_path_scoped_build_lands_in_nested_lens_only() {
+        let parent = tempdir().unwrap();
+        let data = parent.path().join(".lens");
+        let f = Forge::with_paths(parent.path().to_path_buf(), data.clone(), 8192).unwrap();
+
+        // A nested git repo with source but no `.lens` yet.
+        let nested = parent.path().join("vendor");
+        std::fs::create_dir_all(nested.join(".git")).unwrap();
+        std::fs::write(nested.join("inner.rs"), "fn nested_gadget() -> i32 { 7 }\n").unwrap();
+
+        // lens_map on the nested path builds the nested repo's own graph.
+        let map = f
+            .lens_map(Parameters(DiscoverRequest {
+                path: nested.to_string_lossy().to_string(),
+                languages: None,
+            }))
+            .await
+            .unwrap();
+        assert!(map.0.nodes > 0, "nested map must produce a graph");
+        assert!(
+            nested.join(".lens").join("graph.json").exists(),
+            "graph must land in the nested repo's own .lens"
+        );
+
+        // lens_index on the nested path builds the nested repo's own index.
+        f.lens_index(Parameters(IndexRequest {
+            path: nested.to_string_lossy().to_string(),
+            recursive: true,
+        }))
+        .await
+        .unwrap();
+        assert!(
+            nested.join(".lens").join("index.db").exists(),
+            "index.db must land in the nested repo's own .lens"
+        );
+        assert!(
+            nested.join(".lens").join("fts").exists(),
+            "fts dir must land in the nested repo's own .lens"
+        );
+
+        // The parent's own graph was never written, and its index holds zero chunks:
+        // neither nested call touched parent state.
+        assert!(
+            !data.join("graph.json").exists(),
+            "parent graph.json must be untouched by a nested-path build"
+        );
+        assert_eq!(
+            f.index.chunk_count().unwrap(),
+            0,
+            "parent index must hold no chunks after nested-path builds"
+        );
+    }
+
+    /// `lens_search` from a parent folder federates each nested repo's own
+    /// `.lens/fts`, so hits from both nested repos surface alongside the parent's own,
+    /// path-prefixed by repo, and the merged set still respects `limit_per_query`.
+    #[tokio::test]
+    async fn nested_search_federates_and_respects_limit() {
+        let parent = tempdir().unwrap();
+        let data = parent.path().join(".lens");
+        // Parent's own content carrying the shared token.
+        std::fs::write(parent.path().join("notes.md"), "widget in the parent repo\n").unwrap();
+        let f = Forge::with_paths(parent.path().to_path_buf(), data, 8192).unwrap();
+
+        // Two nested git repos, each pre-built into its own `.lens/fts`.
+        for name in ["alpha", "beta"] {
+            let nested = parent.path().join(name);
+            std::fs::create_dir_all(nested.join(".git")).unwrap();
+            std::fs::write(nested.join("notes.md"), format!("widget in {name}\n")).unwrap();
+            let idx = Index::open(&nested.join(".lens"))
+                .unwrap()
+                .with_repo_root(&nested);
+            idx.index_path(&nested, true).unwrap();
+        }
+
+        // Generous limit: every repo's single hit for the shared token survives.
+        let out = f
+            .lens_search(Parameters(SearchRequest {
+                queries: vec!["widget".into()],
+                limit_per_query: 5,
+            }))
+            .await
+            .unwrap();
+        let hits = &out.0.results[0].hits;
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(
+            paths.contains(&"notes.md"),
+            "parent's own hit must be present, got {paths:?}"
+        );
+        assert!(
+            paths.contains(&"alpha/notes.md"),
+            "nested repo alpha's hit must be present + prefixed, got {paths:?}"
+        );
+        assert!(
+            paths.contains(&"beta/notes.md"),
+            "nested repo beta's hit must be present + prefixed, got {paths:?}"
+        );
+        assert!(hits.len() <= 5, "must not exceed limit_per_query");
+
+        // A tight limit still holds after the merge: federation truncates to the cap.
+        let capped = f
+            .lens_search(Parameters(SearchRequest {
+                queries: vec!["widget".into()],
+                limit_per_query: 1,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            capped.0.results[0].hits.len(),
+            1,
+            "merged + capped hits must respect limit_per_query = 1"
+        );
+    }
+
+    // ── T5: combined reproduction of the reported parent-folder hang ───────
+
+    /// Reproduces the reported hang: opening lens on a parent folder containing (a) a
+    /// nested git repo with a PRE-BUILT `.lens` (graph + fts), (b) a nested git repo
+    /// with `.git` but no `.lens` yet, and (c) a large stray file over the index's
+    /// size guard sitting directly in the parent (simulating a stray video/binary).
+    /// Driving the same call sequence a fresh session makes -- `lens_symbol`
+    /// (triggers `ensure_graph`) then `lens_search` (triggers `ensure_index`) -- must
+    /// complete with no panics, surface the pre-built nested repo's content, and
+    /// never read the stray file (or either nested repo) into the parent's own index.
+    #[tokio::test]
+    async fn nested_repo_parent_open_does_not_hang() {
+        let parent = tempdir().unwrap();
+        let data = parent.path().join(".lens");
+        std::fs::write(parent.path().join("top.rs"), "fn top_widget() {}\n").unwrap();
+
+        // (a) nested repo with its own PRE-BUILT graph + fts, as if `lens_map`/
+        // `lens_index` had already run there (T4's lazy-build-in-own-folder path).
+        let built = parent.path().join("built");
+        std::fs::create_dir_all(built.join(".git")).unwrap();
+        std::fs::write(
+            built.join("inner.rs"),
+            "fn built_widget_symbol() { built_helper(); }\nfn built_helper() {}\n",
+        )
+        .unwrap();
+        let outcome = discovery::discover(&built, None).unwrap();
+        outcome
+            .graph
+            .save(&built.join(".lens").join("graph.json"))
+            .unwrap();
+        let built_idx = Index::open(&built.join(".lens"))
+            .unwrap()
+            .with_repo_root(&built);
+        built_idx.index_path(&built, true).unwrap();
+
+        // (b) nested repo with `.git` but no `.lens` yet: never lazily built by a
+        // whole-repo query, only reachable via an explicit path-scoped call.
+        let bare = parent.path().join("bare");
+        std::fs::create_dir_all(bare.join(".git")).unwrap();
+        std::fs::write(bare.join("inner.rs"), "fn bare_widget_symbol() {}\n").unwrap();
+
+        // (c) a large stray file directly in the parent, simulating a stray
+        // video/binary that must never be fully read before being skipped.
+        std::fs::write(
+            parent.path().join("stray.mp4"),
+            vec![b'x'; 3 * 1024 * 1024],
+        )
+        .unwrap();
+
+        let f = Forge::with_paths(parent.path().to_path_buf(), data, 8192).unwrap();
+
+        // A fresh session's first graph query: ensure_graph must build + merge the
+        // pre-built nested graph, not hang trying to parse every sibling repo.
+        let symbol = f
+            .lens_symbol(Parameters(GraphQueryRequest {
+                name: "built_widget_symbol".into(),
+                kind: None,
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            symbol
+                .0
+                .nodes
+                .iter()
+                .any(|n: &NodeView| n.name == "built_widget_symbol"),
+            "pre-built nested repo's graph content must surface via lens_symbol, got {:?}",
+            symbol.0.nodes
+        );
+
+        // A fresh session's first search: ensure_index must build + federate, not
+        // hang on the stray file or either nested repo.
+        let search = f
+            .lens_search(Parameters(SearchRequest {
+                queries: vec!["built_widget_symbol".into()],
+                limit_per_query: 5,
+            }))
+            .await
+            .unwrap();
+        let hits = &search.0.results[0].hits;
+        assert!(
+            hits.iter().any(|h| h.path == "built/inner.rs"),
+            "pre-built nested repo's fts content must surface via lens_search, got {hits:?}"
+        );
+
+        // The stray file and both nested repos must never have been read into the
+        // PARENT's own index: only the parent's own top.rs is there.
+        let manifest: Vec<String> = {
+            let conn = f.index.conn().unwrap();
+            let mut stmt = conn.prepare("SELECT path FROM file_manifest").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+        assert!(
+            manifest.iter().any(|p| p.ends_with("top.rs")),
+            "parent's own top.rs must be indexed, got {manifest:?}"
+        );
+        assert!(
+            !manifest.iter().any(|p| p.contains("stray.mp4")),
+            "the large stray file must never be read into the parent's own index, got {manifest:?}"
+        );
+        assert!(
+            !manifest.iter().any(|p| p.contains("built/") || p.contains("bare/")),
+            "nested repos' files must never be read into the parent's own index, got {manifest:?}"
         );
     }
 

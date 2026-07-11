@@ -15,6 +15,7 @@ use regex::Regex;
 pub use schema::Index;
 
 use self::tantivy_index::TantivyStore;
+use crate::discovery;
 use crate::tools::{IndexResponse, QueryResult, SearchHit, SearchResponse};
 
 /// Lines per chunk for non-markdown files.
@@ -24,6 +25,20 @@ const CODE_WINDOW: usize = 100;
 /// Tantivy writer fans out across all cores; smaller edits use a single writer thread
 /// (spinning up N segment threads for one file is pure overhead).
 const BULK_FILE_THRESHOLD: usize = 32;
+
+/// Denylist of binary/media file extensions (lowercase, no leading dot) skipped
+/// before `fs::read`: video/audio/image/archive/font/compiled-binary formats that
+/// are never useful FTS content and can be large enough to make a naive read
+/// expensive. Matched case-insensitively against the file's extension.
+const BINARY_EXT_DENYLIST: &[&str] = &[
+    "mp4", "mov", "mkv", "avi", "mp3", "wav", "flac", "png", "jpg", "jpeg", "gif", "webp", "pdf",
+    "zip", "tar", "gz", "7z", "dmg", "exe", "bin", "o", "so", "dylib", "wasm", "ttf", "otf",
+    "woff", "woff2",
+];
+
+/// A file larger than this is skipped before `fs::read` rather than fully loaded
+/// into memory just to be checked for UTF-8 validity. Start at 2 MB.
+const MAX_INDEXABLE_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 impl Index {
     /// Index a file or directory, respecting `.gitignore`. Re-indexing a path
@@ -57,6 +72,14 @@ impl Index {
             if !recursive {
                 builder.max_depth(Some(1));
             }
+            // A nested git repo (its own `.git`) is a boundary this walk must not
+            // cross: its content is indexed separately into its own `.lens/fts`,
+            // not folded into this index (mirrors discovery::discover's pruning).
+            let boundary_root = root.to_path_buf();
+            builder.filter_entry(move |entry| {
+                !(entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && discovery::is_repo_boundary(entry.path(), &boundary_root))
+            });
             for entry in builder.build() {
                 let entry = match entry {
                     Ok(e) => e,
@@ -141,6 +164,21 @@ impl Index {
         let mut read_keys: Vec<&String> = Vec::new();
         for &path_str in &changed {
             let file = self.abs_path(path_str);
+            // Cheap pre-read guard: a denylisted binary/media extension, or a file
+            // too large to be worth loading whole, is skipped before ever touching
+            // its bytes (a parent folder can contain multi-GB video/audio/PDF
+            // files). Neither path is written into `read_keys`/the manifest below,
+            // so it stays retryable next run, same as the UTF-8/read-error arms.
+            if is_binary_ext(&file) {
+                continue;
+            }
+            if std::fs::metadata(&file)
+                .map(|m| m.len())
+                .unwrap_or(0)
+                > MAX_INDEXABLE_FILE_BYTES
+            {
+                continue;
+            }
             let content = match std::fs::read(&file) {
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(s) => s,
@@ -700,6 +738,17 @@ fn chunk_by_lines(content: &str, window: usize) -> Vec<String> {
         return vec![];
     }
     lines.chunks(window).map(|w| w.join("\n")).collect()
+}
+
+/// True when `path`'s extension matches [`BINARY_EXT_DENYLIST`] (case-insensitive).
+fn is_binary_ext(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_ascii_lowercase();
+            BINARY_EXT_DENYLIST.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
 }
 
 /// File mtime in milliseconds since the Unix epoch; 0 on any error.
@@ -1283,6 +1332,79 @@ mod tests {
             serde_json::to_string(&baseline).unwrap(),
             serde_json::to_string(&off).unwrap(),
             "LENS_RRF=0 must produce byte-identical output even with a populated map"
+        );
+    }
+
+    // ── nested-repo boundary pruning + binary/size guard (T2) ──────────────
+
+    /// T2: `index_path` must not read a nested git repo's own files into chunks;
+    /// its own `.lens/fts` is queried separately (T4), not folded into this index.
+    #[test]
+    fn index_path_prunes_nested_git_repo() {
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("top.rs"), "fn top_widget() {}\n").unwrap();
+
+        let nested = dir.path().join("vendor");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        fs::write(nested.join("inner.rs"), "fn vendor_gadget() {}\n").unwrap();
+
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+
+        let top_hits = &idx.search(&["top_widget".into()], 5).unwrap().results[0].hits;
+        assert!(!top_hits.is_empty(), "top-level file must be indexed");
+
+        let nested_hits = &idx.search(&["vendor_gadget".into()], 5).unwrap().results[0].hits;
+        assert!(
+            nested_hits.is_empty(),
+            "nested repo's content must not be read into this index, got {nested_hits:?}"
+        );
+    }
+
+    /// T2 (Fix B): a denylisted binary/media extension and a file over
+    /// `MAX_INDEXABLE_FILE_BYTES` must both be skipped before `fs::read`, produce
+    /// zero chunks, and stay absent from the manifest (retryable next run).
+    #[test]
+    fn index_path_skips_binary_ext_and_oversized_files() {
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("kept.rs"), "fn kept() {}\n").unwrap();
+        fs::write(dir.path().join("movie.mp4"), b"not really a video").unwrap();
+        fs::write(
+            dir.path().join("huge.rs"),
+            vec![b'a'; (MAX_INDEXABLE_FILE_BYTES + 1) as usize],
+        )
+        .unwrap();
+
+        let idx = Index::open(data.path()).unwrap();
+        let res = idx.index_path(dir.path(), true).unwrap();
+
+        assert_eq!(res.files_read, 1, "only kept.rs should be read");
+        let kept_hits = &idx.search(&["kept".into()], 5).unwrap().results[0].hits;
+        assert!(!kept_hits.is_empty(), "kept.rs must be searchable");
+
+        assert_eq!(
+            idx.chunk_count().unwrap(),
+            kept_hits.len() as i64,
+            "skipped files must produce zero chunks"
+        );
+
+        let manifest: HashSet<String> = {
+            let conn = idx.conn().unwrap();
+            let mut stmt = conn.prepare("SELECT path FROM file_manifest").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+        assert!(
+            !manifest.iter().any(|p| p.ends_with("movie.mp4")),
+            "denylisted extension must be absent from the manifest, got {manifest:?}"
+        );
+        assert!(
+            !manifest.iter().any(|p| p.ends_with("huge.rs")),
+            "oversized file must be absent from the manifest, got {manifest:?}"
         );
     }
 

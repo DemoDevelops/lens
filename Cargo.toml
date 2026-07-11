@@ -143,6 +143,10 @@ tiktoken-rs = "0.6"
 # architectural way to use all cores for indexing (SQLite FTS5 is single-writer).
 # Replaces the FTS5 chunks/chunks_tri tables; SQLite stays for the mtime manifest.
 tantivy = "0.26"
+# Already resolved transitively (rusqlite/tokio/tantivy all pull it in); used
+# directly by the TUI dashboard to restore the terminal on Ctrl-C/SIGTERM after
+# entering the alternate screen buffer.
+libc = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"

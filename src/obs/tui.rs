@@ -49,51 +49,81 @@ const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█
 
 /// Render one snapshot to a terminal frame. Pure: the only inputs are the snapshot,
 /// the target `width`, the `color` theme (palette + whether ANSI is emitted), the
-/// `$/M`-token `rate` for the money headline, and `rt_seconds` (seconds per avoided
-/// round-trip) for the applied-value time figure. `width < 56` ⇒ the mini layout.
+/// `$/M`-token `rate` for the money headline, `rt_seconds` (seconds per avoided
+/// round-trip) for the applied-value time figure, and `max_rows` (the terminal's
+/// height, when known). `width < 56` ⇒ the mini layout. When the full frame would
+/// exceed `max_rows`, trailing panels are dropped whole (never cut mid-box) with a
+/// one-line note, so a redraw never prints past the visible screen and forces the
+/// terminal to scroll.
 pub fn render_snapshot(
     snap: &Value,
     width: u16,
     color: Theme,
     rate: f64,
     rt_seconds: f64,
+    max_rows: Option<u16>,
 ) -> String {
     let w = (width as usize).clamp(24, 200);
     let mini = w < MINI_MAX;
     let inner = if mini { w } else { w.saturating_sub(4) };
-    let mut out = String::new();
 
-    out.push_str(&header(snap, w, mini, color, rate));
-    out.push('\n');
+    let header = header(snap, w, mini, color, rate);
+    let footer = footer(snap, w, color);
 
-    let section = |title: &str, lines: Vec<String>, o: &mut String| {
+    let section = |title: &str, lines: Vec<String>| -> String {
         if mini {
-            o.push_str(&section_mini(title, &lines, w, color));
+            section_mini(title, &lines, w, color)
         } else {
-            o.push_str(&panel(title, &lines, w, color));
+            panel(title, &lines, w, color)
         }
     };
 
-    section("STATS", stats_strip(snap, inner), &mut out);
-    section("THROUGHPUT", throughput(snap, inner, color), &mut out);
-    section("TOOLS", tool_table(snap, inner, mini, color), &mut out);
-    section(
-        "BY MECHANISM",
-        mechanism_lines(snap, inner, color),
-        &mut out,
-    );
-    section("RTK SHELL", rtk_lines(snap, inner, color), &mut out);
-    section(
-        "SESSION ACTIVITY",
-        activity_lines(snap, inner, color),
-        &mut out,
-    );
-    section(
-        "APPLIED VALUE",
-        applied_value_lines(snap, rt_seconds, color),
-        &mut out,
-    );
-    out.push_str(&footer(snap, w, color));
+    let sections = [
+        section("STATS", stats_strip(snap, inner)),
+        section("THROUGHPUT", throughput(snap, inner, color)),
+        section("TOOLS", tool_table(snap, inner, mini, color)),
+        section("BY MECHANISM", mechanism_lines(snap, inner, color)),
+        section("RTK SHELL", rtk_lines(snap, inner, color)),
+        section("SESSION ACTIVITY", activity_lines(snap, inner, color)),
+        section("APPLIED VALUE", applied_value_lines(snap, rt_seconds, color)),
+    ];
+
+    let mut out = String::new();
+    out.push_str(&header);
+    out.push('\n');
+
+    // Budget: total rows minus the header/footer (always shown) and one spare row
+    // for a truncation note. `shown > 0` guarantees at least one panel prints even
+    // on a budget too tight to fit it, so the screen is never left empty.
+    let budget = max_rows.map(|max| {
+        (max as usize)
+            .saturating_sub(header.lines().count() + footer.lines().count() + 1)
+    });
+    let mut used = 0;
+    let mut shown = 0;
+    for s in &sections {
+        let n = s.lines().count();
+        if let Some(b) = budget {
+            if used + n > b && shown > 0 {
+                break;
+            }
+        }
+        out.push_str(s);
+        used += n;
+        shown += 1;
+    }
+    if shown < sections.len() {
+        out.push_str(&dim(
+            &format!(
+                "… {} more panel(s) hidden — resize or use --mini",
+                sections.len() - shown
+            ),
+            color,
+        ));
+        out.push('\n');
+    }
+
+    out.push_str(&footer);
     out.push('\n');
     out
 }
@@ -105,17 +135,10 @@ fn header(snap: &Value, w: usize, mini: bool, color: Theme, rate: f64) -> String
     let saved = saved_mcp(snap);
     let floor = saved_measured_floor(snap);
     let dollars = saved as f64 * rate / 1_000_000.0;
-    let money = if dollars >= 1.0 {
-        format!("${dollars:.2}")
-    } else if dollars >= 0.01 {
-        format!("${dollars:.3}")
-    } else {
-        format!("${dollars:.4}")
-    };
     let title = bold(&gold("lens", color), color);
     let head = format!(
         "{title}  {} saved · {} measured · ~{} classified tok",
-        bold(&gold(&money, color), color),
+        bold(&gold(&money(dollars), color), color),
         human_count(floor),
         human_count(saved)
     );
@@ -356,14 +379,34 @@ fn activity_lines(snap: &Value, inner: usize, color: Theme) -> Vec<String> {
     lines
 }
 
-/// The applied-value panel: benchmark per-op rates × this scope's live op counts.
-/// Shows measured vs estimated tokens, round-trips avoided, and time saved
-/// (round-trips × `rt_seconds`), then a per-dimension breakdown. Everything here is an
-/// estimate (see the note caption); it never enters the measured `$` headline.
+/// The applied-value panel: benchmark per-op rates × this scope's live op counts,
+/// merged with the real per-model spend/mix from Claude Code's own transcripts
+/// (`actual_usage`) — always shown, mirroring the web's "Actual Usage" mode without
+/// needing a picker. Shows measured vs estimated tokens, round-trips avoided, time
+/// saved, spend, and turns, then a per-dimension breakdown and a per-model table.
+/// Everything here is an estimate (see the note caption); it never enters the
+/// measured `$` headline.
 fn applied_value_lines(snap: &Value, rt_seconds: f64, color: Theme) -> Vec<String> {
     let av = &snap["applied_value"];
     let g = |k: &str| av[k].as_i64().unwrap_or(0).max(0) as u64;
     let rts = av["round_trips_avoided"].as_f64().unwrap_or(0.0);
+    let models: Vec<&Value> = snap["actual_usage"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|m| {
+                    m["model"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty() && s != "<synthetic>")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let total_turns: i64 = models.iter().map(|m| m["turns"].as_i64().unwrap_or(0)).sum();
+    let total_spent: f64 = models
+        .iter()
+        .map(|m| m["consumed_usd"].as_f64().unwrap_or(0.0))
+        .sum();
     let mut lines = vec![
         dim(av["note"].as_str().unwrap_or(""), color),
         format!(
@@ -394,6 +437,11 @@ fn applied_value_lines(snap: &Value, rt_seconds: f64, color: Theme) -> Vec<Strin
             bold(&gold(&human_time(rts * rt_seconds), color), color),
             dim(&format!("@ {rt_seconds:.0}s/round-trip"), color)
         ),
+        format!("spent               {}", gold(&money(total_spent), color)),
+        format!(
+            "turns               {}",
+            gold(&total_turns.to_string(), color)
+        ),
     ];
     if let Some(rows) = av["rows"].as_array() {
         lines.push(dim("by dimension", color));
@@ -419,7 +467,79 @@ fn applied_value_lines(snap: &Value, rt_seconds: f64, color: Theme) -> Vec<Strin
             lines.push(if ops == 0 { dim(&line, color) } else { line });
         }
     }
+    lines.push(dim("by model (actual usage)", color));
+    if models.is_empty() {
+        lines.push(dim("  no usage in window", color));
+    } else {
+        lines.push(dim(
+            &format!(
+                "  {:<10}{:>6}{:>11}{:>9}{:>9}{:>9}",
+                "model", "turns", "saved", "value", "time", "spent"
+            ),
+            color,
+        ));
+        for m in &models {
+            let turns = m["turns"].as_i64().unwrap_or(0);
+            let share = if total_turns > 0 {
+                turns as f64 / total_turns as f64
+            } else {
+                0.0
+            };
+            let saved_tok = m["saved_tokens"].as_f64().unwrap_or(0.0).max(0.0) as u64;
+            let saved_usd = m["saved_usd"].as_f64().unwrap_or(0.0);
+            let spent = m["consumed_usd"].as_f64().unwrap_or(0.0);
+            let time = human_time(rts * share * rt_seconds);
+            let label = model_label(m["model"].as_str().unwrap_or("?"));
+            let row = format!(
+                "  {:<10}{:>6}{:>11}{:>9}{:>9}{:>9}",
+                label,
+                turns,
+                format!("{} tok", human_count(saved_tok)),
+                money(saved_usd),
+                time,
+                money(spent)
+            );
+            lines.push(if turns == 0 { dim(&row, color) } else { row });
+        }
+    }
     lines
+}
+
+/// US dollars at 2/3/4 significant decimals depending on magnitude, so a sub-cent
+/// figure doesn't round away to `$0.00`. Mirrors the web `money()` formatter.
+fn money(dollars: f64) -> String {
+    if dollars >= 1.0 {
+        format!("${dollars:.2}")
+    } else if dollars >= 0.01 {
+        format!("${dollars:.3}")
+    } else {
+        format!("${dollars:.4}")
+    }
+}
+
+/// Human display name for a canonical model key, mirroring the web `modelLabel()`
+/// so the two don't drift. Falls back to the raw id minus the `claude-` prefix and
+/// any trailing `-DDDDDDDD` dated-snapshot suffix (`raw.replace(/^claude-/,
+/// '').replace(/-\d{8}$/, '')` in JS).
+fn model_label(model: &str) -> String {
+    match model {
+        "claude-opus-4-8" => "Opus 4.8".to_string(),
+        "claude-sonnet-5" => "Sonnet 5".to_string(),
+        "claude-haiku-4-5" => "Haiku 4.5".to_string(),
+        "claude-fable-5" => "Fable 5".to_string(),
+        other => {
+            let stripped = other.strip_prefix("claude-").unwrap_or(other);
+            match stripped.rfind('-') {
+                Some(i)
+                    if stripped[i + 1..].len() == 8
+                        && stripped[i + 1..].bytes().all(|b| b.is_ascii_digit()) =>
+                {
+                    stripped[..i].to_string()
+                }
+                _ => stripped.to_string(),
+            }
+        }
+    }
 }
 
 /// Seconds as a compact human duration: `~Ns` / `~N.N min` / `~N.N h`.
@@ -842,12 +962,24 @@ fn local_offset_secs() -> i64 {
 // Refresh loop
 // ---------------------------------------------------------------------------
 
+/// Set by `handle_interrupt` on SIGINT/SIGTERM; polled by `run`'s loop so it can
+/// leave the alternate screen buffer before exiting instead of stranding the
+/// terminal on a frozen frame. `AtomicBool::store` is async-signal-safe.
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn handle_interrupt(_sig: i32) {
+    INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Run the live terminal dashboard: each tick reads the snapshot directly (no HTTP),
-/// clears the screen, renders, and sleeps `interval` seconds — the `lens stats
-/// --watch` model. `scope_global` reads the machine-global mirror (cross-repo, no
-/// session filter), reusing the web's scope branch. `force_view`: `Some(true)` =
-/// full, `Some(false)` = mini, `None` = auto by terminal width. Cooked mode, so
-/// Ctrl-C exits cleanly with nothing to restore.
+/// redraws in the alternate screen buffer, and sleeps `interval` seconds — the
+/// `lens stats --watch` model. The alternate screen (entered only when stdout is a
+/// real tty) keeps every redraw off the scrollback, so the terminal never fights the
+/// user for the viewport the way a plain-buffer redraw loop does; SIGINT/SIGTERM are
+/// caught to leave it cleanly instead of stranding a frozen frame. `scope_global`
+/// reads the machine-global mirror (cross-repo, no session filter), reusing the
+/// web's scope branch. `force_view`: `Some(true)` = full, `Some(false)` = mini,
+/// `None` = auto by terminal width.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     dir: PathBuf,
@@ -860,7 +992,8 @@ pub fn run(
     theme_kind: ThemeKind,
     force_view: Option<bool>,
 ) -> Result<()> {
-    let on = std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal();
+    let tty = std::io::stdout().is_terminal();
+    let on = std::env::var_os("NO_COLOR").is_none() && tty;
     let color = Theme::new(on, theme_kind);
     let interval = interval.max(1);
     let tz_offset = local_offset_secs();
@@ -869,7 +1002,17 @@ pub fn run(
     // since this view launched, captured on the first tick, so both read "since
     // opened" rather than all-time.
     let mut rtk_base: Option<(i64, i64, i64)> = None;
-    loop {
+
+    if tty {
+        unsafe {
+            libc::signal(libc::SIGINT, handle_interrupt as *const () as usize);
+            libc::signal(libc::SIGTERM, handle_interrupt as *const () as usize);
+        }
+        print!("\x1b[?1049h"); // enter alternate screen
+        let _ = std::io::stdout().flush();
+    }
+
+    while !INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) {
         let (d, sess) = if scope_global {
             match crate::rtk::home_root() {
                 Some(home) => (home, None),
@@ -895,11 +1038,25 @@ pub fn run(
             Some(true) => cols.max(56), // --full: framed layout at terminal width
             None => cols,               // auto: mini/full by width
         };
-        let frame = render_snapshot(&snap, width, color, rate, rt_seconds);
+        let frame = render_snapshot(&snap, width, color, rate, rt_seconds, term_rows());
         print!("\x1b[2J\x1b[H{frame}");
         let _ = std::io::stdout().flush();
-        std::thread::sleep(Duration::from_secs(interval));
+        // Sleep in short slices so Ctrl-C is noticed well within a second even when
+        // --interval is large, instead of blocking the whole interval.
+        let mut waited = Duration::ZERO;
+        let target = Duration::from_secs(interval);
+        while waited < target && !INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) {
+            let step = Duration::from_millis(100).min(target - waited);
+            std::thread::sleep(step);
+            waited += step;
+        }
     }
+
+    if tty {
+        print!("\x1b[?1049l"); // leave alternate screen, restoring prior content
+        let _ = std::io::stdout().flush();
+    }
+    Ok(())
 }
 
 /// Rewrite the snapshot's `rtk` totals to the delta since the first tick (the
@@ -951,6 +1108,33 @@ fn term_cols() -> u16 {
         .and_then(|c| c.parse::<u16>().ok())
         .filter(|&c| c > 0)
         .unwrap_or(80)
+}
+
+/// Terminal height in rows: `stty size` ("rows cols"), else `$LINES`, else `None`
+/// (stay unclipped) when the height genuinely can't be determined — e.g. output
+/// isn't a real tty, where clipping would silently drop captured content.
+fn term_rows() -> Option<u16> {
+    if let Ok(out) = std::process::Command::new("stty")
+        .arg("size")
+        .stdin(std::process::Stdio::inherit())
+        .output()
+    {
+        if let Ok(s) = String::from_utf8(out.stdout) {
+            if let Some(rows) = s
+                .split_whitespace()
+                .next()
+                .and_then(|r| r.parse::<u16>().ok())
+            {
+                if rows > 0 {
+                    return Some(rows);
+                }
+            }
+        }
+    }
+    std::env::var("LINES")
+        .ok()
+        .and_then(|r| r.parse::<u16>().ok())
+        .filter(|&r| r > 0)
 }
 
 #[cfg(test)]
@@ -1020,7 +1204,7 @@ mod tests {
     #[test]
     fn render_full_has_every_dimension() {
         let snap = seeded_snap();
-        let out = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0);
+        let out = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0, None);
         // Headline + panels.
         assert!(out.contains("saved"), "money headline");
         assert!(out.contains("APPLIED VALUE"), "applied-value panel title");
@@ -1051,7 +1235,7 @@ mod tests {
     #[test]
     fn render_mini_keeps_dimensions_no_box() {
         let snap = seeded_snap();
-        let out = render_snapshot(&snap, 40, Theme::OFF, 5.0, 4.0);
+        let out = render_snapshot(&snap, 40, Theme::OFF, 5.0, 4.0, None);
         // Same dimensions, terser. No box side glyph.
         assert!(out.contains("APPLIED VALUE"));
         assert!(!out.contains('│'), "mini view drops box sides");
@@ -1067,7 +1251,7 @@ mod tests {
     #[test]
     fn full_lines_fit_the_frame() {
         let snap = seeded_snap();
-        let out = render_snapshot(&snap, 80, ON, 5.0, 4.0);
+        let out = render_snapshot(&snap, 80, ON, 5.0, 4.0, None);
         for line in out.lines() {
             assert!(
                 vis_width(line) <= 80,
@@ -1085,7 +1269,7 @@ mod tests {
             .finish(4_000_000, 0, Some("a".into()), "ok", "", None);
         let snap = snapshot_json(dir.path(), None);
         // 1,000,000 tokens saved @ $5/M ⇒ $5.00.
-        let out = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0);
+        let out = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0, None);
         assert!(
             out.contains("$5.00 saved"),
             "expected $5.00 in: {}",
@@ -1108,8 +1292,8 @@ mod tests {
             .unwrap();
         assert!(rts > 6.0, "3 nav ops avoid >6 round-trips, got {rts}");
         // Doubling rt_seconds roughly doubles the rendered minutes; just assert both render.
-        let a = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0);
-        let b = render_snapshot(&snap, 80, Theme::OFF, 5.0, 10.0);
+        let a = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0, None);
+        let b = render_snapshot(&snap, 80, Theme::OFF, 5.0, 10.0, None);
         assert!(a.contains("@ 4s/round-trip") && b.contains("@ 10s/round-trip"));
     }
 
@@ -1173,9 +1357,15 @@ mod tests {
         assert_eq!(gold("x", Theme::OFF), "x");
         // Whole-frame switch: dark renders teal titles, 70s renders avocado.
         let snap = seeded_snap();
-        let dark = render_snapshot(&snap, 80, Theme::new(true, ThemeKind::Dark), 5.0, 4.0);
-        let seventies =
-            render_snapshot(&snap, 80, Theme::new(true, ThemeKind::Seventies), 5.0, 4.0);
+        let dark = render_snapshot(&snap, 80, Theme::new(true, ThemeKind::Dark), 5.0, 4.0, None);
+        let seventies = render_snapshot(
+            &snap,
+            80,
+            Theme::new(true, ThemeKind::Seventies),
+            5.0,
+            4.0,
+            None,
+        );
         assert!(dark.contains("38;5;73"), "dark theme uses teal titles");
         assert!(
             seventies.contains("38;5;107"),
@@ -1192,5 +1382,105 @@ mod tests {
             Some(ThemeKind::Seventies)
         ));
         assert!(ThemeKind::parse("blue").is_none());
+    }
+
+    /// The applied-value panel always renders a per-model "actual usage" table (no
+    /// picker, unlike the web) plus SPENT/TURNS on the headline. `CLAUDE_CONFIG_DIR`
+    /// is pointed at a fixture so this doesn't depend on the developer machine's real
+    /// `~/.claude` transcripts (see usage.rs's `with_fixture` for the same idiom).
+    #[test]
+    fn applied_value_always_shows_actual_usage_table() {
+        let _g = crate::rtk::env_test_lock();
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+
+        let claude_config = tempdir().unwrap();
+        let proj = claude_config.path().join("projects").join("sess1");
+        std::fs::create_dir_all(&proj).unwrap();
+        let line = serde_json::json!({
+            "message": {"model": "claude-sonnet-5", "usage": {
+                "input_tokens": 100_000, "output_tokens": 50_000,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+            }},
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "cwd": "/tmp/somewhere",
+            "isSidechain": false,
+        })
+        .to_string();
+        std::fs::write(proj.join("usage.jsonl"), line).unwrap();
+
+        let empty = tempdir().unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", claude_config.path());
+        std::env::set_var("HOME", empty.path());
+        std::env::set_var("XDG_CONFIG_HOME", empty.path());
+
+        let snap = seeded_snap();
+
+        match prev_cfg {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+
+        let out = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0, None);
+        assert!(out.contains("by model (actual usage)"));
+        assert!(out.contains("Sonnet 5"), "model label rendered: {out}");
+        assert!(out.contains("spent"), "headline spent line");
+        assert!(out.contains("turns"), "headline turns line");
+    }
+
+    #[test]
+    fn model_label_maps_canonical_keys() {
+        assert_eq!(model_label("claude-opus-4-8"), "Opus 4.8");
+        assert_eq!(model_label("claude-sonnet-5"), "Sonnet 5");
+        assert_eq!(model_label("claude-haiku-4-5"), "Haiku 4.5");
+        assert_eq!(model_label("claude-fable-5"), "Fable 5");
+        assert_eq!(model_label("claude-mythos-x"), "mythos-x");
+        // A dated snapshot id drops both the prefix and the trailing date.
+        assert_eq!(model_label("claude-haiku-4-5-20251001"), "haiku-4-5");
+    }
+
+    #[test]
+    fn money_scales_with_magnitude() {
+        assert_eq!(money(5.0), "$5.00");
+        assert_eq!(money(0.05), "$0.050");
+        assert_eq!(money(0.001), "$0.0010");
+    }
+
+    /// A short terminal (`max_rows`) never gets a frame taller than it: trailing
+    /// panels drop whole (never mid-box — every printed line still balances its
+    /// `┌`/`└` pair), header/footer always survive, and a hidden-panel note appears.
+    /// This is what stops the live `run()` loop from forcing a scroll on every tick.
+    #[test]
+    fn render_clips_trailing_panels_to_fit_max_rows() {
+        let snap = seeded_snap();
+        let unclipped = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0, None);
+        let total = unclipped.lines().count();
+        let budget = (total - 10) as u16;
+        let clipped = render_snapshot(&snap, 80, Theme::OFF, 5.0, 4.0, Some(budget));
+
+        assert!(
+            clipped.lines().count() <= budget as usize,
+            "clipped frame ({} lines) exceeds the {budget}-row budget",
+            clipped.lines().count()
+        );
+        assert!(clipped.contains("lens"), "header always shown");
+        assert!(clipped.contains("store "), "footer always shown");
+        assert!(
+            clipped.contains("more panel(s) hidden"),
+            "truncation note shown when panels are dropped"
+        );
+        // Never cut mid-box: every opened panel border has a matching close.
+        let opens = clipped.matches('┌').count();
+        let closes = clipped.matches('└').count();
+        assert_eq!(opens, closes, "every opened panel box is closed");
     }
 }

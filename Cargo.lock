@@ -816,6 +816,7 @@ dependencies = [
  "blake3",
  "foldhash 0.1.5",
  "ignore",
+ "libc",
  "predicates",
  "rayon",
  "regex",

@@ -294,6 +294,7 @@ pub const SNAPSHOT_DIMENSIONS: &[&str] = &[
     "by_tool",
     "by_mechanism",
     "applied_value",
+    "actual_usage",
     "rtk",
     "activity",
     "store_size",

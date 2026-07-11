@@ -401,7 +401,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .mech b{color:var(--ink)}
   .dim2{color:var(--dim)}
   .av{display:flex;flex-direction:column;gap:3px}
-  .avtot{display:flex;flex-wrap:wrap;gap:3px 18px;align-items:baseline;margin-bottom:4px}
+  .avtot{display:flex;flex-wrap:wrap;gap:5px 22px;align-items:baseline;margin-bottom:0}
   .avtot .k{color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.4px;margin-right:4px}
   .avtot .v{font-size:13px;font-weight:600}
   .avtot .v.big{color:var(--accent);font-size:15px}
@@ -410,6 +410,31 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .avrow .d{color:var(--accent)}
   .avrow .x{color:var(--ink)}
   .avrow.z{opacity:.4}
+  .avcols{display:flex;flex-wrap:wrap;gap:10px 34px;border-top:1px solid var(--line);margin-top:7px;padding-top:8px}
+  .avcol{flex:1 1 300px;min-width:0}
+  .avcol.wide{flex:1.35 1 340px}
+  .subhead{color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.6px;font-weight:600;margin:0 0 5px;padding-bottom:3px;border-bottom:1px solid var(--line)}
+  .mtab{width:auto;margin-top:2px}
+  .mtab td,.mtab th{white-space:nowrap}
+  .mtab td.m{color:var(--accent)}
+  .mtab .u{color:var(--dim)}
+  #boot{position:fixed;inset:0;z-index:100;background:var(--bg);display:flex;align-items:center;justify-content:center;transition:opacity .5s ease}
+  body:not(.loading) #boot{opacity:0;pointer-events:none}
+  .bootwrap{width:min(560px,86vw);border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:16px 18px 15px}
+  .boothead{display:flex;align-items:baseline;gap:9px;margin-bottom:13px;padding-bottom:9px;border-bottom:1px solid var(--line)}
+  .boothead .bp{color:var(--ink);font-weight:700;font-size:15px;letter-spacing:.3px}
+  .boothead .bt{color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.6px}
+  .bootlog{display:flex;flex-direction:column;gap:8px;font-size:11px}
+  .bl{display:flex;align-items:center;gap:9px;color:var(--ink);opacity:0;animation:blin .38s ease forwards;animation-delay:calc(var(--i)*.26s)}
+  .bl .bk{color:var(--accent)}
+  .bl .bh{color:var(--dim)}
+  .bl .bar{flex:1;height:5px;min-width:44px;border-radius:3px;background:var(--bg);overflow:hidden;position:relative}
+  .bl .bar::after{content:"";position:absolute;top:0;bottom:0;left:-42%;width:42%;border-radius:3px;background:linear-gradient(90deg,transparent,var(--accent),transparent);animation:bsweep 1.2s ease-in-out infinite;animation-delay:calc(var(--i)*.26s + .25s)}
+  .bootfoot{margin-top:14px;color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.6px}
+  .bootfoot .cur{display:inline-block;width:7px;margin-left:3px;color:var(--accent);animation:bcur 1.05s steps(1) infinite}
+  @keyframes blin{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+  @keyframes bsweep{0%{left:-42%}100%{left:100%}}
+  @keyframes bcur{50%{opacity:0}}
   .actline{display:flex;flex-wrap:wrap;gap:3px 20px;align-items:baseline}
   .actline i{color:var(--dim);font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.4px;margin-right:4px}
   .actline b{font-size:13px;font-weight:600}
@@ -426,7 +451,18 @@ const INDEX_HTML: &str = r##"<!doctype html>
   footer{color:var(--dim);font-size:9px;padding:3px 10px 8px;text-align:center}
 </style>
 </head>
-<body>
+<body class="loading">
+<div id="boot"><div class="bootwrap">
+  <div class="boothead"><span class="bp">lens</span><span class="bt">observability // dashboard</span></div>
+  <div class="bootlog">
+    <div class="bl" style="--i:0"><span class="bk">&#9656;</span> connecting <span class="bh" id="bootHost"></span><span class="bar"></span></div>
+    <div class="bl" style="--i:1"><span class="bk">&#9656;</span> reading <span class="bh">ops.log</span><span class="bar"></span></div>
+    <div class="bl" style="--i:2"><span class="bk">&#9656;</span> loading graph &plus; index<span class="bar"></span></div>
+    <div class="bl" style="--i:3"><span class="bk">&#9656;</span> aggregating per-model usage<span class="bar"></span></div>
+    <div class="bl" style="--i:4"><span class="bk">&#9656;</span> pricing savings<span class="bar"></span></div>
+  </div>
+  <div class="bootfoot" id="bootFoot">awaiting first snapshot<span class="cur">&#9608;</span></div>
+</div></div>
 <header>
   <h1>lens</h1>
   <div class="live"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
@@ -645,6 +681,9 @@ winTo.addEventListener('change',commitRange);
 // itself carries only canonical keys. FALLBACK_RATES covers an older server payload with
 // no price_table, so the page still works.
 const MODEL_LABELS={'claude-opus-4-8':'Opus 4.8','claude-sonnet-5':'Sonnet 5','claude-haiku-4-5':'Haiku 4.5','claude-fable-5':'Fable 5'};
+// Friendly model name: the canonical label if known, else the raw id minus the `claude-`
+// vendor prefix and any trailing `-YYYYMMDD` date stamp (so old dated ids read cleanly).
+function modelLabel(raw){return MODEL_LABELS[raw]||raw.replace(/^claude-/,'').replace(/-\d{8}$/,'');}
 const FALLBACK_RATES=[{m:'Opus 4.8',r:5},{m:'Fable 5',r:10},{m:'Sonnet 5',r:3},{m:'Haiku 4.5',r:1}];
 const ACTUAL='actual';
 let RATES=FALLBACK_RATES.slice();
@@ -665,35 +704,58 @@ function renderCost(){
 // "est. value" total instantly (the token/round-trip figures are rate-independent). In
 // "Actual Usage" mode this same panel instead shows a per-model breakdown from
 // stats.actual_usage: real per-model token mix, priced against the shared price table.
+// The rate the applied-value plane prices against: the selected model, or the real
+// blended rate (total saved $ / total saved tokens) when the picker is on Actual Usage.
+function appliedRate(){
+  if(rateIdx!==ACTUAL) return RATES[rateIdx];
+  const st=lastActualUsage.reduce((s,m)=>s+(m.saved_tokens||0),0);
+  const sv=lastActualUsage.reduce((s,m)=>s+(m.saved_usd||0),0);
+  return {r:st>0?sv/st*1e6:0,m:'actual mix'};
+}
 function renderApplied(av){
-  if(rateIdx===ACTUAL){
-    document.getElementById('appliedValue').innerHTML=lastActualUsage.length
-      ?lastActualUsage.map(m=>{
-        const label=MODEL_LABELS[m.model]||m.model;
-        return `<div class="avrow"><span class="d">${label}</span><span class="x">saved ${humanCount(Math.round(m.saved_tokens||0))} tok / ${money(m.saved_usd||0)} &middot; spent ${money(m.consumed_usd||0)}</span></div>`;
-      }).join('')
-      :'<span class="dim2">no usage in window</span>';
-    document.getElementById('avNote').textContent='estimated · mix-weighted · uncached-equiv';
-    return;
-  }
-  const rts=av.round_trips_avoided||0, x=RATES[rateIdx];
+  const rts=av.round_trips_avoided||0, x=appliedRate();
+  const rateLbl=rateIdx===ACTUAL?x.r.toFixed(2):x.r;
+  // Real per-model transcript mix, minus synthetic/unnamed rows. Headline spend + turns
+  // and the per-model table below both read from it (same window/scope).
+  const models=lastActualUsage.filter(m=>m.model&&m.model!=='<synthetic>');
+  const totTurns=models.reduce((s,m)=>s+(m.turns||0),0);
+  const totSpent=models.reduce((s,m)=>s+(m.consumed_usd||0),0);
+  // Left sub-section: benchmark per-dimension breakdown (always shown).
+  const toolRows=(av.rows||[]).map(r=>{
+    const parts=[];
+    if(r.est_tokens>0) parts.push(`~${humanCount(r.est_tokens)} tok`);
+    if(r.round_trips>0) parts.push(`~${r.round_trips.toFixed(1)} rt`);
+    if(r.dimension==='darkroom'||r.dimension==='skeleton') parts.push('tok measured live');
+    const txt=parts.length?parts.join(', '):'—';
+    return `<div class="avrow${r.ops?'':' z'}" title="source ${r.source||'modeling floor'}"><span class="d">${r.dimension} <span class="dim2">×${r.ops}</span></span><span class="x">${txt}</span></div>`;
+  }).join('');
+  // Right sub-section (only when the picker is on Actual Usage): an aligned table so
+  // figures line up across rows. Per-model time splits round-trips by that model's turn share.
+  const perModel=models.length
+    ?`<table class="mtab"><thead><tr><th>model</th><th>turns</th><th>saved</th><th>value</th><th>time</th><th>spent</th></tr></thead><tbody>`+
+     models.map(m=>{
+       const share=totTurns>0?(m.turns||0)/totTurns:0;
+       return `<tr><td class="m">${modelLabel(m.model)}</td><td>${(m.turns||0).toLocaleString()}</td>`+
+         `<td>${humanCount(Math.round(m.saved_tokens||0))} <span class="u">tok</span></td>`+
+         `<td>${money(m.saved_usd||0)}</td><td>${humanTime(rts*share*RT_SECONDS)}</td>`+
+         `<td>${money(m.consumed_usd||0)}</td></tr>`;
+     }).join('')+`</tbody></table>`
+    :'<span class="dim2">no usage in window</span>';
   document.getElementById('appliedValue').innerHTML=
     `<div class="avtot">`+
       `<span><i class="k">measured saved</i><b class="v">${humanCount(av.measured_tokens||0)} tok</b></span>`+
       `<span><i class="k">est. counterfactual</i><b class="v">+${humanCount(av.est_counterfactual_tokens||0)} tok</b></span>`+
       `<span><i class="k">est. total avoided</i><b class="v big">${humanCount(av.est_total_tokens||0)} tok</b></span>`+
-      `<span><i class="k">est. value</i><b class="v big">${money((av.est_total_tokens||0)*x.r/1e6)}</b> <span class="basis">@ $${x.r}/M · ${x.m}</span></span>`+
+      `<span><i class="k">est. value</i><b class="v big">${money((av.est_total_tokens||0)*x.r/1e6)}</b> <span class="basis">@ $${rateLbl}/M · ${x.m}</span></span>`+
       `<span><i class="k">round-trips avoided</i><b class="v">~${Math.round(rts)}</b></span>`+
       `<span><i class="k">time saved</i><b class="v big">${humanTime(rts*RT_SECONDS)}</b> <span class="basis">@ ${RT_SECONDS}s/round-trip</span></span>`+
+      `<span><i class="k">spent</i><b class="v">${money(totSpent)}</b></span>`+
+      `<span><i class="k">turns</i><b class="v">${totTurns.toLocaleString()}</b></span>`+
     `</div>`+
-    (av.rows||[]).map(r=>{
-      const parts=[];
-      if(r.est_tokens>0) parts.push(`~${humanCount(r.est_tokens)} tok`);
-      if(r.round_trips>0) parts.push(`~${r.round_trips.toFixed(1)} rt`);
-      if(r.dimension==='darkroom'||r.dimension==='skeleton') parts.push('tok measured live');
-      const txt=parts.length?parts.join(', '):'—';
-      return `<div class="avrow${r.ops?'':' z'}" title="source ${r.source||'modeling floor'}"><span class="d">${r.dimension} <span class="dim2">×${r.ops}</span></span><span class="x">${txt}</span></div>`;
-    }).join('');
+    `<div class="avcols">`+
+      `<div class="avcol"><div class="subhead">lens tools</div>${toolRows}</div>`+
+      (rateIdx===ACTUAL?`<div class="avcol wide"><div class="subhead">per model</div>${perModel}</div>`:``)+
+    `</div>`;
   document.getElementById('avNote').textContent=(av.note||'')+(av.model?(' · '+av.model):'');
 }
 // Model picker: option value is either "actual" (Actual Usage) or a RATES index, pricing
@@ -775,9 +837,18 @@ function compbar(label,raw,ret,maxraw){
   const retW=ret/maxraw*100, savW=Math.max(0,(raw-ret)/maxraw*100), pct=raw>0?Math.round((raw-ret)/raw*100):0;
   return `<div class="hbar"><span class="lbl">${label}</span><span class="track"><span class="fill" style="width:${retW}%"></span><span class="fill dim" style="width:${savW}%"></span></span><span class="val">${pct}%</span></div>`;
 }
+// Boot screen: a terminal-style loading state shown until the first snapshot renders,
+// with a minimum on-screen time so the animation always plays.
+const bootT0=performance.now(); let booted=false;
+(function(){const h=document.getElementById('bootHost'); if(h) h.textContent=location.host;})();
+function finishBoot(){
+  if(booted) return; booted=true;
+  setTimeout(()=>document.body.classList.remove('loading'), Math.max(0,1150-(performance.now()-bootT0)));
+}
 function setStale(){
   document.getElementById('dot').classList.add('stale');
   document.getElementById('status').textContent='disconnected — retrying';
+  const f=!booted&&document.getElementById('bootFoot'); if(f) f.innerHTML='connection refused &middot; retrying<span class="cur">&#9608;</span>';
 }
 async function tick(){
   let d;
@@ -905,6 +976,7 @@ async function tick(){
   const comp=tt.filter(t=>t.raw>0).sort((a,b)=>b.raw-a.raw).slice(0,12);
   const maxCompRaw=Math.max(1,...comp.map(t=>t.raw));
   document.getElementById('compByTool').innerHTML=comp.map(t=>compbar(t.tool,t.raw,t.returned,maxCompRaw)).join('')||'<span class="dim2">no offloading tool calls yet</span>';
+  finishBoot();
 }
 let view='mini';
 const viewDD=makeDD(document.getElementById('view'),'layout: mini fits a narrow pane (cmux); full uses the whole window');

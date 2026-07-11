@@ -2,12 +2,16 @@
 //! behind the dashboard's "Actual Usage" pricing mode.
 //!
 //! Claude Code writes one JSONL transcript per session under
-//! `<config dir>/projects/**/*.jsonl` (`<config dir>` is `$CLAUDE_CONFIG_DIR`,
-//! else `$XDG_CONFIG_HOME/claude`, else `~/.claude`). Each line is a
-//! loosely-typed event; only `assistant` turns carry `message.usage` and a
-//! `model`. This module globs those files, tolerates every other line shape by
-//! skipping it, dedups resumed/rewritten turns by `(message.id, requestId)`,
-//! and aggregates the survivors into a per-model window summary.
+//! `<config dir>/projects/**/*.jsonl`. A machine can hold more than one config
+//! dir (`$CLAUDE_CONFIG_DIR`, `$XDG_CONFIG_HOME/claude`, `~/.claude`); this
+//! module reads the *union* of every one that exists, so usage spans a custom
+//! config dir and the default `~/.claude` together (e.g. two accounts sharing
+//! one machine). Each line is a loosely-typed event; only `assistant` turns
+//! carry `message.usage` and a `model`. This module globs those files,
+//! tolerates every other line shape by skipping it, dedups resumed/rewritten
+//! turns by `(message.id, requestId)` (which also collapses a session that
+//! shows up in two config dirs), and aggregates the survivors into a per-model
+//! window summary.
 //!
 //! Read-only and best-effort: a missing config dir or an unreadable file
 //! yields an empty result, never an error — this feeds a dashboard panel, not
@@ -44,62 +48,75 @@ pub fn read_usage(
     until: Option<i64>,
     cwd_filter: Option<&Path>,
 ) -> Vec<ModelUsage> {
-    let Some(config_dir) = claude_config_dir() else {
-        return Vec::new();
-    };
     let mut seen = HashSet::new();
     let mut agg: BTreeMap<String, ModelUsage> = BTreeMap::new();
-    for file in find_jsonl_files(&config_dir.join("projects")) {
-        let Ok(content) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        for raw in content.lines() {
-            let Some(line) = parse_line(raw) else {
+    for config_dir in claude_config_dirs() {
+        for file in find_jsonl_files(&config_dir.join("projects")) {
+            let Ok(content) = std::fs::read_to_string(&file) else {
                 continue;
             };
-            if since.is_some_and(|s| line.ts < s) {
-                continue;
-            }
-            if until.is_some_and(|u| line.ts >= u) {
-                continue;
-            }
-            if cwd_filter.is_some_and(|filter| !line.cwd.starts_with(filter)) {
-                continue;
-            }
-            if let Some(key) = &line.dedup_key {
-                if !seen.insert(key.clone()) {
-                    continue; // resumed/rewritten turn, already counted
+            for raw in content.lines() {
+                let Some(line) = parse_line(raw) else {
+                    continue;
+                };
+                if since.is_some_and(|s| line.ts < s) {
+                    continue;
                 }
+                if until.is_some_and(|u| line.ts >= u) {
+                    continue;
+                }
+                if cwd_filter.is_some_and(|filter| !line.cwd.starts_with(filter)) {
+                    continue;
+                }
+                if let Some(key) = &line.dedup_key {
+                    if !seen.insert(key.clone()) {
+                        continue; // resumed/rewritten turn, already counted
+                    }
+                }
+                let entry = agg.entry(line.model.clone()).or_insert_with(|| ModelUsage {
+                    model: line.model,
+                    turns: 0,
+                    input: 0,
+                    output: 0,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    cost_usd: 0.0,
+                });
+                entry.turns += 1;
+                entry.input += line.input;
+                entry.output += line.output;
+                entry.cache_creation += line.cache_creation;
+                entry.cache_read += line.cache_read;
+                entry.cost_usd += line.cost_usd;
             }
-            let entry = agg.entry(line.model.clone()).or_insert_with(|| ModelUsage {
-                model: line.model,
-                turns: 0,
-                input: 0,
-                output: 0,
-                cache_creation: 0,
-                cache_read: 0,
-                cost_usd: 0.0,
-            });
-            entry.turns += 1;
-            entry.input += line.input;
-            entry.output += line.output;
-            entry.cache_creation += line.cache_creation;
-            entry.cache_read += line.cache_read;
-            entry.cost_usd += line.cost_usd;
         }
     }
     agg.into_values().collect()
 }
 
-/// Resolve the Claude Code config dir: `$CLAUDE_CONFIG_DIR`, else
-/// `$XDG_CONFIG_HOME/claude`, else `~/.claude`. `None` unless the resolved
-/// dir has a `projects/` subdir (the signal it actually holds transcripts).
-fn claude_config_dir() -> Option<PathBuf> {
-    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(|x| PathBuf::from(x).join("claude")))
-        .or_else(|| home_dir().map(|h| h.join(".claude")))?;
-    dir.join("projects").is_dir().then_some(dir)
+/// Every distinct Claude Code config dir that actually holds transcripts: the
+/// union of `$CLAUDE_CONFIG_DIR`, `$XDG_CONFIG_HOME/claude`, and `~/.claude`,
+/// keeping only those with a `projects/` subdir (the signal it holds
+/// transcripts) and deduping by canonical path so an entry pointing at the
+/// default isn't globbed twice. Empty if none exist.
+fn claude_config_dirs() -> Vec<PathBuf> {
+    let candidates = [
+        std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+        std::env::var_os("XDG_CONFIG_HOME").map(|x| PathBuf::from(x).join("claude")),
+        home_dir().map(|h| h.join(".claude")),
+    ];
+    let mut seen = HashSet::new();
+    let mut dirs = Vec::new();
+    for dir in candidates.into_iter().flatten() {
+        if !dir.join("projects").is_dir() {
+            continue;
+        }
+        let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if seen.insert(key) {
+            dirs.push(dir);
+        }
+    }
+    dirs
 }
 
 /// `$HOME`, else `$USERPROFILE`. `None` if neither is set.
@@ -202,51 +219,113 @@ mod tests {
             .unwrap();
     }
 
-    /// Point `CLAUDE_CONFIG_DIR` at a fresh temp dir holding the fixture for
-    /// the duration of `f`, then restore the prior value. `CLAUDE_CONFIG_DIR`
-    /// is process-global; serialize with `env_test_lock` like the other
+    /// Restore an env var to its prior value, or unset it if there was none.
+    fn restore(key: &str, prev: Option<std::ffi::OsString>) {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    /// Point `CLAUDE_CONFIG_DIR` at a fresh temp dir holding the fixture for the
+    /// duration of `f`, and steer `HOME`/`XDG_CONFIG_HOME` at an empty dir so
+    /// the union reader can't reach the developer's real `~/.claude` (which
+    /// would pollute the hand-computed sums). Restores each var after. These are
+    /// process-global; serialize with `env_test_lock` like the other
     /// env-mutating tests in this crate.
     fn with_fixture<T>(f: impl FnOnce() -> T) -> T {
         let _g = crate::rtk::env_test_lock();
-        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
         let tmp = tempfile::tempdir().unwrap();
         write_fixture(tmp.path());
+        let empty = tempfile::tempdir().unwrap();
         std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        std::env::set_var("HOME", empty.path());
+        std::env::set_var("XDG_CONFIG_HOME", empty.path());
         let out = f();
-        match prev {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
+        restore("CLAUDE_CONFIG_DIR", prev_cfg);
+        restore("HOME", prev_home);
+        restore("XDG_CONFIG_HOME", prev_xdg);
         out
     }
 
     #[test]
-    fn claude_config_dir_resolves_via_env_override() {
+    fn claude_config_dirs_unions_env_override_and_default() {
         let _g = crate::rtk::env_test_lock();
-        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
-        let tmp = tempfile::tempdir().unwrap();
-        write_fixture(tmp.path());
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
-        let resolved = claude_config_dir();
-        match prev {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
-        assert_eq!(resolved.as_deref(), Some(tmp.path()));
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let cfg = tempfile::tempdir().unwrap(); // $CLAUDE_CONFIG_DIR
+        let home = tempfile::tempdir().unwrap(); // $HOME, holds ~/.claude
+        let xdg = tempfile::tempdir().unwrap(); // $XDG_CONFIG_HOME, no claude/projects
+        write_fixture(cfg.path());
+        write_fixture(&home.path().join(".claude"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", cfg.path());
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("XDG_CONFIG_HOME", xdg.path());
+        let dirs = claude_config_dirs();
+        restore("CLAUDE_CONFIG_DIR", prev_cfg);
+        restore("HOME", prev_home);
+        restore("XDG_CONFIG_HOME", prev_xdg);
+        // Both the custom config dir and the default ~/.claude are returned; the
+        // XDG candidate has no projects/ and is dropped.
+        assert_eq!(dirs.len(), 2, "got {dirs:?}");
+        assert!(dirs.iter().any(|d| d == cfg.path()));
+        assert!(dirs.iter().any(|d| d == &home.path().join(".claude")));
     }
 
     #[test]
-    fn claude_config_dir_none_without_projects_subdir() {
+    fn claude_config_dirs_empty_without_projects_subdir() {
         let _g = crate::rtk::env_test_lock();
-        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
-        let tmp = tempfile::tempdir().unwrap(); // no projects/ written
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
-        let resolved = claude_config_dir();
-        match prev {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
-        assert!(resolved.is_none());
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let empty = tempfile::tempdir().unwrap(); // no projects/ anywhere
+        std::env::set_var("CLAUDE_CONFIG_DIR", empty.path());
+        std::env::set_var("HOME", empty.path());
+        std::env::set_var("XDG_CONFIG_HOME", empty.path());
+        let dirs = claude_config_dirs();
+        restore("CLAUDE_CONFIG_DIR", prev_cfg);
+        restore("HOME", prev_home);
+        restore("XDG_CONFIG_HOME", prev_xdg);
+        assert!(dirs.is_empty(), "got {dirs:?}");
+    }
+
+    #[test]
+    fn read_usage_spans_multiple_config_dirs() {
+        let _g = crate::rtk::env_test_lock();
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let cfg = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        write_fixture(cfg.path()); // opus + sonnet under $CLAUDE_CONFIG_DIR
+        // The default ~/.claude, with one line for a model absent from the first
+        // fixture, so its presence proves the union rather than a lucky overlap.
+        let d = home.path().join(".claude").join("projects").join("s");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("u.jsonl"),
+            r#"{"timestamp":"2024-06-01T00:00:00Z","cwd":"/Users/dev/projA","isSidechain":false,"requestId":"rZ","message":{"id":"mZ","model":"other-account-model","usage":{"input_tokens":7,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+        )
+        .unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", cfg.path());
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("XDG_CONFIG_HOME", xdg.path());
+        let usage = read_usage(None, None, None);
+        restore("CLAUDE_CONFIG_DIR", prev_cfg);
+        restore("HOME", prev_home);
+        restore("XDG_CONFIG_HOME", prev_xdg);
+        assert!(usage.iter().any(|m| m.model == "claude-opus-4-8"));
+        let other = usage
+            .iter()
+            .find(|m| m.model == "other-account-model")
+            .expect("the default ~/.claude's usage must be included");
+        assert_eq!(other.turns, 1);
+        assert_eq!(other.input, 7);
     }
 
     #[test]

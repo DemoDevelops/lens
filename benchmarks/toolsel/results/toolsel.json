@@ -1,58 +1,35 @@
 {
-  "mined_lens_first_rate": 0.2,
-  "mined_rate": 0.6833333333333333,
-  "mined_strict_rate": 0.11666666666666667,
-  "model": "claude-sonnet-5 (headless, lens-hooks v0.7.0, low, n6)",
-  "overall_lens_first_rate": 0.34615384615384615,
-  "overall_rate": 0.7564102564102565,
-  "overall_strict_rate": 0.28205128205128205,
-  "runs": 6,
+  "mined_lens_first_rate": 0.1176470588235294,
+  "mined_rate": 0.5294117647058824,
+  "mined_strict_rate": 0.0784313725490196,
+  "model": "",
+  "overall_lens_first_rate": 0.2333333333333333,
+  "overall_rate": 0.5833333333333333,
+  "overall_strict_rate": 0.2,
+  "runs": 3,
   "tasks": [
     {
       "id": "0001_skeleton_forge",
-      "lens_first_rate": 1.0,
-      "rate": 1.0,
+      "lens_first_rate": 0.6666666666666666,
+      "rate": 0.6666666666666666,
       "runs": [
         {
           "lens_first": true,
           "pass": true,
           "strict": true,
           "tools": [
-            "ToolSearch",
             "lens_skeleton"
           ]
         },
         {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
           "tools": [
-            "ToolSearch",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_skeleton"
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
           ]
         },
         {
@@ -64,7 +41,7 @@
           ]
         }
       ],
-      "strict_rate": 1.0
+      "strict_rate": 0.6666666666666666
     },
     {
       "id": "0002_symbol_throttle_fired",
@@ -92,30 +69,7 @@
           "pass": true,
           "strict": true,
           "tools": [
-            "lens_symbol"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_symbol"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_symbol"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
+            "ToolSearch",
             "lens_symbol"
           ]
         }
@@ -124,42 +78,14 @@
     },
     {
       "id": "0003_search_quarantine",
-      "lens_first_rate": 0.5,
+      "lens_first_rate": 1.0,
       "rate": 1.0,
       "runs": [
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "ToolSearch",
-            "lens_search"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_search"
-          ]
-        },
         {
           "lens_first": true,
           "pass": true,
           "strict": true,
           "tools": [
-            "lens_search"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
             "lens_search"
           ]
         },
@@ -180,91 +106,94 @@
           ]
         }
       ],
-      "strict_rate": 0.5
+      "strict_rate": 1.0
     },
     {
       "id": "0004_readonly_setup_doctor_checks",
-      "lens_first_rate": 0.16666666666666666,
+      "lens_first_rate": 0.0,
       "rate": 0.3333333333333333,
+      "runs": [
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Bash"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "Read"
+          ]
+        }
+      ],
+      "strict_rate": 0.0
+    },
+    {
+      "id": "0005_readonly_extract_name_reuse",
+      "lens_first_rate": 0.3333333333333333,
+      "rate": 0.6666666666666666,
       "runs": [
         {
           "lens_first": false,
           "pass": true,
           "strict": false,
           "tools": [
+            "Grep",
+            "lens_search",
+            "Grep",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Read",
+            "Grep",
             "Grep",
             "lens_skeleton",
             "lens_skeleton"
           ]
         },
         {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "Read"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Bash"
-          ]
-        },
-        {
           "lens_first": true,
           "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
           "strict": false,
           "tools": [
-            "Bash"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
+            "lens_grep_ast",
             "Grep",
-            "Read"
+            "Read",
+            "lens_skeleton"
           ]
         }
       ],
-      "strict_rate": 0.16666666666666666
+      "strict_rate": 0.0
     },
     {
-      "id": "0005_readonly_extract_name_reuse",
+      "id": "0006_readonly_dashboard_serve_handler",
       "lens_first_rate": 0.0,
-      "rate": 0.5,
+      "rate": 0.3333333333333333,
       "runs": [
         {
           "lens_first": false,
           "pass": false,
           "strict": false,
           "tools": [
-            "Read"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "Grep",
-            "Grep",
-            "Grep",
-            "Read",
             "Grep"
           ]
         },
@@ -274,8 +203,262 @@
           "strict": false,
           "tools": [
             "Read",
+            "lens_grep_ast",
+            "Grep",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "Grep",
+            "Grep"
+          ]
+        }
+      ],
+      "strict_rate": 0.0
+    },
+    {
+      "id": "0007_nav_include_bodies_threading",
+      "lens_first_rate": 0.0,
+      "rate": 0.6666666666666666,
+      "runs": [
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "ToolSearch",
+            "lens_search",
+            "lens_symbol",
+            "Grep",
+            "Read",
+            "lens_skeleton",
+            "lens_skeleton",
+            "Read"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "ToolSearch",
+            "lens_search",
+            "Grep",
+            "lens_skeleton",
+            "lens_symbol",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "Grep",
+            "Read",
+            "Read",
+            "lens_run_file"
+          ]
+        }
+      ],
+      "strict_rate": 0.0
+    },
+    {
+      "id": "0008_nav_sessionstart_repo_map_digest",
+      "lens_first_rate": 1.0,
+      "rate": 1.0,
+      "runs": [
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": true,
+          "tools": [
+            "lens_search",
+            "Grep",
+            "lens_skeleton",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": true,
+          "tools": [
+            "lens_search",
+            "lens_symbol",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": true,
+          "tools": [
+            "lens_search",
+            "lens_grep_ast",
+            "lens_search",
+            "Grep",
+            "Read"
+          ]
+        }
+      ],
+      "strict_rate": 1.0
+    },
+    {
+      "id": "0009_nav_bench_toolsel_entrypoint",
+      "lens_first_rate": 0.3333333333333333,
+      "rate": 0.6666666666666666,
+      "runs": [
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "Grep"
+          ]
+        },
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "lens_search",
+            "Grep",
+            "lens_skeleton",
+            "Grep"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "lens_skeleton"
+          ]
+        }
+      ],
+      "strict_rate": 0.0
+    },
+    {
+      "id": "0010_grep_include_bodies_occurrences",
+      "lens_first_rate": 0.0,
+      "rate": 1.0,
+      "runs": [
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
             "Grep",
             "lens_search",
+            "lens_skeleton",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "ToolSearch",
+            "lens_search",
+            "Grep",
+            "lens_skeleton",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "lens_search"
+          ]
+        }
+      ],
+      "strict_rate": 0.0
+    },
+    {
+      "id": "0011_grep_repo_map_occurrences",
+      "lens_first_rate": 0.0,
+      "rate": 1.0,
+      "runs": [
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "ToolSearch",
+            "lens_index",
+            "lens_search",
+            "Grep",
+            "Grep",
+            "Read",
+            "Read"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "ToolSearch",
+            "lens_search",
+            "lens_run",
+            "Read",
+            "Read"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "lens_search",
+            "Grep",
+            "Grep"
+          ]
+        }
+      ],
+      "strict_rate": 0.0
+    },
+    {
+      "id": "0012_bigread_server_tool_surface",
+      "lens_first_rate": 0.3333333333333333,
+      "rate": 1.0,
+      "runs": [
+        {
+          "lens_first": true,
+          "pass": true,
+          "strict": true,
+          "tools": [
+            "ToolSearch",
+            "lens_skeleton"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "ToolSearch",
+            "lens_grep_ast",
             "lens_skeleton"
           ]
         },
@@ -286,7 +469,27 @@
           "tools": [
             "Grep",
             "lens_grep_ast",
-            "Read"
+            "lens_grep_ast",
+            "lens_skeleton"
+          ]
+        }
+      ],
+      "strict_rate": 0.3333333333333333
+    },
+    {
+      "id": "0013_bigread_mod_throttle_consts",
+      "lens_first_rate": 0.0,
+      "rate": 0.6666666666666666,
+      "runs": [
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "Read",
+            "Grep",
+            "Grep"
           ]
         },
         {
@@ -295,27 +498,27 @@
           "strict": false,
           "tools": [
             "Grep",
-            "lens_skeleton",
-            "Read"
+            "lens_search",
+            "Grep"
           ]
         },
         {
           "lens_first": false,
-          "pass": false,
+          "pass": true,
           "strict": false,
           "tools": [
             "Grep",
-            "Grep",
-            "Read"
+            "lens_search",
+            "Grep"
           ]
         }
       ],
       "strict_rate": 0.0
     },
     {
-      "id": "0006_readonly_dashboard_serve_handler",
+      "id": "0014_bashagg_1",
       "lens_first_rate": 0.0,
-      "rate": 0.5,
+      "rate": 0.0,
       "runs": [
         {
           "lens_first": false,
@@ -328,11 +531,12 @@
         },
         {
           "lens_first": false,
-          "pass": true,
+          "pass": false,
           "strict": false,
           "tools": [
-            "Grep",
-            "lens_skeleton"
+            "Bash",
+            "Bash",
+            "Bash"
           ]
         },
         {
@@ -340,44 +544,14 @@
           "pass": false,
           "strict": false,
           "tools": [
-            "Grep",
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "Read",
-            "Read",
-            "Read"
+            "Bash"
           ]
         }
       ],
       "strict_rate": 0.0
     },
     {
-      "id": "0007_nav_include_bodies_threading",
+      "id": "0015_bashagg_2",
       "lens_first_rate": 0.0,
       "rate": 0.0,
       "runs": [
@@ -386,277 +560,112 @@
           "pass": false,
           "strict": false,
           "tools": [
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "Grep",
-            "Grep",
-            "Grep",
-            "lens_skeleton",
-            "Grep",
-            "Grep",
-            "Grep",
-            "Grep",
-            "lens_skeleton",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Grep"
-          ]
-        }
-      ],
-      "strict_rate": 0.0
-    },
-    {
-      "id": "0008_nav_sessionstart_repo_map_digest",
-      "lens_first_rate": 0.5,
-      "rate": 1.0,
-      "runs": [
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_search",
-            "Grep",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_search",
-            "Grep",
-            "Read"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "ToolSearch",
-            "lens_search",
-            "lens_symbol",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_search",
-            "Grep",
-            "Read"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "ToolSearch",
-            "lens_search",
-            "lens_symbol",
-            "Read"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_search",
-            "Grep",
-            "lens_skeleton"
-          ]
-        }
-      ],
-      "strict_rate": 0.5
-    },
-    {
-      "id": "0009_nav_bench_toolsel_entrypoint",
-      "lens_first_rate": 0.16666666666666666,
-      "rate": 1.0,
-      "runs": [
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "ToolSearch",
-            "lens_search",
-            "Grep",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "lens_search",
-            "Grep",
-            "lens_skeleton",
-            "Grep",
-            "Read"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "ToolSearch",
-            "lens_search",
-            "Grep",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "Grep",
-            "lens_search",
-            "Grep",
-            "lens_run"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "Read",
-            "lens_symbol",
-            "Grep",
             "Bash"
           ]
         },
         {
           "lens_first": false,
-          "pass": true,
+          "pass": false,
           "strict": false,
           "tools": [
-            "Grep",
-            "Grep",
-            "lens_search",
-            "Grep"
+            "Bash"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Bash"
           ]
         }
       ],
       "strict_rate": 0.0
     },
     {
-      "id": "0010_grep_include_bodies_occurrences",
-      "lens_first_rate": 0.3333333333333333,
-      "rate": 1.0,
+      "id": "0016_bashagg_3",
+      "lens_first_rate": 0.0,
+      "rate": 0.0,
       "runs": [
         {
           "lens_first": false,
-          "pass": true,
+          "pass": false,
           "strict": false,
           "tools": [
-            "Grep",
-            "lens_search",
-            "lens_grep_ast",
-            "Grep",
-            "Grep",
-            "Grep"
+            "Bash"
           ]
         },
         {
           "lens_first": false,
-          "pass": true,
+          "pass": false,
           "strict": false,
           "tools": [
-            "Grep",
-            "lens_search",
-            "Grep",
-            "Grep",
-            "Grep"
+            "Bash"
           ]
         },
         {
           "lens_first": false,
-          "pass": true,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Bash"
+          ]
+        }
+      ],
+      "strict_rate": 0.0
+    },
+    {
+      "id": "0017_bashagg_4",
+      "lens_first_rate": 0.0,
+      "rate": 0.0,
+      "runs": [
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Bash"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": false,
+          "strict": false,
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ]
+        }
+      ],
+      "strict_rate": 0.0
+    },
+    {
+      "id": "0018_grepast_1",
+      "lens_first_rate": 0.0,
+      "rate": 0.6666666666666666,
+      "runs": [
+        {
+          "lens_first": false,
+          "pass": false,
           "strict": false,
           "tools": [
             "Grep",
-            "lens_search",
-            "lens_skeleton",
-            "lens_skeleton",
             "Grep",
             "Grep",
-            "Grep",
-            "Grep",
-            "lens_search"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_search",
-            "lens_run",
-            "lens_run"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_search",
-            "Grep"
+            "lens_skeleton"
           ]
         },
         {
@@ -666,147 +675,17 @@
           "tools": [
             "Grep",
             "ToolSearch",
-            "lens_search"
-          ]
-        }
-      ],
-      "strict_rate": 0.3333333333333333
-    },
-    {
-      "id": "0011_grep_repo_map_occurrences",
-      "lens_first_rate": 0.16666666666666666,
-      "rate": 1.0,
-      "runs": [
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_search",
-            "lens_run",
-            "Read",
-            "Read"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_search",
-            "Grep",
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": true,
-          "pass": true,
-          "strict": true,
-          "tools": [
-            "lens_search",
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_search",
-            "Grep",
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_search",
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_search",
-            "Grep",
-            "lens_search",
-            "Grep"
-          ]
-        }
-      ],
-      "strict_rate": 0.16666666666666666
-    },
-    {
-      "id": "0012_bigread_server_tool_surface",
-      "lens_first_rate": 0.16666666666666666,
-      "rate": 1.0,
-      "runs": [
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
             "lens_grep_ast",
-            "lens_run_file",
             "lens_run_file"
           ]
         },
         {
-          "lens_first": true,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "lens_grep_ast",
-            "lens_search",
-            "lens_skeleton"
-          ]
-        },
-        {
           "lens_first": false,
           "pass": true,
           "strict": false,
           "tools": [
             "Grep",
-            "lens_run",
-            "lens_run"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "Grep",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
-            "lens_search",
-            "lens_skeleton"
-          ]
-        },
-        {
-          "lens_first": false,
-          "pass": true,
-          "strict": false,
-          "tools": [
-            "Grep",
+            "ToolSearch",
             "lens_grep_ast",
             "lens_run_file"
           ]
@@ -815,54 +694,68 @@
       "strict_rate": 0.0
     },
     {
-      "id": "0013_bigread_mod_throttle_consts",
-      "lens_first_rate": 0.5,
-      "rate": 0.5,
+      "id": "0019_grepast_2",
+      "lens_first_rate": 0.0,
+      "rate": 1.0,
       "runs": [
         {
-          "lens_first": true,
+          "lens_first": false,
           "pass": true,
           "strict": false,
           "tools": [
-            "lens_search",
+            "Grep",
+            "ToolSearch",
+            "lens_grep_ast"
+          ]
+        },
+        {
+          "lens_first": false,
+          "pass": true,
+          "strict": false,
+          "tools": [
+            "Grep",
+            "ToolSearch",
+            "lens_grep_ast",
             "lens_skeleton"
           ]
         },
         {
           "lens_first": false,
-          "pass": false,
-          "strict": false,
-          "tools": [
-            "Grep"
-          ]
-        },
-        {
-          "lens_first": true,
           "pass": true,
           "strict": false,
           "tools": [
-            "lens_search",
-            "lens_symbol",
             "Grep",
+            "ToolSearch",
+            "lens_grep_ast",
+            "lens_grep_ast",
             "Read"
           ]
-        },
+        }
+      ],
+      "strict_rate": 0.0
+    },
+    {
+      "id": "0020_grepast_3",
+      "lens_first_rate": 0.0,
+      "rate": 0.0,
+      "runs": [
         {
           "lens_first": false,
           "pass": false,
           "strict": false,
           "tools": [
-            "Grep"
+            "Grep",
+            "Grep",
+            "Grep",
+            "lens_run",
+            "lens_run"
           ]
         },
         {
-          "lens_first": true,
-          "pass": true,
+          "lens_first": false,
+          "pass": false,
           "strict": false,
-          "tools": [
-            "lens_search",
-            "Grep"
-          ]
+          "tools": []
         },
         {
           "lens_first": false,
@@ -870,7 +763,11 @@
           "strict": false,
           "tools": [
             "Grep",
-            "Grep"
+            "Grep",
+            "Grep",
+            "ToolSearch",
+            "lens_run",
+            "lens_run"
           ]
         }
       ],

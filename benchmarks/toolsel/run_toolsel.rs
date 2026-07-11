@@ -479,7 +479,12 @@ fn main() -> anyhow::Result<()> {
         "mined_lens_first_rate": mined_lens_first,
     });
 
-    let out_dir = repo_root().join("benchmarks/toolsel/results");
+    // `LENS_TOOLSEL_OUT` redirects results so concurrent runs (e.g. an off/on
+    // rail A/B) don't clobber the shared committed path (the default),
+    // mirroring `LENS_BENCH_OUT` in benchmarks/common/accuracy.rs.
+    let out_dir = std::env::var_os("LENS_TOOLSEL_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("benchmarks/toolsel/results"));
     std::fs::create_dir_all(&out_dir)?;
     let out_path = out_dir.join("toolsel.json");
     std::fs::write(&out_path, serde_json::to_string_pretty(&out)?)?;

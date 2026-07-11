@@ -1,0 +1,10 @@
+{
+  "id": "0027_skeleton_struct_fields",
+  "prompt": "In this file, list the three field names of the Summary struct in declaration order, and give the exact source line number where the struct definition begins.",
+  "fixtures": ["fixtures/skeleton/service.rs"],
+  "ground_truth": { "field1": "posted", "field2": "rejected", "field3": "net_cents", "line": "78" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "evidence": ["L78: pub struct Summary", "posted", "rejected", "net_cents"],
+  "treatment": { "skeleton": "fixtures/skeleton/service.rs", "with_lines": true }
+}

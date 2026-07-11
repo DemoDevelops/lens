@@ -100,6 +100,89 @@ Every CM cell is `n/a` with a stated reason rather than a fabricated number. The
 faithful head-to-head lens *was* built to win is **session recovery** (below),
 which drives CM's real hook scripts.
 
+## Tool-selection enforcement (full)
+
+### Method
+
+10 real `code-analyst` dispatches were mined from this project's own Claude Code session history (the 10 most recent, deduplicated by prompt): 2 raw telemetry/tool-surface audits, 1 dark-launch rail verification, 1 dashboard architecture map, 2 subsystem maps (accuracy harness, MCP server layer), 1 routing-machinery map, and 3 adversarial Tantivy-backend audits (concurrency, migration integrity, ranking parity). 4 tasks referenced worktrees that no longer existed because the work had since merged to `master`; those were retargeted to the main repo (same files, same content) rather than dropped.
+
+Each task's original prompt was replayed unmodified through three agent variants in parallel:
+- **`code-analyst`** (full-tools baseline). `Read`, `Grep`, `Glob`, `Bash`, plus all `lens_*` tools.
+- **`code-analyst-lens-only`**. `lens_*` tools only; `Read`/`Grep`/`Glob`/`Bash` removed from the tool list entirely (an enforced allowlist, not a nudge or a deny-with-retry).
+- **`code-analyst-no-lens`** (the control this section exists to rule out). `Read`/`Grep`/`Glob`/`Bash` only, no `lens_*` tools at all. Without this arm, "restricting the agent to lens tools saves tokens" is confounded with "restricting the agent's tool count at all saves tokens." This arm isolates lens's own contribution from the effect of restriction itself.
+
+A fourth agent then judged each triple: given the original task and all three reports (no arm labels revealed), it scored `best`/`worst` across all three, and separately verdicted lens-only and no-lens against the full-tools baseline (`equal_or_better` / `worse` / `failed`), with required notes. A sample of every arm's `file:line` citations were independently re-verified against the live source rather than trusted from the judge's say-so.
+
+Per-task and per-arm turns, tool calls, wall-clock, and token counts were extracted from the raw agent transcripts (`assistant` message count, `tool_use` block count, first/last timestamp delta, and summed `usage` fields per transcript).
+
+### Per-task results
+
+| Task | vs full: lens-only | vs full: no-lens | Full turns/tools/dur(s)/tok | lens-only turns/tools/dur(s)/tok | no-lens turns/tools/dur(s)/tok |
+| --- | --- | --- | ---: | ---: | ---: |
+| Mine usage telemetry | worse | equal/better | 64/39/280/2,555,580 | 32/19/117/1,119,889 | 47/32/160/1,357,649 |
+| Audit tool surface | equal/better | equal/better | 34/20/131/2,116,645 | 21/13/86/949,343 | 41/25/132/1,932,236 |
+| T11 rail verification | equal/better | equal/better | 65/42/166/4,025,856 | 40/27/112/2,282,884 | 44/28/115/2,377,832 |
+| Dashboard seams map | worse | equal/better | 23/15/83/830,078 | 24/18/64/1,037,578 | 32/19/103/960,515 |
+| Accuracy bench map | equal/better | equal/better | 20/12/85/965,768 | 26/17/102/906,446 | 41/27/126/1,634,102 |
+| **Server tools map** | **worse** | **worse** | 30/20/81/891,586 | 31/21/87/1,962,941 | 26/14/91/708,390 |
+| Routing machinery map | worse | equal/better | 51/32/151/2,603,920 | 30/18/111/2,116,748 | 42/26/136/2,172,911 |
+| Tantivy concurrency audit | equal/better | equal/better | 48/27/295/3,199,630 | 29/20/193/1,886,399 | 43/23/252/1,747,579 |
+| Tantivy integrity audit | equal/better (best of 3) | equal/better | 32/17/444/1,864,564 | 29/19/386/1,768,378 | 40/21/260/1,581,841 |
+| Tantivy ranking parity audit | equal/better (best of 3) | equal/better | 35/18/210/1,897,173 | 22/13/128/978,662 | 21/12/98/751,737 |
+| **Total** | **6/10 equal-or-better, 2/10 best-of-3** | **9/10 equal-or-better** | **402/242/1926s/20,950,800** | **284/185/1386s/15,009,268** | **377/227/1473s/15,224,792** |
+
+Tokens are total per-transcript throughput (input + output + cache create + cache read).
+
+### The control changes the story
+
+Summed efficiency deltas look similar for both restricted arms (lens-only: -29% turns / -24% tools / -28% duration / -28% tokens vs full; no-lens: -6% turns / -6% tools / -24% duration / -27% tokens vs full). Total tokens and wall-clock savings are nearly identical between them. What is actually distinctive to lens is the sharper turn and tool-call compression (-29%/-24% vs only -6%/-6%): lens gets to the same answer in fewer round-trips, not in meaningfully fewer total tokens than any other tool restriction would produce. Most of the raw token reduction comes from having fewer tools to explore with at all, not specifically from lens.
+
+Quality tells a sharper story. no-lens matched or beat the full-tools baseline on 9 of 10 tasks (1 loss); lens-only matched or beat it on 6 of 10 (4 losses), but was also the only arm to outright win outright on 2 tasks, catching real defects (a Tantivy schema-drift/version-gate gap decoupled from the version check; an unbounded `AllQuery` ranking scan plus a snippet-selection mismatch) that both other arms, including full-tools, missed or understated. lens-only's losses are mostly honest under-precision (hedged via its `LENS_GAP` sentinel), but not entirely: on `server-tools-map` it also asserted a confident, unhedged, WRONG substantive claim (below), the same failure shape as no-lens's confident-but-wrong duplication answer on the same task. This was verified by reading the raw transcript directly, not inferred from a judge summary.
+
+### The regressions
+
+`server-tools-map` is the one task where both restricted arms lost, and the only one where lens-only was both more expensive (2.2x the tokens of full-tools) and lower quality. It asked for exact source-line citations across many small tool-registration sites in `src/server.rs`, AND to confirm or rule out duplicate tool descriptions elsewhere in the repo. Two separate failures, not one:
+
+- **Citation precision** (hedged): several line numbers came from `lens_skeleton`'s elided view rather than a byte-exact read, one was off by 67 lines, and several tools got "inline" instead of a line number where the task explicitly asked for one. lens-only's own `LENS_GAP` sentinel on this report says "two items stayed approximate", an honest, if incomplete, disclosure.
+- **Duplicate-description claim** (NOT hedged, flatly wrong): the same report states "No other file duplicates description prose" and names five files it checked, none of them `README.md` or `src/obs/dashboard.rs`, both of which contain real, independently-worded duplicate tool descriptions that the full-tools agent found (`README.md:76-89` via a literal grep; `dashboard.rs:495-509`'s `TOOL_DESC`). lens-only's `LENS_GAP` disclosure covered the citation-precision gap it noticed, but not this one, it was simply confident and wrong. Neither L48 nor L49 (below) fixes this failure mode; it is a search-completeness gap (not checking docs/non-code files for a literal phrase), not a skeleton-elision gap.
+
+`telemetry-mining`, `dashboard-seams-map`, and `routing-machinery-map` are lens-only's other three losses, all softer: relying on a stale committed doc instead of re-querying live counters, or self-disclosing (via the `LENS_GAP` sentinel) that a citation was approximate rather than byte-verified. None involved a wrong substantive claim; the judge's own language on `routing-machinery-map`: "its factual content is otherwise correct and comparably deep... no hallucinated line numbers found."
+
+Pattern: losing `Bash` cost nothing across all 10 tasks (none needed to build/run/query anything external). Losing `Read`/`Grep` cost precision specifically on (a) citation-heavy scope with many small definitions, where `lens_skeleton`'s elided bodies invite a confident guess at a line number, and (b) cross-file plain-text duplication checks, where a literal grep for a phrase is still the more direct tool than any lens graph/search call. `code-analyst-lens-only`'s contract was subsequently updated to require marking any skeleton-derived (non-byte-verified) citation with a `~` prefix, and to end every report with an explicit `LENS_GAP: none` / `LENS_GAP: <what and why>` line so a caller can programmatically detect and escalate a flagged gap to `code-analyst`. That only catches gaps the agent notices about itself, not silent precision loss like the `server-tools-map` case; a cheap backstop is spot-verifying a sample of citations before trusting the rest, which is what caught that regression here.
+
+## Routing (hooks) — full data
+
+### Method
+
+Two different harnesses measure two different things, and conflating them was a real methodology bug caught mid-cycle:
+
+- The "Tool-selection enforcement" section above uses `Agent`-tool dispatch (`code-analyst` / `code-analyst-lens-only` / `code-analyst-no-lens`). Confirmed by grepping raw subagent transcripts for the `<system-reminder>` tags hook injections leave behind: zero hits across every sampled transcript. `Agent`/`Workflow`-spawned subagents do not receive Claude Code's PreToolUse/SessionStart hooks at all, so that section measures cold-start tool choice given only tool descriptions, not the shipped routing system.
+- This section instead uses `bench_toolsel`: real headless `claude -p` sessions launched with `--settings` pointing at a hooks-wired settings file, so PreToolUse nudges/denies are genuinely live. This is the trustworthy signal for "does routing change tool choice / outcome."
+
+T7 (this release): an A/B on the `grep-ast` and `bash-aggregate` deny rails, `LENS_ROUTING=steer` (`steer`/`full` are the two levels `steers()` recognizes; `nudge` alone never fires a deny), 3 runs per arm per task, `claude-sonnet-5`. Fire counts were pulled from `store.db`'s `gast_would_fire` / `bagg_would_fire` deltas per task, not grepped from logs (macOS BSD `grep -P` silently no-ops, the trap the first attempt at this hit). Results are conditioned on tasks where the rail actually fired (an unfired task is a no-op by construction and would dilute the comparison toward zero).
+
+T6 (this release): an isolated per-model A/B on the grep-scope deny rail alone (`Grep` → `lens_search`/`lens_symbol`), 3 models (sonnet / haiku / opus-4-8) x 2 arms, 234 sessions total, `LENS_ROUTING=full` baseline already active for both arms, so this isolates the rail's marginal contribution on top of a model that already has full lens access, not lens-vs-no-lens.
+
+T1 (prior release, restated for context): the same grep-scope deny rail's live production adoption rate, measured from real usage rather than a curated bench.
+
+### Results
+
+| Test | Scope | Off | On | Δ | N |
+| --- | --- | ---: | ---: | ---: | --- |
+| T7 grep-ast deny | fired tasks, sonnet | 61.1% | 88.9% | +27.8pp | 3 runs/arm |
+| T7 bash-aggregate deny | fired tasks, sonnet | 13.3% | 53.3% | +40.0pp | 3 runs/arm |
+| T7 combined | fired tasks, sonnet | 56.7% | 75.0% | +18.3pp | 3 runs/arm |
+| T6 grep-scope deny | isolated, sonnet | -- | -- | -7.7pp | 234 sessions, 3 models |
+| T6 grep-scope deny | isolated, haiku | -- | -- | 0.0pp | " |
+| T6 grep-scope deny | isolated, opus-4-8 | -- | -- | +5.1pp | " |
+| T1 grep-scope deny | live production | n/a | 71% conversion | n/a | organic usage |
+
+T6's per-model deltas are all inside that arm's own run-to-run standard deviation: read as "no detectable effect," not a negative result. All 13 rail flags shipped this release at kill-switch default-ON polarity (`72d85bf`): the T7 pair on direct evidence of a real gain, the remaining rails (grep-symbol, read-skeleton, read-overview, edit-links) on the same polarity as the already-proven grep-scope rail rather than individually re-benched, since T6 shows the marginal per-rail accuracy signal is hard to isolate once a model already has full lens access, while T1's 71% conversion rate shows the rails do change behavior in the intended direction.
+
+### A caveat: hooks don't make "full" win a quality contest against "lens-only"
+
+Re-running the tool-selection tasks above with the "full" arm driven through a real hooked `claude -p` session (not `Agent` dispatch) instead of assuming hooks are irrelevant: 6/6 tasks still land `equal_or_better` for both `lens-only` and `no-lens` against `full`, with 5/6 ties and one outright `lens-only` win (`rrf-fusion-trace`). Hooks close the gap on live tool selection, which is the point of the A/B above, but they do not make the full-tools arm out-investigate a lens-only agent that has no other option. "full" remains the right default because it keeps `Read`/`Grep`/`Bash` available as a fallback while getting steered toward lens's efficiency, not because it wins a head-to-head quality contest against lens-only; the "Tool-selection enforcement" regressions above (`server-tools-map` and lens-only's other three losses) are why lens-only isn't the default yet.
+
 ## Accuracy (full)
 
 Model: `claude-opus-4-8 (via claude-headless)`

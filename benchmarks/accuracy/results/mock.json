@@ -26,11 +26,11 @@
     },
     {
       "control_acc": 0.0,
-      "control_tokens": 980,
+      "control_tokens": 1470,
       "mechanism": "skeleton",
-      "n": 2,
-      "treatment_acc": 1.0,
-      "treatment_tokens": 920
+      "n": 3,
+      "treatment_acc": 0.6666666666666666,
+      "treatment_tokens": 1559
     }
   ],
   "mode": "mock",
@@ -296,6 +296,32 @@
         "context_bytes": 1982,
         "correct": true,
         "tokens": 460
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "field1": "UNKNOWN",
+          "field2": "UNKNOWN",
+          "field3": "UNKNOWN",
+          "line": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 490
+      },
+      "id": "0027_skeleton_struct_fields",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "field1": "UNKNOWN",
+          "field2": "UNKNOWN",
+          "field3": "UNKNOWN",
+          "line": "UNKNOWN"
+        },
+        "context_bytes": 2409,
+        "correct": false,
+        "tokens": 639
       }
     }
   ]

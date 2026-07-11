@@ -59,6 +59,12 @@ pub struct Treatment {
     pub to: Option<String>,
     /// Skeleton: path to a source file to reduce to signatures + nesting.
     pub skeleton: Option<String>,
+    /// Skeleton (L48): when true, the skeleton treatment is built with
+    /// `with_lines: true` so definition headers carry `L{n}: ` line-number
+    /// citations. Defaults to false, so every existing `skeleton` task is
+    /// unaffected.
+    #[serde(default)]
+    pub with_lines: bool,
     /// Find: top-K budget for the `find` graph_op (how many ranked matches survive
     /// before their neighbors are pulled in). Defaults to 3.
     pub limit: Option<usize>,
@@ -357,7 +363,7 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
         let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
         let spec = discovery::extract::spec_for_extension(ext)
             .ok_or_else(|| anyhow::anyhow!("no language spec for {}", p.display()))?;
-        let skel = discovery::skeleton::skeletonize(&content, &spec, None, false)
+        let skel = discovery::skeleton::skeletonize(&content, &spec, None, t.with_lines)
             .ok_or_else(|| anyhow::anyhow!("could not skeletonize {}", p.display()))?;
         return Ok(skel);
     }

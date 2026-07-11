@@ -1,0 +1,42 @@
+{
+  "name": "bench_3arm",
+  "description": "Real read-only investigation tasks replayed through code-analyst / code-analyst-lens-only / code-analyst-no-lens (workflows/code-analyst-three-arm-replay.js), judged for coverage/correctness/grounding. This set targets the mechanisms shipped since the v0.7.0 release: skeleton line-number citations + struct/enum field visibility (L48/L49), the reroute-rail kill-switch default-ON flip, RRF graph-fused search (L43), $META structural patterns (L41), cross-session memory tools (L42), and markdown link resolution.",
+  "last_run": {
+    "date": "2026-07-10",
+    "model": "claude-sonnet-5",
+    "effort": "low",
+    "result_summary": "6/6 tasks: lens_only_vs_full=equal_or_better and no_lens_vs_full=equal_or_better. 5/6 ties, rrf-fusion-trace best=lens_only outright. routectx-recheck (the exact case that originally surfaced the L48/L49 gap) now ties -- all three arms got the full 7-field RouteCtx struct right, confirming the L48/L49 fix closed the prior gap."
+  },
+  "tasks": [
+    {
+      "id": "routectx-recheck",
+      "desc": "RouteCtx field completeness (the exact case that originally surfaced the L48/L49 skeleton gap)",
+      "prompt": "In this repo, map the `RouteCtx` struct (src/routing/mod.rs) completely: list every field with its type, and every function outside src/routing/mod.rs that constructs or mutates a RouteCtx value, with file:line citations. Be exhaustive about the field list -- a prior review under a similar task missed a field."
+    },
+    {
+      "id": "reroute-rail-defaults",
+      "desc": "Reroute rail default polarity after the \"kill-switch default-ON\" flip",
+      "prompt": "This repo just changed all of its reroute routing rails (grep-scope, grep-symbol, read-skeleton, grep-ast, read-overview, bash-agg, edit-links -- each with a deny and/or nudge variant, 13 env flags total) from dark-launch-off to kill-switch-default-ON. Find where each flag's default value and polarity is read (the source of truth, likely src/routing/reroute/mod.rs), explain precisely what setting a flag to \"0\" now means versus leaving it unset, and cite the exact file:line for the default-resolution logic."
+    },
+    {
+      "id": "rrf-fusion-trace",
+      "desc": "RRF graph-fused search (L43)",
+      "prompt": "Explain how `Index::search_fused` (src/index/mod.rs) combines lexical search rank with graph importance (reciprocal rank fusion). Find every call site of search_fused in the codebase, and explain how the per-file graph-importance ranking fed into it is computed."
+    },
+    {
+      "id": "meta-pattern-compile",
+      "desc": "$META structural pattern compiler (L41)",
+      "prompt": "Explain how a \"$X\"-style structural meta-pattern (e.g. \"$X.unwrap()\") gets compiled into a tree-sitter query in this repo (src/discovery/pattern.rs and callers). Trace the full path from a caller supplying the pattern string through to query execution, including how metavariables are substituted."
+    },
+    {
+      "id": "memory-api-map",
+      "desc": "Cross-session memory tools (L42)",
+      "prompt": "Map the lens_memory_record / lens_memory_query MCP tools end to end: their handlers in src/server.rs, the underlying storage layer, and how a later call's query matches against previously recorded entries. Cite file:line for each hop."
+    },
+    {
+      "id": "markdown-link-resolution",
+      "desc": "Markdown as a first-class graph language: link resolution",
+      "prompt": "Explain how a markdown wikilink or #tag resolves to a real graph node instead of a stub placeholder in this repo's discovery layer. Trace the resolution path and identify what kind of graph node each link type resolves to, with file:line citations."
+    }
+  ]
+}

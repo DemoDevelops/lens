@@ -1,18 +1,9 @@
-Smarter search ranking, markdown as a first-class graph language, cross-session memory, and six more routing rails on by default building on v0.7.0's tool-selection steering. Covers everything merged since v0.7.0.
-
-### Added
-- **Six more routing rails, on by default.** v0.7.0 shipped the base tool-selection routing (nudge toward lens tools, deny a first broad `Grep`). `LENS_ROUTING` now defaults to `full`, and six additional rails (grep-by-symbol-name, pre-edit reads, aggregated bash output, markdown links, AST-shaped grep, overview-worthy reads) each ship a nudge arm and a deny arm and are on by default (kill-switch polarity: set the matching `LENS_*_DENY`/`LENS_*_NUDGE` to `0` to disable one), promoted after a live A/B showed real adoption gains (see [BENCHMARKS.md](BENCHMARKS.md)). High-output read-only `Bash` commands are also now transparently offloaded through `lens_run`.
-- **Identifier-rarity rerank.** A query naming a specific identifier now reranks the file that defines it to the top of results, even when a prose-heavy file scores higher on raw term frequency. On by default; a no-op on queries with no strong identifier.
-- **Graph-aware search fusion (RRF).** Search fuses lexical rank with graph centrality, so a structurally important file (imported and called from everywhere) surfaces even when its own text match is weak. On by default.
-- **`$META` structural pattern language.** Structural search accepts `$X`-style meta-patterns (e.g. `$X.unwrap()`) that compile to tree-sitter queries, verified against independent hand-written oracles.
-- **Cross-session memory.** New `record_memory` / `query_memory` tools store durable, project-scoped notes that a later session can recall by query.
-- **Markdown as a first-class graph language.** Headings, sections, and skeleton views now work on `.md` files like any other language; links resolve to real graph nodes instead of stub placeholders.
-- **Richer skeletons.** `lens_skeleton` now shows struct/enum fields instead of eliding them like function bodies, with optional line-number citations.
-- **Dashboard: real per-model usage.** Savings can be priced against the actually-used model mix ("Actual Usage" mode) instead of one fixed model, and a deterministic classifier attributes savings credit instead of a heuristic.
+A stability patch: no more hang opening from a folder of sibling repos, no more false "disconnected" across concurrent sessions, `lens --version`/`--help` finally just work, and the dashboard's Actual Usage view reaches the terminal. Covers everything merged since v0.8.0.
 
 ### Fixed
-- `bench_fitness`'s tool-surface count no longer miscounts `#[cfg(test)]` functions as tools.
-- A recall regression in `lens_grep_ast` match results.
+- **Opening from a parent folder of git repos no longer hangs.** Launching a session in a directory full of sibling projects used to peg the CPU while the server parsed and indexed every nested repo in one synchronous pass. The walk now stops at each nested `.git` boundary. A bounded-off repo that already has its own `.lens` is reused (its graph merged in path-prefixed, its search index federated), and one without builds lazily into its own `.lens` only when a path-scoped call reaches into it. A binary/media extension denylist and a 2 MB size cap skip large files before they are read, so a stray video no longer gets slurped whole before failing.
+- **"lens shows disconnected" with two sessions in one repo.** The routing layer's liveness signal was a single shared `server.pid` with no ownership check, so one session's clean exit deleted the file out from under another session's still-live server, and routing then read the live server as unreachable. Each server process now owns a per-pid heartbeat file; `mcp_ready` counts the server up while any heartbeat is fresh, so concurrent sessions never clobber each other's liveness.
+- **`lens --version` / `--help` no longer start a dead server.** Unmatched flags fell through into the MCP stdio server, which had no handshake and errored immediately with `connection closed: initialize request`. `--version`/`-V` and `--help`/`-h` are now handled directly, print, and exit cleanly.
 
 ### Improved
-- Setup now allow-lists every lens tool and the CLI up front, including in plan mode, so nothing prompts for permission on first use.
+- **Dashboard "Actual Usage" reaches the terminal.** The per-model Actual Usage view that shipped web-only in v0.8.0 now renders at parity in the TUI dashboard, unions usage across config dirs, gained a boot loader, and no longer fights your scroll.

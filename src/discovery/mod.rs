@@ -26,6 +26,47 @@ use crate::tools::DiscoverResponse;
 pub struct DiscoverOutcome {
     pub graph: Graph,
     pub response: DiscoverResponse,
+    /// Directories under the walked root that are their own git repo boundary
+    /// ([`is_repo_boundary`]) and were pruned from this walk instead of parsed.
+    /// Only [`discover`] populates this (empty for `assemble_graph`'s other
+    /// caller, [`discover_incremental`]).
+    pub nested_repo_roots: Vec<std::path::PathBuf>,
+}
+
+/// True iff `entry` is a nested repo boundary relative to `walk_root`: a
+/// directory other than the walk root itself that owns its own `.git`
+/// directory. `discover`/`nested_repo_roots` never descend past a boundary —
+/// files under it belong to that repo's own graph, not the walking repo's.
+pub fn is_repo_boundary(entry: &Path, walk_root: &Path) -> bool {
+    entry != walk_root && entry.join(".git").exists()
+}
+
+/// Every directory under `root` (excluding `root` itself) that is its own git
+/// repo boundary ([`is_repo_boundary`]), sorted. The walk stops descending the
+/// instant it hits a boundary, so a repo nested inside another nested repo is
+/// not reported — matching `discover`'s own pruning below. The walk is
+/// sequential (`build()`, not `build_parallel()`); the `Mutex` only exists to
+/// satisfy `filter_entry`'s `Send + Sync + 'static` bound, not for real
+/// contention.
+pub fn nested_repo_roots(root: &Path) -> Vec<std::path::PathBuf> {
+    let boundary_root = root.to_path_buf();
+    let found: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let found = std::sync::Arc::new(found);
+    let found_for_filter = std::sync::Arc::clone(&found);
+    let mut builder = WalkBuilder::new(root);
+    builder.standard_filters(true);
+    builder.filter_entry(move |entry| {
+        let is_boundary = entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            && is_repo_boundary(entry.path(), &boundary_root);
+        if is_boundary {
+            found_for_filter.lock().unwrap().push(entry.path().to_path_buf());
+        }
+        !is_boundary
+    });
+    for _ in builder.build() {}
+    let mut roots: Vec<std::path::PathBuf> = std::mem::take(&mut *found.lock().unwrap());
+    roots.sort();
+    roots
 }
 
 /// Discover the structural graph under `root`. `languages` optionally filters to
@@ -41,10 +82,17 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
     let lang_filter: Option<BTreeSet<String>> =
         languages.map(|ls| ls.iter().map(|l| l.to_ascii_lowercase()).collect());
 
-    // Collect candidate files deterministically.
+    // Collect candidate files deterministically. A nested git repo (its own
+    // `.git`) is a boundary this walk must not cross: files under it belong to
+    // that repo's own graph, not this one — see `is_repo_boundary`.
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     let mut builder = WalkBuilder::new(root);
     builder.standard_filters(true);
+    let boundary_root = root.to_path_buf();
+    builder.filter_entry(move |entry| {
+        !(entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            && is_repo_boundary(entry.path(), &boundary_root))
+    });
     for entry in builder.build().flatten() {
         if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             files.push(entry.into_path());
@@ -96,7 +144,50 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
 
     let file_results: Vec<FileResult> = file_results.into_iter().filter_map(|r| r.ok()).collect();
 
-    Ok(assemble_graph(file_results, warnings))
+    let mut outcome = assemble_graph(file_results, warnings);
+    outcome.nested_repo_roots = nested_repo_roots(root);
+    for nested_root in &outcome.nested_repo_roots {
+        merge_nested_graph(&mut outcome.graph, nested_root, root);
+    }
+    Ok(outcome)
+}
+
+/// Merge a nested repo's own persisted graph (`<nested_root>/.lens/graph.json`)
+/// into `graph`, if one exists — a no-op otherwise (T4 builds it lazily on first
+/// path-scoped access). Every node's `file` is rewritten relative to `walk_root`
+/// (prefixed by `nested_root`'s own relative path) and its `id` recomputed to
+/// match, since [`Node::make_id`] is keyed on `file`. Edges are remapped through
+/// the resulting old-id -> new-id map; an id missing from the map (shouldn't
+/// happen for a self-consistent nested graph) is dropped, not a panic.
+/// [`Graph::add_node`]/[`Graph::add_edge`] dedup by id, so this is safe to call
+/// once per nested root.
+fn merge_nested_graph(graph: &mut Graph, nested_root: &Path, walk_root: &Path) {
+    let graph_path = nested_root.join(".lens").join("graph.json");
+    if !graph_path.exists() {
+        return;
+    }
+    let nested = match Graph::load(&graph_path) {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let prefix = nested_root.strip_prefix(walk_root).unwrap_or(nested_root);
+
+    let mut id_map: HashMap<String, String> = HashMap::new();
+    for node in nested.nodes {
+        let new_file = format!("{}/{}", prefix.display(), node.file);
+        let new_id = Node::make_id(&new_file, &node.kind, &node.name, node.line);
+        id_map.insert(node.id.clone(), new_id.clone());
+        graph.add_node(Node {
+            id: new_id,
+            file: new_file,
+            ..node
+        });
+    }
+    for edge in nested.edges {
+        if let (Some(from), Some(to)) = (id_map.get(&edge.from), id_map.get(&edge.to)) {
+            graph.add_edge(from, to, &edge.kind);
+        }
+    }
 }
 
 /// One file's extraction plus the bookkeeping the graph assembly needs. Keyed by
@@ -324,7 +415,11 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         warnings,
     };
 
-    DiscoverOutcome { graph, response }
+    DiscoverOutcome {
+        graph,
+        response,
+        nested_repo_roots: Vec::new(),
+    }
 }
 
 /// Resolve markdown cross-doc links into `imports` edges, and `#anchor`s into edges
@@ -774,10 +869,18 @@ pub fn discover_incremental(
     let lang_filter: Option<BTreeSet<String>> =
         languages.map(|ls| ls.iter().map(|l| l.to_ascii_lowercase()).collect());
 
-    // Collect candidate files deterministically (same walk as `discover`).
+    // Collect candidate files deterministically (same walk as `discover`, including
+    // the nested-repo boundary pruning: a nested git repo's files belong to its own
+    // graph, not this one — otherwise this path would walk into every sibling repo,
+    // reintroducing the parent-folder hang the boundary check exists to prevent).
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     let mut builder = WalkBuilder::new(root);
     builder.standard_filters(true);
+    let boundary_root = root.to_path_buf();
+    builder.filter_entry(move |entry| {
+        !(entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            && is_repo_boundary(entry.path(), &boundary_root))
+    });
     for entry in builder.build().flatten() {
         if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             files.push(entry.into_path());
@@ -870,7 +973,17 @@ pub fn discover_incremental(
     cache.retain(|path, _| live.contains(path));
 
     warnings.sort();
-    let DiscoverOutcome { graph, response } = assemble_graph(file_results, warnings);
+    let DiscoverOutcome {
+        mut graph,
+        response,
+        ..
+    } = assemble_graph(file_results, warnings);
+    // Fold in each nested repo's own persisted graph, identically to `discover`, so
+    // the incremental rebuild stays byte-identical to a full one (and the auto-build
+    // path that runs on session open surfaces nested content).
+    for nested_root in nested_repo_roots(root) {
+        merge_nested_graph(&mut graph, &nested_root, root);
+    }
     Ok(IncrementalOutcome {
         graph,
         response,
@@ -940,6 +1053,118 @@ mod tests {
         assert_eq!(total, 1, "expected exactly one caller->run edge");
         assert!((precision - 1.0).abs() < 1e-9, "precision must be 1.0");
         assert!((recall - 1.0).abs() < 1e-9, "recall must be 1.0");
+    }
+
+    /// T1: `discover` must not descend into a nested git repo (its own `.git`),
+    /// and `nested_repo_roots` must report exactly that boundary directory.
+    #[test]
+    fn discover_prunes_nested_git_repo() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("top.rs"), "fn top_fn() {}\n").unwrap();
+
+        let nested = dir.path().join("vendor");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        fs::write(nested.join("inner.rs"), "fn inner_fn() {}\n").unwrap();
+
+        let out = discover(dir.path(), None).unwrap();
+        let names: Vec<&str> = out.graph.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert!(
+            names.contains(&"top_fn"),
+            "top-level file's symbols must be present; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"inner_fn"),
+            "nested repo's symbols must be absent; got {names:?}"
+        );
+
+        let roots = nested_repo_roots(dir.path());
+        assert_eq!(
+            roots,
+            vec![nested],
+            "nested_repo_roots must report exactly the nested subdir"
+        );
+    }
+
+    /// T3: a nested repo that already has its own persisted `.lens/graph.json`
+    /// must have that graph MERGED into the parent's `discover()` output, with
+    /// every node's `file` prefixed by the nested repo's relative path and its
+    /// `id` recomputed to match (ids are keyed on `file`), and its internal
+    /// edges surviving the id remap.
+    #[test]
+    fn discover_merges_nested_repo_graph_with_prefixed_ids() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("top.rs"), "fn top_fn() {}\n").unwrap();
+
+        let nested = dir.path().join("vendor");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        fs::write(
+            nested.join("inner.rs"),
+            "fn inner_helper() {}\nfn inner_fn() { inner_helper(); }\n",
+        )
+        .unwrap();
+
+        // Build the nested repo's own graph and persist it, as if `lens_map` had
+        // already run there (T4's lazy-build-in-own-folder path).
+        let nested_outcome = discover(&nested, None).unwrap();
+        let nested_helper = nested_outcome
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "inner_helper")
+            .unwrap()
+            .clone();
+        let nested_fn = nested_outcome
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "inner_fn")
+            .unwrap()
+            .clone();
+        nested_outcome
+            .graph
+            .save(&nested.join(".lens").join("graph.json"))
+            .unwrap();
+
+        // Discover the parent: `vendor` is a boundary (owns its own `.git`), so
+        // its content must come in via `merge_nested_graph`, not a fresh parse.
+        let out = discover(dir.path(), None).unwrap();
+
+        let merged_fn = out
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "inner_fn" && n.file == "vendor/inner.rs")
+            .unwrap_or_else(|| {
+                panic!("merged inner_fn node missing; nodes={:?}", out.graph.nodes)
+            });
+        assert_ne!(
+            merged_fn.id, nested_fn.id,
+            "merged node id must differ from its standalone id (file changed)"
+        );
+
+        let merged_helper = out
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "inner_helper" && n.file == "vendor/inner.rs")
+            .unwrap_or_else(|| {
+                panic!(
+                    "merged inner_helper node missing; nodes={:?}",
+                    out.graph.nodes
+                )
+            });
+        assert_ne!(
+            merged_helper.id, nested_helper.id,
+            "merged node id must differ from its standalone id (file changed)"
+        );
+
+        assert!(
+            out.graph.edges.iter().any(
+                |e| e.kind == "calls" && e.from == merged_fn.id && e.to == merged_helper.id
+            ),
+            "calls edge between nested symbols must survive the id remap; edges={:?}",
+            out.graph.edges
+        );
     }
 
     #[test]

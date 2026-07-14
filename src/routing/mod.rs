@@ -189,7 +189,7 @@ pub struct RouteCtx<'a> {
     pub mcp_ready: bool,
     /// Absolute path to the `lens` binary (for the wrap rewrite).
     pub bin: &'a str,
-    /// lens data dir (holds throttle markers + `server.pid`).
+    /// lens data dir (holds throttle markers + `heartbeats/`).
     pub data_dir: &'a Path,
     /// Current session id (scopes one-shot nudge throttling).
     pub session_id: &'a str,
@@ -1440,10 +1440,14 @@ fn throttle_periodic(ctx: &RouteCtx, key: &str, period: u64) -> bool {
 /// Is the MCP server reachable right now?
 ///
 /// `LENS_ROUTING_MCP` forces the answer when set (`up`/`1`/`on`/`true` =>
-/// reachable; `down`/`0`/`off`/`false` => not). Otherwise the server's
-/// heartbeat file `<data_dir>/server.pid` is consulted: it counts as reachable
-/// only while its mtime is within the TTL (`LENS_MCP_TTL` seconds, default
-/// 90 — three heartbeat intervals). Missing, stale, or unreadable => not ready.
+/// reachable; `down`/`0`/`off`/`false` => not). Otherwise `<data_dir>/heartbeats/`
+/// is consulted: reachable iff at least one file in it has an mtime within the
+/// TTL (`LENS_MCP_TTL` seconds, default 90 — three heartbeat intervals). Each
+/// server process owns one file named after its own pid, so this reflects
+/// whether ANY lens server sharing this data dir is alive — a second session's
+/// server exiting cleanly never zeroes out a fresh sibling's heartbeat, unlike
+/// the old single-`server.pid` scheme. Missing dir, empty dir, or all-stale =>
+/// not ready.
 pub fn mcp_ready(data_dir: &Path) -> bool {
     if let Ok(v) = std::env::var("LENS_ROUTING_MCP") {
         match v.trim().to_ascii_lowercase().as_str() {
@@ -1456,14 +1460,18 @@ pub fn mcp_ready(data_dir: &Path) -> bool {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(90);
-    let pid = data_dir.join("server.pid");
-    match std::fs::metadata(&pid).and_then(|m| m.modified()) {
-        Ok(mtime) => match mtime.elapsed() {
-            Ok(age) => age.as_secs() <= ttl,
-            Err(_) => false, // mtime in the future (clock skew) — treat as stale
+    let Ok(entries) = std::fs::read_dir(data_dir.join("heartbeats")) else {
+        return false;
+    };
+    entries.flatten().any(
+        |entry| match std::fs::metadata(entry.path()).and_then(|m| m.modified()) {
+            Ok(mtime) => match mtime.elapsed() {
+                Ok(age) => age.as_secs() <= ttl,
+                Err(_) => false, // mtime in the future (clock skew) — treat as stale
+            },
+            Err(_) => false,
         },
-        Err(_) => false,
-    }
+    )
 }
 /// Is the content index populated? Read-only check: opens `<data_dir>/index.db`
 /// and looks for at least one row in the `file_manifest` table — the Tantivy-era
@@ -2923,21 +2931,35 @@ mod tests {
     #[test]
     fn mcp_ready_env_override_and_heartbeat() {
         let d = tempdir().unwrap();
-        // No pidfile, no override → not ready.
+        // No heartbeats dir, no override → not ready.
         std::env::remove_var("LENS_ROUTING_MCP");
         std::env::remove_var("LENS_MCP_TTL");
         assert!(!mcp_ready(d.path()));
 
-        // Override up/down wins regardless of pidfile.
+        // Override up/down wins regardless of heartbeat state.
         std::env::set_var("LENS_ROUTING_MCP", "up");
         assert!(mcp_ready(d.path()));
         std::env::set_var("LENS_ROUTING_MCP", "off");
         assert!(!mcp_ready(d.path()));
         std::env::remove_var("LENS_ROUTING_MCP");
 
-        // Fresh pidfile within TTL → ready.
-        std::fs::write(d.path().join("server.pid"), "123").unwrap();
+        // Fresh heartbeat file within TTL → ready.
+        let hb = d.path().join("heartbeats");
+        std::fs::create_dir_all(&hb).unwrap();
+        std::fs::write(hb.join("123.pid"), "123").unwrap();
         assert!(mcp_ready(d.path()));
+
+        // A second session's server (different pid, own file) sharing the same
+        // data dir: both fresh → still ready. Removing one (its clean shutdown)
+        // must not affect the other — the whole point of per-pid files instead
+        // of a single shared server.pid.
+        std::fs::write(hb.join("456.pid"), "456").unwrap();
+        assert!(mcp_ready(d.path()));
+        std::fs::remove_file(hb.join("123.pid")).unwrap();
+        assert!(
+            mcp_ready(d.path()),
+            "session B's heartbeat must still count as ready after session A's clean exit"
+        );
 
         // TTL of 0 makes any nonzero age stale (sleep a moment to be safe).
         std::env::set_var("LENS_MCP_TTL", "0");

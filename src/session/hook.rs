@@ -729,13 +729,36 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
     }
 }
 
-/// Bootstrap hint for the durable-memory MCP tools, appended to every fresh
-/// SessionStart (not just when memory already exists) so a session discovers
-/// them even on a brand-new project with nothing recorded yet.
-const MEMORY_TOOLS_HINT: &str = "(Durable project memory across sessions: \
-    ToolSearch(query: \"select:lens_memory_query,lens_memory_record\"), then \
-    lens_memory_query() to read it or lens_memory_record(category, text) to add \
-    a decision/constraint/rejected-approach/rule.)";
+/// One-line pointer to the durable-memory MCP tools for a fresh SessionStart.
+/// lens never injects the memory itself (retrieve-on-demand); this tells the
+/// session the tools exist and, when notes are on record, how many and how
+/// recent — a recency signal so it can decide whether `lens_memory_query()`
+/// (newest last) is worth a call, without paying to inject stale content.
+fn memory_tools_hint(count: i64, latest_ts: Option<i64>, now: i64) -> String {
+    match latest_ts {
+        Some(ts) if count > 0 => format!(
+            "({count} durable project notes on record (most recent {}). Read them with \
+             ToolSearch(query: \"select:lens_memory_query,lens_memory_record\") then \
+             lens_memory_query() (newest last) when a prior decision/constraint/\
+             rejected-approach/rule is relevant.)",
+            rel_age(now.saturating_sub(ts))
+        ),
+        _ => "(No durable project memory yet. To record one that outlives the session: \
+              ToolSearch(query: \"select:lens_memory_query,lens_memory_record\") then \
+              lens_memory_record(category, text) — decision/constraint/rejected-approach/rule.)"
+            .to_string(),
+    }
+}
+
+/// Coarse "N ago" for the memory-hint recency cue (unix-second delta).
+fn rel_age(delta: i64) -> String {
+    match delta {
+        d if d < 90 => "just now".to_string(),
+        d if d < 90 * 60 => format!("{}m ago", d / 60),
+        d if d < 36 * 3600 => format!("{}h ago", d / 3600),
+        d => format!("{}d ago", d / 86400),
+    }
+}
 
 /// SessionStart logic per lifecycle source. Returns the additionalContext to
 /// inject (empty string for startup/clear).
@@ -798,18 +821,17 @@ fn session_start(
                 let events = attribute(raws, session_id, project_str, ts, "SessionStart");
                 store.insert_events(&events)?;
             }
-            // Re-inject durable project memory (decisions/constraints/rules captured in
-            // prior sessions) so a fresh session resumes with them despite the clear.
-            let memory = snapshot::render_project_memory(&store.project_memory(project_str)?);
-            let body = match repo_map_block(data_dir) {
-                Some(block) if memory.is_empty() => block,
-                Some(block) => format!("{memory}\n\n{block}"),
-                None => memory,
-            };
-            Ok(if body.is_empty() {
-                MEMORY_TOOLS_HINT.to_string()
-            } else {
-                format!("{body}\n\n{MEMORY_TOOLS_HINT}")
+            // Durable project memory is deliberately NOT injected here. lens is
+            // retrieve-on-demand; dumping every accreted decision/constraint (most of
+            // them months old) into a cold session is exactly the mandatory-injection
+            // cost lens exists to avoid. Instead point the session at the memory tools
+            // with a live count + recency cue, so it can pull the recent ones via
+            // lens_memory_query() iff a prior note is relevant.
+            let (mem_count, mem_latest) = store.project_memory_summary(project_str)?;
+            let hint = memory_tools_hint(mem_count, mem_latest, ts);
+            Ok(match repo_map_block(data_dir) {
+                Some(block) => format!("{block}\n\n{hint}"),
+                None => hint,
             })
         }
         _ => Ok(String::new()), // "clear" and unknown — no injection

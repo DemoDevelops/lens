@@ -324,9 +324,10 @@ fn render(mut sections: Vec<Section>, budget: usize, compact_count: i64) -> Stri
 }
 
 /// Render durable project memory (from [`super::store::SessionStore::project_memory`])
-/// as a standalone "Project Memory" guide for re-injection at a fresh SessionStart,
-/// so prior decisions/constraints/rules survive into a new session even though the
-/// live event log was cleared. Empty input yields an empty string.
+/// as a standalone "Project Memory" guide. No longer injected at SessionStart (lens is
+/// retrieve-on-demand — see `hook::memory_tools_hint`); retained as the recall path the
+/// C13 benchmark exercises to prove prior decisions stay recoverable in a fresh session.
+/// Empty input yields an empty string.
 pub fn render_project_memory(items: &[(String, String)]) -> String {
     if items.is_empty() {
         return String::new();

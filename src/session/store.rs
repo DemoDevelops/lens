@@ -465,6 +465,18 @@ impl SessionStore {
         })?;
         Ok(rows.flatten().collect())
     }
+
+    /// Row count and newest `created_at` (`None` when empty) of durable memory for
+    /// `project`. A cheap aggregate for the SessionStart hint — avoids loading every
+    /// row just to size and date them.
+    pub fn project_memory_summary(&self, project: &str) -> Result<(i64, Option<i64>)> {
+        let conn = self.conn()?;
+        Ok(conn.query_row(
+            "SELECT COUNT(*), MAX(created_at) FROM project_memory WHERE project = ?1",
+            [project],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
 }
 
 /// The durable memory categories [`memory_item`] recognizes below — the exact

@@ -770,7 +770,7 @@ impl Forge {
 
     /// A token-budgeted map of the repo's most important symbols.
     #[tool(
-        description = "Get a token-budgeted overview of the repo: the most structurally important symbols (PageRank-ranked) with their callers/callees, as much as fits a token budget (default 2000). A high-signal map of a codebase at fixed cost instead of reading files. For one file's structure use lens_skeleton; this is the whole-repo ranked map."
+        description = "Get a token-budgeted overview of the repo: the most structurally important symbols (PageRank-ranked) with their callers/callees, as much as fits a token budget (default 2000). A high-signal map of a codebase at fixed cost instead of reading files. Pass an optional query to focus the map on a topic: symbols whose names match it, and files you have touched this session, are boosted into the budget. For one file's structure use lens_skeleton; this is the whole-repo ranked map."
     )]
     async fn lens_overview(
         &self,
@@ -787,7 +787,9 @@ impl Forge {
                 return Err(e.into());
             }
         };
-        let overview = gquery::overview(&graph, req.token_budget);
+        let seed =
+            gquery::overview_seed(&graph, &self.recent_touched_files(), req.query.as_deref());
+        let overview = gquery::overview(&graph, req.token_budget, &seed);
         let resp = OverviewResponse { overview };
         let returned = obs::json_len(&resp);
         let note = format!("{} bytes", resp.overview.len());

@@ -1,0 +1,10 @@
+{
+  "id": "0028_overview_focus",
+  "prompt": "From the repository overview, what function does niche_handler call?",
+  "fixtures": ["fixtures/overview_focus"],
+  "ground_truth": { "callee": "niche_sink" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["niche_handler", "niche_sink"],
+  "treatment": { "graph_op": "overview", "query": "niche_handler", "overview_budget": 82 }
+}

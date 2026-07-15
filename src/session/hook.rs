@@ -859,7 +859,10 @@ fn repo_map_block(data_dir: &Path) -> Option<String> {
         return None;
     }
     let graph = crate::discovery::graph::Graph::load(&data_dir.join("graph.json")).ok()?;
-    let digest = cap_bytes(&crate::discovery::query::overview(&graph, budget), REPO_MAP_CAP_BYTES);
+    let digest = cap_bytes(
+        &crate::discovery::query::overview(&graph, budget, &std::collections::HashMap::new()),
+        REPO_MAP_CAP_BYTES,
+    );
     Some(format!(
         "<repo_map>\nGraph overview of this repo (most-connected symbols; expand any of these with lens_symbol / lens_links / lens_path):\n{digest}\n</repo_map>"
     ))

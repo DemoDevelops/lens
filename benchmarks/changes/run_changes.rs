@@ -720,7 +720,7 @@ fn measure_c11() -> (f64, usize) {
     let g = discovery::discover(&changes_fixture("overview"), None)
         .unwrap()
         .graph;
-    let overview = gquery::overview(&g, 2000);
+    let overview = gquery::overview(&g, 2000, &std::collections::HashMap::new());
     let important = ["hub_a", "hub_b", "hub_c", "hub_d", "hub_e"];
     let present = important
         .iter()
@@ -1026,7 +1026,7 @@ fn measure_c17() -> (usize, usize, usize) {
     let g = discovery::discover(&changes_fixture("knapsack"), None)
         .unwrap()
         .graph;
-    let overview = gquery::overview(&g, 2000);
+    let overview = gquery::overview(&g, 2000, &std::collections::HashMap::new());
     let mut present = 0usize;
     if overview.contains("`heavy_hub_0_") {
         present += 1;
@@ -1446,6 +1446,67 @@ fn gate_c22() -> (String, bool) {
     (s, pass)
 }
 
+// --- C40: personalized overview focus (L40 aider-style repomap) -------------
+
+/// (the isolated helper is absent from the empty-seed overview, it is present
+/// once its file is marked touched, the empty-seed trip-proof holds, the
+/// exact-fit budget used) for `fixtures/overview_focus` (two hubs called by 40
+/// workers dominate global importance; a helper isolated in its own file has
+/// no callers or callees, so it is globally unimportant).
+fn measure_c40() -> (bool, bool, bool, usize) {
+    let repo = changes_fixture("overview_focus");
+    let g = discovery::discover(&repo, None).unwrap().graph;
+    let empty: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+
+    // Smallest budget at which BOTH hubs are packed under the empty seed,
+    // found via the public API rather than hand-computed weights. The hubs'
+    // importance vastly exceeds every other (tied, zero-inbound) node's, so
+    // the knapsack always includes both once affordable and never trades
+    // either away as the budget grows further - "both hubs present" is
+    // monotonic in the budget, and its smallest true point has ZERO leftover
+    // capacity: no other entry (every render is > 0 tokens) can also fit.
+    let full = gquery::overview(&g, 1_000_000, &empty);
+    let mut lo = 0usize;
+    let mut hi = lens::obs::count_tokens(&full);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let v = gquery::overview(&g, mid, &empty);
+        if v.contains("`hub_x`") && v.contains("`hub_y`") {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let budget = lo;
+
+    let base = gquery::overview(&g, budget, &empty);
+    let absent_without_focus = !base.contains("`obscure_helper`");
+
+    let touched = vec![repo.join("lonely.rs").to_string_lossy().into_owned()];
+    let seed = gquery::overview_seed(&g, &touched, None);
+    let focused = gquery::overview(&g, budget, &seed);
+    let present_with_focus = focused.contains("`obscure_helper`");
+
+    // Trip-proof: a seed weighing every node EQUALLY normalizes to the same
+    // uniform teleport `importance()` uses, so it must render byte-identical
+    // to the empty seed. A future second "empty seed" code path (instead of
+    // reducing through `personalized_importance`) would break this.
+    let uniform: std::collections::HashMap<String, f64> =
+        g.nodes.iter().map(|n| (n.id.clone(), 1.0)).collect();
+    let trip_proof_holds = base == gquery::overview(&g, budget, &uniform);
+
+    (absent_without_focus, present_with_focus, trip_proof_holds, budget)
+}
+
+fn gate_c40() -> (String, bool) {
+    let (absent_without_focus, present_with_focus, trip_proof_holds, budget) = measure_c40();
+    let pass = absent_without_focus && present_with_focus && trip_proof_holds;
+    let s = format!(
+        "## C40 - personalized overview focus (lens_overview, L40)\n\nOn `fixtures/overview_focus` (two hubs called by 40 workers + one helper isolated in its own file), a **{budget}**-token budget fits exactly the two hubs. With an empty seed, the isolated helper is absent: **{absent_without_focus}**. Marking its file touched (`overview_seed`) lifts it into the same budget: **{present_with_focus}**. Trip-proof: a seed weighing every node equally renders byte-identical to the empty seed (both reduce to the same uniform teleport `importance()` uses): **{trip_proof_holds}**.\n\nGate (absolute): the helper is excluded unfocused, included once focused, and the trip-proof holds.\n"
+    );
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -1524,6 +1585,8 @@ fn main() -> anyhow::Result<()> {
     println!("{s21}");
     let (s22, c22_ok) = gate_c22();
     println!("{s22}");
+    let (s40, c40_ok) = gate_c40();
+    println!("{s40}");
 
     println!("\n## Gates");
     let gates = [
@@ -1549,6 +1612,7 @@ fn main() -> anyhow::Result<()> {
         ("C20 RRF fusion lifts buried graph-central file to top 5", c20_ok),
         ("C21 pattern/S-expression parity + trip-proof detects mismatch", c21_ok),
         ("C22 memory record/query roundtrip + trip-proofs detect breakage", c22_ok),
+        ("C40 personalized overview lifts touched-file symbol into budget", c40_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });

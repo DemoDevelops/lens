@@ -76,6 +76,17 @@ pub struct Treatment {
     /// existing `queries` task is unaffected.
     #[serde(default)]
     pub graph_fused: bool,
+    /// Overview focus (L40): the personalization query for an `overview` task.
+    /// `overview_seed` seeds every node whose name matches a query token (+10), so
+    /// a globally-unimportant symbol is lifted into a tight budget. Defaults to
+    /// `None`, so every existing overview task keeps the global map.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Overview focus (L40): per-task token budget for the `overview` treatment, so
+    /// the focus flip is observable with a compact fixture. Defaults to `None` ==
+    /// 2000 (the `lens_overview` tool default), unchanged for every existing task.
+    #[serde(default)]
+    pub overview_budget: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,8 +342,21 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
                 );
                 serde_json::to_string_pretty(&resp)?
             }
-            // The token-budgeted repomap; budget matches the lens_overview tool default.
-            "overview" => gquery::overview(&outcome.graph, 2000),
+            // The token-budgeted repomap. L40 focus A/B lever, mirroring the `find`
+            // arm's LENS_FIND_RANK: the personalization seed is applied UNLESS
+            // LENS_OVERVIEW_FOCUS=0, so the SAME task runs focus-on (treatment) vs
+            // focus-off across two harness runs, isolating the personalized-overview
+            // win. Focus-off uses an empty seed == the pre-L40 static render by
+            // construction. Budget defaults to 2000 (the lens_overview tool default).
+            "overview" => {
+                let budget = t.overview_budget.unwrap_or(2000);
+                let seed = if std::env::var("LENS_OVERVIEW_FOCUS").as_deref() == Ok("0") {
+                    std::collections::HashMap::new()
+                } else {
+                    gquery::overview_seed(&outcome.graph, &[], t.query.as_deref())
+                };
+                gquery::overview(&outcome.graph, budget, &seed)
+            }
             // Natural-language find, re-ranked per `LENS_FIND_RANK` (L36 A/B lever).
             // The treatment IS the lens improvement, so it defaults to the
             // personalized-PR ranking; the A/B control sets `raw` (current

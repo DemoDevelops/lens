@@ -1,0 +1,13 @@
+{
+  "id": "0034_real_focus_repomap",
+  "prompt": "From the repository overview, which function builds the repo-map digest that the SessionStart hook injects?",
+  "fixtures": ["../../src/session"],
+  "ground_truth": { "function": "repo_map_block" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["repo_map_block"],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "repo map digest session start hook inject"
+  }
+}

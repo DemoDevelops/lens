@@ -1,0 +1,19 @@
+{
+  "id": "0053_real_focus_register_tokenizers",
+  "prompt": "Right after the tantivy index is opened, which function does the work to register lens's custom tokenizers: the stemmer used for content/symbols and the trigram tokenizer used for literal/structural queries?",
+  "fixtures": [
+    "../../src/index"
+  ],
+  "ground_truth": {
+    "function": "register_tokenizers"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": [
+    "register_tokenizers"
+  ],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "tantivy index register custom tokenizers stemmer content symbols trigram tokenizer literal structural"
+  }
+}

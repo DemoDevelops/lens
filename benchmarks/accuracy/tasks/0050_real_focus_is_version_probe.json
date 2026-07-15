@@ -1,0 +1,19 @@
+{
+  "id": "0050_real_focus_is_version_probe",
+  "prompt": "In the Bash command classifier, which function detects that a command is just a version probe: a --version flag, or -V as the second token?",
+  "fixtures": [
+    "../../src/routing"
+  ],
+  "ground_truth": {
+    "function": "is_version_probe"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": [
+    "is_version_probe"
+  ],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "version probe flag detect command classifier second token"
+  }
+}

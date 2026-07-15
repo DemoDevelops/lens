@@ -1,0 +1,19 @@
+{
+  "id": "0057_real_focus_civil_from_days",
+  "prompt": "In obs's ISO-8601 timestamp formatter, which function turns a count of days since the Unix epoch into a civil calendar year/month/day, proleptic Gregorian, without pulling in a chrono/time crate dependency?",
+  "fixtures": [
+    "../../src/obs"
+  ],
+  "ground_truth": {
+    "function": "civil_from_days"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": [
+    "civil_from_days"
+  ],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "iso 8601 timestamp days since unix epoch civil calendar year month day proleptic gregorian"
+  }
+}

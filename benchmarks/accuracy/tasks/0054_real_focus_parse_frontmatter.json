@@ -1,0 +1,19 @@
+{
+  "id": "0054_real_focus_parse_frontmatter",
+  "prompt": "When lens extracts structure from a markdown file, which function is responsible for the parse step that turns the YAML frontmatter block, the ---delimited header at the top of the file, into fields?",
+  "fixtures": [
+    "../../src/discovery"
+  ],
+  "ground_truth": {
+    "function": "parse_frontmatter"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": [
+    "parse_frontmatter"
+  ],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "markdown extract yaml frontmatter block delimited header top file parse fields"
+  }
+}

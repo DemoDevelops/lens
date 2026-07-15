@@ -1,0 +1,13 @@
+{
+  "id": "0036_real_focus_overviewdue",
+  "prompt": "From the repository overview, which function decides whether the read-overview nudge is due based on the reads-since-map counter?",
+  "fixtures": ["../../src/routing"],
+  "ground_truth": { "function": "overview_due" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["overview_due"],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "read overview nudge fire threshold reads since map"
+  }
+}

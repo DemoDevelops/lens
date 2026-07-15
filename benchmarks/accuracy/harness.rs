@@ -21,6 +21,22 @@ use accuracy::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `--probe[-all]`: deterministic feature off/on A/B (no LLM, no quota). For
+    // each L51 (`graph_fused`) / L40 (`overview`) task it prints whether the
+    // answer is surfaced with the feature OFF vs ON, the win/tie/regression
+    // verdict, and the validity fields proving the task can actually exercise
+    // the mechanism (so a tie is never silently confused with an un-testable
+    // fixture). `--probe <substr>` limits to matching task ids.
+    let cli: Vec<String> = std::env::args().collect();
+    if let Some(pos) = cli.iter().position(|a| a == "--probe" || a == "--probe-all") {
+        let only = if cli[pos] == "--probe" {
+            cli.get(pos + 1).map(|s| s.as_str())
+        } else {
+            None
+        };
+        return probe_all(only).await;
+    }
+
     // Backend precedence: explicit `LENS_BENCH_BACKEND=claude-headless|claude-pty`
     // (both bill plan quota via Claude Code) > Anthropic API key > mock.
     let backend = std::env::var("LENS_BENCH_BACKEND").unwrap_or_default();
@@ -118,6 +134,79 @@ async fn main() -> anyhow::Result<()> {
     std::fs::write(&out_path, serde_json::to_string_pretty(&payload)? + "\n")?;
     eprintln!("\nwrote {}", out_path.display());
 
+    Ok(())
+}
+
+/// Deterministic L40 overview-focus off/on A/B over the real-fixture tasks (no
+/// LLM). The answer is "surfaced" iff every `evidence` token is present in the
+/// treatment context (the mock-oracle rule), so this measures focus's own recall
+/// with zero model noise. Each overview task is classified from two exact facts:
+/// whether the unfocused overview already contained the answer (off=HIT, a
+/// regression guard) and whether the answer is in the full unbudgeted overview at
+/// all (can_participate). A WIN is off=MISS -> on=HIT; a REGRESSION is the reverse.
+async fn probe_all(only: Option<&str>) -> anyhow::Result<()> {
+    use lens::discovery::{self, query as gquery};
+    use std::collections::HashMap;
+
+    let tasks = accuracy::load_tasks()?;
+    let (mut n_win, mut n_reg, mut n_guard, mut n_nohelp, mut n_invalid) = (0, 0, 0, 0, 0);
+
+    println!("# L40 overview-focus off/on probe (deterministic, no LLM)\n");
+    for task in &tasks {
+        if task.treatment.graph_op.as_deref() != Some("overview") {
+            continue;
+        }
+        if let Some(f) = only {
+            if !task.id.contains(f) {
+                continue;
+            }
+        }
+
+        std::env::set_var("LENS_OVERVIEW_FOCUS", "0");
+        let off_ctx = accuracy::build_treatment_context(task).await?;
+        std::env::set_var("LENS_OVERVIEW_FOCUS", "1");
+        let on_ctx = accuracy::build_treatment_context(task).await?;
+        std::env::remove_var("LENS_OVERVIEW_FOCUS");
+
+        let present = |ctx: &str| task.evidence.iter().all(|e| ctx.contains(e));
+        let off = present(&off_ctx);
+        let on = present(&on_ctx);
+
+        // Can the answer participate at all? It must be in the full unbudgeted
+        // overview, so focus has something to lift into the tight budget.
+        let fixture = accuracy::accuracy_root().join(&task.fixtures[0]);
+        let graph = discovery::discover(&fixture, None)?.graph;
+        let answer = task.evidence.first().cloned().unwrap_or_default();
+        let can_participate = gquery::overview(&graph, 1_000_000, &HashMap::new()).contains(&answer);
+
+        // off=HIT tasks are regression guards (the unfocused overview already had
+        // the answer; the only question is whether focus knocks it out). off=MISS
+        // tasks are improvement probes: a win lifts a below-budget answer into
+        // budget; no-help means focus applied but did not lift it; INVALID means
+        // the answer is not in the overview at all, so the task cannot test focus.
+        let class = match (off, on, can_participate) {
+            (false, true, _) => "WIN",
+            (true, false, _) => "REGRESSION",
+            (true, true, _) => "guard-held",
+            (false, false, true) => "no-help",
+            (false, false, false) => "INVALID",
+        };
+        match class {
+            "WIN" => n_win += 1,
+            "REGRESSION" => n_reg += 1,
+            "guard-held" => n_guard += 1,
+            "no-help" => n_nohelp += 1,
+            _ => n_invalid += 1,
+        }
+        println!(
+            "{:<32} off={:<4} on={:<4} participate={:<5} {class}",
+            task.id,
+            if off { "HIT" } else { "MISS" },
+            if on { "HIT" } else { "MISS" },
+            can_participate,
+        );
+    }
+    println!("\nwin={n_win} regression={n_reg} guard-held={n_guard} no-help={n_nohelp} invalid={n_invalid}");
     Ok(())
 }
 
@@ -255,10 +344,13 @@ mod tests {
         // knife-edge and tight-budget regression cases), so a missing-evidence
         // treatment there is the experiment, not a failure. They are measured by
         // their dedicated LENS_FIND_RANK runs, not this savings health-check.
+        // The `real_focus_*` probes (real src/ subsystems) are the same:
+        // reality-check A/B fixtures for L40 overview focus, measured by their
+        // own LENS_OVERVIEW_FOCUS off/on run (`bench_accuracy --probe`).
         assert!(
             results
                 .iter()
-                .filter(|r| !r.id.contains("findloc") && !r.id.contains("expand"))
+                .filter(|r| !r.id.contains("findloc") && !r.id.contains("real"))
                 .all(|r| r.treatment.correct),
             "every savings treatment arm should be correct under the mock oracle"
         );
@@ -289,9 +381,11 @@ mod tests {
         // at a fixed find budget, not byte savings, and a find subgraph that
         // surfaces the reachable hub is legitimately larger than a 2KB-truncated
         // raw-source control. They remain in every accuracy/correctness assertion
-        // above.
+        // above. The `real_*` probes are likewise excluded: they point at real
+        // src/ subsystems, so the 2KB-truncated control is not a meaningful
+        // byte-savings baseline for them.
         let savings: Vec<&TaskResult> =
-            results.iter().filter(|r| !r.id.contains("findloc")).collect();
+            results.iter().filter(|r| !r.id.contains("findloc") && !r.id.contains("real")).collect();
         let ctrl_tok: usize = savings.iter().map(|r| r.control.tokens).sum();
         let treat_tok: usize = savings.iter().map(|r| r.treatment.tokens).sum();
         assert!(

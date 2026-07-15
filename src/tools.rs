@@ -155,12 +155,6 @@ pub struct SearchHit {
     pub path: String,
     pub snippet: String,
     pub score: f64,
-    /// 1-based start line of the chunk, when derivable (absent for
-    /// session-continuity records and markdown chunks, which have no fixed
-    /// line window). Omitted from the JSON entirely when `None`, so existing
-    /// consumers see no shape change.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub line: Option<usize>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -427,33 +421,4 @@ pub struct StatsResponse {
     pub index_chunks: i64,
     pub graph_nodes: i64,
     pub graph_edges: i64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// T1 (L51): `SearchHit.line` is additive and skipped when `None`, so a
-    /// hit with no derivable line serializes to exactly the pre-change
-    /// 3-field shape (existing consumers see no schema change).
-    #[test]
-    fn search_hit_line_none_is_byte_identical_to_pre_change_shape() {
-        let response = SearchResponse {
-            results: vec![QueryResult {
-                query: "foo".to_string(),
-                hits: vec![SearchHit {
-                    path: "src/foo.rs".to_string(),
-                    snippet: "fn foo() {}".to_string(),
-                    score: 1.5,
-                    line: None,
-                }],
-            }],
-        };
-        let json = serde_json::to_string(&response).unwrap();
-        assert_eq!(
-            json,
-            r#"{"results":[{"query":"foo","hits":[{"path":"src/foo.rs","snippet":"fn foo() {}","score":1.5}]}]}"#,
-            "line: None must be omitted, keeping the pre-change SearchHit JSON shape"
-        );
-    }
 }

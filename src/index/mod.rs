@@ -15,7 +15,7 @@ use regex::Regex;
 pub use schema::Index;
 
 use self::tantivy_index::TantivyStore;
-use crate::discovery::{self, graph::Graph};
+use crate::discovery;
 use crate::tools::{IndexResponse, QueryResult, SearchHit, SearchResponse};
 
 /// Lines per chunk for non-markdown files.
@@ -301,7 +301,7 @@ impl Index {
     /// Delegates to [`search_fused`](Index::search_fused) with an empty file-rank
     /// map, so every existing caller sees exactly today's output.
     pub fn search(&self, queries: &[String], limit_per_query: usize) -> Result<SearchResponse> {
-        self.search_fused(queries, limit_per_query, &HashMap::new(), None)
+        self.search_fused(queries, limit_per_query, &HashMap::new())
     }
 
     /// Like [`search`](Index::search), but fuses the text ranking with a per-file
@@ -309,16 +309,12 @@ impl Index {
     /// `file_ranks` maps a stored file path (`rel_key` form) to its graph rank
     /// (0 = most central). An empty map — or `LENS_RRF=0` — makes the output
     /// byte-identical to [`search`](Index::search). Only the BM25/prose path fuses;
-    /// structural/trigram queries are unaffected. When `graph` is `Some` and
-    /// `LENS_EXPAND=1`, each query's hits are then expanded into their 1-hop graph
-    /// neighborhood (see [`expand_hits`]); a `None` graph or the default-off flag
-    /// leaves them untouched.
+    /// structural/trigram queries are unaffected.
     pub fn search_fused(
         &self,
         queries: &[String],
         limit_per_query: usize,
         file_ranks: &HashMap<String, usize>,
-        graph: Option<&Graph>,
     ) -> Result<SearchResponse> {
         let store = self.store();
         let mut results = Vec::new();
@@ -328,15 +324,6 @@ impl Index {
             } else {
                 ranked_search(store, query, limit_per_query, file_ranks)?
             };
-            // L51: when a graph is supplied, expand each query's lexical hits into
-            // their 1-hop neighborhood. budget = limit_per_query (one neighbor "slot"
-            // per requested hit). expand_hits is gated by LENS_EXPAND (default off)
-            // and returns hits untouched when off or the graph is empty, so both a
-            // None graph and the off flag stay byte-identical.
-            let hits = match graph {
-                Some(g) => expand_hits(hits, g, limit_per_query),
-                None => hits,
-            };
             results.push(QueryResult {
                 query: query.clone(),
                 hits,
@@ -344,200 +331,6 @@ impl Index {
         }
         Ok(SearchResponse { results })
     }
-}
-
-/// L51 edge-type weights for lexical-hit expansion: how much a 1-hop neighbor
-/// inherits from the hit that anchors it, by relationship kind. `calls` is the
-/// strongest signal (a direct dependency), `references` weaker (the symbol is
-/// used), `imports` weakest (a module-level pull). `contains` (hierarchy) and any
-/// other kind score `0.0`, which doubles as the adjacency `keep` filter: only
-/// positive-weight kinds expand. A small fixed table; revisit only if the L51
-/// recall A/B (T5) justifies it.
-fn edge_weight(kind: &str) -> f64 {
-    match kind {
-        "calls" => 1.0,
-        "references" => 0.8,
-        "imports" => 0.6,
-        _ => 0.0,
-    }
-}
-
-/// L51 confidence blend weights. A neighbor's confidence is an even split between
-/// the anchoring hit's normalized lexical strength (its score over the strongest
-/// hit this query, so neighbors of a weak match are discounted) and the neighbor's
-/// normalized query-personalized PageRank (how central it is to the query's matched
-/// entry points). Both terms lie in `[0, 1]`, so confidence does too. Deliberately
-/// simple; the A/B decides whether the split moves.
-const LEX_BLEND: f64 = 0.5;
-const PI_BLEND: f64 = 0.5;
-
-/// Total order for the L51-expanded result set: score descending, then a
-/// deterministic tie-break (path asc, line asc, snippet asc). The appended
-/// neighbors are unique by `(path, line)`, so this is a total order over them and
-/// no `HashMap` iteration order can leak into the returned ordering.
-fn expand_rank_cmp(a: &SearchHit, b: &SearchHit) -> Ordering {
-    b.score
-        .partial_cmp(&a.score)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| a.path.cmp(&b.path))
-        .then_with(|| a.line.cmp(&b.line))
-        .then_with(|| a.snippet.cmp(&b.snippet))
-}
-
-/// Whether L51 hit expansion is enabled: any `LENS_EXPAND` value other than
-/// `"0"` is on; unset defaults to off. Single source of truth for the flag —
-/// `expand_hits` gates expansion itself on it, and `ranked_search` /
-/// `structural_search` gate whether `line` is populated at all on it, so a
-/// `LENS_EXPAND=0` (default) search never carries a `line` field and stays
-/// byte-identical to master's `SearchHit { path, snippet, score }` shape.
-fn expand_enabled() -> bool {
-    std::env::var("LENS_EXPAND").map(|v| v != "0").unwrap_or(false)
-}
-
-/// L51: expand each lexical search hit into its confidence-filtered 1-hop graph
-/// neighborhood, merging the structural neighbors into the ranked result set.
-///
-/// Gated by `LENS_EXPAND` (read PER CALL, default OFF). When the flag is off, when
-/// the graph has no nodes, or when no hit aligns to a graph node, the input `Vec`
-/// is returned untouched (byte-identical), so every caller that does not opt in,
-/// and every empty-graph caller such as [`Index::search`], is provably unaffected.
-///
-/// Otherwise, for each hit carrying a `line`, its nearest graph node is the anchor
-/// ([`Graph::node_nearest`]). Neighbors are the 1-hop undirected [`Graph::adjacency`]
-/// over `calls|imports|references` edges (`contains` hierarchy excluded). A neighbor
-/// scores `hit.score * edge_weight(kind) * confidence`, where confidence blends the
-/// anchor's lexical strength with one query-seeded [`Graph::personalized_importance`]
-/// pass over the anchor nodes. That PageRank propagates over calls+imports only, so
-/// a neighbor reached solely by a `references` edge leans on its edge weight rather
-/// than its PR. Each factor is `<= 1` and `hit.score` sets the scale, so a neighbor
-/// never outranks its own anchor, though a strong hit's neighbor can outrank an
-/// unrelated weak hit.
-///
-/// Neighbors are deduped against the originals and one another by `(path, line)`
-/// (highest score wins), the top `budget` survivors are appended, and the whole vec
-/// is re-sorted by [`expand_rank_cmp`]. Snippets are a lightweight `"{kind} {name}"`
-/// signature, so expansion does no per-neighbor file I/O.
-fn expand_hits(hits: Vec<SearchHit>, graph: &Graph, budget: usize) -> Vec<SearchHit> {
-    // Flag guard FIRST so the OFF path is byte-identical for every caller.
-    let on = expand_enabled();
-    if !on || graph.nodes.is_empty() {
-        return hits;
-    }
-
-    // Align each lexical hit that has a line to its nearest graph node. seed maps an
-    // anchor node id to its lexical score, the restart vector for personalized PR.
-    let mut anchors = Vec::new();
-    let mut seed: HashMap<String, f64> = HashMap::new();
-    let mut max_hit_score = 0.0_f64;
-    for hit in &hits {
-        let Some(line) = hit.line else { continue };
-        let Some(node) = graph.node_nearest(&hit.path, line) else {
-            continue;
-        };
-        anchors.push((node, hit.score));
-        let slot = seed.entry(node.id.clone()).or_insert(0.0);
-        *slot = slot.max(hit.score);
-        max_hit_score = max_hit_score.max(hit.score);
-    }
-    if anchors.is_empty() {
-        return hits;
-    }
-
-    // Neighbor enumeration reuses adjacency, restricted to the positive-weight
-    // (relevance-bearing) edge kinds. adjacency drops the edge kind, so build a
-    // companion undirected (from, to) -> best weight map from the same kept edges
-    // for the per-neighbor edge_weight lookup.
-    let adj = graph.adjacency(|k| edge_weight(k) > 0.0);
-    let mut edge_w: HashMap<(&str, &str), f64> = HashMap::new();
-    for e in &graph.edges {
-        let w = edge_weight(&e.kind);
-        if w <= 0.0 {
-            continue;
-        }
-        for (a, b) in [
-            (e.from.as_str(), e.to.as_str()),
-            (e.to.as_str(), e.from.as_str()),
-        ] {
-            let slot = edge_w.entry((a, b)).or_insert(0.0);
-            if w > *slot {
-                *slot = w;
-            }
-        }
-    }
-
-    // One query-personalized PageRank pass seeded on the anchor nodes.
-    let pi = graph.personalized_importance(&seed);
-    let pi_max = pi.values().copied().fold(0.0_f64, f64::max);
-
-    // Best score per candidate neighbor node id (a neighbor reachable from several
-    // anchors keeps its strongest score). HashMap order here does not leak into the
-    // result: the materialized neighbors get a total sort below.
-    let mut best: HashMap<&str, f64> = HashMap::new();
-    for (anchor, hit_score) in &anchors {
-        let hit_score = *hit_score;
-        let Some(neigh_ids) = adj.get(&anchor.id) else {
-            continue;
-        };
-        let lex_norm = if max_hit_score > 0.0 {
-            hit_score / max_hit_score
-        } else {
-            0.0
-        };
-        for nid in neigh_ids {
-            let kind_w = edge_w
-                .get(&(anchor.id.as_str(), nid.as_str()))
-                .copied()
-                .unwrap_or(0.0);
-            if kind_w <= 0.0 {
-                continue;
-            }
-            let pi_norm = if pi_max > 0.0 {
-                pi.get(nid).copied().unwrap_or(0.0) / pi_max
-            } else {
-                0.0
-            };
-            let confidence = LEX_BLEND * lex_norm + PI_BLEND * pi_norm;
-            let score = hit_score * kind_w * confidence;
-            if score <= 0.0 {
-                continue;
-            }
-            let slot = best.entry(nid.as_str()).or_insert(0.0);
-            if score > *slot {
-                *slot = score;
-            }
-        }
-    }
-
-    // Materialize neighbor hits with a lightweight signature snippet (no file I/O).
-    let mut neighbors: Vec<SearchHit> = best
-        .into_iter()
-        .filter_map(|(nid, score)| {
-            let n = graph.node(nid)?;
-            Some(SearchHit {
-                path: n.file.clone(),
-                snippet: format!("{} {}", n.kind, n.name),
-                score,
-                line: Some(n.line),
-            })
-        })
-        .collect();
-
-    // Dedup against the originals and among neighbors by (path, line): sort by score
-    // desc first so the strongest survivor of a collision wins, then cap by budget.
-    // seen is seeded with the originals so an existing hit is never re-added.
-    let mut seen: HashSet<(String, Option<usize>)> =
-        hits.iter().map(|h| (h.path.clone(), h.line)).collect();
-    neighbors.sort_by(expand_rank_cmp);
-    neighbors.retain(|h| seen.insert((h.path.clone(), h.line)));
-    neighbors.truncate(budget);
-    if neighbors.is_empty() {
-        return hits; // nothing new merged, so preserve the original order exactly.
-    }
-
-    let mut out = hits;
-    out.extend(neighbors);
-    out.sort_by(expand_rank_cmp);
-    out
 }
 
 /// Proximity boost weight: added to the BM25 score of a multi-term hit, scaled by
@@ -590,10 +383,6 @@ fn ranked_search(
     limit: usize,
     file_ranks: &HashMap<String, usize>,
 ) -> Result<Vec<SearchHit>> {
-    // L51: read once per call (not per-hit, to avoid an env read in the candidate
-    // loop) so `line` is populated only when expansion can use it; LENS_EXPAND=0
-    // (default) keeps every hit's `line` None, matching master's shape exactly.
-    let expand_on = expand_enabled();
     // Over-fetch a deeper BM25 pool than the caller asked for, so the proximity
     // re-rank below can pull a tight-span chunk ranked beyond L into the final top-L.
     let fetch = limit.saturating_mul(OVERFETCH_K).min(OVERFETCH_CAP);
@@ -687,18 +476,10 @@ fn ranked_search(
         return Ok(fused
             .into_iter()
             .take(limit)
-            .map(|(_fused, _text_rank, path, chunk_id, snippet, score)| {
-                let line = if expand_on {
-                    chunk_start_line(&path, &chunk_id)
-                } else {
-                    None
-                };
-                SearchHit {
-                    path,
-                    snippet,
-                    score,
-                    line,
-                }
+            .map(|(_fused, _text_rank, path, _chunk_id, snippet, score)| SearchHit {
+                path,
+                snippet,
+                score,
             })
             .collect());
     }
@@ -706,18 +487,10 @@ fn ranked_search(
     Ok(rows
         .into_iter()
         .take(limit)
-        .map(|(path, chunk_id, snippet, score)| {
-            let line = if expand_on {
-                chunk_start_line(&path, &chunk_id)
-            } else {
-                None
-            };
-            SearchHit {
-                path,
-                snippet,
-                score,
-                line,
-            }
+        .map(|(path, _chunk_id, snippet, score)| SearchHit {
+            path,
+            snippet,
+            score,
         })
         .collect())
 }
@@ -859,9 +632,6 @@ fn min_cover_span(content: &str, terms: &[String]) -> Option<usize> {
 /// identifier most (typically its definition) leads. The candidate pool is filtered
 /// to exact literal matches (dropping ngram false positives), then sorted by count.
 fn structural_search(store: &TantivyStore, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-    // L51: read once per call (not per-hit), mirroring ranked_search — see there for
-    // why `line` must be gated on this flag rather than populated unconditionally.
-    let expand_on = expand_enabled();
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
@@ -891,18 +661,10 @@ fn structural_search(store: &TantivyStore, query: &str, limit: usize) -> Result<
     hits.truncate(limit);
     Ok(hits
         .into_iter()
-        .map(|(path, chunk_id, snippet, score)| {
-            let line = if expand_on {
-                chunk_start_line(&path, &chunk_id)
-            } else {
-                None
-            };
-            SearchHit {
-                path,
-                snippet,
-                score,
-                line,
-            }
+        .map(|(path, _chunk_id, snippet, score)| SearchHit {
+            path,
+            snippet,
+            score,
         })
         .collect())
 }
@@ -936,21 +698,6 @@ fn is_structural(query: &str) -> bool {
 /// equally relevant code outranks them.
 fn is_doc_path(path: &str) -> bool {
     path.ends_with(".md") || path.ends_with(".markdown")
-}
-
-/// The chunk's 1-based start line, when derivable. `index_path` names each
-/// code-file chunk `"{path}#{0-based window index}"` (see `chunk_file` /
-/// `chunk_by_lines`), and every window is exactly `CODE_WINDOW` source lines,
-/// so the index maps directly back to a start line. Returns `None` for
-/// session-continuity records (`path` prefixed `session://`, mirroring
-/// `Index::prune_missing`'s check) and for markdown chunks, which are
-/// heading-delimited rather than a fixed line window.
-fn chunk_start_line(path: &str, chunk_id: &str) -> Option<usize> {
-    if path.starts_with("session://") || is_doc_path(path) {
-        return None;
-    }
-    let idx: usize = chunk_id.strip_prefix(path)?.strip_prefix('#')?.parse().ok()?;
-    Some(idx * CODE_WINDOW + 1)
 }
 
 /// Split a file into chunks: markdown by headings, everything else by line windows.
@@ -1562,7 +1309,7 @@ mod tests {
         let baseline = idx.search(&queries, 5).unwrap();
 
         // (i) An empty file-rank map (fusion on by default) is byte-identical to search.
-        let empty = idx.search_fused(&queries, 5, &HashMap::new(), None).unwrap();
+        let empty = idx.search_fused(&queries, 5, &HashMap::new()).unwrap();
         assert_eq!(
             serde_json::to_string(&baseline).unwrap(),
             serde_json::to_string(&empty).unwrap(),
@@ -1578,7 +1325,7 @@ mod tests {
             }
         }
         std::env::set_var("LENS_RRF", "0");
-        let off = idx.search_fused(&queries, 5, &ranks, None).unwrap();
+        let off = idx.search_fused(&queries, 5, &ranks).unwrap();
         // Restore BEFORE asserting so a failed assertion can't leak "0" into a later test.
         std::env::remove_var("LENS_RRF");
         assert_eq!(
@@ -1707,191 +1454,11 @@ mod tests {
         // With fusion and central ranked graph-central (rank 0), it is lifted to the top.
         let mut file_ranks: HashMap<String, usize> = HashMap::new();
         file_ranks.insert(central_path, 0);
-        let fused = idx.search_fused(&[query.to_string()], 5, &file_ranks, None).unwrap();
+        let fused = idx.search_fused(&[query.to_string()], 5, &file_ranks).unwrap();
         assert!(
             fused.results[0].hits[0].path.ends_with("central.rs"),
             "RRF must lift the graph-central file to rank 1, got {}",
             fused.results[0].hits[0].path
         );
-    }
-
-    // ── L51 hit expansion (expand_hits) ─────────────────────────────────────
-
-    /// Serializes the `LENS_EXPAND`-sensitive tests (mirrors `RRF_TEST_LOCK`): they
-    /// mutate a process-global env var. No other test passes a graph to
-    /// `search_fused`, so expansion never runs elsewhere and a transient value is
-    /// invisible to them.
-    static EXPAND_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// A tiny graph: `caller` (caller.rs:1) `calls` `callee` (target.rs:1); two
-    /// unconnected nodes `a`/`b` exist so importance is not degenerate.
-    fn expand_fixture_graph() -> Graph {
-        use discovery::graph::Node;
-        let mut g = Graph::new();
-        let caller = Node::new("caller.rs", "function", "caller", 1, "rust");
-        let callee = Node::new("target.rs", "function", "callee", 1, "rust");
-        let caller_id = caller.id.clone();
-        let callee_id = callee.id.clone();
-        g.add_node(caller);
-        g.add_node(callee);
-        g.add_node(Node::new("a.rs", "function", "a", 1, "rust"));
-        g.add_node(Node::new("b.rs", "function", "b", 1, "rust"));
-        g.add_edge(&caller_id, &callee_id, "calls");
-        g
-    }
-
-    /// Flag OFF (default): `expand_hits` returns its input byte-identical, even when
-    /// the graph is non-empty and hits align to nodes.
-    #[test]
-    fn expand_hits_off_is_identity() {
-        let _lock = EXPAND_TEST_LOCK.lock().unwrap();
-        std::env::remove_var("LENS_EXPAND");
-        let graph = expand_fixture_graph();
-        let hits = vec![
-            SearchHit {
-                path: "caller.rs".to_string(),
-                snippet: "fn caller".to_string(),
-                score: 3.0,
-                line: Some(1),
-            },
-            SearchHit {
-                path: "a.rs".to_string(),
-                snippet: "fn a".to_string(),
-                score: 1.0,
-                line: Some(1),
-            },
-        ];
-        let before = serde_json::to_string(&hits).unwrap();
-        let out = expand_hits(hits, &graph, 5);
-        assert_eq!(
-            serde_json::to_string(&out).unwrap(),
-            before,
-            "LENS_EXPAND off must return the input hits unchanged"
-        );
-    }
-
-    /// Flag ON: a lexical hit on `caller.rs` surfaces its 1-hop `calls` neighbor
-    /// `target.rs`, while the original hit is preserved.
-    #[test]
-    fn expand_hits_on_adds_one_hop_neighbor() {
-        let _lock = EXPAND_TEST_LOCK.lock().unwrap();
-        let graph = expand_fixture_graph();
-        let hits = vec![SearchHit {
-            path: "caller.rs".to_string(),
-            snippet: "fn caller".to_string(),
-            score: 3.0,
-            line: Some(1),
-        }];
-        std::env::set_var("LENS_EXPAND", "1");
-        let out = expand_hits(hits, &graph, 5);
-        std::env::remove_var("LENS_EXPAND"); // restore before asserting
-
-        assert!(
-            out.iter()
-                .any(|h| h.path == "target.rs" && h.line == Some(1)),
-            "LENS_EXPAND=1 must surface the 1-hop `calls` neighbor target.rs, got {:?}",
-            out.iter()
-                .map(|h| (h.path.clone(), h.line))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            out.iter().any(|h| h.path == "caller.rs"),
-            "the original lexical hit must remain in the expanded set"
-        );
-    }
-
-    /// Guard mirroring [`rrf_empty_map_or_off_is_byte_identical`], but at the
-    /// `search_fused`/`SearchResponse` level (T2's `expand_hits_off_is_identity`
-    /// already covers the bare `Vec<SearchHit>` level): a PRESENT, non-empty graph
-    /// whose `auth.rs:1` node aligns to a real corpus hit and `calls` a distinct
-    /// neighbor must still leave `LENS_EXPAND`-off output byte-identical to a
-    /// graph-absent search (the production-risk case where `graph.json` exists but
-    /// the flag stays off). The anchor node's `file` is the corpus file's
-    /// canonicalized absolute path, matching what hits actually carry (verified: with
-    /// this same fixture, `LENS_EXPAND=1` DOES surface the neighbor and diverge from
-    /// baseline), so this guard is a real regression check, not a vacuous pass.
-    #[test]
-    fn expand_off_is_byte_identical() {
-        let _lock = EXPAND_TEST_LOCK.lock().unwrap();
-        // Default OFF (switch unset).
-        std::env::remove_var("LENS_EXPAND");
-        let data = tempdir().unwrap();
-        let src = corpus();
-        let idx = Index::open(data.path()).unwrap();
-        idx.index_path(src.path(), true).unwrap();
-
-        let queries = vec!["authenticate".to_string(), "pooling".to_string(), "add".to_string()];
-        let file_ranks: HashMap<String, usize> = HashMap::new();
-        let baseline = idx.search_fused(&queries, 5, &file_ranks, None).unwrap();
-
-        // A graph whose `auth.rs:1` node ANCHORS the real "authenticate" hit and
-        // `calls` a distinct `login.rs:1` neighbor: if expansion ran despite the flag
-        // being off, the neighbor would appear and the assertions below would catch
-        // it. Hits store the canonicalized absolute file path (index_path
-        // canonicalizes its root before walking), so the node's `file` must match
-        // that form, not a bare "auth.rs" relative name.
-        let root = std::fs::canonicalize(src.path()).unwrap();
-        let auth_path = root.join("auth.rs").to_string_lossy().into_owned();
-        let login_path = root.join("login.rs").to_string_lossy().into_owned();
-
-        use discovery::graph::Node;
-        let mut graph = Graph::new();
-        let anchor = Node::new(&auth_path, "function", "authenticate", 1, "rust");
-        let neighbor = Node::new(&login_path, "function", "login", 1, "rust");
-        let anchor_id = anchor.id.clone();
-        let neighbor_id = neighbor.id.clone();
-        graph.add_node(anchor);
-        graph.add_node(neighbor);
-        graph.add_edge(&anchor_id, &neighbor_id, "calls");
-
-        // (i) A present, non-empty graph with the switch unset (default off) is still
-        // byte-identical to the graph-absent baseline.
-        let unset = idx
-            .search_fused(&queries, 5, &file_ranks, Some(&graph))
-            .unwrap();
-        assert_eq!(
-            serde_json::to_string(&baseline).unwrap(),
-            serde_json::to_string(&unset).unwrap(),
-            "a present non-empty graph with LENS_EXPAND unset must be byte-identical to a graph-absent search"
-        );
-
-        // (ii) An EXPLICIT switch-off ("0") with the same non-empty graph is still
-        // byte-identical: it is the env kill switch, not merely the graph's absence,
-        // that keeps expansion off.
-        std::env::set_var("LENS_EXPAND", "0");
-        let off = idx
-            .search_fused(&queries, 5, &file_ranks, Some(&graph))
-            .unwrap();
-        // Restore BEFORE asserting so a failed assertion can't leak "0" into a later test.
-        std::env::remove_var("LENS_EXPAND");
-        let serialized_off = serde_json::to_string(&off).unwrap();
-        assert_eq!(
-            serde_json::to_string(&baseline).unwrap(),
-            serialized_off,
-            "LENS_EXPAND=0 must produce byte-identical output even with a present non-empty graph"
-        );
-
-        // Strengthened guard: this is the assertion that actually enforces "OFF ==
-        // master shape" — the byte-identical checks above only prove `baseline` /
-        // `unset` / `off` agree WITH EACH OTHER, not that any of them matches the
-        // pre-L51 shape. Assert directly that LENS_EXPAND=0 output carries no "line"
-        // key at all, and that every hit has exactly master's
-        // `SearchHit { path, snippet, score }` keys, nothing more.
-        assert!(
-            !serialized_off.contains("\"line\""),
-            "LENS_EXPAND=0 output must contain no \"line\" key, got {serialized_off}"
-        );
-        let off_value: serde_json::Value = serde_json::from_str(&serialized_off).unwrap();
-        for result in off_value["results"].as_array().unwrap() {
-            for hit in result["hits"].as_array().unwrap() {
-                let mut keys: Vec<&str> = hit.as_object().unwrap().keys().map(|k| k.as_str()).collect();
-                keys.sort();
-                assert_eq!(
-                    keys,
-                    vec!["path", "score", "snippet"],
-                    "LENS_EXPAND=0 hit must have exactly master's {{path, snippet, score}} shape, got {hit}"
-                );
-            }
-        }
     }
 }

@@ -1,0 +1,21 @@
+{
+  "id": "0029_expand_neighbor",
+  "prompt": "Which function computes the widget calibration offset used by the retry sequence?",
+  "fixtures": [
+    "fixtures/expand_neighbor"
+  ],
+  "ground_truth": {
+    "function": "caloffset_marker_q7zx4p"
+  },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "evidence": [
+    "caloffset_marker_q7zx4p"
+  ],
+  "treatment": {
+    "queries": [
+      "widget calibration retry sequence backoff"
+    ],
+    "graph_fused": true
+  }
+}

@@ -608,9 +608,20 @@ impl Forge {
             return Err(e.into());
         }
         let file_ranks = self.file_ranks();
+        // L51: load the persisted graph opportunistically (mirrors `file_ranks`:
+        // read `graph.json` only when present, never build from a search). An absent
+        // or unreadable graph yields `None`, so `search_fused` leaves hits untouched.
+        let graph = {
+            let graph_file = self.graph_file();
+            if graph_file.exists() {
+                Graph::load(&graph_file).ok()
+            } else {
+                None
+            }
+        };
         match self
             .index
-            .search_fused(&req.queries, req.limit_per_query, &file_ranks)
+            .search_fused(&req.queries, req.limit_per_query, &file_ranks, graph.as_ref())
         {
             Ok(mut resp) => {
                 self.federate_nested_search(&mut resp, &req.queries, req.limit_per_query);
@@ -1313,7 +1324,7 @@ impl Forge {
                 Ok(i) => i.with_repo_root(&nested_root),
                 Err(_) => continue,
             };
-            let nested = match nested_index.search_fused(queries, limit_per_query, &HashMap::new()) {
+            let nested = match nested_index.search_fused(queries, limit_per_query, &HashMap::new(), None) {
                 Ok(r) => r,
                 Err(_) => continue,
             };

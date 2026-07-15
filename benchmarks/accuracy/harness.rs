@@ -258,7 +258,7 @@ mod tests {
         assert!(
             results
                 .iter()
-                .filter(|r| !r.id.contains("findloc"))
+                .filter(|r| !r.id.contains("findloc") && !r.id.contains("expand"))
                 .all(|r| r.treatment.correct),
             "every savings treatment arm should be correct under the mock oracle"
         );

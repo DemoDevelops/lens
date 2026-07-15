@@ -119,6 +119,21 @@ impl Graph {
         v
     }
 
+    /// All nodes defined in `path` (exact match), sorted by id for determinism.
+    pub fn nodes_in_file(&self, path: &str) -> Vec<&Node> {
+        let mut v: Vec<&Node> = self.nodes.iter().filter(|n| n.file == path).collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
+    }
+
+    /// The node in `path` whose line is closest to `line` (ties broken by id
+    /// for determinism). `None` when the file has no nodes.
+    pub fn node_nearest(&self, path: &str, line: usize) -> Option<&Node> {
+        self.nodes_in_file(path)
+            .into_iter()
+            .min_by_key(|n| (n.line.abs_diff(line), n.id.as_str()))
+    }
+
     /// Build a name -> node ids index (for resolving call/import targets).
     pub fn name_index(&self) -> HashMap<String, Vec<String>> {
         let mut idx: HashMap<String, Vec<String>> = HashMap::new();
@@ -485,6 +500,23 @@ mod tests {
         assert_eq!(n1.len(), 2); // a, b
         let (n2, _) = g.neighbors(&a, 2);
         assert_eq!(n2.len(), 3); // a, b, c
+    }
+
+    #[test]
+    fn nodes_in_file_filters_by_file() {
+        let g = sample();
+        assert_eq!(g.nodes_in_file("f.rs").len(), 4); // a, b, c, d
+        assert!(g.nodes_in_file("other.rs").is_empty());
+    }
+
+    #[test]
+    fn node_nearest_picks_closest_line() {
+        let g = sample();
+        // sample() has a@1, b@5, c@9, d@13 in f.rs; line 6 is closest to b@5.
+        let b = Node::make_id("f.rs", "function", "b", 5);
+        let nearest = g.node_nearest("f.rs", 6).unwrap();
+        assert_eq!(nearest.id, b);
+        assert!(g.node_nearest("other.rs", 6).is_none());
     }
 
     #[test]

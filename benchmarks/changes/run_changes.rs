@@ -1212,7 +1212,7 @@ fn measure_c20() -> (usize, usize) {
         .collect();
 
     let fused = index
-        .search_fused(&[C20_QUERY.to_string()], 5, &file_ranks)
+        .search_fused(&[C20_QUERY.to_string()], 5, &file_ranks, None)
         .unwrap();
     let fused_rank = c18_rank(&fused.results[0].hits, C20_CENTRAL);
     (plain_rank, fused_rank)
@@ -1507,6 +1507,112 @@ fn gate_c40() -> (String, bool) {
     (s, pass)
 }
 
+// --- C51: 1-hop graph-neighbor expansion recovers a buried file (L51) -------
+
+/// Query that only `C51_ANCHOR`'s content matches; `C51_TARGET` shares none of
+/// its terms, so plain lexical search cannot return it at any rank.
+const C51_QUERY: &str = "frobnicate ratchet widget";
+const C51_ANCHOR: &str = "anchor.rs";
+const C51_TARGET: &str = "target.rs";
+
+/// (rank of `C51_TARGET` under `search_fused` with `LENS_EXPAND=0`, rank under
+/// the same call with `LENS_EXPAND=1`, and whether the `=0` run is
+/// byte-identical to plain `Index::search`) for `C51_QUERY` over an inline
+/// two-file corpus. `file_ranks` is EMPTY, so RRF (`ranked_search`'s fusion
+/// block, gated by `LENS_RRF` but guarded by `!file_ranks.is_empty()`) is a
+/// no-op regardless of ambient `LENS_RRF` state - the only lever able to move
+/// `C51_TARGET`'s rank here is the hand-built `Graph` passed as
+/// `search_fused`'s 5th argument. `C51_ANCHOR` mentions every query term
+/// densely (the corpus's only lexical match for `C51_QUERY`); `C51_TARGET`
+/// shares no term with the query (absent from plain search at any rank) but is
+/// a 1-hop `calls` neighbor of `C51_ANCHOR`'s node in the graph.
+fn measure_c51() -> (usize, usize, bool) {
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(
+        src.path().join(C51_ANCHOR),
+        "fn anchor() {\n    // frobnicate ratchet widget frobnicate ratchet widget\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src.path().join(C51_TARGET),
+        "fn target() {\n    // orthogonal helper unrelated to any lexical probe\n}\n",
+    )
+    .unwrap();
+
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap();
+    index.index_path(src.path(), true).unwrap();
+    let queries = vec![C51_QUERY.to_string()];
+    let file_ranks: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    // Hits carry the corpus's CANONICALIZED absolute path (`index_path`
+    // canonicalizes its root before walking), so the graph nodes' `file` must
+    // match that form, not the bare relative name.
+    let root = std::fs::canonicalize(src.path()).unwrap();
+    let anchor_path = root.join(C51_ANCHOR).to_string_lossy().into_owned();
+    let target_path = root.join(C51_TARGET).to_string_lossy().into_owned();
+
+    let anchor = discovery::graph::Node::new(&anchor_path, "function", "anchor", 1, "rust");
+    let target = discovery::graph::Node::new(&target_path, "function", "target", 1, "rust");
+    let anchor_id = anchor.id.clone();
+    let target_id = target.id.clone();
+    let mut graph = discovery::graph::Graph::new();
+    graph.add_node(anchor);
+    graph.add_node(target);
+    graph.add_edge(&anchor_id, &target_id, "calls");
+
+    let plain = index.search(&queries, 5).unwrap();
+
+    std::env::set_var("LENS_EXPAND", "0");
+    let off = index
+        .search_fused(&queries, 5, &file_ranks, Some(&graph))
+        .unwrap();
+    std::env::remove_var("LENS_EXPAND"); // restore before the next measurement
+
+    let byte_identical_off =
+        serde_json::to_string(&plain).unwrap() == serde_json::to_string(&off).unwrap();
+    let off_rank = c18_rank(&off.results[0].hits, C51_TARGET);
+
+    std::env::set_var("LENS_EXPAND", "1");
+    let on = index
+        .search_fused(&queries, 5, &file_ranks, Some(&graph))
+        .unwrap();
+    std::env::remove_var("LENS_EXPAND"); // restore immediately after use
+
+    let on_rank = c18_rank(&on.results[0].hits, C51_TARGET);
+
+    (off_rank, on_rank, byte_identical_off)
+}
+
+fn gate_c51() -> (String, bool) {
+    let (off_rank, on_rank, byte_identical_off) = measure_c51();
+    // ABSOLUTE: `off_rank == 0` proves `C51_TARGET` is genuinely absent from the
+    // corpus's lexical result set on its own (it shares no query term with
+    // `C51_QUERY`), so any later appearance in the top 5 can only come from the
+    // graph-neighbor expansion pass, not from a lexical fluke.
+    // Trip-proof: `byte_identical_off` asserts the `LENS_EXPAND=0` run matches
+    // plain `Index::search` byte-for-byte even with the graph present - if
+    // expansion secretly ran despite the flag, this equality (and the gate)
+    // would fail.
+    let buried = off_rank == 0 || off_rank > 5;
+    let recovered = (1..=5).contains(&on_rank);
+    let pass = buried && recovered && byte_identical_off;
+    let off_label = if off_rank == 0 {
+        "outside top 5".to_string()
+    } else {
+        off_rank.to_string()
+    };
+    let on_label = if on_rank == 0 {
+        "outside top 5".to_string()
+    } else {
+        on_rank.to_string()
+    };
+    let s = format!(
+        "## C51 - graph-neighbor expansion recovers a buried file (L51)\n\nQuery `\"{C51_QUERY}\"` over an inline two-file corpus: `{C51_ANCHOR}` is the corpus's only lexical match (dense term overlap); `{C51_TARGET}` shares no term with the query but is a 1-hop `calls` neighbor of `{C51_ANCHOR}`'s node in a hand-built graph. `file_ranks` is empty, so RRF is a no-op and the only lever in play is `LENS_EXPAND`. Rank of `{C51_TARGET}` with expansion off: **{off_label}**; with expansion on: **{on_label}**. Trip-proof: the off run is byte-identical to plain `Index::search`: **{byte_identical_off}**. Gate (absolute, trip-proofed): off rank is outside the top 5 AND the on rank is within it AND the off run matches plain search exactly.\n"
+    );
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -1587,6 +1693,8 @@ fn main() -> anyhow::Result<()> {
     println!("{s22}");
     let (s40, c40_ok) = gate_c40();
     println!("{s40}");
+    let (s51, c51_ok) = gate_c51();
+    println!("{s51}");
 
     println!("\n## Gates");
     let gates = [
@@ -1613,6 +1721,7 @@ fn main() -> anyhow::Result<()> {
         ("C21 pattern/S-expression parity + trip-proof detects mismatch", c21_ok),
         ("C22 memory record/query roundtrip + trip-proofs detect breakage", c22_ok),
         ("C40 personalized overview lifts touched-file symbol into budget", c40_ok),
+        ("C51 graph-neighbor expansion recovers a buried file (trip-proofed)", c51_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });

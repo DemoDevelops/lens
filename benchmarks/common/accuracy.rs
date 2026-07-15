@@ -313,7 +313,7 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
                 .enumerate()
                 .map(|(rank, (path, _score))| (path.to_string(), rank))
                 .collect();
-            index.search_fused(queries, 5, &file_ranks)?
+            index.search_fused(queries, 5, &file_ranks, Some(&graph))?
         } else {
             index.search(queries, 5)?
         };

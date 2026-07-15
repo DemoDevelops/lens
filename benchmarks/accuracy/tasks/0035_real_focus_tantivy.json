@@ -1,0 +1,13 @@
+{
+  "id": "0035_real_focus_tantivy",
+  "prompt": "From the repository overview, which function builds and commits the content index?",
+  "fixtures": ["../../src/index"],
+  "ground_truth": { "function": "index_path" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["index_path"],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "tantivy content index build commit writer"
+  }
+}

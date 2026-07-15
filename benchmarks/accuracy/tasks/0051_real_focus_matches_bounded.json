@@ -1,0 +1,19 @@
+{
+  "id": "0051_real_focus_matches_bounded",
+  "prompt": "In the Bash command classifier, which helper matches a command's leading keyword against the fixed bounded low-output prefix list like pwd, whoami, git status via the Aho-Corasick automaton?",
+  "fixtures": [
+    "../../src/routing"
+  ],
+  "ground_truth": {
+    "function": "matches_bounded"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": [
+    "matches_bounded"
+  ],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "bounded low output prefix list pwd whoami git status aho-corasick automaton leading keyword matches"
+  }
+}

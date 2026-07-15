@@ -1,0 +1,19 @@
+{
+  "id": "0055_real_focus_merge_nested_graph",
+  "prompt": "After a nested repo is discovered separately, which function does the merge of that nested repo's own graph back into the parent's combined graph output, remapping node ids and file paths as it goes?",
+  "fixtures": [
+    "../../src/discovery"
+  ],
+  "ground_truth": {
+    "function": "merge_nested_graph"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": [
+    "merge_nested_graph"
+  ],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "nested repo discovered merge own graph back parent combined output remap node ids file paths"
+  }
+}

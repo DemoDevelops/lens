@@ -1,0 +1,13 @@
+{
+  "id": "0037_real_focus_skeletonize",
+  "prompt": "From the repository overview, which function reduces a source file to signatures with bodies elided to an ellipsis?",
+  "fixtures": ["../../src/discovery"],
+  "ground_truth": { "function": "skeletonize" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["skeletonize"],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "signatures bodies elided ellipsis skeleton reduce"
+  }
+}

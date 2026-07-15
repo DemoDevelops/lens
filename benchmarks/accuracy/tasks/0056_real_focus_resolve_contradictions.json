@@ -1,0 +1,19 @@
+{
+  "id": "0056_real_focus_resolve_contradictions",
+  "prompt": "In the session store's resume/recovery view, when the same entity's state was recorded more than once, e.g. a path touched then later deleted, which function resolves those contradictions, keeping only the latest-timestamped event per entity and leaving keyless events untouched?",
+  "fixtures": [
+    "../../src/session"
+  ],
+  "ground_truth": {
+    "function": "resolve_contradictions"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": [
+    "resolve_contradictions"
+  ],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "session store resume recovery entity state recorded resolve contradictions latest timestamped event per entity keyless"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "0052_real_focus_chunk_markdown",
+  "prompt": "When lens indexes a markdown file, which function is responsible for the per-heading chunk boundaries instead of the generic fixed-size line chunker used for other files?",
+  "fixtures": [
+    "../../src/index"
+  ],
+  "ground_truth": {
+    "function": "chunk_markdown"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": [
+    "chunk_markdown"
+  ],
+  "treatment": {
+    "graph_op": "overview",
+    "query": "markdown per-heading chunk boundaries generic fixed-size line chunker index"
+  }
+}

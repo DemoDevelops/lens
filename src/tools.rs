@@ -294,6 +294,11 @@ pub struct OverviewRequest {
     /// Token budget for the overview (default 2000).
     #[serde(default = "default_overview_budget")]
     pub token_budget: usize,
+    /// Optional focus: symbols whose names match this query, plus files touched
+    /// this session, are boosted in the ranking so the map centers on a topic.
+    /// Omit for the unfocused, structurally-ranked map.
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

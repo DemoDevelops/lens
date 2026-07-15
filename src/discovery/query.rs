@@ -364,8 +364,25 @@ const KNAPSACK_MAX_CELLS: usize = 8_000_000;
 /// back to a binary-searched prefix when the DP table would be too large. Gives an
 /// agent a high-signal map of a codebase at a fixed token cost instead of reading
 /// files.
-pub fn overview(graph: &Graph, token_budget: usize) -> String {
-    let importance = graph.importance();
+///
+/// `seed` personalizes the ranking (L40): an aider-style focus vector over node
+/// ids (session-touched files and `query`-matched names, built by
+/// [`overview_seed`]) fed to [`Graph::personalized_importance`]. An empty seed
+/// reduces to the global PageRank teleport by construction, so a no-focus overview
+/// is byte-identical to the static map: one code path, never a branch on emptiness.
+pub fn overview(graph: &Graph, token_budget: usize, seed: &HashMap<String, f64>) -> String {
+    overview_ranked(graph, token_budget, &graph.personalized_importance(seed))
+}
+
+/// The ordering and knapsack-packing core of [`overview`], rendering from a
+/// precomputed `importance` map. Split out so the exact ranking is injectable:
+/// [`overview`] passes seeded PageRank; the regression test passes
+/// `graph.importance()` directly to pin empty-seed == global-PR byte-for-byte.
+fn overview_ranked(
+    graph: &Graph,
+    token_budget: usize,
+    importance: &HashMap<String, f64>,
+) -> String {
     let mut ranked: Vec<&Node> = graph
         .nodes
         .iter()
@@ -409,6 +426,34 @@ pub fn overview(graph: &Graph, token_budget: usize) -> String {
         .map(|i| ranked[i])
         .collect();
     render_overview(graph, &picked)
+}
+
+/// Build the [`overview`] personalization seed (aider-style repomap focus): each
+/// node gets +50 when its file was touched this session (`recent_files`) and +10
+/// when its name matches the optional `query`, so a node hit by both weighs 60.
+/// Reuses the same session-proximity ([`is_recent`]) and lexical ([`score_name`])
+/// signals as `lens_symbol` and `lens_find`. An empty result (no touched files and
+/// no query match) leaves [`overview`] byte-identical to the global map.
+pub fn overview_seed(
+    graph: &Graph,
+    recent_files: &[String],
+    query: Option<&str>,
+) -> HashMap<String, f64> {
+    let tokens = query.map(tokenize);
+    let mut seed: HashMap<String, f64> = HashMap::new();
+    for node in &graph.nodes {
+        let mut w = 0.0;
+        if is_recent(&node.file, recent_files) {
+            w += 50.0;
+        }
+        if tokens.as_ref().is_some_and(|t| score_name(&node.name, t) > 0) {
+            w += 10.0;
+        }
+        if w > 0.0 {
+            *seed.entry(node.id.clone()).or_insert(0.0) += w;
+        }
+    }
+    seed
 }
 
 /// Largest importance-ranked PREFIX whose render fits `token_budget` (binary
@@ -525,10 +570,10 @@ mod tests {
         fs::write(dir.path().join("r.rs"), src).unwrap();
         let g = discover(dir.path(), None).unwrap().graph;
 
-        let full = overview(&g, 100_000);
+        let full = overview(&g, 100_000, &HashMap::new());
         assert!(full.contains("`hub_x`") && full.contains("`w0`"), "full lists everything");
 
-        let tight = overview(&g, 80);
+        let tight = overview(&g, 80, &HashMap::new());
         assert!(crate::obs::count_tokens(&tight) <= 80, "tight overview must fit the budget");
         // The hubs survive (entries carry backticks; a name in a caller list does not).
         assert!(
@@ -540,6 +585,80 @@ mod tests {
         assert!(
             entries(&tight) < entries(&full),
             "tight overview drops low-importance symbols"
+        );
+    }
+
+    #[test]
+    fn overview_empty_seed_equals_global_pr_render() {
+        // The byte-identity pin. An empty seed MUST flow through
+        // personalized_importance(&empty), which reduces to importance()'s uniform
+        // teleport. Rendering directly from graph.importance() via the shared
+        // packing core (overview_ranked) must be byte-for-byte identical to
+        // overview() with an empty seed, at both a generous and a truncating budget
+        // (covers ordering AND packing). A future second code path for the empty
+        // case would break this.
+        let dir = tempdir().unwrap();
+        let mut src = String::from("pub fn hub_x() -> i32 { 1 }\npub fn hub_y() -> i32 { 2 }\n");
+        for i in 0..40 {
+            src.push_str(&format!("pub fn w{i}() -> i32 {{ hub_x() + hub_y() }}\n"));
+        }
+        fs::write(dir.path().join("r.rs"), src).unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let empty = HashMap::new();
+        for budget in [100_000usize, 80] {
+            assert_eq!(
+                overview(&g, budget, &empty),
+                overview_ranked(&g, budget, &g.importance()),
+                "empty-seed overview must equal the global-PR render byte-for-byte (budget {budget})"
+            );
+        }
+    }
+
+    #[test]
+    fn overview_focus_lifts_touched_file_into_budget() {
+        // A cluster of hubs (each called by 40 workers) dominates global
+        // importance; an isolated helper in its own file is globally unimportant. A
+        // budget sized to exactly the two hubs excludes the helper. Marking the
+        // helper's file touched seeds its node (+50), so personalized PageRank lifts
+        // it into the same budget, proving personalization changes the packed set
+        // while the empty path stays fixed.
+        let dir = tempdir().unwrap();
+        let mut core = String::from("pub fn hub_x() -> i32 { 1 }\npub fn hub_y() -> i32 { 2 }\n");
+        for i in 0..40 {
+            core.push_str(&format!("pub fn w{i}() -> i32 {{ hub_x() + hub_y() }}\n"));
+        }
+        fs::write(dir.path().join("core.rs"), core).unwrap();
+        fs::write(
+            dir.path().join("lonely.rs"),
+            "pub fn obscure_helper() -> i32 { 7 }\n",
+        )
+        .unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        // Budget = header + the two hub entries exactly, so the hubs fill capacity
+        // and no lower-importance node (the helper included) fits without a boost.
+        let entry_tokens = |name: &str| {
+            let node = g.nodes.iter().find(|n| n.name == name).unwrap();
+            crate::obs::count_tokens(&render_entry(&g, node))
+        };
+        let budget =
+            crate::obs::count_tokens(OVERVIEW_HEADER) + entry_tokens("hub_x") + entry_tokens("hub_y");
+
+        let plain = overview(&g, budget, &HashMap::new());
+        assert!(
+            !plain.contains("`obscure_helper`"),
+            "the isolated helper is globally unimportant and must be dropped at the two-hub budget"
+        );
+
+        // Mark lonely.rs touched -> overview_seed assigns its node 50.0.
+        let touched = vec![dir.path().join("lonely.rs").to_string_lossy().into_owned()];
+        let seed = overview_seed(&g, &touched, None);
+        assert!(!seed.is_empty(), "touching a real file must seed its node");
+        let focused = overview(&g, budget, &seed);
+        assert!(
+            focused.contains("`obscure_helper`"),
+            "marking its file touched must lift the helper into the same budget"
         );
     }
 

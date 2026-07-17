@@ -176,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
                 clean.push_str("\n> Run method: real model via headless `claude -p`, tools disabled, context-only isolation — each arm answers only from its given context, exactly like a direct API call.\n");
             }
             clean.push_str(&format!(
-                ">\n> Samples are small (N = {}) and each task runs once. Directional confirmations, not statistically powered rates.\n",
+                ">\n> Samples are small (N = {}); each task runs multiple times with results shown as mean±stddev. Directional confirmations, not statistically powered rates.\n",
                 small_n(&ns)
             ));
 

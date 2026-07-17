@@ -1,0 +1,10 @@
+{
+  "id": "0059_reaches_personalized_importance",
+  "prompt": "Following call edges only, can `find_ranked` reach `personalized_importance`? Answer yes or no.",
+  "fixtures": ["../../src/discovery"],
+  "ground_truth": { "reachable": "yes" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["personalized_importance"],
+  "treatment": { "graph_op": "path", "from": "find_ranked", "to": "personalized_importance" }
+}

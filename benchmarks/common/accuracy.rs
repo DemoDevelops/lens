@@ -13,17 +13,18 @@
 //! treatment accuracy >= control accuracy while treatment tokens << control.
 
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use lens::darkroom;
+use lens::discovery::graph::Graph;
 use lens::discovery::{self, query as gquery};
 use lens::index::Index;
 use lens::store::Store;
-use lens::tools::ExecuteRequest;
+use lens::tools::{ExecuteRequest, GraphView, NodeView};
 
 /// Naive-agent context budget (bytes). Raw fixtures larger than this are
 /// truncated in the control arm — the regime where naive sessions lose data.
@@ -87,6 +88,9 @@ pub struct Treatment {
     /// 2000 (the `lens_overview` tool default), unchanged for every existing task.
     #[serde(default)]
     pub overview_budget: Option<usize>,
+    /// Neighbors: hops outward from the resolved node. Defaults to 1, the
+    /// `lens_links` default.
+    pub depth: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +150,13 @@ pub enum Model {
     /// arrives as structured JSON (`.result`) instead of a PTY screen scrape. The
     /// string is the `--model` passed to `claude` (empty = the session default).
     ClaudeHeadless(String),
+    /// Real model driven through headless `claude -p` with **tools live**. Unlike
+    /// every other backend the arms are not two prebuilt contexts: both are agent
+    /// sessions over this repo that differ only in whether the lens MCP server is
+    /// configured at all, so the measured delta is lens's marginal contribution in
+    /// the setting lens actually runs in. The string is the `--model` passed to
+    /// `claude` (empty = the session default).
+    ClaudeAgentic(String),
 }
 
 impl Model {
@@ -157,6 +168,8 @@ impl Model {
             Model::ClaudePty(m) => format!("{m} (via claude-pty)"),
             Model::ClaudeHeadless(m) if m.is_empty() => "claude-headless".to_string(),
             Model::ClaudeHeadless(m) => format!("{m} (via claude-headless)"),
+            Model::ClaudeAgentic(m) if m.is_empty() => "claude-agentic".to_string(),
+            Model::ClaudeAgentic(m) => format!("{m} (via claude-agentic)"),
         }
     }
 }
@@ -169,30 +182,119 @@ pub struct ArmResult {
     pub tokens: usize,
     pub context_bytes: usize,
     pub answer: Value,
+    /// Tool calls the agent made. Agentic arms only; the tools-off backends are
+    /// handed their context and call nothing, so the field is skipped there and
+    /// their serialized shape is unchanged.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rounds: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// K-run fold for one arm. Only present when an arm ran more than once, so a
+/// single-run result serializes exactly as it did before K-run existed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArmStats {
+    pub runs: usize,
+    pub success_rate: f64,
+    pub mean_tokens: f64,
+    pub stddev_tokens: f64,
+    pub mean_rounds: f64,
+    pub stddev_rounds: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResult {
     pub id: String,
     pub mechanism: String,
+    /// The arm's first run — the single-value view every pre-K-run consumer reads.
     pub control: ArmResult,
     pub treatment: ArmResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_stats: Option<ArmStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub treatment_stats: Option<ArmStats>,
 }
 
-/// Run both arms of one task.
-pub async fn run_task(task: &Task, model: &Model) -> anyhow::Result<TaskResult> {
-    let control_ctx = build_control_context(task)?;
-    let treatment_ctx = build_treatment_context(task).await?;
-
-    let control = run_arm(task, model, &control_ctx)?;
-    let treatment = run_arm(task, model, &treatment_ctx)?;
-
+/// Run both arms of one task `runs` times each. `runs = 1` reproduces the
+/// single-shot behavior exactly, down to the serialized shape.
+pub async fn run_task(task: &Task, model: &Model, runs: usize) -> anyhow::Result<TaskResult> {
+    let runs = runs.max(1);
+    let (mut control, mut treatment) = match model {
+        Model::ClaudeAgentic(id) => agentic_arms(task, id, runs)?,
+        _ => context_arms(task, model, runs).await?,
+    };
     Ok(TaskResult {
         id: task.id.clone(),
         mechanism: task.primary_mechanism.clone(),
-        control,
-        treatment,
+        control_stats: fold_arm(&control),
+        treatment_stats: fold_arm(&treatment),
+        control: control.remove(0),
+        treatment: treatment.remove(0),
     })
+}
+
+/// The classic two-context arms: one control/treatment context built once, then
+/// answered `runs` times (rebuilding is deterministic, so it would only burn time).
+async fn context_arms(
+    task: &Task,
+    model: &Model,
+    runs: usize,
+) -> anyhow::Result<(Vec<ArmResult>, Vec<ArmResult>)> {
+    let control_ctx = build_control_context(task)?;
+    let treatment_ctx = build_treatment_context(task).await?;
+    let mut control = Vec::new();
+    let mut treatment = Vec::new();
+    for _ in 0..runs {
+        control.push(run_arm(task, model, &control_ctx)?);
+        treatment.push(run_arm(task, model, &treatment_ctx)?);
+    }
+    Ok((control, treatment))
+}
+
+/// Fold `runs` repetitions of one arm into its rate/mean/stddev. `None` for a
+/// single run: there is no variance to report, and the caller's single-value
+/// fields already say everything.
+fn fold_arm(runs: &[ArmResult]) -> Option<ArmStats> {
+    if runs.len() < 2 {
+        return None;
+    }
+    let successes: Vec<f64> = runs.iter().map(|r| r.correct as u8 as f64).collect();
+    let tokens: Vec<f64> = runs.iter().map(|r| r.tokens as f64).collect();
+    let rounds: Vec<f64> = runs.iter().map(|r| r.rounds as f64).collect();
+    Some(ArmStats {
+        runs: runs.len(),
+        success_rate: mean(&successes),
+        mean_tokens: mean(&tokens),
+        stddev_tokens: stddev(&tokens),
+        mean_rounds: mean(&rounds),
+        stddev_rounds: stddev(&rounds),
+    })
+}
+
+fn mean(xs: &[f64]) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.iter().sum::<f64>() / xs.len() as f64
+}
+
+/// Population standard deviation. Fewer than two samples have no spread, so
+/// they report 0.0 rather than NaN.
+pub fn stddev(xs: &[f64]) -> f64 {
+    if xs.len() < 2 {
+        return 0.0;
+    }
+    let m = mean(xs);
+    (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt()
+}
+
+/// Standard deviation of a sum of independent per-task draws: variances add, so
+/// summing the stddevs themselves would overstate the spread.
+fn stddev_of_sum(sds: impl Iterator<Item = f64>) -> f64 {
+    sds.map(|s| s * s).sum::<f64>().sqrt()
 }
 
 fn run_arm(task: &Task, model: &Model, context: &str) -> anyhow::Result<ArmResult> {
@@ -216,6 +318,9 @@ fn run_arm(task: &Task, model: &Model, context: &str) -> anyhow::Result<ArmResul
                 .map_err(|e| anyhow::anyhow!("claude headless call failed: {e}"))?;
             extract_json(&raw)
         }
+        // `run_task` routes the agentic backend to `agentic_arms` before this
+        // point: its arms explore the repo, they don't answer from a context.
+        Model::ClaudeAgentic(_) => unreachable!("agentic arms do not run from a prebuilt context"),
     };
     let correct = score(&answer, &task.ground_truth, &task.check, task.tolerance);
     Ok(ArmResult {
@@ -223,6 +328,7 @@ fn run_arm(task: &Task, model: &Model, context: &str) -> anyhow::Result<ArmResul
         tokens: est_tokens(context),
         context_bytes: context.len(),
         answer,
+        rounds: 0, // handed its context; it calls nothing
     })
 }
 
@@ -376,6 +482,16 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
                 );
                 serde_json::to_string_pretty(&view)?
             }
+            // Who-calls-X / what-does-X-call, the `lens_links` path. `lens_links`
+            // takes the node id a prior `lens_symbol` call handed the model, so
+            // the name -> id resolution a task spec needs happens here.
+            "neighbors" => {
+                let name = t.name.as_deref().unwrap_or("");
+                let id = resolve_node_id(&outcome.graph, name, t.kind.as_deref())
+                    .ok_or_else(|| anyhow::anyhow!("neighbors: no node matching '{name}'"))?;
+                let view = gquery::neighbors(&outcome.graph, &id, t.depth.unwrap_or(1));
+                neighbors_context(&view, &id)?
+            }
             other => return Err(anyhow::anyhow!("unknown graph_op '{other}'")),
         };
         return Ok(json);
@@ -394,6 +510,51 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
     Err(anyhow::anyhow!("task {} has no treatment spec", task.id))
 }
 
+/// Resolve a symbol token to a node id the way `query::path` does — exact id,
+/// then exact name, then first substring hit. `query::resolve` is private, so a
+/// name-addressed `neighbors` task needs its own copy of the rule.
+fn resolve_node_id(graph: &Graph, token: &str, kind: Option<&str>) -> Option<String> {
+    if graph.node(token).is_some() {
+        return Some(token.to_string());
+    }
+    let matches = graph.find_by_name(token, kind);
+    matches
+        .iter()
+        .find(|n| n.name == token)
+        .or_else(|| matches.first())
+        .map(|n| n.id.clone())
+}
+
+/// `lens_links`'s neighborhood, joined into named callers and callees. The raw
+/// view's edges carry opaque blake3 ids, so who-calls-X is unanswerable from it
+/// without this join. `via` keeps the edge kind visible, so a containing module
+/// (a `contains` edge) is never mistaken for a caller.
+fn neighbors_context(view: &GraphView, target_id: &str) -> anyhow::Result<String> {
+    let by_id: std::collections::HashMap<&str, &NodeView> =
+        view.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let callers: Vec<Value> = view
+        .edges
+        .iter()
+        .filter(|e| e.to == target_id)
+        .filter_map(|e| by_id.get(e.from.as_str()).map(|n| linked(n, &e.kind)))
+        .collect();
+    let callees: Vec<Value> = view
+        .edges
+        .iter()
+        .filter(|e| e.from == target_id)
+        .filter_map(|e| by_id.get(e.to.as_str()).map(|n| linked(n, &e.kind)))
+        .collect();
+    Ok(serde_json::to_string_pretty(&json!({
+        "target": by_id.get(target_id),
+        "callers": callers,
+        "callees": callees,
+    }))?)
+}
+
+fn linked(n: &NodeView, via: &str) -> Value {
+    json!({ "via": via, "name": n.name, "kind": n.kind, "file": n.file, "line": n.line })
+}
+
 fn truncate_bytes(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -409,11 +570,15 @@ fn truncate_bytes(s: &str, max: usize) -> String {
 
 const SYSTEM_PROMPT: &str = "You are a precise data-extraction assistant. Answer strictly from the provided context. Respond with a single minified JSON object and nothing else — no prose, no code fences.";
 
-fn format_user(context: &str, prompt: &str, ground_truth: &Value) -> String {
-    let keys: Vec<String> = ground_truth
+fn ground_truth_keys(ground_truth: &Value) -> Vec<String> {
+    ground_truth
         .as_object()
         .map(|o| o.keys().cloned().collect())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn format_user(context: &str, prompt: &str, ground_truth: &Value) -> String {
+    let keys = ground_truth_keys(ground_truth);
     format!(
         "Context:\n{context}\n\nQuestion: {prompt}\n\nRespond with ONLY a JSON object with exactly these keys: {keys:?}."
     )
@@ -636,6 +801,412 @@ fn claude_headless_attempt(prompt: &str, model: &str) -> Result<String, String> 
         })
 }
 
+// --- Agentic backend (tools live, lens MCP wired in) ------------------------
+
+/// Builtin file tools, permitted to both arms.
+const BASELINE_TOOLS: &str = "Read Grep Glob Bash";
+/// The lens arm additionally permits the lens MCP tools. This is a *permission*
+/// list, not an isolation boundary: `--allowedTools` was measured NOT to stop a
+/// baseline session from reaching an MCP server it can see (it found lens via
+/// `ToolSearch` and called it successfully). Isolation is structural — see
+/// `arm_isolation`.
+const LENS_TOOLS: &str = "Read Grep Glob Bash mcp__lens";
+
+/// Proof that lens's SessionStart guide reached a session: the lens arm must see
+/// it (it ships with `lens setup`), the baseline must not.
+const GUIDE_SENTINEL: &str = "<context_window_protection>";
+
+const AGENTIC_SYSTEM_PROMPT: &str = "You are a precise code-analysis assistant working in a real repository. Investigate with the tools available until you can answer. Respond with a single minified JSON object and nothing else — no prose, no code fences.";
+
+/// The task's fixtures as repo-root-relative paths: the agentic arms run from the
+/// repo root, while `fixtures` are written relative to `accuracy_root()`.
+fn fixture_scope(task: &Task) -> Vec<String> {
+    let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    task.fixtures
+        .iter()
+        .map(|f| {
+            let joined = accuracy_root().join(f);
+            let abs = std::fs::canonicalize(&joined).unwrap_or(joined);
+            abs.strip_prefix(&root)
+                .unwrap_or(&abs)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect()
+}
+
+/// The agentic arms get no prebuilt context: finding the evidence with the tools
+/// they have IS the measurement. They do get the fixture scope, because every
+/// other arm is implicitly scoped to it (the control sees only the fixture's
+/// bytes; the treatment graph is built from the fixture) and the ground truth
+/// only asserts what holds *inside* it — asked repo-wide, a correct answer scores
+/// wrong.
+fn format_agentic_user(task: &Task) -> String {
+    let keys = ground_truth_keys(&task.ground_truth);
+    let scope = fixture_scope(task).join(", ");
+    format!(
+        "{AGENTIC_SYSTEM_PROMPT}\n\nScope: answer only about code under `{scope}` in this repository. Ignore matches outside that path.\n\nQuestion: {}\n\nRespond with ONLY a JSON object with exactly these keys: {keys:?}.",
+        task.prompt
+    )
+}
+
+/// Live A/B of two configs a user could actually install: **vanilla Claude** vs
+/// **lens as `lens setup` installs it**. The adoption layer (SessionStart guide,
+/// nudge/deny rails) ships with lens, so it belongs to the lens arm rather than
+/// being equalized away; equalizing it would amputate the thing being measured.
+fn agentic_arms(
+    task: &Task,
+    model: &str,
+    runs: usize,
+) -> anyhow::Result<(Vec<ArmResult>, Vec<ArmResult>)> {
+    let iso = arm_isolation()?;
+    let mut control = Vec::new();
+    let mut treatment = Vec::new();
+    for _ in 0..runs {
+        control.push(run_agentic_arm(task, model, &iso.baseline())?);
+        treatment.push(run_agentic_arm(task, model, &iso.lens_arm())?);
+    }
+    Ok((control, treatment))
+}
+
+/// One side of the A/B as it reaches `claude -p`.
+struct ArmSpec<'a> {
+    allowed_tools: &'a str,
+    mcp_config: &'a Path,
+    settings: &'a Path,
+    /// Whether lens's SessionStart guide must reach this arm. A lens arm without
+    /// it means routing silently failed to take; a baseline with it means lens
+    /// leaked in. Either way the arm measures the wrong thing, so it fails loudly.
+    expects_guide: bool,
+}
+
+/// What separates the arms, on disk. Held together because the files must all
+/// outlive the sessions that read them.
+struct ArmIsolation {
+    baseline_mcp: tempfile::NamedTempFile,
+    baseline_settings: tempfile::NamedTempFile,
+    lens_mcp: tempfile::NamedTempFile,
+    lens_settings: tempfile::NamedTempFile,
+}
+
+impl ArmIsolation {
+    fn baseline(&self) -> ArmSpec<'_> {
+        ArmSpec {
+            allowed_tools: BASELINE_TOOLS,
+            mcp_config: self.baseline_mcp.path(),
+            settings: self.baseline_settings.path(),
+            expects_guide: false,
+        }
+    }
+
+    fn lens_arm(&self) -> ArmSpec<'_> {
+        ArmSpec {
+            allowed_tools: LENS_TOOLS,
+            mcp_config: self.lens_mcp.path(),
+            settings: self.lens_settings.path(),
+            expects_guide: true,
+        }
+    }
+}
+
+/// The lens arm's hooks shell the *installed* `~/.cargo/bin/lens` (that is what
+/// `lens setup` registers) while its MCP tools come from `target/release/lens`.
+/// Verified benign: both builds emit a byte-identical SessionStart guide, repo
+/// map, and rail nudge; only a durable-memory state footnote differs, which is
+/// data rather than code.
+fn arm_isolation() -> anyhow::Result<ArmIsolation> {
+    if !supports_strict_mcp_config() {
+        return Err(anyhow::anyhow!(
+            "this `claude` CLI has no --strict-mcp-config, so the baseline arm cannot be \
+             isolated from the ambient lens MCP server; refusing to run an invalid A/B"
+        ));
+    }
+    Ok(ArmIsolation {
+        baseline_mcp: write_temp_json(&json!({ "mcpServers": {} }))?,
+        baseline_settings: write_temp_json(&baseline_settings_json())?,
+        lens_mcp: write_temp_json(&mcp_config_json(&lens_release_bin()))?,
+        lens_settings: write_temp_json(&lens_settings_json())?,
+    })
+}
+
+fn write_temp_json(v: &Value) -> anyhow::Result<tempfile::NamedTempFile> {
+    let mut f = tempfile::NamedTempFile::new()?;
+    f.write_all(serde_json::to_string(v)?.as_bytes())?;
+    Ok(f)
+}
+
+/// MCP config pointing at the release lens binary with no subcommand — the same
+/// server semantics `lens setup`'s `register_mcp` registers.
+fn mcp_config_json(lens_bin: &Path) -> Value {
+    json!({ "mcpServers": { "lens": { "command": lens_bin.to_string_lossy(), "args": [] } } })
+}
+
+/// Baseline = a machine where lens was never installed. Its hooks are registered
+/// globally and cannot be un-merged (settings merge, so `{"hooks":{}}` is inert),
+/// but `LENS_ROUTING=off` is a true no-op — "PreToolUse returns {}, SessionStart
+/// unchanged" — so they fire and contribute nothing. Rails pinned off likewise.
+/// This has to travel as an env-only `--settings` file because ambient settings
+/// env beats the child's process env (the toolsel harness does the same).
+fn baseline_settings_json() -> Value {
+    let mut env = Map::new();
+    env.insert("LENS_ROUTING".to_string(), json!("off"));
+    for flag in REROUTE_RAIL_FLAGS {
+        env.insert((*flag).to_string(), json!("0"));
+    }
+    json!({ "env": env })
+}
+
+/// lens arm = lens exactly as `lens setup` installs it: routing at its shipping
+/// default. `full` is nudge + steer + wrap, which is what injects the SessionStart
+/// guide and arms the deny rails. The 13 rails are deliberately left unset: they
+/// are default-ON kill-switches, so unset IS the shipping default and pinning them
+/// to "0" would disable the adoption layer under test.
+fn lens_settings_json() -> Value {
+    json!({ "env": { "LENS_ROUTING": "full" } })
+}
+
+fn lens_release_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/release/lens")
+}
+
+/// Whether the installed `claude` CLI recognizes `--strict-mcp-config` (checked
+/// once per process; older CLIs lack it).
+fn supports_strict_mcp_config() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        Command::new("claude")
+            .args(["-p", "--help"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("--strict-mcp-config"))
+            .unwrap_or(false)
+    })
+}
+
+/// All 13 reroute-rail nudge/deny flags, default-ON kill-switches (`=0` disables).
+/// Keep in sync with the flag matrix in `src/routing/reroute/mod.rs`.
+const REROUTE_RAIL_FLAGS: &[&str] = &[
+    "LENS_GREP_SCOPE_DENY",
+    "LENS_GREP_SYMBOL_DENY",
+    "LENS_GREP_SYMBOL_NUDGE",
+    "LENS_READ_SKELETON_DENY",
+    "LENS_READ_SKELETON_NUDGE",
+    "LENS_GREP_AST_NUDGE",
+    "LENS_GREP_AST_DENY",
+    "LENS_READ_OVERVIEW_NUDGE",
+    "LENS_READ_OVERVIEW_DENY",
+    "LENS_BASH_AGG_NUDGE",
+    "LENS_BASH_AGG_DENY",
+    "LENS_EDIT_LINKS_NUDGE",
+    "LENS_EDIT_LINKS_DENY",
+];
+
+/// One arm, retried once (a transient kill/timeout succeeds on the second try).
+fn run_agentic_arm(task: &Task, model: &str, arm: &ArmSpec) -> anyhow::Result<ArmResult> {
+    let prompt = format_agentic_user(task);
+    let mut last_err = String::new();
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        match claude_agentic_attempt(&prompt, model, arm) {
+            Ok(run) => {
+                // A misconfigured arm is not worth retrying, and silently measuring
+                // it is how the first two builds shipped an invalid A/B.
+                if (run.guide_injections > 0) != arm.expects_guide {
+                    return Err(anyhow::anyhow!(
+                        "arm [{}] expected lens guide={} but saw {} injection(s): its routing \
+                         config did not take, so the arm is measuring the wrong thing",
+                        arm.allowed_tools,
+                        arm.expects_guide,
+                        run.guide_injections
+                    ));
+                }
+                if run.hit_turn_cap {
+                    eprintln!(
+                        "  WARNING: agentic [{}] hit --max-turns 8; this answer is truncated, \
+                         not a real result — a deny rail costs a round to recover",
+                        arm.allowed_tools
+                    );
+                }
+                let answer = extract_json(&run.answer);
+                return Ok(ArmResult {
+                    correct: score(&answer, &task.ground_truth, &task.check, task.tolerance),
+                    tokens: run.tokens,
+                    // The only context we hand an agentic arm is the question; what
+                    // it pulls in beyond that is its own doing, and `tokens` is what
+                    // measures it.
+                    context_bytes: prompt.len(),
+                    answer,
+                    rounds: run.rounds(),
+                });
+            }
+            Err(e) => {
+                eprintln!(
+                    "  agentic [{}] attempt {} failed: {e}",
+                    arm.allowed_tools,
+                    attempt + 1
+                );
+                last_err = e;
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "agentic arm [{}]: {last_err}",
+        arm.allowed_tools
+    ))
+}
+
+/// What one agentic session measured.
+struct AgenticRun {
+    answer: String,
+    /// Raw `tool_use` names in call order. `rounds` is just its length; the names
+    /// themselves are what prove the baseline arm never reached lens.
+    tools: Vec<String>,
+    tokens: usize,
+    /// Times lens's SessionStart guide landed in this session.
+    guide_injections: usize,
+    /// True if the session was cut off by `--max-turns` rather than finishing. A
+    /// deny rail costs the lens arm a round to recover, so the cap can silently
+    /// depress its result.
+    hit_turn_cap: bool,
+}
+
+impl AgenticRun {
+    fn rounds(&self) -> usize {
+        self.tools.len()
+    }
+}
+
+/// One live `claude -p` seeing exactly the MCP servers in `arm.mcp_config` and the
+/// tools permitted by `arm.allowed_tools`. Wall-clock bounded by `perl alarm`
+/// (headless `claude` has no timeout flag, macOS has no `timeout`).
+fn claude_agentic_attempt(
+    prompt: &str,
+    model: &str,
+    arm: &ArmSpec,
+) -> Result<AgenticRun, String> {
+    let workdir = env!("CARGO_MANIFEST_DIR"); // the lens MCP server pins cwd at spawn
+    let effort = std::env::var("LENS_BENCH_EFFORT").unwrap_or_else(|_| "low".to_string());
+    let mut cmd = Command::new("perl");
+    cmd.current_dir(workdir)
+        .args(["-e", "alarm shift; exec @ARGV", "180"])
+        .arg("claude")
+        .arg("-p")
+        .arg(prompt)
+        .arg("--mcp-config")
+        .arg(arm.mcp_config)
+        // Honor only `arm.mcp_config`, so the empty baseline config really is empty.
+        .arg("--strict-mcp-config")
+        .args(["--settings", &arm.settings.to_string_lossy()]);
+    // Each arm declares its own routing in its settings file. Scrub any ambient
+    // LENS_* first so a stale value in the developer's shell cannot reach either
+    // arm: the lens arm needs the rails genuinely unset to get their default-ON
+    // shipping behavior.
+    cmd.env_remove("LENS_ROUTING");
+    for flag in REROUTE_RAIL_FLAGS {
+        cmd.env_remove(flag);
+    }
+    if !model.is_empty() {
+        cmd.args(["--model", model]);
+    }
+    cmd.args(["--effort", effort.as_str()])
+        .args(["--allowedTools", arm.allowed_tools])
+        .args(["--output-format", "stream-json"])
+        .arg("--verbose")
+        .args(["--max-turns", "8"]);
+
+    let out = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawning claude: {e}"))?
+        .wait_with_output()
+        .map_err(|e| format!("waiting on claude: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "claude exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(500)
+                .collect::<String>()
+        ));
+    }
+    parse_agentic_stream(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Fold a `--output-format stream-json` transcript into what one session
+/// measured, plus the two facts that say whether the arm was even valid: was
+/// lens's guide injected, and did the turn cap cut the session short.
+fn parse_agentic_stream(stream: &str) -> Result<AgenticRun, String> {
+    let lines: Vec<Value> = stream
+        .lines()
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    let result = lines
+        .iter()
+        .rev()
+        .find(|o| o.get("type").and_then(Value::as_str) == Some("result"))
+        .ok_or("stream-json carried no result line")?;
+    if result.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(format!(
+            "claude reported is_error: {}",
+            result.get("result").and_then(Value::as_str).unwrap_or("?")
+        ));
+    }
+    let answer = result
+        .get("result")
+        .and_then(Value::as_str)
+        .ok_or("result line missing .result")?
+        .to_string();
+    Ok(AgenticRun {
+        answer,
+        tools: tool_use_names(&lines),
+        tokens: result.get("usage").map(usage_tokens).unwrap_or(0),
+        guide_injections: stream.matches(GUIDE_SENTINEL).count(),
+        hit_turn_cap: result.get("subtype").and_then(Value::as_str) == Some("error_max_turns"),
+    })
+}
+
+/// Tool calls in the transcript in call order, deduped by `tool_use` id: one
+/// assistant message is emitted over several lines as its content blocks stream
+/// in, so the same call can legitimately appear more than once.
+fn tool_use_names(lines: &[Value]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    lines
+        .iter()
+        .filter(|o| o.get("type").and_then(Value::as_str) == Some("assistant"))
+        .filter_map(|o| o.pointer("/message/content").and_then(Value::as_array))
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .filter_map(|item| {
+            let id = item.get("id").and_then(Value::as_str)?;
+            let name = item.get("name").and_then(Value::as_str)?;
+            seen.insert(id.to_string()).then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Every token the session put through the model: all three input classes plus
+/// output, read off the `result` line's cumulative usage. `input_tokens` alone is
+/// only the *uncached* remainder — 16 against ~82k of cache_read + cache_creation
+/// in a measured run — so counting just input+output would report a number
+/// unrelated to the context the agent actually consumed, which is the thing being
+/// measured. Cached input still enters the model on every turn.
+fn usage_tokens(usage: &Value) -> usize {
+    [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "output_tokens",
+    ]
+    .iter()
+    .filter_map(|k| usage.get(*k).and_then(Value::as_u64))
+    .sum::<u64>() as usize
+}
+
 /// Extract the last balanced `{...}` object from `s` by scanning back from the
 /// final `}` and brace-matching. Robust to the prompt echo (which may contain
 /// other braces) because the model's answer is the trailing object.
@@ -784,6 +1355,73 @@ pub struct Group {
     pub treatment_acc: f64,
     pub control_tokens: usize,
     pub treatment_tokens: usize,
+    /// K-run / agentic detail. `None` for a single-run tools-off table, which is
+    /// what every result committed before K-run existed is, so those files still
+    /// deserialize and still render exactly as they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<GroupStats>,
+}
+
+/// Group totals across `runs` repetitions. Token/round figures are each task's
+/// mean over its runs, summed across the group's tasks — the same "sum over
+/// tasks" convention the single-run token columns already use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupStats {
+    pub runs: usize,
+    pub control_tokens: f64,
+    pub treatment_tokens: f64,
+    pub control_tokens_sd: f64,
+    pub treatment_tokens_sd: f64,
+    pub control_rounds: f64,
+    pub treatment_rounds: f64,
+    pub control_rounds_sd: f64,
+    pub treatment_rounds_sd: f64,
+}
+
+impl Group {
+    /// This row's K-run view; a single-run group reads as one run with no spread.
+    fn stats_or_single(&self) -> GroupStats {
+        self.stats.clone().unwrap_or(GroupStats {
+            runs: 1,
+            control_tokens: self.control_tokens as f64,
+            treatment_tokens: self.treatment_tokens as f64,
+            control_tokens_sd: 0.0,
+            treatment_tokens_sd: 0.0,
+            control_rounds: 0.0,
+            treatment_rounds: 0.0,
+            control_rounds_sd: 0.0,
+            treatment_rounds_sd: 0.0,
+        })
+    }
+}
+
+/// One arm of one task, flattened for aggregation: the K-run fold if the arm ran
+/// more than once, else the single run restated in the same shape.
+struct ArmRow {
+    success: f64,
+    tokens: f64,
+    tokens_sd: f64,
+    rounds: f64,
+    rounds_sd: f64,
+}
+
+fn arm_row(r: &ArmResult, stats: Option<&ArmStats>) -> ArmRow {
+    match stats {
+        Some(s) => ArmRow {
+            success: s.success_rate,
+            tokens: s.mean_tokens,
+            tokens_sd: s.stddev_tokens,
+            rounds: s.mean_rounds,
+            rounds_sd: s.stddev_rounds,
+        },
+        None => ArmRow {
+            success: r.correct as u8 as f64,
+            tokens: r.tokens as f64,
+            tokens_sd: 0.0,
+            rounds: r.rounds as f64,
+            rounds_sd: 0.0,
+        },
+    }
 }
 
 /// Aggregate per-task results into per-mechanism groups (fixed order).
@@ -796,15 +1434,42 @@ pub fn aggregate(results: &[TaskResult]) -> Vec<Group> {
             continue;
         }
         let n = rows.len();
-        let control_correct = rows.iter().filter(|r| r.control.correct).count();
-        let treat_correct = rows.iter().filter(|r| r.treatment.correct).count();
+        let ctrl: Vec<ArmRow> = rows
+            .iter()
+            .map(|r| arm_row(&r.control, r.control_stats.as_ref()))
+            .collect();
+        let treat: Vec<ArmRow> = rows
+            .iter()
+            .map(|r| arm_row(&r.treatment, r.treatment_stats.as_ref()))
+            .collect();
+        let runs = rows
+            .iter()
+            .filter_map(|r| r.control_stats.as_ref())
+            .map(|s| s.runs)
+            .max()
+            .unwrap_or(1);
+        // Only a K-run or agentic group has anything to say beyond the single
+        // values; anything else keeps the pre-K-run shape and table exactly.
+        let has_rounds = ctrl.iter().chain(&treat).any(|a| a.rounds > 0.0);
+        let stats = (runs > 1 || has_rounds).then(|| GroupStats {
+            runs,
+            control_tokens: ctrl.iter().map(|a| a.tokens).sum(),
+            treatment_tokens: treat.iter().map(|a| a.tokens).sum(),
+            control_tokens_sd: stddev_of_sum(ctrl.iter().map(|a| a.tokens_sd)),
+            treatment_tokens_sd: stddev_of_sum(treat.iter().map(|a| a.tokens_sd)),
+            control_rounds: ctrl.iter().map(|a| a.rounds).sum(),
+            treatment_rounds: treat.iter().map(|a| a.rounds).sum(),
+            control_rounds_sd: stddev_of_sum(ctrl.iter().map(|a| a.rounds_sd)),
+            treatment_rounds_sd: stddev_of_sum(treat.iter().map(|a| a.rounds_sd)),
+        });
         groups.push(Group {
             mechanism: mech.to_string(),
             n,
-            control_acc: control_correct as f64 / n as f64,
-            treatment_acc: treat_correct as f64 / n as f64,
+            control_acc: ctrl.iter().map(|a| a.success).sum::<f64>() / n as f64,
+            treatment_acc: treat.iter().map(|a| a.success).sum::<f64>() / n as f64,
             control_tokens: rows.iter().map(|r| r.control.tokens).sum(),
             treatment_tokens: rows.iter().map(|r| r.treatment.tokens).sum(),
+            stats,
         });
     }
     groups
@@ -818,15 +1483,36 @@ pub fn render_accuracy_markdown(groups: &[Group], model_label: &str, pending: bo
         s.push_str("> **Accuracy: pending real-model run.** The numbers below are from the mock oracle (a context-presence stub that tests scoring/plumbing only). Set `ANTHROPIC_API_KEY` and re-run `bench_accuracy` for real-model results.\n\n");
     }
     s.push_str(&format!("Model: `{model_label}`\n\n"));
-    s.push_str("| Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |\n");
-    s.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+    // The variance/rounds columns only exist for K-run or agentic rows. A
+    // single-run table has nothing to put in them, so it keeps its original shape.
+    let detailed = groups.iter().any(|g| g.stats.is_some());
+    if detailed {
+        s.push_str("| Task set | N | Runs | Control success | lens success | Δ success | Control tokens | lens tokens | Token Δ | Control rounds | lens rounds |\n");
+        s.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+    } else {
+        s.push_str("| Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |\n");
+        s.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+    }
     let mut neg = Vec::new();
     for g in groups {
         let delta = g.treatment_acc - g.control_acc;
         if delta < -0.0001 {
             neg.push(g.mechanism.clone());
         }
+        s.push_str(&group_row(g, delta, detailed));
+    }
+    if !neg.is_empty() {
         s.push_str(&format!(
+            "\n⚠️ **Negative accuracy delta on: {}.** A mechanism that loses accuracy is dropping load-bearing context and needs fixing or scoping.\n",
+            neg.join(", ")
+        ));
+    }
+    s
+}
+
+fn group_row(g: &Group, delta: f64, detailed: bool) -> String {
+    if !detailed {
+        return format!(
             "| {} tasks | {} | {:.0}% | {:.0}% | {:+.0}pp | {} | {} | {:+} |\n",
             cap(&g.mechanism),
             g.n,
@@ -836,15 +1522,31 @@ pub fn render_accuracy_markdown(groups: &[Group], model_label: &str, pending: bo
             g.control_tokens,
             g.treatment_tokens,
             g.treatment_tokens as i64 - g.control_tokens as i64,
-        ));
+        );
     }
-    if !neg.is_empty() {
-        s.push_str(&format!(
-            "\n⚠️ **Negative accuracy delta on: {}.** A mechanism that loses accuracy is dropping load-bearing context and needs fixing or scoping.\n",
-            neg.join(", ")
-        ));
+    let k = g.stats_or_single();
+    format!(
+        "| {} tasks | {} | {} | {:.0}% | {:.0}% | {:+.0}pp | {} | {} | {:+.0} | {} | {} |\n",
+        cap(&g.mechanism),
+        g.n,
+        k.runs,
+        g.control_acc * 100.0,
+        g.treatment_acc * 100.0,
+        delta * 100.0,
+        spread(k.control_tokens, k.control_tokens_sd, 0),
+        spread(k.treatment_tokens, k.treatment_tokens_sd, 0),
+        k.treatment_tokens - k.control_tokens,
+        spread(k.control_rounds, k.control_rounds_sd, 1),
+        spread(k.treatment_rounds, k.treatment_rounds_sd, 1),
+    )
+}
+
+/// `mean±sd`, dropping the `±0` a single run would always carry.
+fn spread(mean: f64, sd: f64, places: usize) -> String {
+    if sd <= 0.0 {
+        return format!("{mean:.places$}");
     }
-    s
+    format!("{mean:.places$}±{sd:.places$}")
 }
 
 fn cap(s: &str) -> String {
@@ -873,5 +1575,364 @@ mod claude_pty_tests {
     #[test]
     fn none_when_no_object() {
         assert_eq!(last_json_object("no braces here"), None);
+    }
+}
+
+#[cfg(test)]
+mod k_run_tests {
+    use super::{aggregate, render_accuracy_markdown, run_task, Model, Task};
+    use serde_json::json;
+
+    fn reach_task() -> Task {
+        serde_json::from_value(json!({
+            "id": "t_krun",
+            "prompt": "Can `handle_request` reach `connect_db`?",
+            "fixtures": ["fixtures/repo"],
+            "ground_truth": { "reachable": "yes" },
+            "check": "contains",
+            "primary_mechanism": "discovery",
+            "evidence": ["connect_db"],
+            "treatment": { "graph_op": "path", "from": "handle_request", "to": "connect_db" }
+        }))
+        .expect("task spec")
+    }
+
+    #[tokio::test]
+    async fn k_run_folds_each_arm_and_renders_variance_columns() {
+        let r = run_task(&reach_task(), &Model::Mock, 3).await.expect("run");
+        let s = r.treatment_stats.as_ref().expect("k-run stats");
+        assert_eq!(s.runs, 3);
+        assert_eq!(s.success_rate, 1.0);
+        assert_eq!(s.stddev_tokens, 0.0, "Mock is deterministic");
+        assert_eq!(s.mean_rounds, 0.0, "a tools-off arm calls nothing");
+        // The single-value fields stay the first run, so old readers still work.
+        assert!(r.treatment.correct);
+
+        let md = render_accuracy_markdown(&aggregate(&[r]), "mock", false);
+        assert!(md.contains("| Runs |"), "{md}");
+        assert!(md.contains("lens rounds"), "{md}");
+    }
+
+    /// The pre-K-run table is what every committed result renders as; a default
+    /// `runs = 1` must not gain a column or a `±`.
+    #[tokio::test]
+    async fn single_run_renders_the_original_table_untouched() {
+        let r = run_task(&reach_task(), &Model::Mock, 1).await.expect("run");
+        assert!(r.control_stats.is_none() && r.treatment_stats.is_none());
+        let md = render_accuracy_markdown(&aggregate(&[r]), "mock", false);
+        assert!(
+            md.contains("| Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |"),
+            "{md}"
+        );
+        assert!(!md.contains("rounds"), "{md}");
+        assert!(!md.contains('±'), "{md}");
+    }
+}
+
+#[cfg(test)]
+mod neighbors_tests {
+    use super::{build_treatment_context, mock_answer, Task};
+    use serde_json::{json, Value};
+
+    /// `handle_request` -> `fetch_user` -> `connect_db` in the toy fixture, so
+    /// `fetch_user`'s neighborhood has one caller and one callee.
+    fn who_calls_fetch_user() -> Task {
+        serde_json::from_value(json!({
+            "id": "t_neighbors",
+            "prompt": "Which function calls `fetch_user`?",
+            "fixtures": ["fixtures/repo"],
+            "ground_truth": { "caller": "handle_request" },
+            "check": "contains",
+            "primary_mechanism": "discovery",
+            "evidence": ["handle_request"],
+            "treatment": { "graph_op": "neighbors", "name": "fetch_user" }
+        }))
+        .expect("task spec")
+    }
+
+    #[tokio::test]
+    async fn neighbors_arm_names_callers_and_callees_by_direction() {
+        let task = who_calls_fetch_user();
+        let ctx = build_treatment_context(&task).await.expect("neighbors arm");
+        let v: Value = serde_json::from_str(&ctx).expect("context is json");
+
+        assert_eq!(v["target"]["name"], "fetch_user");
+        let caller_names: Vec<&str> = v["callers"]
+            .as_array()
+            .expect("callers")
+            .iter()
+            .filter(|c| c["via"] == "calls")
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        let callee_names: Vec<&str> = v["callees"]
+            .as_array()
+            .expect("callees")
+            .iter()
+            .filter(|c| c["via"] == "calls")
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert!(
+            caller_names.contains(&"handle_request"),
+            "callers were {caller_names:?}"
+        );
+        assert!(
+            callee_names.contains(&"connect_db"),
+            "callees were {callee_names:?}"
+        );
+        // Direction is the whole point: the callee must not read as a caller.
+        assert!(!caller_names.contains(&"connect_db"));
+    }
+
+    /// The Mock oracle is a substring check over the treatment context, so a
+    /// who-calls-X task only scores if the arm spells the caller's name out.
+    #[tokio::test]
+    async fn neighbors_context_satisfies_the_mock_oracle() {
+        let task = who_calls_fetch_user();
+        let ctx = build_treatment_context(&task).await.expect("neighbors arm");
+        assert_eq!(
+            mock_answer(&ctx, &task.evidence, &task.ground_truth),
+            task.ground_truth
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolvable_name_errors_rather_than_scoring_an_empty_neighborhood() {
+        let mut task = who_calls_fetch_user();
+        task.treatment.name = Some("no_such_symbol_anywhere".to_string());
+        assert!(build_treatment_context(&task).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod agentic_isolation_tests {
+    use super::{
+        baseline_settings_json, fixture_scope, format_agentic_user, lens_settings_json,
+        mcp_config_json, Task,
+    };
+    use serde_json::json;
+    use std::path::Path;
+
+    fn task_with_fixture(fixture: &str) -> Task {
+        serde_json::from_value(json!({
+            "id": "t_scope",
+            "prompt": "Which function calls `spec_for_extension`?",
+            "fixtures": [fixture],
+            "ground_truth": { "caller": "any_spec_for_extension" },
+            "check": "contains",
+            "primary_mechanism": "discovery",
+            "evidence": ["any_spec_for_extension"],
+            "treatment": { "graph_op": "neighbors", "name": "spec_for_extension" }
+        }))
+        .expect("task spec")
+    }
+
+    /// `fixtures` are relative to `accuracy_root()`, but an agentic arm runs from
+    /// the repo root, so the scope it is told must be rebased to that root.
+    #[test]
+    fn fixture_scope_is_repo_root_relative() {
+        assert_eq!(
+            fixture_scope(&task_with_fixture("../../src/discovery")),
+            vec!["src/discovery".to_string()]
+        );
+        assert_eq!(
+            fixture_scope(&task_with_fixture("fixtures/repo")),
+            vec!["benchmarks/accuracy/fixtures/repo".to_string()]
+        );
+    }
+
+    /// Without a scope the question is repo-wide while the ground truth only holds
+    /// inside the fixture, so a correct whole-repo answer scores wrong.
+    #[test]
+    fn agentic_prompt_carries_the_fixture_scope() {
+        let p = format_agentic_user(&task_with_fixture("../../src/discovery"));
+        assert!(p.contains("Scope: answer only about code under `src/discovery`"), "{p}");
+        assert!(p.contains("Which function calls `spec_for_extension`?"), "{p}");
+    }
+
+    /// The baseline's isolation is structural: an empty server map plus
+    /// `--strict-mcp-config`. `--allowedTools` does not gate a discoverable MCP
+    /// server, so nothing here may depend on it.
+    #[test]
+    fn baseline_mcp_config_declares_no_servers_while_lens_config_declares_lens() {
+        let baseline = json!({ "mcpServers": {} });
+        assert!(baseline["mcpServers"].as_object().expect("map").is_empty());
+
+        let lens = mcp_config_json(Path::new("/tmp/lens"));
+        assert_eq!(lens["mcpServers"]["lens"]["command"], "/tmp/lens");
+    }
+
+    /// The baseline emulates a machine without lens. Its hooks cannot be
+    /// un-merged, so `LENS_ROUTING=off` is what makes them contribute nothing.
+    #[test]
+    fn baseline_settings_turn_lens_off_entirely() {
+        let s = baseline_settings_json();
+        assert_eq!(s["env"]["LENS_ROUTING"], "off");
+        assert_eq!(s["env"]["LENS_GREP_SCOPE_DENY"], "0");
+        assert!(s.get("hooks").is_none(), "settings merge, so a hooks block is inert");
+    }
+
+    /// The lens arm is lens as shipped: routing at its default, rails untouched.
+    /// Pinning the rails to "0" here would disable the adoption layer under test.
+    #[test]
+    fn lens_settings_ship_full_routing_with_rails_left_unset() {
+        let s = lens_settings_json();
+        assert_eq!(s["env"]["LENS_ROUTING"], "full");
+        for flag in super::REROUTE_RAIL_FLAGS {
+            assert!(
+                s["env"].get(flag).is_none(),
+                "{flag} must stay unset: it is a default-ON kill-switch"
+            );
+        }
+    }
+
+    /// The validity gate. Two earlier builds passed every compile-time check and
+    /// were still invalid (the baseline reached lens via `ToolSearch`; then both
+    /// arms had routing amputated). Only a live session can prove the arms are the
+    /// two configs a user could install, so this spawns real `claude -p` runs and
+    /// is `#[ignore]`d to keep `cargo test` hermetic:
+    ///
+    ///   cargo test --bin bench_accuracy -- --ignored --nocapture arms_are_lens
+    #[test]
+    #[ignore = "spawns live `claude -p` sessions; needs target/release/lens built"]
+    fn arms_are_lens_installed_vs_not() {
+        use super::{arm_isolation, claude_agentic_attempt};
+        let iso = arm_isolation().expect("isolation setup");
+        let prompt = format_agentic_user(&task_with_fixture("../../src/discovery"));
+        let model = super::default_model();
+
+        let baseline = claude_agentic_attempt(&prompt, &model, &iso.baseline()).expect("baseline");
+        eprintln!(
+            "BASELINE  tools={:?} guide_injections={} turn_cap={}",
+            baseline.tools, baseline.guide_injections, baseline.hit_turn_cap
+        );
+        let leaked: Vec<&String> = baseline
+            .tools
+            .iter()
+            .filter(|t| t.starts_with("mcp__lens__"))
+            .collect();
+        assert!(leaked.is_empty(), "baseline reached lens: {leaked:?}");
+        assert_eq!(
+            baseline.guide_injections, 0,
+            "baseline must look like lens was never installed"
+        );
+
+        let lens = claude_agentic_attempt(&prompt, &model, &iso.lens_arm()).expect("lens arm");
+        eprintln!(
+            "LENS ARM  tools={:?} guide_injections={} turn_cap={}",
+            lens.tools, lens.guide_injections, lens.hit_turn_cap
+        );
+        assert!(
+            lens.guide_injections >= 1,
+            "lens arm got no SessionStart guide, so `full` routing did not take and the \
+             arm is not lens-as-installed"
+        );
+        assert!(baseline.tokens > 0 && lens.tokens > 0, "both arms must report usage");
+    }
+}
+
+#[cfg(test)]
+mod back_compat_tests {
+    use super::{accuracy_root, Group, TaskResult};
+    use serde_json::Value;
+
+    /// The committed results predate every K-run/agentic field, and both readers
+    /// of them fail *silently*: `bench_report` falls back to a "not run yet" stub,
+    /// and the harness's filtered-rerun merge does `.ok().unwrap_or_default()`,
+    /// which drops every prior task instead of erroring. A new field that forgets
+    /// `#[serde(default)]` still compiles, so pin the contract here.
+    #[test]
+    fn committed_results_still_deserialize() {
+        for name in ["mock.json", "real.json"] {
+            let path = accuracy_root().join("results").join(name);
+            let raw = std::fs::read_to_string(&path).expect("read committed results");
+            let doc: Value = serde_json::from_str(&raw).expect("results are json");
+            let groups: Vec<Group> = serde_json::from_value(doc["groups"].clone())
+                .unwrap_or_else(|e| panic!("{name} groups no longer deserialize: {e}"));
+            let tasks: Vec<TaskResult> = serde_json::from_value(doc["tasks"].clone())
+                .unwrap_or_else(|e| panic!("{name} tasks no longer deserialize: {e}"));
+            assert!(!groups.is_empty(), "{name} lost its groups");
+            assert!(!tasks.is_empty(), "{name} lost its tasks");
+        }
+    }
+}
+
+#[cfg(test)]
+mod agentic_tests {
+    use super::{parse_agentic_stream, stddev, stddev_of_sum, tool_use_names, usage_tokens};
+    use serde_json::{json, Value};
+
+    /// Shapes taken from a real `claude -p --output-format stream-json --verbose`
+    /// run: one assistant message is split across lines (thinking, then tool_use)
+    /// and repeats its partial `message.usage`, so per-turn usage is neither
+    /// complete nor unique — only the `result` line's cumulative usage is.
+    const FIXTURE: &str = r#"{"type":"system","subtype":"init","session_id":"abc"}
+{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hm"}],"usage":{"input_tokens":10,"output_tokens":4}}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":10,"output_tokens":4}}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"mcp__lens__lens_links"}],"usage":{"input_tokens":6,"output_tokens":1}}}
+not even json
+{"type":"result","subtype":"success","is_error":false,"result":"{\"caller\":\"runtime_for\"}","usage":{"input_tokens":16,"cache_creation_input_tokens":63772,"cache_read_input_tokens":18653,"output_tokens":207}}"#;
+
+    #[test]
+    fn parses_answer_rounds_and_tokens_from_transcript() {
+        let run = parse_agentic_stream(FIXTURE).expect("parse");
+        assert_eq!(run.answer, "{\"caller\":\"runtime_for\"}");
+        assert_eq!(run.rounds(), 2, "two distinct tool_use ids");
+        assert_eq!(run.tools, vec!["Bash", "mcp__lens__lens_links"]);
+        // Every input class plus output: 16 + 63772 + 18653 + 207.
+        assert_eq!(run.tokens, 82648);
+    }
+
+    #[test]
+    fn same_tool_use_id_across_streamed_lines_counts_once() {
+        let dup = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read"}]}}"#;
+        let lines: Vec<Value> = dup
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        assert_eq!(tool_use_names(&lines), vec!["Read"]);
+    }
+
+    #[test]
+    fn is_error_result_is_an_error() {
+        let stream = r#"{"type":"result","subtype":"error","is_error":true,"result":"boom"}"#;
+        assert!(parse_agentic_stream(stream).is_err());
+    }
+
+    #[test]
+    fn missing_result_line_is_an_error() {
+        let stream = r#"{"type":"system","subtype":"init"}"#;
+        assert!(parse_agentic_stream(stream).is_err());
+    }
+
+    #[test]
+    fn usage_counts_cached_input_not_just_the_uncached_remainder() {
+        let usage = json!({
+            "input_tokens": 16,
+            "cache_creation_input_tokens": 63772,
+            "cache_read_input_tokens": 18653,
+            "output_tokens": 207,
+        });
+        assert_eq!(usage_tokens(&usage), 82648);
+        // Absent classes are simply not counted, never fatal.
+        assert_eq!(usage_tokens(&json!({ "input_tokens": 5 })), 5);
+    }
+
+    #[test]
+    fn population_stddev() {
+        assert_eq!(stddev(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]), 2.0);
+    }
+
+    #[test]
+    fn stddev_of_fewer_than_two_samples_is_zero() {
+        assert_eq!(stddev(&[]), 0.0);
+        assert_eq!(stddev(&[7.0]), 0.0);
+    }
+
+    #[test]
+    fn stddev_of_a_sum_adds_variances_not_deviations() {
+        // 3² + 4² = 5², not 3 + 4.
+        assert_eq!(stddev_of_sum([3.0, 4.0].into_iter()), 5.0);
     }
 }

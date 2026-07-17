@@ -1,0 +1,10 @@
+{
+  "id": "0058_caller_of_spec_for_extension",
+  "prompt": "Which function calls `spec_for_extension`?",
+  "fixtures": ["../../src/discovery"],
+  "ground_truth": { "caller": "any_spec_for_extension" },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["any_spec_for_extension"],
+  "treatment": { "graph_op": "neighbors", "name": "spec_for_extension" }
+}

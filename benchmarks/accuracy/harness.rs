@@ -37,8 +37,17 @@ async fn main() -> anyhow::Result<()> {
         return probe_all(only).await;
     }
 
-    // Backend precedence: explicit `LENS_BENCH_BACKEND=claude-headless|claude-pty`
-    // (both bill plan quota via Claude Code) > Anthropic API key > mock.
+    // `--runs <n>`: repeat each arm n times and fold into mean±stddev (default 1,
+    // reproducing the original single-shot behavior byte-for-byte).
+    let runs: usize = cli
+        .iter()
+        .position(|a| a == "--runs")
+        .and_then(|i| cli.get(i + 1))
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
+
+    // Backend precedence: explicit `LENS_BENCH_BACKEND=claude-headless|claude-pty|agentic`
+    // (all bill plan quota via Claude Code) > Anthropic API key > mock.
     let backend = std::env::var("LENS_BENCH_BACKEND").unwrap_or_default();
     let has_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
     let (model, pending, mode) = if backend == "claude-headless" || backend == "headless" {
@@ -47,6 +56,9 @@ async fn main() -> anyhow::Result<()> {
     } else if backend == "claude-pty" || backend == "pty" {
         eprintln!("running accuracy harness via claude-pty (plan quota, tools disabled)");
         (Model::ClaudePty(default_model()), false, "real")
+    } else if backend == "agentic" {
+        eprintln!("running accuracy harness via agentic claude -p (plan quota, tools live incl mcp__lens)");
+        (Model::ClaudeAgentic(default_model()), false, "real")
     } else if has_key {
         (Model::Anthropic(default_model()), false, "real")
     } else {
@@ -71,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut results: Vec<TaskResult> = Vec::new();
     for task in &tasks {
-        match run_task(task, &model).await {
+        match run_task(task, &model, runs).await {
             Ok(r) => results.push(r),
             Err(e) => eprintln!("task {} failed: {e}", task.id),
         }
@@ -335,7 +347,7 @@ mod tests {
 
         let mut results = Vec::new();
         for task in &tasks {
-            results.push(run_task(task, &Model::Mock).await.expect("run task"));
+            results.push(run_task(task, &Model::Mock, 1).await.expect("run task"));
         }
 
         // Treatment surfaces the evidence for every savings task -> all correct.

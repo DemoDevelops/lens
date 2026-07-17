@@ -1,0 +1,65 @@
+{
+  "groups": [
+    {
+      "control_acc": 1.0,
+      "control_tokens": 248026,
+      "mechanism": "discovery",
+      "n": 1,
+      "stats": {
+        "control_rounds": 4.0,
+        "control_rounds_sd": 1.4142135623730951,
+        "control_tokens": 208600.0,
+        "control_tokens_sd": 57079.90373736335,
+        "runs": 3,
+        "treatment_rounds": 1.3333333333333333,
+        "treatment_rounds_sd": 0.4714045207910317,
+        "treatment_tokens": 109968.0,
+        "treatment_tokens_sd": 22789.41916767516
+      },
+      "treatment_acc": 1.0,
+      "treatment_tokens": 94301
+    }
+  ],
+  "mode": "real",
+  "model": "claude-haiku-4-5-20251001 (via claude-agentic)",
+  "tasks": [
+    {
+      "control": {
+        "answer": {
+          "caller": "any_spec_for_extension"
+        },
+        "context_bytes": 451,
+        "correct": true,
+        "rounds": 5,
+        "tokens": 248026
+      },
+      "control_stats": {
+        "mean_rounds": 4.0,
+        "mean_tokens": 208600.0,
+        "runs": 3,
+        "stddev_rounds": 1.4142135623730951,
+        "stddev_tokens": 57079.90373736335,
+        "success_rate": 1.0
+      },
+      "id": "0058_caller_of_spec_for_extension",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "caller": "any_spec_for_extension"
+        },
+        "context_bytes": 451,
+        "correct": true,
+        "rounds": 1,
+        "tokens": 94301
+      },
+      "treatment_stats": {
+        "mean_rounds": 1.3333333333333333,
+        "mean_tokens": 109968.0,
+        "runs": 3,
+        "stddev_rounds": 0.4714045207910317,
+        "stddev_tokens": 22789.41916767516,
+        "success_rate": 1.0
+      }
+    }
+  ]
+}

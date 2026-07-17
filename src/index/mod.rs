@@ -11,15 +11,25 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use regex::Regex;
+use tree_sitter::{Node as TsNode, Parser};
 
 pub use schema::Index;
 
 use self::tantivy_index::TantivyStore;
 use crate::discovery;
+use crate::discovery::tags_adapter::{any_spec_for_extension, AnySpec};
 use crate::tools::{IndexResponse, QueryResult, SearchHit, SearchResponse};
 
 /// Lines per chunk for non-markdown files.
 const CODE_WINDOW: usize = 100;
+
+/// Target byte span for AST-boundary chunks (see [`chunk_by_ast`]): a code file is
+/// split at tree-sitter node boundaries into chunks of roughly this size, so a chunk
+/// holds a whole function/impl rather than a fixed line cut. Byte-based, distinct from
+/// `CODE_WINDOW`'s lines and `SNIPPET_TOKENS`' whitespace tokens. ~4 KB is on the order
+/// of 130 lines of code, keeping granularity comparable to the line-window fallback
+/// while leaving any file this size or smaller as a single chunk.
+const AST_CHUNK_BYTES: usize = 4096;
 
 /// A re-index touching at least this many changed files is a bulk build, so the
 /// Tantivy writer fans out across all cores; smaller edits use a single writer thread
@@ -700,16 +710,26 @@ fn is_doc_path(path: &str) -> bool {
     path.ends_with(".md") || path.ends_with(".markdown")
 }
 
-/// Split a file into chunks: markdown by headings, everything else by line windows.
+/// Split a file into chunks: markdown by headings, code by AST node boundaries (via
+/// [`chunk_by_ast`] for any grammar we can parse), and everything else by line windows.
+///
+/// The `LENS_AST_CHUNK` kill switch (default on; `=0` forces the old fixed line-window
+/// path, mirroring `LENS_RRF`/`LENS_IDENT_RERANK`) is read once per file — cheap, since
+/// `chunk_file` is called once per file, not per chunk — and is the recall gate's
+/// trip-proof. An extension with no tree-sitter grammar always falls back to line
+/// windows regardless of the switch.
 fn chunk_file(path: &Path, content: &str) -> Vec<String> {
-    let is_md = matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("md") | Some("markdown")
-    );
+    let ext = path.extension().and_then(|e| e.to_str());
+    let is_md = matches!(ext, Some("md") | Some("markdown"));
     if is_md {
-        chunk_markdown(content)
-    } else {
-        chunk_by_lines(content, CODE_WINDOW)
+        return chunk_markdown(content);
+    }
+    let ast_on = std::env::var("LENS_AST_CHUNK")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    match ext.and_then(any_spec_for_extension) {
+        Some(spec) if ast_on => chunk_by_ast(content, &spec, AST_CHUNK_BYTES),
+        _ => chunk_by_lines(content, CODE_WINDOW),
     }
 }
 
@@ -738,6 +758,82 @@ fn chunk_by_lines(content: &str, window: usize) -> Vec<String> {
         return vec![];
     }
     lines.chunks(window).map(|w| w.join("\n")).collect()
+}
+
+/// Split code into chunks aligned to tree-sitter node boundaries. A top-level named
+/// node within `limit` bytes becomes one chunk; a node exceeding `limit` is split into
+/// its named children (recursively); adjacent under-limit siblings merge by byte span
+/// until the next would push the span past `limit`.
+///
+/// Chunks are consecutive byte slices of `content` (each runs from the previous chunk's
+/// end to the current boundary, the last to end-of-file), so they tile the file exactly:
+/// inter-node gaps — whitespace, punctuation the grammar leaves between named nodes — are
+/// absorbed into the adjoining chunk and no byte is dropped, hence `chunks.concat()`
+/// recovers `content` verbatim. A non-empty input yields at least one chunk.
+///
+/// Falls back to [`chunk_by_lines`] when the grammar yields no usable tree: the parser
+/// can't load the language, `parse` returns `None`, or the root node has no named
+/// children (an empty or fully-unparsed file).
+fn chunk_by_ast(content: &str, spec: &AnySpec, limit: usize) -> Vec<String> {
+    let language = spec.language();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return chunk_by_lines(content, CODE_WINDOW);
+    }
+    let tree = match parser.parse(content, None) {
+        Some(t) => t,
+        None => return chunk_by_lines(content, CODE_WINDOW),
+    };
+    let root = tree.root_node();
+    if root.named_child_count() == 0 {
+        return chunk_by_lines(content, CODE_WINDOW);
+    }
+
+    // Flatten to atomic (start_byte, end_byte) units in source order.
+    let mut units: Vec<(usize, usize)> = Vec::new();
+    collect_units(root, limit, &mut units);
+    if units.is_empty() {
+        return chunk_by_lines(content, CODE_WINDOW);
+    }
+
+    // Merge adjacent units greedily by byte span, materializing each chunk as the
+    // consecutive slice `content[chunk_start..boundary]` so gaps are covered. The span
+    // is measured from the current group's first unit start; when the next unit would
+    // push it past `limit`, flush at the previous unit's end and start a new group.
+    let mut chunks: Vec<String> = Vec::new();
+    let mut chunk_start = 0usize;
+    let mut group_start = units[0].0;
+    let mut last_end = units[0].1;
+    for &(start, end) in &units[1..] {
+        if end - group_start > limit {
+            chunks.push(content[chunk_start..last_end].to_string());
+            chunk_start = last_end;
+            group_start = start;
+        }
+        last_end = end;
+    }
+    // Final group extends to end-of-file so any trailing gap is covered.
+    chunks.push(content[chunk_start..].to_string());
+    chunks
+}
+
+/// Recursively flatten a node's named descendants into atomic `(start_byte, end_byte)`
+/// units for [`chunk_by_ast`]: a named child within `limit` bytes is one unit; an
+/// oversize child is split into ITS named children; an oversize node with no named
+/// children is kept whole (nothing left to split). Units come out in source order and
+/// are pairwise disjoint (a unit is never an ancestor of another).
+fn collect_units(node: TsNode<'_>, limit: usize, out: &mut Vec<(usize, usize)>) {
+    let mut cursor = node.walk();
+    let children: Vec<TsNode> = node.named_children(&mut cursor).collect();
+    drop(cursor);
+    for child in children {
+        let (start, end) = (child.start_byte(), child.end_byte());
+        if end - start <= limit || child.named_child_count() == 0 {
+            out.push((start, end));
+        } else {
+            collect_units(child, limit, out);
+        }
+    }
 }
 
 /// True when `path`'s extension matches [`BINARY_EXT_DENYLIST`] (case-insensitive).
@@ -1459,6 +1555,79 @@ mod tests {
             fused.results[0].hits[0].path.ends_with("central.rs"),
             "RRF must lift the graph-central file to rank 1, got {}",
             fused.results[0].hits[0].path
+        );
+    }
+
+    // ── AST-boundary chunking (L32) ─────────────────────────────────────────
+
+    #[test]
+    fn chunk_by_ast_aligns_to_fn_boundaries_and_covers_every_byte() {
+        use std::fmt::Write as _;
+
+        // A > 100-line file with two substantial top-level fns: `alpha` behind a
+        // leading `#[attr]` and `beta` declared `pub`, so the two chunk-start forms
+        // (`#[`, `pub fn `) are both exercised alongside plain `fn `. Each body carries
+        // uniquely-named markers so coverage can be checked line by line.
+        let mut src = String::from("#[allow(dead_code)]\nfn alpha() {\n");
+        for i in 0..48 {
+            writeln!(src, "    let alpha_marker_{i} = {i};").unwrap();
+        }
+        src.push_str("}\n\npub fn beta() {\n");
+        for i in 0..48 {
+            writeln!(src, "    let beta_marker_{i} = {i};").unwrap();
+        }
+        src.push_str("}\n");
+        assert!(src.lines().count() > 100, "fixture must exceed 100 lines");
+
+        let spec = any_spec_for_extension("rs").unwrap();
+        // Limit between one fn's byte size (~half the file) and the two combined, so
+        // each fn is kept whole yet the pair does not merge into a single chunk.
+        let limit = src.len() * 3 / 5;
+        let chunks = chunk_by_ast(&src, &spec, limit);
+
+        // Every chunk, once left-trimmed, starts on a definition boundary — a fn, a
+        // `pub fn`, or a doc-comment/attribute line that precedes one — never mid-body.
+        for (i, c) in chunks.iter().enumerate() {
+            let t = c.trim_start();
+            assert!(
+                t.starts_with("fn ")
+                    || t.starts_with("pub fn ")
+                    || t.starts_with("///")
+                    || t.starts_with("#["),
+                "chunk {i} must start on a definition boundary, got: {:?}",
+                &t[..t.len().min(40)]
+            );
+        }
+
+        // The two fns land in SEPARATE chunks.
+        let ai = chunks
+            .iter()
+            .position(|c| c.contains("fn alpha("))
+            .expect("a chunk must contain alpha");
+        let bi = chunks
+            .iter()
+            .position(|c| c.contains("fn beta("))
+            .expect("a chunk must contain beta");
+        assert_ne!(ai, bi, "alpha and beta must fall in different chunks");
+
+        // Full byte coverage: the chunks tile the file exactly (gap-free, no join
+        // separator), so concatenation recovers every byte — hence every body line.
+        assert_eq!(chunks.concat(), src, "chunks must recover the whole file verbatim");
+        assert!(
+            chunks.iter().any(|c| c.contains("alpha_marker_47")),
+            "alpha's body must survive intact across the chunks"
+        );
+        assert!(
+            chunks.iter().any(|c| c.contains("beta_marker_47")),
+            "beta's body must survive intact across the chunks"
+        );
+
+        // An unknown extension has no grammar, so `chunk_file` falls back to the fixed
+        // line-window chunker (byte-identical to calling it directly).
+        assert_eq!(
+            chunk_file(Path::new("x.unknownext"), &src),
+            chunk_by_lines(&src, CODE_WINDOW),
+            "an extension with no tree-sitter grammar must use line-window chunking"
         );
     }
 }

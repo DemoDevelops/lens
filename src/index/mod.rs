@@ -419,6 +419,8 @@ fn ranked_search(
     } else {
         Vec::new()
     };
+    // Context rendering per hit (env-gated, default Snippet = today's output verbatim).
+    let ctx_mode = search_context_mode();
     // (path, chunk_id, snippet, combined_score)
     let mut rows: Vec<(String, String, String, f64)> = Vec::with_capacity(candidates.len());
     for (path, chunk_id, content, mut score) in candidates {
@@ -440,7 +442,13 @@ fn ranked_search(
                 score += PROX_WEIGHT / span.max(1) as f64;
             }
         }
-        let snippet = ranked_snippet(&content, &terms);
+        let snippet = match ctx_mode {
+            SearchContext::Snippet => ranked_snippet(&content, &terms),
+            SearchContext::Unit => {
+                unit_snippet(&content, &terms, &path).unwrap_or_else(|| ranked_snippet(&content, &terms))
+            }
+            SearchContext::Chunk => content,
+        };
         rows.push((path, chunk_id, snippet, score));
     }
     // Re-rank: higher combined score first, then a stable (path, chunk_id) tiebreak.
@@ -549,6 +557,76 @@ fn ranked_snippet(content: &str, terms: &[String]) -> String {
         out.push_str(" …");
     }
     out
+}
+
+/// Byte cap for the adaptive enclosing-unit returned by `LENS_SEARCH_CONTEXT=unit`:
+/// the match's enclosing definition is returned whole when it fits, otherwise the
+/// search falls back to [`ranked_snippet`]. ~2 KB returns ~90% of this repo's
+/// functions whole while bounding worst-case context to a few hundred tokens.
+const SEARCH_UNIT_CAP_BYTES: usize = 2048;
+
+/// How `lens_search` renders each hit's context, selected by `LENS_SEARCH_CONTEXT`.
+/// `Snippet` (default) is today's byte-identical ~24-token window; `Unit` returns the
+/// match's enclosing definition (capped, snippet fallback); `Chunk` returns the whole
+/// stored index chunk (the blunt, ~4 KB variant, kept for A/B comparison).
+#[derive(Clone, Copy, PartialEq)]
+enum SearchContext {
+    Snippet,
+    Unit,
+    Chunk,
+}
+
+/// Read the search-context mode. Default `Snippet` keeps the current output verbatim,
+/// so with the env unset every existing search result is byte-identical.
+fn search_context_mode() -> SearchContext {
+    match std::env::var("LENS_SEARCH_CONTEXT").as_deref() {
+        Ok("unit") => SearchContext::Unit,
+        Ok("chunk") => SearchContext::Chunk,
+        _ => SearchContext::Snippet,
+    }
+}
+
+/// The enclosing definition around the first query-term match in `content`, returned as
+/// a verbatim source slice when it parses and fits [`SEARCH_UNIT_CAP_BYTES`]. `None`
+/// (caller falls back to [`ranked_snippet`]) when the file has no grammar, the chunk
+/// doesn't parse, the match sits in no named node, or the smallest containing unit still
+/// exceeds the cap. Uses the same tree-sitter spec as [`chunk_by_ast`], so it aligns to
+/// the node boundaries L32 chunks on. With AST chunking the enclosing unit is the whole
+/// function; on a torn line-chunk it may be a partial one, which is why the mode pairs
+/// with L32.
+fn unit_snippet(content: &str, terms: &[String], path: &str) -> Option<String> {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
+    let spec = any_spec_for_extension(ext)?;
+    // Byte offset of the first matching term. `to_ascii_lowercase` is length-preserving
+    // and the proximity terms are already lowercased ASCII, so the offset maps straight
+    // back into `content`. No match (query stemmed past the surface form) starts at 0,
+    // mirroring `ranked_snippet`'s `unwrap_or(0)`.
+    let lc = content.to_ascii_lowercase();
+    let offset = terms
+        .iter()
+        .filter_map(|t| lc.find(t.as_str()))
+        .min()
+        .unwrap_or(0);
+    let mut parser = Parser::new();
+    parser.set_language(&spec.language()).ok()?;
+    let tree = parser.parse(content, None)?;
+    // Descend the root->match path, returning the shallowest (largest) named node that
+    // contains the offset and fits the cap: the whole enclosing definition when it fits,
+    // else the largest sub-unit that does. A node containing the offset but with no
+    // fitting descendant ends the walk at `None`.
+    let mut node = tree.root_node();
+    loop {
+        let mut cursor = node.walk();
+        let child = node
+            .named_children(&mut cursor)
+            .find(|c| c.start_byte() <= offset && offset < c.end_byte());
+        drop(cursor);
+        let c = child?;
+        if c.end_byte() - c.start_byte() <= SEARCH_UNIT_CAP_BYTES {
+            return content.get(c.start_byte()..c.end_byte()).map(str::to_string);
+        }
+        node = c;
+    }
 }
 
 /// Lowercased alphanumeric tokens of `text`, in order. Splits on non-alphanumeric
@@ -1630,4 +1708,49 @@ mod tests {
             "an extension with no tree-sitter grammar must use line-window chunking"
         );
     }
+
+    #[test]
+    fn unit_snippet_returns_the_whole_enclosing_fn_not_its_neighbors() {
+        // Three small top-level fns; the match sits in the middle one. The enclosing-unit
+        // render (LENS_SEARCH_CONTEXT=unit) must hand back `bravo` whole and neither
+        // neighbor, where a fixed line window would bleed across the boundaries.
+        let src = "fn alpha() {\n    let a = 1;\n}\n\nfn bravo() {\n    let unique_marker = 2;\n}\n\nfn gamma() {\n    let c = 3;\n}\n";
+        let terms = vec!["unique_marker".to_string()];
+        let out = unit_snippet(src, &terms, "x.rs").expect("enclosing unit for a parseable rs chunk");
+        assert!(
+            out.contains("fn bravo(") && out.contains("unique_marker"),
+            "must return the matched fn, got: {out:?}"
+        );
+        assert!(
+            !out.contains("fn alpha(") && !out.contains("fn gamma("),
+            "must exclude neighbor fns, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn unit_snippet_respects_the_byte_cap() {
+        use std::fmt::Write as _;
+        // A single fn far larger than the cap: the whole fn cannot be returned, so the
+        // walk descends and yields a bounded sub-unit, never the oversize fn.
+        let mut src = String::from("fn huge() {\n");
+        let mut i = 0;
+        while src.len() <= SEARCH_UNIT_CAP_BYTES * 2 {
+            writeln!(src, "    let filler_{i} = {i};").unwrap();
+            i += 1;
+        }
+        src.push_str("    let unique_marker = 0;\n}\n");
+        let terms = vec!["unique_marker".to_string()];
+        if let Some(out) = unit_snippet(&src, &terms, "x.rs") {
+            assert!(
+                out.len() <= SEARCH_UNIT_CAP_BYTES,
+                "returned unit must respect the cap, got {} bytes",
+                out.len()
+            );
+            assert!(
+                !out.contains("filler_0"),
+                "must not return the whole oversize fn, got: {out:?}"
+            );
+        }
+    }
+
 }

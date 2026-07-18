@@ -1152,13 +1152,28 @@ mod tests {
     #[test]
     fn both_renderers_reference_every_snapshot_dimension() {
         use crate::obs::stats::{snapshot_json, SNAPSHOT_DIMENSIONS};
-        let tui_src = include_str!("tui.rs");
+        // The TUI is a module dir; scan every source file (model.rs is the one
+        // that must name each key).
+        const TUI_SRC: &str = concat!(
+            include_str!("tui/mod.rs"),
+            include_str!("tui/model.rs"),
+            include_str!("tui/theme.rs"),
+            include_str!("tui/header.rs"),
+            include_str!("tui/tables.rs"),
+            include_str!("tui/charts.rs"),
+            include_str!("tui/value.rs"),
+            include_str!("tui/misc.rs"),
+        );
+        let tui_src = TUI_SRC;
         for key in SNAPSHOT_DIMENSIONS {
             assert!(
                 INDEX_HTML.contains(key),
                 "web INDEX_HTML omits snapshot key '{key}'"
             );
-            assert!(tui_src.contains(key), "tui.rs omits snapshot key '{key}'");
+            assert!(
+                tui_src.contains(key),
+                "tui source omits snapshot key '{key}'"
+            );
         }
         // Each key is a live snapshot key, not a stale name.
         let dir = tempdir().unwrap();

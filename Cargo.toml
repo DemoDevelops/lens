@@ -147,6 +147,14 @@ tantivy = "0.26"
 # directly by the TUI dashboard to restore the terminal on Ctrl-C/SIGTERM after
 # entering the alternate screen buffer.
 libc = "0.2"
+# Terminal dashboard widgets (`lens dashboard --tui`), behind the default-on
+# `tui` feature so `--no-default-features` keeps the MCP server lean. Re-exports
+# crossterm as `ratatui::crossterm` — no separate crossterm dependency.
+ratatui = { version = "0.29", optional = true }
+
+[features]
+default = ["tui"]
+tui = ["dep:ratatui"]
 
 [dev-dependencies]
 assert_cmd = "2"

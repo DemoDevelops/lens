@@ -586,14 +586,45 @@ fn search_context_mode() -> SearchContext {
     }
 }
 
-/// The enclosing definition around the first query-term match in `content`, returned as
-/// a verbatim source slice when it parses and fits [`SEARCH_UNIT_CAP_BYTES`]. `None`
-/// (caller falls back to [`ranked_snippet`]) when the file has no grammar, the chunk
-/// doesn't parse, the match sits in no named node, or the smallest containing unit still
-/// exceeds the cap. Uses the same tree-sitter spec as [`chunk_by_ast`], so it aligns to
-/// the node boundaries L32 chunks on. With AST chunking the enclosing unit is the whole
-/// function; on a torn line-chunk it may be a partial one, which is why the mode pairs
-/// with L32.
+/// Function- and type-definition node kinds across the tree-sitter grammars lens parses,
+/// used by [`unit_snippet`] to find the enclosing definition of a match. Statement-level
+/// kinds (Rust `let_declaration`, JS `variable_declaration`, ...) are deliberately absent
+/// so the walk returns the whole enclosing function, not the single statement the match
+/// sits on.
+const DEF_KINDS: &[&str] = &[
+    // rust
+    "function_item",
+    "struct_item",
+    "enum_item",
+    "trait_item",
+    "impl_item",
+    "mod_item",
+    "union_item",
+    "macro_definition",
+    // python, c/c++
+    "function_definition",
+    "class_definition",
+    // javascript / typescript
+    "function_declaration",
+    "generator_function_declaration",
+    "method_definition",
+    "class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    // go, java
+    "method_declaration",
+    "type_declaration",
+    "constructor_declaration",
+];
+
+/// The enclosing definition around the first query-term match in `content`, returned as a
+/// verbatim source slice when it parses and fits [`SEARCH_UNIT_CAP_BYTES`]. Descends to the
+/// token at the match, then walks up to the nearest [`DEF_KINDS`] node (fn/struct/impl/
+/// class/method). Returns `None` (caller falls back to [`ranked_snippet`]) when: the file
+/// has no grammar, the chunk doesn't parse, the match sits in no definition (e.g. a
+/// top-level comment), or the enclosing definition is larger than the cap. It never returns
+/// a sub-fragment of an oversize definition, so a name query inside a large function yields
+/// a snippet fallback, not the bare identifier. Uses the same spec as [`chunk_by_ast`].
 fn unit_snippet(content: &str, terms: &[String], path: &str) -> Option<String> {
     let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
     let spec = any_spec_for_extension(ext)?;
@@ -610,22 +641,21 @@ fn unit_snippet(content: &str, terms: &[String], path: &str) -> Option<String> {
     let mut parser = Parser::new();
     parser.set_language(&spec.language()).ok()?;
     let tree = parser.parse(content, None)?;
-    // Descend the root->match path, returning the shallowest (largest) named node that
-    // contains the offset and fits the cap: the whole enclosing definition when it fits,
-    // else the largest sub-unit that does. A node containing the offset but with no
-    // fitting descendant ends the walk at `None`.
-    let mut node = tree.root_node();
+    // Walk up from the token at the match to the nearest definition node. Return it whole
+    // when it fits the cap; when the enclosing definition is oversize (or the match is in
+    // no definition at all), return None so the caller emits a ranked snippet instead of a
+    // fragment.
+    let mut node = tree.root_node().descendant_for_byte_range(offset, offset)?;
     loop {
-        let mut cursor = node.walk();
-        let child = node
-            .named_children(&mut cursor)
-            .find(|c| c.start_byte() <= offset && offset < c.end_byte());
-        drop(cursor);
-        let c = child?;
-        if c.end_byte() - c.start_byte() <= SEARCH_UNIT_CAP_BYTES {
-            return content.get(c.start_byte()..c.end_byte()).map(str::to_string);
+        if DEF_KINDS.contains(&node.kind()) {
+            if node.end_byte() - node.start_byte() <= SEARCH_UNIT_CAP_BYTES {
+                return content
+                    .get(node.start_byte()..node.end_byte())
+                    .map(str::to_string);
+            }
+            return None;
         }
-        node = c;
+        node = node.parent()?;
     }
 }
 
@@ -1728,29 +1758,29 @@ mod tests {
     }
 
     #[test]
-    fn unit_snippet_respects_the_byte_cap() {
+    fn unit_snippet_falls_back_when_enclosing_fn_exceeds_cap() {
         use std::fmt::Write as _;
-        // A single fn far larger than the cap: the whole fn cannot be returned, so the
-        // walk descends and yields a bounded sub-unit, never the oversize fn.
-        let mut src = String::from("fn huge() {\n");
+        // A fn far larger than the cap: the enclosing definition cannot be returned whole,
+        // so unit_snippet returns None (the caller emits a ranked snippet) rather than a
+        // fragment. Regression guard for the bare-identifier bug where a query matching the
+        // fn NAME inside an oversize fn returned just the name.
+        let mut src = String::from("fn oversize_target() {\n");
         let mut i = 0;
         while src.len() <= SEARCH_UNIT_CAP_BYTES * 2 {
             writeln!(src, "    let filler_{i} = {i};").unwrap();
             i += 1;
         }
-        src.push_str("    let unique_marker = 0;\n}\n");
-        let terms = vec!["unique_marker".to_string()];
-        if let Some(out) = unit_snippet(&src, &terms, "x.rs") {
-            assert!(
-                out.len() <= SEARCH_UNIT_CAP_BYTES,
-                "returned unit must respect the cap, got {} bytes",
-                out.len()
-            );
-            assert!(
-                !out.contains("filler_0"),
-                "must not return the whole oversize fn, got: {out:?}"
-            );
-        }
+        src.push_str("}\n");
+        assert_eq!(
+            unit_snippet(&src, &["oversize_target".to_string()], "x.rs"),
+            None,
+            "name match in an oversize fn must fall back, not return the bare identifier"
+        );
+        assert_eq!(
+            unit_snippet(&src, &["filler_7".to_string()], "x.rs"),
+            None,
+            "body match in an oversize fn must fall back to a ranked snippet"
+        );
     }
 
 }

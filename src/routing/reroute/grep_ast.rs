@@ -137,16 +137,6 @@ fn query_for(hint: &AstHint) -> String {
     }
 }
 
-/// A Context nudge for a syntax-shaped Grep: names the exact `lens_grep_ast`
-/// call with the translated query, since grep would also match this same
-/// text inside a comment or string literal, where the shape doesn't hold.
-pub fn nudge(hint: &AstHint) -> String {
-    let query = query_for(hint);
-    format!(
-        "This grep pattern describes Rust syntax, not text to search for — grep also matches it inside comments and string literals, where the shape doesn't apply. lens_grep_ast matches real syntax nodes instead: lens_grep_ast(language=\"rust\", query=\"{query}\"). If lens_grep_ast isn't loaded yet: ToolSearch(query: \"select:lens_grep_ast\")."
-    )
-}
-
 /// Deny reason for a Grep `pattern` [`syntax_shape`] identified as a Rust
 /// syntax shape: names the exact `lens_grep_ast` call with the translated
 /// query, offers the `ToolSearch` bootstrap in case the lens tools aren't
@@ -164,13 +154,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn impl_block_shape_and_nudge() {
+    fn impl_block_shape_and_deny_reason() {
         let hint = syntax_shape("impl Forge");
         assert_eq!(hint, Some(AstHint::ImplBlock("Forge".to_string())));
-        let n = nudge(&hint.unwrap());
-        assert!(n.contains("impl_item"), "{n}");
-        assert!(n.contains("lens_grep_ast"), "{n}");
-        assert!(n.contains("\"Forge\""), "{n}");
+        let r = deny_reason(&hint.unwrap());
+        assert!(r.contains("impl_item"), "{r}");
+        assert!(r.contains("lens_grep_ast"), "{r}");
+        assert!(r.contains("\"Forge\""), "{r}");
     }
 
     #[test]
@@ -251,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn every_hint_nudge_names_the_tool_and_a_query() {
+    fn every_hint_deny_reason_names_the_tool_and_a_query() {
         for hint in [
             AstHint::ImplBlock("Forge".to_string()),
             AstHint::Attribute("tool".to_string()),
@@ -261,9 +251,9 @@ mod tests {
             AstHint::TraitDef,
             AstHint::ForIn,
         ] {
-            let n = nudge(&hint);
-            assert!(n.contains("lens_grep_ast"), "{n}");
-            assert!(n.contains("ToolSearch"), "{n}");
+            let r = deny_reason(&hint);
+            assert!(r.contains("lens_grep_ast"), "{r}");
+            assert!(r.contains("ToolSearch"), "{r}");
         }
     }
 }

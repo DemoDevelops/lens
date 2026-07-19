@@ -5,6 +5,7 @@
   "ground_truth": { "count": 1 },
   "check": "numeric_tolerance",
   "primary_mechanism": "discovery",
+  "lens_fn": "lens_run_file",
   "evidence": ["1"],
   "treatment": {
     "language": "python",

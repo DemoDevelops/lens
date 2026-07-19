@@ -1,0 +1,11 @@
+{
+  "id": "0071_real_agentic_warmup_second_param",
+  "prompt": "In src/warmup.rs, what is the name of the second parameter of the function `warmup`?",
+  "fixtures": ["../../src"],
+  "ground_truth": { "param_name": "data_dir" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_symbol",
+  "evidence": ["warmup", "data_dir"],
+  "treatment": { "skeleton": "../../src/warmup.rs" }
+}

@@ -16,7 +16,8 @@ mod accuracy;
 use std::path::PathBuf;
 
 use accuracy::{
-    aggregate, default_model, load_tasks, render_accuracy_markdown, run_task, Model, TaskResult,
+    aggregate, default_model, function_report, lens_release_bin, load_tasks,
+    render_accuracy_markdown, run_task, Model, TaskResult,
 };
 
 #[tokio::main]
@@ -69,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
         (Model::Mock, true, "mock")
     };
 
+    let all_tasks = load_tasks()?; // unfiltered, for the lens_fn tag lookup below
     let mut tasks = load_tasks()?;
     // Optional focus filter: `LENS_BENCH_ONLY=<substr>` keeps only tasks
     // whose mechanism or id contains the substring (e.g. "discovery"). Used to
@@ -137,11 +139,23 @@ async fn main() -> anyhow::Result<()> {
         render_accuracy_markdown(&groups, &model.label(), pending)
     );
 
+    // The Contracts bench schema: `overall` + `per_function` folded across
+    // whatever tasks carry a `lens_fn` tag (populated for every real_agentic_*
+    // task). `bench_binary` names the single binary this run's hooks and
+    // `--mcp-config` both resolved to, so a future hooks/mcp mismatch shows up
+    // in the results header instead of silently voiding the run.
+    let (overall, per_function) = function_report(&all_tasks, &results);
+    let bench_binary =
+        (backend == "agentic").then(|| lens_release_bin().to_string_lossy().to_string());
+
     let payload = serde_json::json!({
         "mode": mode,
         "model": model.label(),
+        "bench_binary": bench_binary,
         "groups": groups,
         "tasks": results,
+        "overall": overall,
+        "per_function": per_function,
     });
     std::fs::write(&out_path, serde_json::to_string_pretty(&payload)? + "\n")?;
     eprintln!("\nwrote {}", out_path.display());

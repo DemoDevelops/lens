@@ -1,7 +1,7 @@
 //! MCP server wiring: the `Forge` handler holds shared state and exposes every
 //! lens tool. Tool bodies delegate to the feature modules.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -411,7 +411,7 @@ impl Forge {
     /// Skeletonize a source file: signatures + nesting, executable bodies elided,
     /// the full text stored so any body is one `lens_recall` away.
     #[tool(
-        description = "Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to `…`. Far fewer tokens than reading the whole file, and the full text is stored so any elided body is one lens_recall away (use the returned retrieve_ref). Pass `include_bodies` with definition names to get those bodies back verbatim in the same response, without a second call. Pass `with_lines: true` to prefix each signature with its `L{n}:` source line for exact citations. Do not Read a code file just to see its structure — use this first; use Read only when about to Edit."
+        description = "Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to `…`. Far fewer tokens than reading the whole file, and the full text is stored so any elided body is one lens_recall away (use the returned retrieve_ref). Pass `include_bodies` with definition names to get those bodies back verbatim in the same response, without a second call. Line-number prefixes (`L{n}:`) are included by default for exact citations; pass `with_lines: false` to omit them. A skeleton too large for the response budget comes back truncated (`truncated: true`) with a `skeleton_ref` to fetch the full skeleton text via lens_recall. Do not Read a code file just to see its structure — use this first; use Read only when about to Edit."
     )]
     async fn lens_skeleton(
         &self,
@@ -443,7 +443,7 @@ impl Forge {
             &content,
             &spec,
             req.include_bodies.as_deref(),
-            req.with_lines.unwrap_or(false),
+            req.with_lines.unwrap_or(true),
         ) else {
             let msg = format!("could not parse {} for skeleton; use Read", p.display());
             op.finish(0, 0, None, "error", msg.clone(), None);
@@ -466,14 +466,27 @@ impl Forge {
         let _ = self.store.record_source(&reference, &p.to_string_lossy());
         let retrieve_ref = reference[..reference.len().min(12)].to_string();
         let raw_in = content.len() as u64;
+        // Budget the skeleton itself, mirroring `maybe_compact`'s inline-cap mechanism
+        // for graph views: a skeleton whose signatures alone overflow the response cap
+        // (mined defect, 21 cases: large files blew the 25k client cap) gets a
+        // budgeted head plus a ref to the full skeleton text, instead of being
+        // returned raw and unbounded.
+        let (skeleton, truncated, skeleton_ref) = if skeleton.len() > self.max_inline {
+            let full_ref = self.store.put(&skeleton).ok();
+            let short_ref = full_ref.map(|r| r[..r.len().min(12)].to_string());
+            (truncate_skeleton(&skeleton, self.max_inline), true, short_ref)
+        } else {
+            (skeleton, false, None)
+        };
         let returned = skeleton.len() as u64;
         // The file bytes were processed but kept out of context; credit the savings
         // counter lens_stats reads (mirrors lens_run_file's file-size credit).
         let _ = self.store.bump_stat("raw_bytes_processed", raw_in as i64);
         let explain = self.ops.explain(|| {
             format!(
-                "skeletonized {} ({language}): {raw_in} -> {returned} bytes; full text at ref {retrieve_ref}",
-                p.display()
+                "skeletonized {} ({language}): {raw_in} -> {returned} bytes; full text at ref {retrieve_ref}{}",
+                p.display(),
+                if truncated { "; skeleton itself budgeted" } else { "" }
             )
         });
         op.finish(
@@ -488,29 +501,39 @@ impl Forge {
             skeleton,
             language,
             retrieve_ref,
+            truncated,
+            skeleton_ref,
         }))
     }
 
     /// Fetch a full blob previously offloaded to the reversible store.
     #[tool(
-        description = "Retrieve the full content for a retrieve_ref returned by another tool (reverses any truncation/compression). If the blob snapshots a file that has since changed or been deleted, the response carries a one-line `stale` warning naming the file."
+        description = "Retrieve the full content for a retrieve_ref returned by another tool (reverses any truncation/compression). Optional `offset`/`limit` (1-based lines) and `grep` (substring filter, applied first) slice a large ref instead of returning it all at once. If the blob snapshots a file that has since changed or been deleted, the response carries a one-line `stale` warning naming the file."
     )]
     async fn lens_recall(
         &self,
         Parameters(req): Parameters<RetrieveRequest>,
     ) -> Result<Json<RetrieveResponse>, ToolFailure> {
-        let op = self
-            .ops
-            .start("lens_recall", serde_json::json!({ "ref": req.reference }));
+        let op = self.ops.start(
+            "lens_recall",
+            serde_json::json!({ "ref": req.reference, "offset": req.offset, "limit": req.limit, "grep": req.grep }),
+        );
         match self.store.get(&req.reference) {
             Ok(Some(content)) => {
                 let stale = self.stale_note(&req.reference);
+                let (content, sliced) =
+                    slice_content(&content, req.offset, req.limit, req.grep.as_deref());
                 // Retrieve is the inverse of offloading (expansion), so it saves
                 // nothing: raw_in == returned keeps tokens_saved_est at 0.
                 let bytes = content.len() as u64;
-                let explain = self
-                    .ops
-                    .explain(|| format!("expanded ref {} to {} bytes", req.reference, bytes));
+                let explain = self.ops.explain(|| {
+                    format!(
+                        "expanded ref {} to {} bytes{}",
+                        req.reference,
+                        bytes,
+                        if sliced { " (sliced)" } else { "" }
+                    )
+                });
                 op.finish(
                     bytes,
                     bytes,
@@ -519,7 +542,7 @@ impl Forge {
                     "blob expanded from store",
                     explain,
                 );
-                Ok(Json(RetrieveResponse { content, stale }))
+                Ok(Json(RetrieveResponse { content, stale, sliced }))
             }
             Ok(None) => {
                 op.finish(
@@ -748,9 +771,58 @@ impl Forge {
             op.finish(0, 0, None, "error", msg.clone(), None);
             return Err(ToolFailure::plain(msg));
         };
-        let view = gquery::neighbors_dir(&graph, &id, req.depth, req.direction.as_deref());
+        let requested_depth = req.depth;
+        let mut depth = requested_depth;
+        let mut view = gquery::neighbors_dir(&graph, &id, depth, req.direction.as_deref());
         let raw_payload = view_payload_len(&view);
-        let compacted = self.maybe_compact(view);
+        // The dictionary compaction `maybe_compact` applies below isn't a hard cap: a
+        // subgraph with little name repetition can still overflow the response budget
+        // after compacting (mined defect: a compacted depth-10 subgraph still over the
+        // client's response cap). Shrink depth first, then breadth, until the
+        // compacted form actually fits.
+        let mut depth_trimmed = false;
+        while depth > 1 && compacted_len(&view) > self.max_inline {
+            depth -= 1;
+            view = gquery::neighbors_dir(&graph, &id, depth, req.direction.as_deref());
+            depth_trimmed = true;
+        }
+        let nodes_before_breadth_trim = view.nodes.len();
+        while view.nodes.len() > 1 && compacted_len(&view) > self.max_inline {
+            let keep = (view.nodes.len() / 2).max(1);
+            view.nodes.truncate(keep);
+            let kept: HashSet<&str> = view.nodes.iter().map(|n| n.id.as_str()).collect();
+            view.edges
+                .retain(|e| kept.contains(e.from.as_str()) && kept.contains(e.to.as_str()));
+        }
+        let nodes_after_breadth_trim = view.nodes.len();
+        let breadth_trimmed = nodes_after_breadth_trim < nodes_before_breadth_trim;
+
+        let mut compacted = self.maybe_compact(view);
+        if depth_trimmed || breadth_trimmed {
+            let mut parts = Vec::new();
+            if depth_trimmed {
+                parts.push(format!("depth {requested_depth} -> {depth}"));
+            }
+            if breadth_trimmed {
+                parts.push(format!(
+                    "nodes {nodes_before_breadth_trim} -> {nodes_after_breadth_trim}"
+                ));
+            }
+            compacted.trim_note = Some(format!(
+                "response budget trim: {}; full depth-{requested_depth} subgraph via retrieve_ref",
+                parts.join(", ")
+            ));
+            compacted.truncated = true;
+            // Point retrieve_ref at the FULL requested-depth subgraph (not whatever
+            // `maybe_compact` stored for the already-trimmed view above), so "the rest"
+            // is always recoverable regardless of how much depth/breadth was cut.
+            let full = gquery::neighbors_dir(&graph, &id, requested_depth, req.direction.as_deref());
+            let full_json =
+                serde_json::json!({ "nodes": full.nodes, "edges": full.edges }).to_string();
+            if let Ok(r) = self.store.put(&full_json) {
+                compacted.retrieve_ref = Some(r);
+            }
+        }
         self.record_graph_op(op, raw_payload, &compacted);
         Ok(Json(compacted))
     }
@@ -1234,7 +1306,10 @@ impl Forge {
                 continue;
             }
             let score = qr.hits.first().map(|h| h.score).unwrap_or(1.0) + 1.0;
-            qr.hits.insert(0, SearchHit { path: file.clone(), snippet: def, score });
+            qr.hits.insert(
+                0,
+                SearchHit { path: file.clone(), snippet: def, score, line: *line },
+            );
             qr.hits.truncate(limit.max(1));
         }
     }
@@ -1789,6 +1864,7 @@ impl Forge {
             retrieve_ref: reference,
             resolved: view.resolved,
             total_matches: view.total_matches,
+            trim_note: view.trim_note,
         }
     }
 
@@ -1829,6 +1905,68 @@ fn view_payload_len(view: &GraphView) -> u64 {
     serde_json::json!({ "nodes": view.nodes, "edges": view.edges })
         .to_string()
         .len() as u64
+}
+
+/// Serialized size of `view`'s dictionary-compacted form (the same transform
+/// `maybe_compact` applies, computed here without storing anything). Dictionary
+/// compaction can under-compress a subgraph with little name repetition, so
+/// `lens_links` uses this — not `view_payload_len`'s raw size — as its real budget
+/// check when deciding whether depth/breadth need trimming further.
+fn compacted_len(view: &GraphView) -> usize {
+    let original = serde_json::json!({ "nodes": view.nodes, "edges": view.edges });
+    crate::store::compress::compact_json(&original).to_string().len()
+}
+
+/// Truncate a `lens_skeleton` skeleton to at most `budget` bytes, backing off to a
+/// UTF-8 char boundary and then the last newline at or before the cut point (so a
+/// line is never split mid-way), and appending a note pointing at `skeleton_ref`.
+/// Used when the skeleton text itself — not just the file it was built from —
+/// overflows the response budget.
+fn truncate_skeleton(s: &str, budget: usize) -> String {
+    if s.len() <= budget {
+        return s.to_string();
+    }
+    let mut cut = budget.min(s.len());
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let cut = s[..cut].rfind('\n').map(|i| i + 1).unwrap_or(cut);
+    format!(
+        "{}\n… [truncated {} of {} bytes; full skeleton at skeleton_ref via lens_recall]",
+        &s[..cut],
+        s.len() - cut,
+        s.len()
+    )
+}
+
+/// Apply `lens_recall`'s optional `grep`/`offset`/`limit` narrowing to a stored blob's
+/// full content. `grep`, when present, filters to lines containing the substring
+/// first; `offset`/`limit` (1-based) then page through the (possibly filtered) lines.
+/// Returns the narrowed text and whether any narrowing param was given (the caller's
+/// signal that `content` may be less than the full stored blob).
+fn slice_content(
+    content: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    grep: Option<&str>,
+) -> (String, bool) {
+    if offset.is_none() && limit.is_none() && grep.is_none() {
+        return (content.to_string(), false);
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let filtered: Vec<&str> = match grep {
+        Some(pat) => lines.into_iter().filter(|l| l.contains(pat)).collect(),
+        None => lines,
+    };
+    let start = offset.unwrap_or(1).max(1) - 1;
+    if start >= filtered.len() {
+        return (String::new(), true);
+    }
+    let end = match limit {
+        Some(n) => (start + n).min(filtered.len()),
+        None => filtered.len(),
+    };
+    (filtered[start..end].join("\n"), true)
 }
 
 /// Load a saved staleness manifest, or `None` if absent/unreadable (which forces
@@ -2096,6 +2234,71 @@ mod tests {
             err.message.contains("totally_unresolvable_xyz_123"),
             "{}",
             err.message
+        );
+    }
+
+    /// T14: a `lens_links` call whose requested depth (10) pulls in a subgraph that
+    /// still overflows the response budget even after `maybe_compact`'s dictionary
+    /// compaction (mined defect: uniquely-named nodes compress poorly) must be
+    /// trimmed — depth and/or breadth — to actually fit, note what was cut, and keep
+    /// the full requested-depth subgraph recoverable via `retrieve_ref`.
+    #[tokio::test]
+    async fn links_depth_ten_fits_the_response_budget_via_trim() {
+        let base = tempdir().unwrap();
+        let repo = base.path().to_path_buf();
+        // A long linear call chain with long, largely-unique names (little repetition
+        // for `compact_json`'s dictionary to exploit), so a depth-10 neighborhood
+        // still overflows a tiny response budget after compaction.
+        let mut src = String::new();
+        for i in 0..25 {
+            src.push_str(&format!(
+                "pub fn node_alpha_chain_member_{i:03}() {{\n    node_alpha_chain_member_{:03}();\n}}\n\n",
+                i + 1
+            ));
+        }
+        src.push_str("pub fn node_alpha_chain_member_025() {}\n");
+        std::fs::write(repo.join("chain.rs"), &src).unwrap();
+
+        // Tiny inline budget so even a modest subgraph must be trimmed to fit.
+        let f = Forge::with_paths(repo.clone(), base.path().join(".lens"), 64).unwrap();
+        let resp = f
+            .lens_links(Parameters(GraphNeighborsRequest {
+                node_id: "node_alpha_chain_member_000".into(),
+                depth: 10,
+                direction: Some("callees".into()),
+            }))
+            .await
+            .unwrap()
+            .0;
+
+        assert!(
+            resp.truncated,
+            "a depth-10 chain over a 64-byte budget must be trimmed"
+        );
+        assert!(
+            resp.trim_note.is_some(),
+            "a trimmed response must note what was cut"
+        );
+        let served = serde_json::to_string(&resp).unwrap().len();
+        assert!(
+            served < 4096,
+            "the served response ({served} bytes) must be budgeted, not the raw depth-10 payload"
+        );
+        // "The rest" is still recoverable: the full requested-depth subgraph via ref.
+        let full_ref = resp.retrieve_ref.clone().expect("ref to the full subgraph");
+        let recalled = f
+            .lens_recall(Parameters(crate::tools::RetrieveRequest {
+                reference: full_ref,
+                offset: None,
+                limit: None,
+                grep: None,
+            }))
+            .await
+            .unwrap()
+            .0;
+        assert!(
+            recalled.content.contains("node_alpha_chain_member_010"),
+            "the full ref must cover nodes beyond whatever depth/breadth was trimmed"
         );
     }
 
@@ -2673,6 +2876,13 @@ mod tests {
             "skeleton dropped the signature: {}",
             resp.skeleton
         );
+        // T14: `with_lines` defaults to true (no explicit request value given above),
+        // so the signature is prefixed with its source line without asking for it.
+        assert!(
+            resp.skeleton.contains("L1:"),
+            "with_lines must default to true: {}",
+            resp.skeleton
+        );
         assert!(
             !resp.skeleton.contains("compute(x)"),
             "body leaked into skeleton: {}",
@@ -2684,17 +2894,90 @@ mod tests {
         let recalled = f
             .lens_recall(Parameters(crate::tools::RetrieveRequest {
                 reference: resp.retrieve_ref.clone(),
+                offset: None,
+                limit: None,
+                grep: None,
             }))
             .await
             .unwrap()
             .0;
         assert_eq!(recalled.content, full, "recall did not return the full file");
+        // Well under the 8192-byte budget: not truncated, no skeleton_ref.
+        assert!(!resp.truncated);
+        assert!(resp.skeleton_ref.is_none());
+    }
+
+    /// T14: a skeleton whose signatures ALONE overflow the response budget (mined
+    /// defect, 21 cases: `lens_skeleton` blowing the 25k client cap on large files)
+    /// must come back as a budgeted head plus a `skeleton_ref`, and that ref, when
+    /// recalled, must return the full (untruncated) skeleton text.
+    #[tokio::test]
+    async fn skeleton_over_budget_returns_truncated_head_and_full_ref() {
+        let base = tempdir().unwrap();
+        let repo = base.path().to_path_buf();
+        let file = repo.join("many.rs");
+        let mut src = String::new();
+        for i in 0..80 {
+            src.push_str(&format!(
+                "pub fn func_number_{i:03}(x: i32) -> i32 {{\n    x + {i}\n}}\n\n"
+            ));
+        }
+        std::fs::write(&file, &src).unwrap();
+        // Tiny inline budget forces the skeleton itself (not just the source file)
+        // to overflow, even though the skeleton is far smaller than the raw file.
+        let f = Forge::with_paths(repo.clone(), base.path().join(".lens"), 512).unwrap();
+
+        let resp = f
+            .lens_skeleton(Parameters(crate::tools::SkeletonRequest {
+                path: file.display().to_string(),
+                include_bodies: None,
+                with_lines: None,
+            }))
+            .await
+            .unwrap()
+            .0;
+
+        assert!(
+            resp.truncated,
+            "an 80-fn skeleton must overflow a 512-byte budget"
+        );
+        assert!(
+            !resp.skeleton.contains("func_number_079"),
+            "the truncated head must not carry the tail of the skeleton: {}",
+            resp.skeleton
+        );
+        let skeleton_ref = resp
+            .skeleton_ref
+            .clone()
+            .expect("a truncated skeleton must carry a ref to the full text");
+
+        let recalled = f
+            .lens_recall(Parameters(crate::tools::RetrieveRequest {
+                reference: skeleton_ref,
+                offset: None,
+                limit: None,
+                grep: None,
+            }))
+            .await
+            .unwrap()
+            .0;
+        assert!(
+            recalled.content.len() > resp.skeleton.len(),
+            "the full skeleton must be larger than the truncated head"
+        );
+        assert!(
+            recalled.content.contains("func_number_079"),
+            "the full skeleton must include what the truncated head elided"
+        );
     }
 
     /// Recall a ref and unwrap the response (staleness tests hit this repeatedly).
     async fn recall(f: &Forge, reference: &str) -> crate::tools::RetrieveResponse {
         f.lens_recall(Parameters(crate::tools::RetrieveRequest {
             reference: reference.to_string(),
+            offset: None,
+            limit: None,
+            grep: None,
         }))
         .await
         .unwrap()
@@ -2760,6 +3043,59 @@ mod tests {
         let resp = recall(&f, &reference).await;
         assert_eq!(resp.content, "just a blob");
         assert!(resp.stale.is_none());
+        assert!(!resp.sliced, "no offset/limit/grep given, so nothing was sliced");
+    }
+
+    /// T14: `lens_recall`'s optional `offset`/`limit`/`grep` slice a large ref instead
+    /// of returning it all at once (mined defect, 6 cases: a 141KB ref was
+    /// all-or-nothing).
+    #[tokio::test]
+    async fn recall_offset_limit_grep_slice_a_large_ref() {
+        let (f, _dir) = forge(8192);
+        let mut lines: Vec<String> = (1..=50).map(|i| format!("line {i:02} content")).collect();
+        lines[9] = "line 10 MARKER content".to_string();
+        lines[24] = "line 25 MARKER content".to_string();
+        let content = lines.join("\n");
+        let reference = f.store.put(&content).unwrap();
+
+        async fn sliced(
+            f: &Forge,
+            reference: &str,
+            offset: Option<usize>,
+            limit: Option<usize>,
+            grep: Option<&str>,
+        ) -> crate::tools::RetrieveResponse {
+            f.lens_recall(Parameters(crate::tools::RetrieveRequest {
+                reference: reference.to_string(),
+                offset,
+                limit,
+                grep: grep.map(|s| s.to_string()),
+            }))
+            .await
+            .unwrap()
+            .0
+        }
+
+        // offset/limit page through 1-based lines.
+        let page = sliced(&f, &reference, Some(5), Some(3), None).await;
+        assert_eq!(page.content, lines[4..7].join("\n"));
+        assert!(page.sliced);
+
+        // grep narrows to matching lines only (both params composable, tested via
+        // grep alone here since it is the seam most likely to regress).
+        let grepped = sliced(&f, &reference, None, None, Some("MARKER")).await;
+        assert_eq!(grepped.content, format!("{}\n{}", lines[9], lines[24]));
+        assert!(grepped.sliced);
+
+        // grep + limit compose: narrow to matches, then page through them.
+        let grepped_paged = sliced(&f, &reference, Some(2), Some(1), Some("MARKER")).await;
+        assert_eq!(grepped_paged.content, lines[24]);
+        assert!(grepped_paged.sliced);
+
+        // No slicing params: unsliced, full content, byte-identical to a plain recall.
+        let full = recall(&f, &reference).await;
+        assert_eq!(full.content, content);
+        assert!(!full.sliced);
     }
 
     #[tokio::test]
@@ -2833,6 +3169,7 @@ mod tests {
             retrieve_ref: None,
             resolved: vec![],
             total_matches: None,
+            trim_note: None,
         };
         let out = f.maybe_compact(view);
         assert!(!out.truncated);
@@ -2863,6 +3200,7 @@ mod tests {
             retrieve_ref: None,
             resolved: vec![],
             total_matches: None,
+            trim_note: None,
         };
         let out = f.maybe_compact(view);
         assert!(out.truncated);

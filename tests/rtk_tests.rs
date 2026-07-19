@@ -20,6 +20,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
+use lens::store::Store;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_lens")
 }
@@ -283,6 +285,72 @@ fn routing_defers_bash_to_rtk_only_when_active() {
             .unwrap()
             .contains("wrap -- "),
         "RTK inactive ⇒ Bash wrap behaves exactly as before"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H4 (plan T2): Bash would-fire counters split on rtk_active.
+// ---------------------------------------------------------------------------
+
+/// Seed a populated `index.db` in `data_dir` so `routing::index_present`
+/// returns true — the in-crate `seed_index` fixture is `#[cfg(test)]` and
+/// unreachable from this integration crate (mirrors `routing_tests.rs`'s
+/// copy of the same fixture).
+fn seed_index(data_dir: &Path) {
+    let conn = rusqlite::Connection::open(data_dir.join("index.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS file_manifest(path TEXT PRIMARY KEY, mtime INTEGER NOT NULL);
+         INSERT OR REPLACE INTO file_manifest(path, mtime) VALUES ('src/f0.rs', 123);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn rtk_active_splits_bagg_would_fire_denominator() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let bagg_bash = json!({
+        "session_id": "s1", "cwd": d.path().to_string_lossy(),
+        "tool_name": "Bash", "tool_input": { "command": "wc -l src/f0.rs" }
+    });
+
+    // rtk active: the plain `bagg_would_fire` key must NOT bump; the split
+    // `bagg_would_fire_rtk_deferred` key must.
+    let active = [
+        ("LENS_ROUTING", "full"),
+        ("LENS_ROUTING_MCP", "up"),
+        ("LENS_DEFER_BASH_TO_RTK", "1"),
+    ];
+    run_pretooluse(&bagg_bash, &active, d.path());
+
+    let store = Store::open(d.path()).unwrap();
+    assert_eq!(
+        store.get_stat("bagg_would_fire").unwrap(),
+        0,
+        "rtk active must not bump the plain bagg_would_fire key"
+    );
+    assert_eq!(
+        store.get_stat("bagg_would_fire_rtk_deferred").unwrap(),
+        1,
+        "rtk active bumps the split bagg_would_fire_rtk_deferred key"
+    );
+
+    // rtk inactive: the plain key bumps as before; the split key stays put.
+    let inactive = [
+        ("LENS_ROUTING", "full"),
+        ("LENS_ROUTING_MCP", "up"),
+        ("LENS_DEFER_BASH_TO_RTK", "0"),
+    ];
+    run_pretooluse(&bagg_bash, &inactive, d.path());
+    assert_eq!(
+        store.get_stat("bagg_would_fire").unwrap(),
+        1,
+        "rtk inactive bumps the plain bagg_would_fire key"
+    );
+    assert_eq!(
+        store.get_stat("bagg_would_fire_rtk_deferred").unwrap(),
+        1,
+        "rtk inactive must not bump the rtk-deferred key further"
     );
 }
 

@@ -1,0 +1,11 @@
+{
+  "id": "0073_real_agentic_extract_spec_for_extension_param",
+  "prompt": "In src/discovery/extract.rs, what is the type of the single parameter accepted by the function `spec_for_extension`?",
+  "fixtures": ["../../src"],
+  "ground_truth": { "param_type": "&str" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_skeleton",
+  "evidence": ["spec_for_extension", "&str"],
+  "treatment": { "skeleton": "../../src/discovery/extract.rs" }
+}

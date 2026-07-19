@@ -1,0 +1,11 @@
+{
+  "id": "0072_real_agentic_graph_vec_returning_methods",
+  "prompt": "How many methods in src/discovery/graph.rs return a `Vec<&Node>` or `Vec<&Edge>` type? Name them, sorted alphabetically, as `method_1` and `method_2`.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "count": 2, "method_1": "find_by_name", "method_2": "incident" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_grep_ast",
+  "evidence": ["find_by_name", "incident"],
+  "treatment": { "skeleton": "../../src/discovery/graph.rs" }
+}

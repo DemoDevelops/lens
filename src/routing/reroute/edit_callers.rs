@@ -1,15 +1,14 @@
-//! edit_callers — Rail 2a: Edit(symbol with >=K callers) -> lens_links nudge.
+//! edit_callers — Rail 2a: Edit(symbol with >=K callers) -> lens_links deny.
 //!
 //! When an Edit touches a *declaration* line — a `fn`/`def`/`func`/`class`/
 //! `struct` signature — changing that signature can break every caller. We look
 //! the symbol up in the structural graph and, if it has at least K incoming
 //! `calls` edges (callers), route the editor at `lens_links` so the blast
-//! radius is visible before committing: [`caller_nudge`] is the
-//! `Decision::Context` arm, [`deny_reason`] the one-shot deny arm (blocked at
-//! most once per symbol per session; the verbatim retry always passes). Pure
-//! and graph-backed; the once-per-(session, symbol) `elink:{sym}` throttle and
-//! the `LENS_EDIT_LINKS_NUDGE`/`LENS_EDIT_LINKS_DENY` gates live in
-//! `route_inner` (`src/routing/mod.rs`).
+//! radius is visible before committing: [`deny_reason`] is the one-shot deny
+//! arm (blocked at most once per symbol per session; the verbatim retry always
+//! passes). Pure and graph-backed; the once-per-(session, symbol) `elink:{sym}`
+//! throttle and the `LENS_EDIT_LINKS_DENY` gate live in `route_inner`
+//! (`src/routing/mod.rs`).
 //!
 //! Caller-edge direction: a `calls` edge is stored `from` = caller, `to` =
 //! callee (see [`crate::discovery::graph`]), so the callers of `sym` are the
@@ -67,22 +66,10 @@ pub fn caller_count(graph: &Graph, sym: &str) -> Option<usize> {
     )
 }
 
-/// Nudge toward `lens_links` when `sym` has at least `k` incoming `calls` edges
-/// (callers). Returns `None` when `sym` is absent from the graph or has fewer
-/// than `k` callers (see [`caller_count`]).
-pub fn caller_nudge(graph: &Graph, sym: &str, k: usize) -> Option<String> {
-    let count = caller_count(graph, sym).filter(|&count| count >= k)?;
-    Some(format!(
-        "`{sym}` has {count} callers — run lens_links(\"{sym}\") before you change its \
-         signature. If the lens tools aren't loaded yet, load them first: \
-         ToolSearch(query: \"select:lens_links,lens_path\")."
-    ))
-}
-
-/// Deny reason for the rail's steering arm — the same blast-radius guidance as
-/// [`caller_nudge`] with the real caller count, plus the one-shot promise: the
-/// `elink:{sym}` marker is set before the deny returns, so an Edit is blocked
-/// at most once per symbol per session and the verbatim retry always passes.
+/// Deny reason for the rail's steering arm — blast-radius guidance with the
+/// real caller count, plus the one-shot promise: the `elink:{sym}` marker is
+/// set before the deny returns, so an Edit is blocked at most once per symbol
+/// per session and the verbatim retry always passes.
 pub fn deny_reason(sym: &str, callers: usize) -> String {
     format!(
         "`{sym}` has {callers} callers — its declaration is about to change, so see the \
@@ -93,7 +80,7 @@ pub fn deny_reason(sym: &str, callers: usize) -> String {
     )
 }
 
-/// Minimum caller count that arms the nudge. `LENS_EDIT_LINKS_MIN_CALLERS`
+/// Minimum caller count that arms the deny. `LENS_EDIT_LINKS_MIN_CALLERS`
 /// overrides it; absence or a parse failure falls back to 3.
 pub fn min_callers() -> usize {
     std::env::var("LENS_EDIT_LINKS_MIN_CALLERS")
@@ -126,23 +113,18 @@ mod tests {
     }
 
     #[test]
-    fn decl_edit_to_multicaller_symbol_nudges() {
+    fn decl_edit_to_multicaller_symbol_extracts_and_counts() {
         // A decl-touching edit: old_string carries the `fn foo(...)` signature.
         assert_eq!(
             edited_symbol("fn foo(a: i32) -> i32", "fn foo(a: i64) -> i64").as_deref(),
             Some("foo")
         );
         let g = graph_with_callers(4);
-        let nudge = caller_nudge(&g, "foo", 3).expect("4 callers >= k=3 must nudge");
-        assert!(
-            nudge.contains('4'),
-            "must embed the real caller count: {nudge}"
-        );
-        assert!(
-            nudge.contains("lens_links"),
-            "must name lens_links: {nudge}"
-        );
-        assert!(nudge.contains("foo"), "must name the symbol: {nudge}");
+        assert_eq!(caller_count(&g, "foo"), Some(4));
+        let r = deny_reason("foo", 4);
+        assert!(r.contains('4'), "must embed the real caller count: {r}");
+        assert!(r.contains("lens_links"), "must name lens_links: {r}");
+        assert!(r.contains("foo"), "must name the symbol: {r}");
     }
 
     #[test]
@@ -159,8 +141,10 @@ mod tests {
 
     #[test]
     fn single_caller_below_threshold_is_silent() {
+        // `route_inner` gates on `caller_count(..).filter(|&n| n >= k)`; a
+        // 1-caller symbol is below the K=3 gate.
         let g = graph_with_callers(1);
-        assert_eq!(caller_nudge(&g, "foo", 3), None);
+        assert_eq!(caller_count(&g, "foo"), Some(1));
     }
 
     #[test]
@@ -175,7 +159,6 @@ mod tests {
     fn symbol_absent_from_graph_is_silent() {
         // `sym` isn't in the graph => None (distinct from an in-graph 0-caller).
         let g = graph_with_callers(4);
-        assert_eq!(caller_nudge(&g, "missing", 3), None);
         assert_eq!(caller_count(&g, "missing"), None);
     }
 
@@ -198,7 +181,7 @@ mod tests {
     fn count_equal_to_threshold_fires() {
         // count == k is on the fire side of the `>= k` gate.
         let g = graph_with_callers(3);
-        assert!(caller_nudge(&g, "foo", 3).is_some());
+        assert!(caller_count(&g, "foo").is_some_and(|n| n >= 3));
     }
 
     #[test]

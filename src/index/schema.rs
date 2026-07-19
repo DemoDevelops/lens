@@ -12,7 +12,12 @@ use super::tantivy_index::TantivyStore;
 /// Bump to force a clean full rebuild after an on-disk format change. A mismatch
 /// clears the manifest so the next `index_path` re-reads every file into a fresh
 /// Tantivy index (also discards a stale SQLite-FTS5-era index).
-const FTS_BACKEND_VERSION: &str = "tantivy1";
+///
+/// tantivy2: adds the stored `line` field (chunk start line, for `SearchHit::line`);
+/// `TantivyStore::open`'s own schema-mismatch check already wipes the on-disk
+/// Tantivy directory for the new field, this bump forces the SQLite mtime
+/// manifest to also reset so `index_path` re-reads every file into it.
+const FTS_BACKEND_VERSION: &str = "tantivy2";
 
 /// Handle to the content index. Cloneable and cheap to share across async tasks:
 /// the Tantivy store is behind an `Arc`, and the SQLite manifest opens a connection

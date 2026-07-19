@@ -10,6 +10,7 @@
   },
   "check": "contains",
   "primary_mechanism": "discovery",
+  "lens_fn": "lens_links",
   "evidence": ["any_spec_for_language", "grep_ast_filtered", "lens_grep_ast"],
   "treatment": { "graph_op": "neighbors", "name": "spec_for_language", "depth": 3 }
 }

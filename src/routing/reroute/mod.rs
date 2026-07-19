@@ -15,24 +15,25 @@
 //! - `read_overview` → `rovr`
 //!
 //! Env flags — kill-switch polarity: every flag is ON by default and `=0`
-//! disables it (the `LENS_GREP_FIRST_DENY` pattern), one flag per arm:
-//! - `LENS_GREP_SYMBOL_NUDGE` / `LENS_GREP_SYMBOL_DENY`
-//! - `LENS_READ_SKELETON_NUDGE` / `LENS_READ_SKELETON_DENY`
-//! - `LENS_BASH_AGG_NUDGE` / `LENS_BASH_AGG_DENY`
-//! - `LENS_EDIT_LINKS_NUDGE` / `LENS_EDIT_LINKS_DENY`
-//! - `LENS_GREP_AST_NUDGE` / `LENS_GREP_AST_DENY`
-//! - `LENS_READ_OVERVIEW_NUDGE` / `LENS_READ_OVERVIEW_DENY`
+//! disables it (the `LENS_GREP_FIRST_DENY` pattern), one flag per rail:
+//! - `LENS_GREP_SYMBOL_DENY`
+//! - `LENS_READ_SKELETON_DENY`
+//! - `LENS_BASH_AGG_DENY`
+//! - `LENS_EDIT_LINKS_DENY`
+//! - `LENS_GREP_AST_DENY`
+//! - `LENS_READ_OVERVIEW_DENY`
+//! - `LENS_BASH_GREP_DENY`
+//! - `LENS_READ_RUNFILE_DENY`
 //!
-//! Every rail carries BOTH a nudge and a deny arm. The deny arm fires under
-//! `Level::steers` (Steer|Full). The nudge arm fires only at `Level::Nudge`
-//! (`nudges() && !steers()`) for gsym/rskel/rovr/elink; the gast/bagg nudges
-//! keep their original `Level::nudges` gate, pre-empted at steering levels by
-//! their deny's shared one-shot key. Both arms of a rail share that rail's
-//! one-shot throttle key AND the SAME `{p}_would_fire` / `{p}_next_{class}`
-//! counter keys — the prefix identifies the rail; `{p}_shadow_next_{class}` is
-//! the follower counter when the operator has kill-switched the arm (`=0`).
+//! Every rail is DENY-only, firing under `Level::steers` (Steer|Full). The
+//! nudge arms were retired 2026-07-19 (measured conversion 0-33% for nudges
+//! vs 51-71% for denies). Each rail keeps its one-shot throttle key and the
+//! `{p}_would_fire` / `{p}_next_{class}` counter keys — the prefix identifies
+//! the rail; `{p}_shadow_next_{class}` is the follower counter when the
+//! operator has kill-switched the rail (`=0`).
 
 pub mod bash_aggregate;
+pub mod bash_grep;
 pub mod edit_callers;
 pub mod grep_ast;
 pub mod grep_symbol;

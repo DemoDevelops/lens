@@ -69,22 +69,45 @@ pub struct RetrieveRequest {
     /// A `retrieve_ref` returned by another tool.
     #[serde(rename = "ref")]
     pub reference: String,
+    /// 1-based line to start returning from (default 1, the beginning). Lets a
+    /// large ref be paged through instead of recalled all at once.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Max lines to return starting at `offset` (default: the rest of the content).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Return only lines containing this substring (case-sensitive). Applied
+    /// before `offset`/`limit`, so the two compose: narrow to matching lines,
+    /// then page through them.
+    #[serde(default)]
+    pub grep: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RetrieveResponse {
-    /// The full stored blob.
+    /// The full stored blob, or the narrowed slice when `offset`/`limit`/`grep`
+    /// were given.
     pub content: String,
     /// Present when the blob snapshots a source file that has since changed or
     /// been deleted: a one-line warning naming the file. Absent while the file
     /// still matches the snapshot (or the blob has no source file).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale: Option<String>,
+    /// True when `offset`/`limit`/`grep` were given, so `content` may be a
+    /// narrower slice of the full stored blob rather than all of it.
+    pub sliced: bool,
 }
 
 // ---------------------------------------------------------------------------
 // lens_skeleton (file structure view)
 // ---------------------------------------------------------------------------
+
+/// Default for [`SkeletonRequest::with_lines`]: line-number prefixes on by default
+/// (mined defect: callers citing skeleton output without a line number, since the
+/// old default was off). Still overridable with an explicit `with_lines: false`.
+fn default_with_lines() -> Option<bool> {
+    Some(true)
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SkeletonRequest {
@@ -96,20 +119,31 @@ pub struct SkeletonRequest {
     #[serde(default)]
     pub include_bodies: Option<Vec<String>>,
     /// When true, prefix each definition's signature line with `L{n}: ` (its
-    /// 1-indexed source line) so callers can cite exact locations. Default false.
-    #[serde(default)]
+    /// 1-indexed source line) so callers can cite exact locations. Default true;
+    /// pass `false` to omit the prefixes.
+    #[serde(default = "default_with_lines")]
     pub with_lines: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SkeletonResponse {
     /// The file's structure: signatures, types, and nesting with executable bodies
-    /// elided to `…`.
+    /// elided to `…`. Budgeted to the server's inline limit: when the full skeleton
+    /// would exceed it, this is a truncated head and the full text is at
+    /// `skeleton_ref` (see `truncated`).
     pub skeleton: String,
     /// Detected language (e.g. "rust", "python").
     pub language: String,
     /// Ref to fetch the full file via `lens_recall` (any elided body is one call away).
     pub retrieve_ref: String,
+    /// True when `skeleton` above was truncated to fit the response budget; the
+    /// full (untruncated) skeleton text is at `skeleton_ref`.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Present only when `truncated`: a ref to fetch the full skeleton text via
+    /// `lens_recall`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skeleton_ref: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +189,9 @@ pub struct SearchHit {
     pub path: String,
     pub snippet: String,
     pub score: f64,
+    /// 1-based line the hit's chunk starts at, so a caller can jump straight to
+    /// it instead of re-searching the file.
+    pub line: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -234,7 +271,7 @@ pub struct ResolvedNote {
     pub other_candidates: usize,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GraphView {
     pub nodes: Vec<NodeView>,
     pub edges: Vec<EdgeView>,
@@ -258,6 +295,13 @@ pub struct GraphView {
     /// returned), so existing outputs stay byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_matches: Option<usize>,
+    /// Present only when `lens_links` had to shrink `depth` and/or truncate the
+    /// node/edge lists to fit the response budget: a short description of what
+    /// was cut. The full requested-depth subgraph is still recoverable via
+    /// `retrieve_ref`. Omitted (and absent from other tools' output) when no
+    /// trimming was needed, so unaffected outputs stay byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trim_note: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

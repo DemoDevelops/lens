@@ -52,6 +52,9 @@ const STEM_TOKENIZER: &str = "en_stem";
 /// (another process — `lens warmup`/`watch` while the server runs — may hold it).
 const WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// One BM25 ranked-candidate row: `(path, chunk_id, content, start_line, base_score)`.
+pub(crate) type RankedCandidate = (String, String, String, u64, f64);
+
 /// Schema field handles. `Field` is `Copy`, so this is cheap to clone.
 #[derive(Clone)]
 pub(crate) struct Fields {
@@ -60,6 +63,9 @@ pub(crate) struct Fields {
     pub symbols: Field,
     pub content: Field,
     pub content_ng: Field,
+    /// 1-based line the chunk starts at in its source file, stored (not indexed
+    /// for search) so `lens_search` can report `SearchHit::line`.
+    pub line: Field,
 }
 
 /// A Tantivy-backed FTS store: one index directory, one reusable reader, the schema
@@ -108,6 +114,8 @@ fn build_schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
+    // line: stored-only, never queried — just carried back to `SearchHit::line`.
+    let line = b.add_u64_field("line", STORED);
     let schema = b.build();
     (
         schema,
@@ -117,6 +125,7 @@ fn build_schema() -> (Schema, Fields) {
             symbols,
             content,
             content_ng,
+            line,
         },
     )
 }
@@ -191,7 +200,8 @@ impl TantivyStore {
     }
 
     /// Add one chunk. `content` is indexed under both the stemmed and trigram fields
-    /// and stored once.
+    /// and stored once. `start_line` is the chunk's 1-based starting line in its
+    /// source file, stored only (see [`Fields::line`]).
     pub fn add_chunk(
         &self,
         writer: &IndexWriter,
@@ -199,6 +209,7 @@ impl TantivyStore {
         chunk_id: &str,
         symbols: &str,
         content: &str,
+        start_line: u64,
     ) -> Result<()> {
         writer
             .add_document(doc!(
@@ -207,6 +218,7 @@ impl TantivyStore {
                 self.fields.symbols => symbols,
                 self.fields.content => content,
                 self.fields.content_ng => content,
+                self.fields.line => start_line,
             ))
             .context("adding tantivy document")?;
         Ok(())
@@ -252,13 +264,9 @@ impl TantivyStore {
 
     /// Ranked candidate pool: OR-join of the query's stemmed tokens across `symbols`
     /// (boosted [`SYMBOLS_BOOST`]x) and `content`, top `fetch` by Tantivy BM25.
-    /// Returns `(path, chunk_id, content, base_score)`; `mod.rs` applies the doc
-    /// penalty + proximity re-rank on top.
-    pub fn ranked_candidates(
-        &self,
-        query: &str,
-        fetch: usize,
-    ) -> Result<Vec<(String, String, String, f64)>> {
+    /// Returns `(path, chunk_id, content, line, base_score)`; `mod.rs` applies the
+    /// doc penalty + proximity re-rank on top.
+    pub fn ranked_candidates(&self, query: &str, fetch: usize) -> Result<Vec<RankedCandidate>> {
         self.reader.reload().context("reloading tantivy reader")?;
         let searcher = self.reader.searcher();
         let terms = self.analyze(STEM_TOKENIZER, query);
@@ -290,6 +298,7 @@ impl TantivyStore {
                 self.stored(&d, self.fields.path),
                 self.stored(&d, self.fields.chunk_id),
                 self.stored(&d, self.fields.content),
+                self.stored_u64(&d, self.fields.line),
                 score as f64,
             ));
         }
@@ -300,12 +309,12 @@ impl TantivyStore {
     /// chars use the trigram field (an AND of the query's trigrams — a substring
     /// superset `mod.rs` filters exactly); shorter operators scan all docs (mirrors
     /// the FTS5 `LIKE` fallback the trigram index cannot serve). Returns
-    /// `(path, chunk_id, content)`.
+    /// `(path, chunk_id, content, line)`.
     pub fn structural_candidates(
         &self,
         query: &str,
         fetch: usize,
-    ) -> Result<Vec<(String, String, String)>> {
+    ) -> Result<Vec<(String, String, String, u64)>> {
         self.reader.reload().context("reloading tantivy reader")?;
         let searcher = self.reader.searcher();
         let q = query.trim();
@@ -337,6 +346,7 @@ impl TantivyStore {
                     self.stored(&d, self.fields.path),
                     self.stored(&d, self.fields.chunk_id),
                     self.stored(&d, self.fields.content),
+                    self.stored_u64(&d, self.fields.line),
                 ));
             }
             Ok(out)
@@ -354,6 +364,7 @@ impl TantivyStore {
                         self.stored(&d, self.fields.path),
                         self.stored(&d, self.fields.chunk_id),
                         content,
+                        self.stored_u64(&d, self.fields.line),
                     ));
                 }
             }
@@ -384,6 +395,12 @@ impl TantivyStore {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string()
+    }
+
+    /// Stored `u64` field read, defaulting to 0 (a pre-migration doc with no
+    /// stored `line`, which the `FTS_BACKEND_VERSION` bump forces a rebuild past).
+    fn stored_u64(&self, d: &TantivyDocument, f: Field) -> u64 {
+        d.get_first(f).and_then(|v| v.as_u64()).unwrap_or(0)
     }
 }
 

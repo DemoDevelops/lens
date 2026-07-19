@@ -1,0 +1,107 @@
+{"tool": "Bash", "tool_input": {"command": "grep -rl \"repo_map\" ~/.claude-personal/hooks 2>/dev/null; find ~/.claude-personal/hooks -iname \"*session*start*\" 2>/dev/null"}, "prime_prompt": "clean up the fixture layout", "graph_names": [], "expect": "deny", "source": "routing.log Bash (real cmd, dogfood audit)"}
+{"tool": "Bash", "tool_input": {"command": "grep -rl \"repo_map\" ~/.claude-personal 2>/dev/null"}, "prime_prompt": "clean up the fixture layout", "graph_names": [], "expect": "deny", "source": "routing.log Bash (real cmd, dogfood audit)"}
+{"tool": "Bash", "tool_input": {"command": "grep -n \"fn repo_map_block\" -A 40 /Users/gene/.claude-personal/projects/-Users-gene-Documents-AI-Stuff-lens/82bac125-5799-4b55-9a7c-d25b3fbe7665/tool-results/toolu_01U8GPe299aS2nNhfFsFoTjb.txt"}, "prime_prompt": "clean up the fixture layout", "graph_names": [], "expect": "deny", "source": "routing.log Bash (real cmd, dogfood audit)"}
+{"tool": "Bash", "tool_input": {"command": "grep -rl \"repo_map\" ~/.claude-personal/hooks ~/.claude-personal/skills 2>/dev/null | head -20"}, "prime_prompt": "clean up the fixture layout", "graph_names": [], "expect": "deny", "source": "routing.log Bash (real cmd, dogfood audit)"}
+{"tool": "Bash", "tool_input": {"command": "grep -rl \"repo_map\" /Users/gene/Documents/AI\\ Stuff/lens 2>/dev/null | head -20"}, "prime_prompt": "clean up the fixture layout", "graph_names": [], "expect": "deny", "source": "routing.log Bash (real cmd, dogfood audit)"}
+{"tool": "Bash", "tool_input": {"command": "grep -n -B2 -A2 \"bench_toolsel\" Cargo.toml"}, "prime_prompt": "clean up the fixture layout", "graph_names": [], "expect": "modify", "source": "routing.log Bash (real cmd, dogfood audit)"}
+{"tool": "Bash", "tool_input": {"command": "rg -n --no-heading include_bodies -g '!benchmarks/toolsel/results/*' ."}, "prime_prompt": "clean up the fixture layout", "graph_names": [], "expect": "deny", "source": "routing.log Bash (real cmd, dogfood audit)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "ToolSearch", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_find", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_grep_ast", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_grep_ast", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_grep_ast", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_recall", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_recall", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_recall", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_run", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_run", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_run_file", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_search", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_skeleton", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "mcp__lens__lens_symbol", "tool_input": {}, "prime_prompt": null, "graph_names": [], "expect": "passthrough", "source": "routing.log (lens's own tool call, never re-routed)"}
+{"tool": "Grep", "tool_input": {"pattern": "impl Forge|struct Forge"}, "prime_prompt": null, "graph_names": ["Forge"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "fn doctor"}, "prime_prompt": null, "graph_names": ["doctor"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "fn doctor"}, "prime_prompt": null, "graph_names": ["doctor"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "fn doctor"}, "prime_prompt": null, "graph_names": ["doctor"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "include_bodies|fn extract_name|fn.*name"}, "prime_prompt": null, "graph_names": ["extract_name"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "fn handle_connection|fn handle_conn|TcpListener|stream: TcpStream"}, "prime_prompt": null, "graph_names": ["handle_connection"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "fn handle_connection|TOOL_DESC|const.*DESC"}, "prime_prompt": null, "graph_names": ["handle_connection"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "fn handle_connection|async fn handle|TcpListener|const.*DESC|DESCRIPTIONS"}, "prime_prompt": null, "graph_names": ["handle_connection"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "fn repo_map_block|fn.*overview|Graph::load"}, "prime_prompt": null, "graph_names": ["repo_map_block"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "fn repo_map_block|fn session_start"}, "prime_prompt": null, "graph_names": ["repo_map_block"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "bench_toolsel"}, "prime_prompt": null, "graph_names": ["bench_toolsel"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "bench_toolsel"}, "prime_prompt": null, "graph_names": ["bench_toolsel"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "bench_toolsel"}, "prime_prompt": null, "graph_names": ["bench_toolsel"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "include_bodies"}, "prime_prompt": null, "graph_names": ["include_bodies"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "repo_map"}, "prime_prompt": null, "graph_names": ["repo_map"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "repo_map"}, "prime_prompt": null, "graph_names": ["repo_map"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "READ_GRAPH_PERIOD"}, "prime_prompt": null, "graph_names": ["READ_GRAPH_PERIOD"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}
+{"tool": "Grep", "tool_input": {"pattern": "READ_GRAPH_THRESHOLD_DEFAULT|READ_GRAPH_PERIOD|inspect_escalation|fn threshold|fn overview_due|LENS_READ_GRAPH_THRESHOLD"}, "prime_prompt": null, "graph_names": ["threshold"], "expect": "deny", "source": "routing.log Grep grep-symbol-deny (pattern recovered from real deny reason)"}

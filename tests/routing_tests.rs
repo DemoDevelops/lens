@@ -47,23 +47,19 @@ fn run_hook(
         // Determinism: never inherit routing env from the test runner.
         .env_remove("LENS_ROUTING")
         .env_remove("LENS_ROUTING_MCP")
-        // ...including the 13 reroute-rail flags and their tunables. Kill-switch
-        // polarity means every rail flag is ON by default and `=0` disables it,
-        // so an unset flag here is LIVE, not off — the rail tests below pin
-        // whichever flags each call needs explicitly (see `rail_envs`).
+        // ...including the reroute-rail deny flags and their tunables.
+        // Kill-switch polarity means every rail flag is ON by default and `=0`
+        // disables it, so an unset flag here is LIVE, not off — the rail tests
+        // below pin whichever flags each call needs explicitly (see `rail_envs`).
         .env_remove("LENS_GREP_SCOPE_DENY")
         .env_remove("LENS_GREP_SYMBOL_DENY")
-        .env_remove("LENS_GREP_SYMBOL_NUDGE")
         .env_remove("LENS_READ_SKELETON_DENY")
-        .env_remove("LENS_READ_SKELETON_NUDGE")
-        .env_remove("LENS_BASH_AGG_NUDGE")
         .env_remove("LENS_BASH_AGG_DENY")
-        .env_remove("LENS_EDIT_LINKS_NUDGE")
         .env_remove("LENS_EDIT_LINKS_DENY")
-        .env_remove("LENS_GREP_AST_NUDGE")
         .env_remove("LENS_GREP_AST_DENY")
-        .env_remove("LENS_READ_OVERVIEW_NUDGE")
         .env_remove("LENS_READ_OVERVIEW_DENY")
+        .env_remove("LENS_BASH_GREP_DENY")
+        .env_remove("LENS_READ_RUNFILE_DENY")
         .env_remove("LENS_EDIT_LINKS_MIN_CALLERS")
         .env_remove("LENS_READ_OVERVIEW_THRESHOLD")
         // RTK coexistence (plan T4): force the defer-Bash-to-RTK gate OFF so these
@@ -141,10 +137,11 @@ fn off_is_a_true_noop() {
 #[test]
 fn webfetch_denies_when_steering() {
     let d = tempfile::tempdir().unwrap();
-    for lvl in ["steer", "full"] {
+    // Distinct sessions per level: the WebFetch deny is one-shot per session.
+    for (lvl, sess) in [("steer", "wf-steer"), ("full", "wf-full")] {
         let (_, v) = run_hook(
             "PreToolUse",
-            &webfetch_payload(d.path(), "s1"),
+            &webfetch_payload(d.path(), sess),
             &[("LENS_ROUTING", lvl), ("LENS_ROUTING_MCP", "up")],
             d.path(),
         );
@@ -240,24 +237,20 @@ fn stateful_chain_passes_through_unchanged() {
 }
 
 // ---------------------------------------------------------------------------
-// §2/§4: nudges are throttled to once per session
+// §2/§4: nudge retirement — steer without wrap emits nothing for plain Bash
 // ---------------------------------------------------------------------------
 
 #[test]
-fn bash_nudge_fires_once_then_passthrough_at_steer() {
+fn wrappable_bash_is_a_pure_noop_at_steer() {
+    // The per-call Bash nudge is retired: at steer (no wrap) a wrappable
+    // command renders byte-identical `{}` every time.
     let d = tempfile::tempdir().unwrap();
     let envs = [("LENS_ROUTING", "steer"), ("LENS_ROUTING_MCP", "up")];
     let p = bash_payload(d.path(), "s1", "find . -type f");
-    let (_, v1) = run_hook("PreToolUse", &p, &envs, d.path());
-    assert!(
-        v1["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false),
-        "first wrappable Bash at steer should emit a nudge"
-    );
+    let (raw1, _) = run_hook("PreToolUse", &p, &envs, d.path());
+    assert_eq!(raw1, "{}", "no nudge on the first wrappable Bash at steer");
     let (raw2, _) = run_hook("PreToolUse", &p, &envs, d.path());
-    assert_eq!(raw2, "{}", "nudge throttled to once per session");
+    assert_eq!(raw2, "{}", "and none afterwards either");
 }
 
 // ---------------------------------------------------------------------------
@@ -838,43 +831,35 @@ fn find_trace_prompt_arms_a_one_shot_deny_on_the_first_grep() {
 }
 
 // ---------------------------------------------------------------------------
-// T8: reroute rails — six classifiers wired into routing, each with BOTH a
-// deny arm and a nudge arm, all 13 flags kill-switch polarity (default ON,
-// `=0` disables), gated on level + mcp_ready + index_present, mirroring the
-// shipped grep-scope deny. Every test drives the real binary.
+// T8: reroute rails — deny-only classifiers wired into routing, all flags
+// kill-switch polarity (default ON, `=0` disables), gated on level +
+// mcp_ready + index_present, mirroring the shipped grep-scope deny. Every
+// test drives the real binary.
 // ---------------------------------------------------------------------------
 
 /// The steering env every rail's gates expect (level + reachable MCP); each
 /// test appends its rail's flag explicitly.
 const FULL_UP: [(&str, &str); 2] = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
 
-/// The Level::Nudge env (never steers): gsym/rskel/rovr/elink's nudge arm
-/// only fires here, since their deny arm owns steer/full.
-const NUDGE_UP: [(&str, &str); 2] = [("LENS_ROUTING", "nudge"), ("LENS_ROUTING_MCP", "up")];
-
-/// All 13 rail flags pinned OFF (`=0`). Kill-switch polarity means every flag
-/// is ON by default, so a test isolating ONE rail must silence the other
-/// twelve or an unrelated rail can pre-empt the assertion (e.g. `impl Foo` is
+/// All rail deny flags pinned OFF (`=0`). Kill-switch polarity means every
+/// flag is ON by default, so a test isolating ONE rail must silence the
+/// others or an unrelated rail can pre-empt the assertion (e.g. `impl Foo` is
 /// BOTH a gsym- and a gast-shaped Grep pattern).
-const ALL_RAILS_OFF: [(&str, &str); 13] = [
+const ALL_RAILS_OFF: [(&str, &str); 9] = [
     ("LENS_GREP_SCOPE_DENY", "0"),
     ("LENS_GREP_SYMBOL_DENY", "0"),
-    ("LENS_GREP_SYMBOL_NUDGE", "0"),
     ("LENS_READ_SKELETON_DENY", "0"),
-    ("LENS_READ_SKELETON_NUDGE", "0"),
-    ("LENS_GREP_AST_NUDGE", "0"),
     ("LENS_GREP_AST_DENY", "0"),
-    ("LENS_READ_OVERVIEW_NUDGE", "0"),
     ("LENS_READ_OVERVIEW_DENY", "0"),
-    ("LENS_BASH_AGG_NUDGE", "0"),
     ("LENS_BASH_AGG_DENY", "0"),
-    ("LENS_EDIT_LINKS_NUDGE", "0"),
     ("LENS_EDIT_LINKS_DENY", "0"),
+    ("LENS_BASH_GREP_DENY", "0"),
+    ("LENS_READ_RUNFILE_DENY", "0"),
 ];
 
-/// Build a deterministic env vec for a rail test: `level` (e.g. `FULL_UP`,
-/// `NUDGE_UP`) plus all 13 rail flags pinned OFF, with `overrides` applied
-/// last so a test can re-enable its own rail(s) (`=1`) or tweak level/mcp.
+/// Build a deterministic env vec for a rail test: `level` (e.g. `FULL_UP`)
+/// plus all rail deny flags pinned OFF, with `overrides` applied last so a
+/// test can re-enable its own rail(s) (`=1`) or tweak level/mcp.
 fn rail_envs<'a>(
     level: &[(&'a str, &'a str)],
     overrides: &[(&'a str, &'a str)],
@@ -993,13 +978,6 @@ fn is_deny(v: &Value) -> bool {
     v["hookSpecificOutput"]["permissionDecision"] == "deny"
 }
 
-fn context_of(v: &Value) -> String {
-    v["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or("")
-        .to_string()
-}
-
 #[test]
 fn grep_symbol_deny_fires_once_with_flag_and_gates() {
     let d = tempfile::tempdir().unwrap();
@@ -1072,38 +1050,6 @@ fn grep_symbol_deny_off_or_gated_stays_quiet() {
     seed_index(d2.path());
     let (_, seeded) = run_hook("PreToolUse", &p4, &up, d2.path());
     assert!(is_deny(&seeded), "populated index un-gates the deny: {seeded}");
-}
-
-#[test]
-fn grep_ast_nudge_translates_syntax_shapes_once() {
-    let d = tempfile::tempdir().unwrap();
-    seed_index(d.path());
-    let envs = rail_envs(&FULL_UP, &[("LENS_GREP_AST_NUDGE", "1")]);
-
-    let p = grep_payload(d.path(), "gast1", "impl Forge");
-    let (_, first) = run_hook("PreToolUse", &p, &envs, d.path());
-    assert!(!is_deny(&first), "gast is a nudge, never a deny: {first}");
-    let ctx = context_of(&first);
-    assert!(
-        ctx.contains("lens_grep_ast") && ctx.contains("impl_item"),
-        "nudge carries the translated tree-sitter query: {ctx}"
-    );
-
-    // One-shot per session: a second syntax-shaped Grep gets no gast nudge.
-    let p2 = grep_payload(d.path(), "gast1", "async fn");
-    let (_, second) = run_hook("PreToolUse", &p2, &envs, d.path());
-    assert!(
-        !context_of(&second).contains("lens_grep_ast"),
-        "gast nudge is one-shot: {second}"
-    );
-
-    // Flag off: no gast nudge, and `{}` once the generic tip is spent.
-    let off = rail_envs(&FULL_UP, &[]);
-    let poff = grep_payload(d.path(), "gast2", "impl Forge");
-    let (_, off1) = run_hook("PreToolUse", &poff, &off, d.path());
-    assert!(!context_of(&off1).contains("lens_grep_ast"), "flag off: {off1}");
-    let (raw2, _) = run_hook("PreToolUse", &poff, &off, d.path());
-    assert_eq!(raw2, "{}", "flag off after the one-shot tip is a pure no-op");
 }
 
 #[test]
@@ -1190,19 +1136,28 @@ fn read_skeleton_deny_fires_once_and_spares_edited_and_bounded_reads() {
     seed_index(d.path());
     let envs = rail_envs(&FULL_UP, &[("LENS_READ_SKELETON_DENY", "1")]);
 
-    // A whole, unedited code-file Read is denied toward lens_skeleton, once.
-    let p = read_payload(d.path(), "rskel1", "src/server.rs");
+    // A whole, unedited code-file Read is denied toward lens_skeleton, once
+    // per file (`src/widget.rs` need not exist on disk — the classifier
+    // doesn't stat).
+    let p = read_payload(d.path(), "rskel1", "src/widget.rs");
     let (_, first) = run_hook("PreToolUse", &p, &envs, d.path());
     assert!(is_deny(&first), "whole code-file Read must deny: {first}");
     let reason = first["hookSpecificOutput"]["permissionDecisionReason"]
         .as_str()
         .unwrap();
     assert!(
-        reason.contains("lens_skeleton(path=\"src/server.rs\")") && reason.contains("include_bodies"),
+        reason.contains("lens_skeleton(path=\"src/widget.rs\")") && reason.contains("include_bodies"),
         "deny reason names the exact skeleton call: {reason}"
     );
     let (_, second) = run_hook("PreToolUse", &p, &envs, d.path());
-    assert!(!is_deny(&second), "retried Read must pass (one-shot): {second}");
+    assert!(!is_deny(&second), "retried Read must pass (per-file one-shot): {second}");
+    // Per-file semantics: a DIFFERENT file gets its own deny in this session.
+    let p_b = read_payload(d.path(), "rskel1", "src/widget_two.rs");
+    let (_, second_file) = run_hook("PreToolUse", &p_b, &envs, d.path());
+    assert!(
+        is_deny(&second_file),
+        "a different file gets its own skeleton deny: {second_file}"
+    );
 
     // An edited path is spared: Read-before-the-next-Edit is the right tool.
     let edit_post = json!({
@@ -1216,90 +1171,60 @@ fn read_skeleton_deny_fires_once_and_spares_edited_and_bounded_reads() {
     let edited = read_payload(d.path(), "rskel2", "src/edited.rs");
     let (_, spared) = run_hook("PreToolUse", &edited, &envs, d.path());
     assert!(!is_deny(&spared), "an edited path must never skeleton-deny: {spared}");
-    // ...and the one-shot was NOT spent on it: an unedited file still denies.
+    // ...and its one-shot was NOT spent: an unedited file still denies.
     let other = read_payload(d.path(), "rskel2", "src/other.rs");
     let (_, denied) = run_hook("PreToolUse", &other, &envs, d.path());
     assert!(is_deny(&denied), "unedited file still denies in the same session: {denied}");
 
-    // A bounded Read (offset/limit) is already lean — spared too.
+    // A bounded Read (offset/limit) is not rskel's shape (it is the runfile
+    // arm's, pinned off by rail_envs here) — spared.
     let bounded = json!({
         "session_id": "rskel3",
         "cwd": d.path().to_string_lossy(),
         "tool_name": "Read",
-        "tool_input": { "file_path": "src/server.rs", "limit": 40 },
+        "tool_input": { "file_path": "src/widget.rs", "limit": 40 },
     });
     let (_, lean) = run_hook("PreToolUse", &bounded, &envs, d.path());
     assert!(!is_deny(&lean), "a bounded Read must never skeleton-deny: {lean}");
 
-    // Flag off: no deny, `{}` once the one-shot tips are spent.
+    // Flag off: no deny, byte-identical `{}`.
     let off_env = rail_envs(&FULL_UP, &[]);
-    let poff = read_payload(d.path(), "rskel4", "src/server.rs");
+    let poff = read_payload(d.path(), "rskel4", "src/widget.rs");
     let (_, off1) = run_hook("PreToolUse", &poff, &off_env, d.path());
     assert!(!is_deny(&off1), "flag off must never deny: {off1}");
     let (raw2, _) = run_hook("PreToolUse", &poff, &off_env, d.path());
-    assert_eq!(raw2, "{}", "flag off after the one-shot tip is a pure no-op");
+    assert_eq!(raw2, "{}", "flag off is a pure no-op");
 }
 
 #[test]
-fn bash_agg_nudge_fires_at_steer_wrap_keeps_priority_at_full() {
+fn bash_grep_deny_end_to_end_prompt_arms_then_denies() {
+    // The full arming path through the real binary: a UserPromptSubmit (any
+    // prompt, steering) arms the grep-scope budget; the next broad shell grep
+    // is denied toward lens_search; the verbatim retry passes.
     let d = tempfile::tempdir().unwrap();
     seed_index(d.path());
-    let agg = "find . -name '*.rs' | wc -l";
-
-    // At steer (no wrap), the aggregate pipeline gets the specific lens_run
-    // nudge instead of the generic Bash tip.
-    let steer = rail_envs(
-        &[("LENS_ROUTING", "steer"), ("LENS_ROUTING_MCP", "up")],
-        &[("LENS_BASH_AGG_NUDGE", "1")],
-    );
-    let p = bash_payload(d.path(), "bagg1", agg);
-    let (_, first) = run_hook("PreToolUse", &p, &steer, d.path());
-    assert!(!is_deny(&first), "bagg is a nudge, never a deny: {first}");
+    let envs: Vec<(&str, &str)> = FULL_UP.to_vec();
+    let sess = "bgrep-e2e";
+    let prompt = json!({
+        "session_id": sess,
+        "cwd": d.path().to_string_lossy(),
+        "prompt": "clean up the fixture layout",
+    });
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+    let grep = bash_payload(d.path(), sess, "grep -rn deny_threshold src/");
+    let (_, first) = run_hook("PreToolUse", &grep, &envs, d.path());
+    assert!(is_deny(&first), "armed broad shell grep must deny: {first}");
+    let reason = first["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
     assert!(
-        context_of(&first).contains("reshapes data"),
-        "aggregate pipeline gets the lens_run nudge: {first}"
+        reason.contains("lens_search(queries: [\"deny_threshold\"])"),
+        "deny reason carries the ready-to-paste lens_search call: {reason}"
     );
-    // One-shot: the next aggregate falls back to the generic tip.
-    let p2 = bash_payload(d.path(), "bagg1", "git log | wc -l");
-    let (_, second) = run_hook("PreToolUse", &p2, &steer, d.path());
+    let (_, second) = run_hook("PreToolUse", &grep, &envs, d.path());
     assert!(
-        !context_of(&second).contains("reshapes data"),
-        "bagg nudge is one-shot: {second}"
-    );
-
-    // Additive: at full the wrap rewrite keeps priority over the nudge.
-    let full = rail_envs(&FULL_UP, &[("LENS_BASH_AGG_NUDGE", "1")]);
-    let p3 = bash_payload(d.path(), "bagg2", agg);
-    let (_, wrapped) = run_hook("PreToolUse", &p3, &full, d.path());
-    let hso = &wrapped["hookSpecificOutput"];
-    assert_eq!(hso["permissionDecision"], "allow", "wrap still wins at full: {wrapped}");
-    assert!(
-        hso["updatedInput"]["command"].as_str().unwrap().contains("wrap -- "),
-        "the aggregate is wrapped, not just nudged: {wrapped}"
-    );
-
-    // Flag off at steer: the generic Bash tip, not the aggregate one.
-    let steer_off = rail_envs(&[("LENS_ROUTING", "steer"), ("LENS_ROUTING_MCP", "up")], &[]);
-    let p4 = bash_payload(d.path(), "bagg3", agg);
-    let (_, off) = run_hook("PreToolUse", &p4, &steer_off, d.path());
-    assert!(
-        !context_of(&off).contains("reshapes data"),
-        "flag off: no aggregate nudge: {off}"
-    );
-    let (raw2, _) = run_hook("PreToolUse", &p4, &steer_off, d.path());
-    assert_eq!(raw2, "{}", "flag off after the one-shot tip is a pure no-op");
-
-    // MCP down gates the rail (the generic tip is not MCP-gated, so assert on
-    // the rail's phrase, not on emptiness).
-    let steer_down = rail_envs(
-        &[("LENS_ROUTING", "steer"), ("LENS_ROUTING_MCP", "down")],
-        &[("LENS_BASH_AGG_NUDGE", "1")],
-    );
-    let p5 = bash_payload(d.path(), "bagg4", agg);
-    let (_, gated) = run_hook("PreToolUse", &p5, &steer_down, d.path());
-    assert!(
-        !context_of(&gated).contains("reshapes data"),
-        "mcp down must gate the bagg nudge: {gated}"
+        !is_deny(&second),
+        "the verbatim retry passes (budget consumed): {second}"
     );
 }
 
@@ -1360,41 +1285,19 @@ fn bash_agg_deny_fires_before_wrap_with_flag_and_wraps_off() {
 }
 
 #[test]
-fn edit_links_nudge_names_callers_once_per_symbol_and_never_denies() {
-    // The nudge arm only fires at Level::Nudge — steer/full is the deny arm's
-    // territory (see edit_links_deny_fires_once_per_symbol_at_full_and_never_touches_content).
+fn edit_links_deny_covers_multiedit_and_stays_quiet_without_graph() {
+    // MultiEdit + guard coverage for the deny arm (the retired nudge arm's
+    // shape tests, re-homed): the first decl-touching edit in `edits[]` wins;
+    // body-only edits, below-threshold symbols, flag-off, and a missing graph
+    // all render byte-identical `{}` or pass through.
     let d = tempfile::tempdir().unwrap();
     seed_index(d.path());
     std::fs::write(d.path().join("graph.json"), callers_graph_json().to_string()).unwrap();
-    let envs = rail_envs(&NUDGE_UP, &[("LENS_EDIT_LINKS_NUDGE", "1")]);
-
-    // A decl-touching Edit of a 3-caller symbol nudges toward lens_links.
-    let p = edit_payload(d.path(), "elink1", "fn alpha() {", "fn alpha(x: u32) {");
-    let (_, first) = run_hook("PreToolUse", &p, &envs, d.path());
-    assert!(!is_deny(&first), "the nudge arm never denies: {first}");
-    let ctx = context_of(&first);
-    assert!(
-        ctx.contains("lens_links(\"alpha\")") && ctx.contains("3 callers"),
-        "nudge names the symbol and its caller count: {ctx}"
-    );
-
-    // Once per (session, symbol): the same symbol stays quiet afterwards.
-    let (raw2, _) = run_hook("PreToolUse", &p, &envs, d.path());
-    assert_eq!(raw2, "{}", "elink is once per session+symbol");
-
-    // Below the caller threshold: quiet.
-    let pb = edit_payload(d.path(), "elink1", "fn beta() {", "fn beta(x: u32) {");
-    let (raw_b, _) = run_hook("PreToolUse", &pb, &envs, d.path());
-    assert_eq!(raw_b, "{}", "a 1-caller symbol is below the K=3 gate");
-
-    // A body-only edit extracts no symbol: quiet.
-    let pbody = edit_payload(d.path(), "elink1", "let x = 1;", "let x = 2;");
-    let (raw_body, _) = run_hook("PreToolUse", &pbody, &envs, d.path());
-    assert_eq!(raw_body, "{}", "body-only edits never nudge");
+    let envs = rail_envs(&FULL_UP, &[("LENS_EDIT_LINKS_DENY", "1")]);
 
     // MultiEdit: the first decl-touching edit in `edits[]` wins.
     let pm = json!({
-        "session_id": "elink2",
+        "session_id": "elink-multi",
         "cwd": d.path().to_string_lossy(),
         "tool_name": "MultiEdit",
         "tool_input": { "file_path": "src/a.rs", "edits": [
@@ -1403,75 +1306,37 @@ fn edit_links_nudge_names_callers_once_per_symbol_and_never_denies() {
         ]},
     });
     let (_, multi) = run_hook("PreToolUse", &pm, &envs, d.path());
+    assert!(is_deny(&multi), "MultiEdit finds the decl-touching edit: {multi}");
     assert!(
-        context_of(&multi).contains("lens_links(\"alpha\")"),
-        "MultiEdit finds the decl-touching edit: {multi}"
+        multi["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("lens_links(\"alpha\")"),
+        "deny names the symbol: {multi}"
     );
 
-    // Flag off: an Edit is a pure no-op (`{}`) — no other Edit routing exists.
-    let off_env = rail_envs(&NUDGE_UP, &[]);
-    let poff = edit_payload(d.path(), "elink3", "fn alpha() {", "fn alpha(x: u32) {");
+    // Below the caller threshold: quiet.
+    let pb = edit_payload(d.path(), "elink-low", "fn beta() {", "fn beta(x: u32) {");
+    let (raw_b, _) = run_hook("PreToolUse", &pb, &envs, d.path());
+    assert_eq!(raw_b, "{}", "a 1-caller symbol is below the K=3 gate");
+
+    // A body-only edit extracts no symbol: quiet.
+    let pbody = edit_payload(d.path(), "elink-body", "let x = 1;", "let x = 2;");
+    let (raw_body, _) = run_hook("PreToolUse", &pbody, &envs, d.path());
+    assert_eq!(raw_body, "{}", "body-only edits never deny");
+
+    // Flag off: an Edit is a pure no-op (`{}`).
+    let off_env = rail_envs(&FULL_UP, &[]);
+    let poff = edit_payload(d.path(), "elink-off", "fn alpha() {", "fn alpha(x: u32) {");
     let (raw_off, _) = run_hook("PreToolUse", &poff, &off_env, d.path());
     assert_eq!(raw_off, "{}", "flag off: Edit renders byte-identical {{}}");
 
     // No graph on disk: the load is guarded, quiet.
     let d2 = tempfile::tempdir().unwrap();
     seed_index(d2.path());
-    let png = edit_payload(d2.path(), "elink4", "fn alpha() {", "fn alpha(x: u32) {");
+    let png = edit_payload(d2.path(), "elink-nograph", "fn alpha() {", "fn alpha(x: u32) {");
     let (raw_ng, _) = run_hook("PreToolUse", &png, &envs, d2.path());
     assert_eq!(raw_ng, "{}", "graph absent: the rail stays quiet");
-}
-
-#[test]
-fn read_overview_nudge_after_fifth_mapless_read_and_map_resets() {
-    // The nudge arm only fires at Level::Nudge — steer/full is the deny arm's
-    // territory (see read_overview_deny_fires_once_at_full_...).
-    let d = tempfile::tempdir().unwrap();
-    seed_index(d.path());
-    let envs = rail_envs(&NUDGE_UP, &[("LENS_READ_OVERVIEW_NUDGE", "1")]);
-
-    // Reads 1-4: no overview nudge yet; read 5 fires it, naming lens_overview.
-    let p = read_payload(d.path(), "rovr1", "src/server.rs");
-    for i in 1..=4 {
-        let (_, v) = run_hook("PreToolUse", &p, &envs, d.path());
-        assert!(
-            !context_of(&v).contains("lens_overview"),
-            "read {i} of 4 must not fire the overview nudge: {v}"
-        );
-    }
-    let (_, fifth) = run_hook("PreToolUse", &p, &envs, d.path());
-    assert!(!is_deny(&fifth), "rovr is a nudge, never a deny: {fifth}");
-    assert!(
-        context_of(&fifth).contains("lens_overview"),
-        "the 5th mapless read fires the overview nudge: {fifth}"
-    );
-
-    // A lens_map call resets the counter: the next read is read #1 again.
-    let p2 = read_payload(d.path(), "rovr2", "src/server.rs");
-    for _ in 1..=4 {
-        run_hook("PreToolUse", &p2, &envs, d.path());
-    }
-    let map = json!({
-        "session_id": "rovr2",
-        "cwd": d.path().to_string_lossy(),
-        "tool_name": "mcp__lens__lens_map",
-        "tool_input": {},
-    });
-    run_hook("PreToolUse", &map, &envs, d.path());
-    let (_, after_map) = run_hook("PreToolUse", &p2, &envs, d.path());
-    assert!(
-        !context_of(&after_map).contains("lens_overview"),
-        "a lens_map call must zero the mapless-read counter: {after_map}"
-    );
-
-    // Flag off: the 5th read is a pure no-op.
-    let p3 = read_payload(d.path(), "rovr3", "src/server.rs");
-    let off_env = rail_envs(&NUDGE_UP, &[]);
-    for _ in 1..=4 {
-        run_hook("PreToolUse", &p3, &off_env, d.path());
-    }
-    let (raw5, _) = run_hook("PreToolUse", &p3, &off_env, d.path());
-    assert_eq!(raw5, "{}", "flag off: the 5th read renders byte-identical {{}}");
 }
 
 #[test]
@@ -1617,12 +1482,12 @@ fn rskel_edit_intent_prompt_exempts_the_pre_edit_read() {
     let sess = "rskeledit1";
 
     // An edit-shaped prompt arms the edit-intent exemption for this session.
-    let prompt = prompt_payload(d.path(), sess, "Update the null check in src/server.rs");
+    let prompt = prompt_payload(d.path(), sess, "Update the null check in src/widget.rs");
     run_hook("UserPromptSubmit", &prompt, &envs, d.path());
 
     // The whole, unedited code-file Read that rskel would normally deny now
     // passes through: the harness needs this Read before the Edit.
-    let read = read_payload(d.path(), sess, "src/server.rs");
+    let read = read_payload(d.path(), sess, "src/widget.rs");
     let (_, v) = run_hook("PreToolUse", &read, &envs, d.path());
     assert!(
         !is_deny(&v),
@@ -1642,7 +1507,7 @@ fn rskel_denies_after_a_neutral_prompt_leaves_edit_intent_clear() {
     let prompt = prompt_payload(d.path(), sess, "Summarize the project layout for me.");
     run_hook("UserPromptSubmit", &prompt, &envs, d.path());
 
-    let read = read_payload(d.path(), sess, "src/server.rs");
+    let read = read_payload(d.path(), sess, "src/widget.rs");
     let (_, v) = run_hook("PreToolUse", &read, &envs, d.path());
     assert!(is_deny(&v), "a neutral prompt must not exempt the Read: {v}");
 }
@@ -1656,9 +1521,9 @@ fn rskel_edit_intent_is_recleared_by_a_later_non_edit_prompt() {
 
     // Edit-shaped prompt arms the exemption: the pre-edit Read passes (and,
     // being exempt, never spends the rskel one-shot).
-    let edit_prompt = prompt_payload(d.path(), sess, "Refactor the deny gate in src/server.rs");
+    let edit_prompt = prompt_payload(d.path(), sess, "Refactor the deny gate in src/widget.rs");
     run_hook("UserPromptSubmit", &edit_prompt, &envs, d.path());
-    let read = read_payload(d.path(), sess, "src/server.rs");
+    let read = read_payload(d.path(), sess, "src/widget.rs");
     let (_, armed_read) = run_hook("PreToolUse", &read, &envs, d.path());
     assert!(
         !is_deny(&armed_read),
@@ -1790,87 +1655,12 @@ fn edit_links_deny_fires_once_per_symbol_at_full_and_never_touches_content() {
 }
 
 #[test]
-fn gsym_and_rskel_nudges_fire_only_at_nudge_level_sharing_the_deny_key() {
-    let d = tempfile::tempdir().unwrap();
-    seed_index(d.path());
-    std::fs::write(
-        d.path().join("graph.json"),
-        resolving_graph_json("handle_connection").to_string(),
-    )
-    .unwrap();
-    let nudge_envs = rail_envs(
-        &NUDGE_UP,
-        &[
-            ("LENS_GREP_SYMBOL_NUDGE", "1"),
-            ("LENS_READ_SKELETON_NUDGE", "1"),
-        ],
-    );
-
-    // gsym: at Level::Nudge the symbol-shaped Grep gets a soft suggestion, not
-    // a deny.
-    let grep = grep_payload(d.path(), "gsymnudge1", "fn handle_connection");
-    let (_, gv) = run_hook("PreToolUse", &grep, &nudge_envs, d.path());
-    assert!(!is_deny(&gv), "gsym nudge never denies: {gv}");
-    assert!(
-        context_of(&gv).contains("lens_symbol(name=\"handle_connection\")"),
-        "gsym nudge names lens_symbol: {gv}"
-    );
-    // Shares the deny's one-shot key: the same symbol-shaped Grep stays quiet
-    // on retry (the generic grep tip may still fire, so assert absence of the
-    // gsym-specific text, not byte-identical emptiness).
-    let (_, gv2) = run_hook("PreToolUse", &grep, &nudge_envs, d.path());
-    assert!(
-        !context_of(&gv2).contains("lens_symbol(name=\"handle_connection\")"),
-        "gsym nudge is one-shot, shared with the deny key: {gv2}"
-    );
-
-    // rskel: at Level::Nudge a whole unedited code-file Read gets a soft
-    // suggestion, not a deny.
-    let read = read_payload(d.path(), "rskelnudge1", "src/server.rs");
-    let (_, rv) = run_hook("PreToolUse", &read, &nudge_envs, d.path());
-    assert!(!is_deny(&rv), "rskel nudge never denies: {rv}");
-    assert!(
-        context_of(&rv).contains("lens_skeleton(path=\"src/server.rs\")"),
-        "rskel nudge names lens_skeleton: {rv}"
-    );
-    let (_, rv2) = run_hook("PreToolUse", &read, &nudge_envs, d.path());
-    assert!(
-        !context_of(&rv2).contains("lens_skeleton(path=\"src/server.rs\")"),
-        "rskel nudge is one-shot, shared with the deny key: {rv2}"
-    );
-
-    // At Level::Full the SAME nudge flag (deny left off by rail_envs) fires no
-    // gsym nudge at all — the nudge arm is Level::Nudge-exclusive, deny owns
-    // steer/full.
-    let d2 = tempfile::tempdir().unwrap();
-    seed_index(d2.path());
-    std::fs::write(
-        d2.path().join("graph.json"),
-        resolving_graph_json("handle_connection").to_string(),
-    )
-    .unwrap();
-    let full_nudge_only = rail_envs(&FULL_UP, &[("LENS_GREP_SYMBOL_NUDGE", "1")]);
-    let grep3 = grep_payload(d2.path(), "gsymnudge2", "fn handle_connection");
-    let (_, gv3) = run_hook("PreToolUse", &grep3, &full_nudge_only, d2.path());
-    assert!(
-        !context_of(&gv3).contains("lens_symbol(name=\"handle_connection\")"),
-        "gsym nudge must not fire at Full (deny owns steer/full): {gv3}"
-    );
-}
-
-#[test]
 fn gast_deny_only_config_attributes_follower_to_live_not_shadow() {
-    // Locks T4's fix: gast's mirror previously armed on the NUDGE flag at
-    // nudges(), independent of the deny's steers() gate, so a deny-only
-    // config (nudge=0, deny unset/default-ON) misattributed its follower to
-    // gast_shadow_next_* instead of gast_next_*.
+    // Locks the live/shadow attribution: with the gast deny genuinely unset
+    // (default-ON), its follower lands in gast_next_*, never in shadow.
     let d = tempfile::tempdir().unwrap();
     seed_index(d.path());
-    let envs = rail_envs_leave_unset(
-        &FULL_UP,
-        &["LENS_GREP_AST_DENY"],
-        &[("LENS_GREP_AST_NUDGE", "0")],
-    );
+    let envs = rail_envs_leave_unset(&FULL_UP, &["LENS_GREP_AST_DENY"], &[]);
     let syn = grep_payload(d.path(), "gastattr1", "impl Forge");
     run_hook("PreToolUse", &syn, &envs, d.path());
     let bash = bash_payload(d.path(), "gastattr1", "echo hi");
@@ -1907,7 +1697,7 @@ fn routing_garbage_value_behaves_as_full_fail_safe() {
 }
 
 #[test]
-fn kill_switch_all_13_flags_off_leaves_only_grep_first_and_escalation_denies() {
+fn kill_switch_all_rail_flags_off_leaves_only_grep_first_and_escalation_denies() {
     let d = tempfile::tempdir().unwrap();
     seed_index(d.path());
     std::fs::write(
@@ -1916,44 +1706,48 @@ fn kill_switch_all_13_flags_off_leaves_only_grep_first_and_escalation_denies() {
     )
     .unwrap();
     // Every rail flag explicitly OFF: a symbol-shaped Grep, a whole code-file
-    // Read, an aggregate Bash, and a multi-caller Edit must all pass through
-    // with no rail deny/nudge at all.
+    // Read, a bounded Read, a shell grep, an aggregate Bash, and a
+    // multi-caller Edit must all pass through with no rail deny at all.
     let envs = rail_envs(&FULL_UP, &[]);
 
-    // The generic grep/read one-shot tips (GREP_NUDGE/READ_NUDGE) may still
-    // fire and happen to mention `lens_symbol(name)`/`lens_skeleton(path)` as
-    // part of their intent-mapping prose, so assert on each rail's distinct
-    // opening phrase rather than a substring the generic tip also contains.
     let grep = grep_payload(d.path(), "kill1", "fn handle_connection");
     let (_, gv) = run_hook("PreToolUse", &grep, &envs, d.path());
     assert!(!is_deny(&gv), "gsym must be silent under the kill-switch: {gv}");
-    assert!(
-        !context_of(&gv).contains("This grep pattern"),
-        "no gsym nudge either: {gv}"
-    );
 
-    let read = read_payload(d.path(), "kill2", "src/server.rs");
+    let read = read_payload(d.path(), "kill2", "src/widget.rs");
     let (_, rv) = run_hook("PreToolUse", &read, &envs, d.path());
     assert!(!is_deny(&rv), "rskel must be silent under the kill-switch: {rv}");
-    assert!(
-        !context_of(&rv).contains("This Read pulls in a whole code file"),
-        "no rskel nudge either: {rv}"
-    );
+
+    let bounded = json!({
+        "session_id": "kill2",
+        "cwd": d.path().to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": "src/widget.rs", "limit": 40 },
+    });
+    let (_, bv_read) = run_hook("PreToolUse", &bounded, &envs, d.path());
+    assert!(!is_deny(&bv_read), "runfile must be silent under the kill-switch: {bv_read}");
 
     let agg = bash_payload(d.path(), "kill3", "find . -name '*.rs' | wc -l");
     let (_, bv) = run_hook("PreToolUse", &agg, &envs, d.path());
     assert!(!is_deny(&bv), "bagg must be silent under the kill-switch: {bv}");
-    assert!(
-        !context_of(&bv).contains("reshapes data"),
-        "no bagg nudge either: {bv}"
-    );
+
+    // A prompt-armed broad shell grep: bash-grep off means no deny.
+    let prompt = json!({
+        "session_id": "kill3",
+        "cwd": d.path().to_string_lossy(),
+        "prompt": "tidy the fixtures",
+    });
+    run_hook("UserPromptSubmit", &prompt, &envs, d.path());
+    let shell_grep = bash_payload(d.path(), "kill3", "grep -rn foo src/");
+    let (_, sgv) = run_hook("PreToolUse", &shell_grep, &envs, d.path());
+    assert!(!is_deny(&sgv), "bash-grep must be silent under the kill-switch: {sgv}");
 
     std::fs::write(d.path().join("graph.json"), callers_graph_json().to_string()).unwrap();
     let edit = edit_payload(d.path(), "kill4", "fn alpha() {", "fn alpha(x: u32) {");
     let (raw_e, _) = run_hook("PreToolUse", &edit, &envs, d.path());
     assert_eq!(raw_e, "{}", "elink must be a pure no-op under the kill-switch");
 
-    // The always-on mechanisms outside the 13-flag matrix (grep-first deny,
+    // The always-on mechanisms outside the rail-flag matrix (grep-first deny,
     // read-escalation deny) are unaffected by the kill-switch.
     let sess = "kill5";
     let plain_read = read_payload(d.path(), sess, "src/other_file.rs");
@@ -1964,6 +1758,6 @@ fn kill_switch_all_13_flags_off_leaves_only_grep_first_and_escalation_denies() {
     }
     assert!(
         is_deny(&fourth),
-        "the read-escalation deny is unaffected by the 13-flag kill-switch: {fourth}"
+        "the read-escalation deny is unaffected by the rail kill-switches: {fourth}"
     );
 }

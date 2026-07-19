@@ -1,196 +1,84 @@
-//! Applied-value panel: totals strip, per-dimension rows, and the Actual-Usage
-//! per-model table (the web `renderApplied`). Stub in T1; T6 renders the real
-//! widgets and carries its own `TestBackend` tests.
+//! Applied-value panel: a compact totals line plus the Actual-Usage per-model
+//! table (the web `renderApplied`, condensed). Content only — no border;
+//! `chrome::frame_session_value` owns the surrounding frame.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table};
 use ratatui::Frame;
+use serde_json::Value;
 
+use super::tables::num_cell;
 use super::{model, App, RateMode};
 
+/// Real per-model transcript mix, minus synthetic/unnamed rows. The totals'
+/// `spent`/`turns` and the per-model table both read from this.
+fn valid_models(snap: &Value) -> Vec<&Value> {
+    model::actual_usage(snap)
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|m| m["model"].as_str().is_some_and(|s| !s.is_empty() && s != "<synthetic>"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Estimated value applied to this scope's ops (never folded into the measured
-/// `$` headline); per-model table when `app.rate_mode` is `Actual`.
-///
-/// Layout: a totals strip (two `Line`s of labeled chips), then a middle region
-/// — the per-dimension "lens tools" breakdown, beside a per-model table when the
-/// rate picker is on `Actual` (its picker equivalent) — then the note caption.
-/// Field reads mirror the web `renderApplied` and the old ANSI `applied_value_lines`.
-pub(crate) fn applied_value(f: &mut Frame, area: Rect, app: &App) {
+/// `$` headline): one totals line, then the per-model table when
+/// `app.rate_mode` is `Actual`, else a `$/M` rate caption. The table's columns
+/// fill the panel's real width instead of a fixed guess, so a wide `session |
+/// value` split doesn't leave the model table crowded into a corner.
+pub(crate) fn value_content(f: &mut Frame, area: Rect, app: &App) {
     let p = app.palette;
-    let lbl = Style::default().fg(p.dim);
     let dimst = Style::default().fg(p.dim);
     let val = Style::default().fg(p.accent);
     let big = Style::default().fg(p.accent).add_modifier(Modifier::BOLD);
     let ink = Style::default().fg(p.ink);
 
     let av = model::applied_value(&app.snapshot);
-    let gi = |k: &str| av[k].as_i64().unwrap_or(0).max(0) as u64;
-    let measured = gi("measured_tokens");
-    let counter = gi("est_counterfactual_tokens");
-    let total = gi("est_total_tokens");
+    let total = av["est_total_tokens"].as_i64().unwrap_or(0).max(0) as u64;
     let rts = av["round_trips_avoided"].as_f64().unwrap_or(0.0);
     let est_value = model::money(total as f64 * app.rate / 1e6);
 
-    // Real per-model transcript mix, minus synthetic/unnamed rows. The totals'
-    // `spent`/`turns` and the per-model table both read from it.
-    let models = model::actual_usage(&app.snapshot)
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter(|m| {
-                    m["model"]
-                        .as_str()
-                        .is_some_and(|s| !s.is_empty() && s != "<synthetic>")
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let models = valid_models(&app.snapshot);
     let tot_turns: i64 = models.iter().map(|m| m["turns"].as_i64().unwrap_or(0)).sum();
-    let tot_spent: f64 = models
-        .iter()
-        .map(|m| m["consumed_usd"].as_f64().unwrap_or(0.0))
-        .sum();
 
-    // Totals strip: two lines of `label value [basis]` chips, styled from the palette.
-    let chip = move |label: &'static str, value: Span<'static>, basis: Option<String>| {
-        let mut v = vec![Span::styled(format!("{label} "), lbl), value];
-        if let Some(b) = basis {
-            v.push(Span::styled(format!(" {b}"), dimst));
-        }
-        v
-    };
-    let join = move |chips: Vec<Vec<Span<'static>>>| {
-        let mut out: Vec<Span<'static>> = Vec::new();
-        for (i, c) in chips.into_iter().enumerate() {
-            if i > 0 {
-                out.push(Span::styled("   ", dimst));
-            }
-            out.extend(c);
-        }
-        Line::from(out)
-    };
-    let line_a = join(vec![
-        chip(
-            "measured saved",
-            Span::styled(format!("{} tok", model::human_count(measured)), val),
-            None,
-        ),
-        chip(
-            "est. counterfactual",
-            Span::styled(format!("+{} tok", model::human_count(counter)), val),
-            None,
-        ),
-        chip(
-            "est. total avoided",
-            Span::styled(format!("{} tok", model::human_count(total)), big),
-            None,
-        ),
-        chip(
-            "est. value",
-            Span::styled(est_value, big),
-            Some(format!("@ ${}/M", app.rate)),
-        ),
-    ]);
-    let line_b = join(vec![
-        chip(
-            "round-trips avoided",
-            Span::styled(format!("~{}", rts.round() as i64), val),
-            None,
-        ),
-        chip(
-            "time saved",
-            Span::styled(model::human_time(rts * app.rt_seconds), big),
-            Some(format!("@ {}s/round-trip", app.rt_seconds)),
-        ),
-        chip("spent", Span::styled(model::money(tot_spent), val), None),
-        chip("turns", Span::styled(tot_turns.to_string(), val), None),
+    let totals = Line::from(vec![
+        Span::styled(est_value, big),
+        Span::styled(format!(" · {} tok", model::human_count(total)), val),
+        Span::styled(format!(" · {} turns", tot_turns), dimst),
     ]);
 
-    // Per-dimension "lens tools" breakdown (always shown).
-    let mut dim_lines: Vec<Line<'static>> = vec![Line::from(Span::styled("lens tools", dimst))];
-    if let Some(rs) = av["rows"].as_array() {
-        for r in rs {
-            let d = r["dimension"].as_str().unwrap_or("");
-            let ops = r["ops"].as_i64().unwrap_or(0);
-            let et = r["est_tokens"].as_i64().unwrap_or(0);
-            let rt = r["round_trips"].as_f64().unwrap_or(0.0);
-            let mut parts: Vec<String> = Vec::new();
-            if et > 0 {
-                parts.push(format!("~{} tok", model::human_count(et as u64)));
-            }
-            if rt > 0.0 {
-                parts.push(format!("~{rt:.1} rt"));
-            }
-            if matches!(d, "darkroom" | "skeleton") {
-                parts.push("tok measured live".to_string());
-            }
-            if parts.is_empty() {
-                parts.push("—".to_string());
-            }
-            let name_style = if ops == 0 { dimst } else { ink };
-            dim_lines.push(Line::from(vec![
-                Span::styled(format!("{d} "), name_style),
-                Span::styled(format!("×{ops}  "), dimst),
-                Span::styled(parts.join(", "), dimst),
-            ]));
-        }
-    }
-
-    let chunks = Layout::vertical([
-        Constraint::Length(2), // totals strip
-        Constraint::Min(1),    // dimensions | per-model
-        Constraint::Length(1), // note caption
-    ])
-    .split(area);
-    f.render_widget(Paragraph::new(vec![line_a, line_b]), chunks[0]);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    f.render_widget(Paragraph::new(totals), chunks[0]);
 
     if app.rate_mode == RateMode::Actual {
-        // Actual Usage picker: dimensions left, per-model table right.
-        let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .split(chunks[1]);
-        f.render_widget(Paragraph::new(dim_lines), cols[0]);
-        let right = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(cols[1]);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled("per model", dimst))),
-            right[0],
-        );
         if models.is_empty() {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled("no usage in window", dimst))),
-                right[1],
+                chunks[1],
             );
         } else {
-            let header = Row::new(
-                ["model", "turns", "saved", "value", "time", "spent"]
-                    .into_iter()
-                    .map(|h| Cell::from(Span::styled(h, dimst))),
-            );
+            let header = Row::new(vec![
+                Cell::from(Span::styled("model", dimst)),
+                num_cell("turns".into(), dimst),
+                num_cell("saved".into(), dimst),
+                num_cell("spent".into(), dimst),
+            ]);
             let body: Vec<Row> = models
                 .iter()
                 .map(|m| {
                     let turns = m["turns"].as_i64().unwrap_or(0);
-                    let share = if tot_turns > 0 {
-                        turns as f64 / tot_turns as f64
-                    } else {
-                        0.0
-                    };
                     let saved_tok = m["saved_tokens"].as_f64().unwrap_or(0.0).max(0.0) as u64;
-                    let saved_usd = m["saved_usd"].as_f64().unwrap_or(0.0);
                     let spent = m["consumed_usd"].as_f64().unwrap_or(0.0);
-                    let time = model::human_time(rts * share * app.rt_seconds);
                     let label = model::model_label(m["model"].as_str().unwrap_or("?"));
                     let row = Row::new(vec![
                         Cell::from(Span::styled(label, ink)),
-                        Cell::from(Span::styled(turns.to_string(), ink)),
-                        Cell::from(Span::styled(
-                            format!("{} tok", model::human_count(saved_tok)),
-                            val,
-                        )),
-                        Cell::from(Span::styled(model::money(saved_usd), val)),
-                        Cell::from(Span::styled(time, ink)),
-                        Cell::from(Span::styled(model::money(spent), val)),
+                        num_cell(turns.to_string(), ink),
+                        num_cell(model::human_count(saved_tok), val),
+                        num_cell(model::money(spent), val),
                     ]);
                     if turns == 0 {
                         row.style(dimst)
@@ -199,35 +87,48 @@ pub(crate) fn applied_value(f: &mut Frame, area: Rect, app: &App) {
                     }
                 })
                 .collect();
+            // `model` stays a tight fixed column (a wide Fill share here just
+            // strands blank space after a short left-aligned label); the
+            // numeric columns Fill the rest evenly so a wide `value` half
+            // spreads its right-aligned figures out instead of leaving them
+            // crowded against a narrow fixed table with empty space past it.
             let widths = [
-                Constraint::Length(11),
-                Constraint::Length(7),
-                Constraint::Length(11),
-                Constraint::Length(9),
-                Constraint::Length(11),
-                Constraint::Length(9),
+                Constraint::Length(12),
+                Constraint::Fill(1),
+                Constraint::Fill(1),
+                Constraint::Fill(1),
             ];
             f.render_widget(
-                Table::new(body, widths).header(header).column_spacing(1),
-                right[1],
+                Table::new(body, widths).header(header).column_spacing(2),
+                chunks[1],
             );
         }
     } else {
-        // Model-rate picker: per-dimension rows only, no per-model table.
-        f.render_widget(Paragraph::new(dim_lines), chunks[1]);
+        let caption = format!(
+            "rate ${}/M · time ~{}",
+            app.rate,
+            model::human_time(rts * app.rt_seconds)
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(caption, dimst))),
+            chunks[1],
+        );
     }
+}
 
-    let note = av["note"].as_str().unwrap_or("");
-    let model_name = av["model"].as_str().unwrap_or("");
-    let caption = if model_name.is_empty() {
-        note.to_string()
+/// The row count [`value_content`] draws at, so
+/// [`super::chrome::session_value_height`] can size the shared frame to fit
+/// the per-model table instead of guessing a fixed height.
+pub(crate) fn value_line_count(app: &App) -> usize {
+    if app.rate_mode != RateMode::Actual {
+        return 2; // totals + rate caption
+    }
+    let n = valid_models(&app.snapshot).len();
+    if n == 0 {
+        2 // totals + "no usage in window"
     } else {
-        format!("{note} · {model_name}")
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(caption, dimst))),
-        chunks[2],
-    );
+        2 + n // totals + header + one row per model
+    }
 }
 
 #[cfg(test)]
@@ -268,7 +169,7 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(120, 40)).unwrap();
         t.draw(|f| {
             let a = f.area();
-            applied_value(f, a, app);
+            value_content(f, a, app);
         })
         .unwrap();
         t.backend()
@@ -315,10 +216,9 @@ mod tests {
             buf.contains(&model::model_label("claude-sonnet-5")),
             "Sonnet label"
         );
-        // A per-model figure: Opus's saved-value column ($0.432).
-        assert!(buf.contains("$0.432"), "per-model saved value cell");
-        // Spent total ($1.66) excludes the synthetic/empty rows; their $9.00 never renders.
-        assert!(buf.contains("$1.66"), "spent total excludes synthetic + empty");
+        // Per-row spent figures render; the synthetic/empty rows are filtered out.
+        assert!(buf.contains("$1.11"), "Opus spent cell");
+        assert!(buf.contains("$0.55"), "Sonnet spent cell");
         assert!(!buf.contains("$9.00"), "synthetic row filtered out");
     }
 
@@ -326,8 +226,8 @@ mod tests {
     fn model_mode_hides_per_model_table() {
         let app = app_with(snapshot(), RateMode::Opus);
         let buf = render(&app);
-        // Per-dimension rows render (the "lens tools" breakdown).
-        assert!(buf.contains("darkroom"), "per-dimension row present");
+        // A rate caption renders instead of the per-model table.
+        assert!(buf.contains("rate $5/M"), "rate caption present");
         // The per-model table is absent, so no model labels appear.
         assert!(
             !buf.contains(&model::model_label("claude-opus-4-8")),

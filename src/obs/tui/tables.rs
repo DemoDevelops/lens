@@ -6,15 +6,30 @@
 //! fields the old ANSI renderer's `stats_strip`/`tool_table` read — only the
 //! output changed, from box-drawing strings to ratatui widgets.
 
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::layout::{Alignment, Constraint, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 use serde_json::Value;
 
 use super::model;
 use super::App;
+
+/// One fixed hue per data column (ops/raw/ret/saved/save%/off/err/to), not
+/// palette-derived — a small decorative categorical set (picked to read
+/// clearly against either theme's near-black bg) so each column is
+/// identifiable on sight instead of every header reading the same dim gray.
+const HEADER_HUES: [Color; 8] = [
+    Color::Rgb(0xe0, 0xa0, 0x5a), // ops: orange
+    Color::Rgb(0xe0, 0xc8, 0x6e), // raw: yellow
+    Color::Rgb(0x8c, 0xc8, 0x96), // ret: green
+    Color::Rgb(0xb4, 0x96, 0xdc), // saved: lavender
+    Color::Rgb(0xe6, 0x8c, 0xaf), // save%: pink
+    Color::Rgb(0x78, 0xc8, 0xd2), // off: cyan
+    Color::Rgb(0xe0, 0x82, 0x82), // err: soft red
+    Color::Rgb(0xe6, 0xb4, 0x78), // to: soft amber
+];
 
 /// Canonical lens MCP tools, always shown in the tools table (dimmed at 0 ops) so a
 /// dormant tool reads as unused, not absent. Mirrors `ADOPTION_TOOLS` in the web
@@ -114,7 +129,9 @@ pub(crate) fn stat_strip(f: &mut Frame, area: Rect, app: &App) {
         label
     };
 
-    let line = Line::from(vec![
+    // Two shorter lines instead of one 9-chip wall — each comfortably fits an
+    // 80-col terminal instead of running off the right edge.
+    let line_a = Line::from(vec![
         Span::styled("ops ", label),
         Span::styled(model::geti(snap, "ops").to_string(), value),
         Span::styled(" (", label),
@@ -129,14 +146,15 @@ pub(crate) fn stat_strip(f: &mut Frame, area: Rect, app: &App) {
         Span::styled("ret ", label),
         Span::styled(model::human_bytes(ret), value),
         Span::styled("  ·  ", label),
+        Span::styled("save% ", label),
+        Span::styled(format!("{overall_pct}%"), value),
+    ]);
+    let line_b = Line::from(vec![
         Span::styled("saved ", label),
         Span::styled(
             format!("{} tok", model::human_count(model::saved_mcp(snap))),
             value,
         ),
-        Span::styled("  ·  ", label),
-        Span::styled("save% ", label),
-        Span::styled(format!("{overall_pct}%"), value),
         Span::styled("  ·  ", label),
         Span::styled("tools ", label),
         Span::styled(format!("{fired}/{}", ADOPTION_TOOLS.len()), value),
@@ -155,14 +173,88 @@ pub(crate) fn stat_strip(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("{} ms", model::geti(snap, "lock_wait_ms")), value),
     ]);
 
-    f.render_widget(Paragraph::new(line), area);
+    f.render_widget(Paragraph::new(vec![line_a, line_b]), area);
+}
+
+/// Right-pad/truncate (with `…`) `s` to exactly `width` display columns, so a
+/// long third-party tool name can't push the table's fixed columns out of line.
+fn fit_label(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    if count <= width {
+        return format!("{s:<width$}");
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut truncated: String = s.chars().take(width - 1).collect();
+    truncated.push('…');
+    truncated
+}
+
+/// A right-aligned numeric cell in `style`.
+pub(crate) fn num_cell(text: String, style: Style) -> Cell<'static> {
+    Cell::from(Line::from(Span::styled(text, style)).alignment(Alignment::Right))
+}
+
+/// Greedy word-wrap line count for `text` at `width` columns — the same
+/// algorithm `Paragraph`'s `Wrap` uses, so this predicts its actual height.
+pub(crate) fn wrap_line_count(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let mut lines = 1usize;
+    let mut col = 0usize;
+    for word in text.split_whitespace() {
+        let wlen = word.chars().count();
+        if col == 0 {
+            col = wlen;
+        } else if col + 1 + wlen <= width {
+            col += 1 + wlen;
+        } else {
+            lines += 1;
+            col = wlen;
+        }
+    }
+    lines.max(1)
+}
+
+/// The tallest the hint line ever needs to be at `width` columns: the longest
+/// `"name: description"` in [`TOOL_DESC`], wrapped. A fixed worst-case instead
+/// of measuring the current selection, so the panel's total height doesn't
+/// jump around as the user browses tools with `j`/`k`.
+pub(crate) fn max_hint_lines(width: u16) -> usize {
+    TOOL_DESC
+        .iter()
+        .map(|(name, desc)| wrap_line_count(&format!("{name}: {desc}"), width as usize))
+        .max()
+        .unwrap_or(1)
+}
+
+/// The 10 canonical tools plus any extras that fired — the exact row count
+/// [`tools_table`] will draw, so the caller can size the panel to its real
+/// content instead of guessing a fixed floor (a tall terminal shouldn't turn a
+/// 14-row table into a mostly-empty box).
+pub(crate) fn tools_row_count(app: &App) -> usize {
+    let by_tool = model::by_tool(&app.snapshot);
+    let extras = by_tool
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|t| t["tool"].as_str())
+                .filter(|n| !ADOPTION_TOOLS.contains(n))
+                .count()
+        })
+        .unwrap_or(0);
+    ADOPTION_TOOLS.len() + extras
 }
 
 /// Per-tool adoption table: the 10 canonical tools (dim at 0 ops) + extras that
-/// fired; `app.tool_sel` highlights a row and surfaces its description.
-pub(crate) fn tools_table(f: &mut Frame, area: Rect, app: &App) {
-    const BAR_MAX: usize = 8;
-
+/// fired; `app.tool_sel` highlights a row and surfaces its description. Columns
+/// are plain right-aligned numbers (no in-cell bar) so they stay aligned at any
+/// terminal width instead of silently overlapping. Content only — no border;
+/// `chrome::frame_overview_tools` owns the surrounding frame and dividers.
+pub(crate) fn tools_rows(f: &mut Frame, area: Rect, app: &App) {
     let snap = &app.snapshot;
     let p = &app.palette;
     let by_tool = model::by_tool(snap);
@@ -183,13 +275,6 @@ pub(crate) fn tools_table(f: &mut Frame, area: Rect, app: &App) {
         .chain(extras)
         .collect();
 
-    let max_raw = entries
-        .iter()
-        .filter_map(|t| t["raw"].as_u64())
-        .max()
-        .unwrap_or(0)
-        .max(1);
-
     let sel = app.tool_sel.min(names.len().saturating_sub(1));
 
     let rows: Vec<Row> = names
@@ -207,105 +292,115 @@ pub(crate) fn tools_table(f: &mut Frame, area: Rect, app: &App) {
             let offc = t.and_then(|t| t["offloaded_ops"].as_i64()).unwrap_or(0);
             let offb = t.and_then(|t| t["offloaded_bytes"].as_u64()).unwrap_or(0);
 
-            let bar_w = (((raw as f64 / max_raw as f64) * BAR_MAX as f64).round() as usize)
-                .min(BAR_MAX);
-            let raw_cell = if present {
-                format!(
-                    "{}{} {}",
-                    "█".repeat(bar_w),
-                    " ".repeat(BAR_MAX - bar_w),
-                    model::human_bytes(raw)
-                )
+            let status = if !present || ops == 0 {
+                p.dim
+            } else if errs != 0 {
+                p.bad
             } else {
-                "—".to_string()
+                p.accent
             };
-            let ret_cell = if present {
-                model::human_bytes(ret)
-            } else {
-                "—".to_string()
-            };
-            let saved_cell = if saved != 0 {
-                saved.to_string()
-            } else {
-                "—".to_string()
-            };
+            let ink = Style::default().fg(p.ink);
+            let dim = Style::default().fg(p.dim);
+
+            let raw_cell = if present { model::human_bytes(raw) } else { "—".into() };
+            let ret_cell = if present { model::human_bytes(ret) } else { "—".into() };
+            let saved_cell = if saved != 0 { model::human_count(saved.max(0) as u64) } else { "—".into() };
             let pct_cell = if raw > 0 {
                 format!("{}%", (raw as i64 - ret as i64) * 100 / raw as i64)
             } else {
-                "—".to_string()
+                "—".into()
             };
             let off_cell = if offc != 0 {
                 format!("{offc}·{}", model::human_bytes(offb))
             } else {
-                "—".to_string()
+                "—".into()
             };
-            let err_cell = if errs != 0 {
-                errs.to_string()
-            } else {
-                "—".to_string()
-            };
-            let to_cell = if tos != 0 {
-                tos.to_string()
-            } else {
-                "—".to_string()
-            };
+            let err_style = if errs != 0 { Style::default().fg(p.bad) } else { dim };
+            let to_style = if tos != 0 { Style::default().fg(p.warn) } else { dim };
 
-            let row = Row::new(vec![
-                name.clone(),
-                ops.to_string(),
-                raw_cell,
-                ret_cell,
-                saved_cell,
-                pct_cell,
-                off_cell,
-                err_cell,
-                to_cell,
-            ]);
-
-            if i == sel {
-                row.style(Style::default().bg(p.accent).fg(p.bg))
-            } else if ops == 0 {
-                row.style(Style::default().fg(p.dim))
+            // Only the tool name inverts on selection, not the whole row — the
+            // rest of the row keeps its normal styling so the row-level status
+            // colors (dim/accent/bad) stay legible while browsing with j/k.
+            let name_style = if i == sel {
+                Style::default().fg(status).add_modifier(Modifier::REVERSED)
             } else {
-                row.style(Style::default().fg(p.ink))
-            }
+                Style::default().fg(status)
+            };
+            Row::new(vec![
+                Cell::from(Span::styled(fit_label(name, 16), name_style)),
+                num_cell(ops.to_string(), ink),
+                num_cell(raw_cell, ink),
+                num_cell(ret_cell, ink),
+                num_cell(saved_cell, ink),
+                num_cell(pct_cell, ink),
+                num_cell(off_cell, dim),
+                num_cell(if errs != 0 { errs.to_string() } else { "—".into() }, err_style),
+                num_cell(if tos != 0 { tos.to_string() } else { "—".into() }, to_style),
+            ])
         })
         .collect();
 
+    // A distinct hue per column (not one uniform dim gray) makes each column
+    // instantly identifiable at a glance instead of requiring the reader to
+    // trace back up from a data cell to figure out which header it's under.
+    let bold = |c: Color| Style::default().fg(c).add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
-        "tool", "ops", "raw", "ret", "saved~tok", "save%", "off", "err", "to",
-    ])
-    .style(Style::default().fg(p.dim));
+        Cell::from(Span::styled("tool", bold(p.ink))),
+        num_cell("ops".into(), bold(HEADER_HUES[0])),
+        num_cell("raw".into(), bold(HEADER_HUES[1])),
+        num_cell("ret".into(), bold(HEADER_HUES[2])),
+        num_cell("saved".into(), bold(HEADER_HUES[3])),
+        num_cell("save%".into(), bold(HEADER_HUES[4])),
+        num_cell("off".into(), bold(HEADER_HUES[5])),
+        num_cell("err".into(), bold(HEADER_HUES[6])),
+        num_cell("to".into(), bold(HEADER_HUES[7])),
+    ]);
 
     let widths = [
-        Constraint::Length(14),
+        Constraint::Length(16),
         Constraint::Length(6),
-        Constraint::Length(18),
         Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(8),
+        Constraint::Length(6),
         Constraint::Length(10),
-        Constraint::Length(7),
-        Constraint::Length(13),
-        Constraint::Length(5),
-        Constraint::Length(5),
+        Constraint::Length(4),
+        Constraint::Length(4),
     ];
 
-    let [table_area, hint_area] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
+    let table = Table::new(rows, widths).header(header).column_spacing(2);
+    let mut table_state = TableState::default().with_selected(Some(sel));
+    f.render_stateful_widget(table, area, &mut table_state);
+}
 
-    let table = Table::new(rows, widths).header(header).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(p.line))
-            .title(" tools "),
-    );
-    f.render_widget(table, table_area);
+/// The selected row's `name: description`, wrapped — the web's native `title`
+/// tooltip, surfaced as text since a terminal has no hover. Sized to the
+/// *longest* tool description at this width by [`max_hint_lines`], not a
+/// fixed guess, so no description ever gets cut off. Content only; the "info"
+/// divider above it is `chrome::frame_overview_tools`'s.
+pub(crate) fn render_hint(f: &mut Frame, area: Rect, app: &App) {
+    let p = &app.palette;
+    let by_tool = model::by_tool(&app.snapshot);
+    let empty: Vec<Value> = Vec::new();
+    let entries = by_tool.as_array().unwrap_or(&empty);
+    let extras: Vec<String> = entries
+        .iter()
+        .filter_map(|t| t["tool"].as_str())
+        .filter(|n| !ADOPTION_TOOLS.contains(n))
+        .map(|s| s.to_string())
+        .collect();
+    let names: Vec<String> = ADOPTION_TOOLS.iter().map(|s| s.to_string()).chain(extras).collect();
+    let sel = app.tool_sel.min(names.len().saturating_sub(1));
 
     let sel_name = names.get(sel).map(String::as_str).unwrap_or("");
     let hint = Line::from(vec![
-        Span::styled(format!("{sel_name}: "), Style::default().fg(p.dim)),
+        Span::styled(
+            format!("{sel_name}: "),
+            Style::default().fg(p.ink).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(tool_desc(sel_name), Style::default().fg(p.dim)),
     ]);
-    f.render_widget(Paragraph::new(hint), hint_area);
+    f.render_widget(Paragraph::new(hint).wrap(Wrap { trim: true }), area);
 }
 
 #[cfg(test)]
@@ -346,7 +441,7 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(120, 30)).unwrap();
         t.draw(|f| {
             let a = f.area();
-            tools_table(f, a, app);
+            tools_rows(f, a, app);
         })
         .unwrap();
         t.backend()

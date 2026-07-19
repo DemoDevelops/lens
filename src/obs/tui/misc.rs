@@ -1,145 +1,90 @@
-//! By-mechanism chips, RTK shell savings, session activity, and the footer
-//! (the web row2 + activity + footer). Stubs in T1; T7 renders the real
-//! widgets and carries its own `TestBackend` tests.
+//! Session summary and the footer (the web row2, activity, and footer,
+//! condensed).
 
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Sparkline, Wrap};
-use ratatui::Frame;
+use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::{layout::Rect, Frame};
 
 use super::model;
 use super::App;
 
-/// "by mechanism" chips: `name <ops>op·<saved>tok` per mechanism.
-pub(crate) fn mechanism(f: &mut Frame, area: Rect, app: &App) {
-    let p = &app.palette;
-    let items = model::by_mechanism(&app.snapshot)
+/// `mechanism 1op · 2op · ...`, plain (no per-item styling) — used both to
+/// render the line and, via [`super::tables::wrap_line_count`], to predict
+/// how many rows it wraps to at a given width so the frame can be sized to
+/// fit it instead of cutting it off mid-word.
+fn mechanism_summary(app: &App) -> String {
+    let mech_items = model::by_mechanism(&app.snapshot)
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-
-    let mut spans = Vec::new();
-    if items.is_empty() {
-        spans.push(Span::styled("—", Style::new().fg(p.dim)));
-    } else {
-        for (i, m) in items.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" · ", Style::new().fg(p.dim)));
-            }
+    if mech_items.is_empty() {
+        return "\u{2014}".to_string();
+    }
+    mech_items
+        .iter()
+        .map(|m| {
             let name = m["mechanism"].as_str().unwrap_or("?");
             let ops = m["ops"].as_i64().unwrap_or(0);
-            let saved = model::human_count(m["saved"].as_i64().unwrap_or(0).max(0) as u64);
-            spans.push(Span::styled(name.to_string(), Style::new().fg(p.accent)));
-            spans.push(Span::styled(
-                format!(" {ops}op·{saved}tok"),
-                Style::new().fg(p.dim),
-            ));
-        }
-    }
-
-    let block = Block::bordered()
-        .border_style(Style::new().fg(p.line))
-        .title(Span::styled("by mechanism", Style::new().fg(p.ink)));
-    let para = Paragraph::new(Line::from(spans))
-        .block(block)
-        .wrap(Wrap { trim: true });
-    f.render_widget(para, area);
+            format!("{name} {ops}")
+        })
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
 }
 
-/// RTK's own measured shell savings (already rebased to the delta since this
-/// view opened by the run loop's `rebase_rtk`).
-pub(crate) fn rtk(f: &mut Frame, area: Rect, app: &App) {
-    let p = &app.palette;
-    let r = model::rtk(&app.snapshot);
+/// Fixed-width label column so `mechanism`/`rtk`/`activity` read as a
+/// key:value list instead of three differently-indented sentences.
+const LABEL_WIDTH: usize = 10;
 
-    let lines: Vec<Line> = if r["installed"].as_bool() == Some(true) {
+fn labeled(label: &str, style: Style) -> Span<'static> {
+    Span::styled(format!("{label:<LABEL_WIDTH$}"), style)
+}
+
+/// Mechanism mix, RTK shell savings, and session activity as three labeled,
+/// wrapped lines — content only, no border; `chrome::frame_session_value`
+/// owns the surrounding frame. The mechanism line wraps (instead of the old
+/// single unwrapped line, which just got cut off mid-word past the panel's
+/// width) since its item count varies with how many mechanisms have fired.
+pub(crate) fn session_content(f: &mut Frame, area: Rect, app: &App) {
+    let p = &app.palette;
+    let ink = Style::new().fg(p.ink);
+    let label = Style::new().fg(p.dim).add_modifier(Modifier::BOLD);
+
+    let mech_line = Line::from(vec![labeled("mechanism", label), Span::styled(mechanism_summary(app), ink)]);
+
+    let r = model::rtk(&app.snapshot);
+    let installed = r["installed"].as_bool() == Some(true);
+    let rtk_text = if installed {
         let cmds = r["total_commands"].as_i64().unwrap_or(0);
         let saved = model::human_count(r["total_saved"].as_i64().unwrap_or(0).max(0) as u64);
-        let pct = r["avg_savings_pct"].as_f64().unwrap_or(0.0);
-        vec![
-            Line::styled(
-                format!("cmds {cmds} · saved {saved}tok · avg {pct:.1}%"),
-                Style::new().fg(p.ink),
-            ),
-            Line::styled("since opened", Style::new().fg(p.dim)),
-        ]
+        format!("{cmds} cmds \u{b7} {saved} tok saved")
     } else {
-        vec![Line::styled(
-            "not installed — run lens rtk install",
-            Style::new().fg(p.dim),
-        )]
+        "not installed".to_string()
     };
+    let rtk_style = if installed { ink } else { Style::new().fg(p.dim) };
+    let rtk_line = Line::from(vec![labeled("rtk", label), Span::styled(rtk_text, rtk_style)]);
 
-    let block = Block::bordered()
-        .border_style(Style::new().fg(p.line))
-        .title(Span::styled("RTK shell savings", Style::new().fg(p.ink)));
-    f.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-/// Session activity: events/sessions/last-ts line + events/min sparkline +
-/// per-category chips.
-pub(crate) fn activity(f: &mut Frame, area: Rect, app: &App) {
-    let p = &app.palette;
     let a = model::activity(&app.snapshot);
-
-    let block = Block::bordered()
-        .border_style(Style::new().fg(p.line))
-        .title(Span::styled("session activity", Style::new().fg(p.ink)));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let rows = Layout::vertical([
-        Constraint::Length(1), // events · sessions · last
-        Constraint::Length(1), // events/min sparkline
-        Constraint::Min(1),    // by-category chips
-    ])
-    .split(inner);
-
     let total_events = a["total_events"].as_i64().unwrap_or(0);
     let sessions = a["sessions"].as_i64().unwrap_or(0);
-    let last = a["last_ts"]
-        .as_i64()
-        .map(crate::obs::iso8601_secs)
-        .unwrap_or_else(|| "—".to_string());
-    let header = Paragraph::new(Line::styled(
-        format!("events {total_events} · sessions {sessions} · last {last}"),
-        Style::new().fg(p.ink),
-    ));
-    f.render_widget(header, rows[0]);
+    let activity_line = Line::from(vec![
+        labeled("activity", label),
+        Span::styled(format!("{total_events} events \u{b7} {sessions} sessions"), ink),
+    ]);
 
-    let series = if app.event_series.is_empty() {
-        model::series(&app.snapshot, "event_buckets", 60)
-    } else {
-        app.event_series.clone()
-    };
-    let spark = Sparkline::default()
-        .data(&series)
-        .style(Style::new().fg(p.warn));
-    f.render_widget(spark, rows[1]);
+    f.render_widget(
+        Paragraph::new(vec![mech_line, rtk_line, activity_line]).wrap(Wrap { trim: true }),
+        area,
+    );
+}
 
-    let cats = a["by_category"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let cat_line = if cats.is_empty() {
-        Line::styled("no activity captured yet", Style::new().fg(p.dim))
-    } else {
-        let mut spans = Vec::new();
-        for (i, c) in cats.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" · ", Style::new().fg(p.dim)));
-            }
-            let name = c["category"].as_str().unwrap_or("?");
-            let count = c["count"].as_i64().unwrap_or(0);
-            spans.push(Span::styled(
-                format!("{name} {count}"),
-                Style::new().fg(p.ink),
-            ));
-        }
-        Line::from(spans)
-    };
-    f.render_widget(Paragraph::new(cat_line).wrap(Wrap { trim: true }), rows[2]);
+/// The row count [`session_content`] draws at `col_width` columns, so
+/// [`super::chrome::session_value_height`] can size the shared frame to fit
+/// the mechanism line's real wrap instead of guessing a fixed height.
+pub(crate) fn session_line_count(app: &App, col_width: u16) -> usize {
+    let text = format!("{:<LABEL_WIDTH$}{}", "mechanism", mechanism_summary(app));
+    let mech_lines = super::tables::wrap_line_count(&text, col_width.max(1) as usize).max(1);
+    mech_lines + 2 // rtk + activity, each one line
 }
 
 /// `store <size> · index <n> · graph <n>n/<n>e · updated <ts>`.
@@ -209,7 +154,7 @@ mod tests {
             .collect()
     }
 
-    /// Seeds every key the four panels read: `by_mechanism` (array of
+    /// Seeds every key `session_box` and `footer` read: `by_mechanism` (array of
     /// `{mechanism,ops,saved}`), `rtk` (`installed`/`total_commands`/
     /// `total_saved`/`avg_savings_pct`), `activity` (`total_events`/`sessions`/
     /// `last_ts`/`by_category` array of `{category,count}`), and the top-level
@@ -245,38 +190,25 @@ mod tests {
     }
 
     #[test]
-    fn mechanism_renders_chip_name() {
+    fn session_box_renders_mechanism_rtk_and_activity() {
         let app = app_with(snap());
-        let out = render(&app, mechanism);
-        assert!(out.contains("darkroom"), "chip name missing: {out}");
+        let out = render(&app, session_content);
+        assert!(out.contains("darkroom"), "mechanism chip name missing: {out}");
+        assert!(out.contains("77"), "rtk cmds count missing: {out}");
+        assert!(out.contains("314"), "activity events count missing: {out}");
+        assert!(out.contains("8 sessions"), "activity sessions count missing: {out}");
     }
 
     #[test]
-    fn rtk_renders_installed_line() {
-        let app = app_with(snap());
-        let out = render(&app, rtk);
-        assert!(out.contains("cmds"), "rtk cmds label missing: {out}");
-        assert!(out.contains("77"), "total_commands missing: {out}");
-    }
-
-    #[test]
-    fn rtk_renders_not_installed() {
+    fn session_box_renders_rtk_not_installed() {
         let mut s = snap();
         s["rtk"] = json!({"installed": false});
         let app = app_with(s);
-        let out = render(&app, rtk);
+        let out = render(&app, session_content);
         assert!(
             out.contains("not installed"),
             "not-installed message missing: {out}"
         );
-    }
-
-    #[test]
-    fn activity_renders_event_and_session_counts() {
-        let app = app_with(snap());
-        let out = render(&app, activity);
-        assert!(out.contains("314"), "events count missing: {out}");
-        assert!(out.contains("sessions 8"), "sessions count missing: {out}");
     }
 
     #[test]

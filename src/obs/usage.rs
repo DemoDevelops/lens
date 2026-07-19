@@ -95,16 +95,32 @@ pub fn read_usage(
 }
 
 /// Every distinct Claude Code config dir that actually holds transcripts: the
-/// union of `$CLAUDE_CONFIG_DIR`, `$XDG_CONFIG_HOME/claude`, and `~/.claude`,
-/// keeping only those with a `projects/` subdir (the signal it holds
-/// transcripts) and deduping by canonical path so an entry pointing at the
-/// default isn't globbed twice. Empty if none exist.
+/// union of `$CLAUDE_CONFIG_DIR`, `$XDG_CONFIG_HOME/claude`, `~/.claude`, and
+/// every other `~/.claude*` sibling (e.g. `~/.claude-personal`, a second
+/// account sharing the machine) — so multi-account setups are read whether or
+/// not `$CLAUDE_CONFIG_DIR` happens to be set in the calling shell; a launcher
+/// that doesn't propagate it (a terminal multiplexer, a service manager)
+/// shouldn't silently narrow "global" down to one account. Keeps only entries
+/// with a `projects/` subdir (the signal it holds transcripts) and dedupes by
+/// canonical path. Empty if none exist.
 fn claude_config_dirs() -> Vec<PathBuf> {
-    let candidates = [
+    let mut candidates = vec![
         std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
         std::env::var_os("XDG_CONFIG_HOME").map(|x| PathBuf::from(x).join("claude")),
-        home_dir().map(|h| h.join(".claude")),
     ];
+    if let Some(home) = home_dir() {
+        if let Ok(entries) = std::fs::read_dir(&home) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if name.starts_with(".claude") {
+                    candidates.push(Some(home.join(name)));
+                }
+            }
+        } else {
+            candidates.push(Some(home.join(".claude")));
+        }
+    }
     let mut seen = HashSet::new();
     let mut dirs = Vec::new();
     for dir in candidates.into_iter().flatten() {
@@ -274,6 +290,30 @@ mod tests {
         assert_eq!(dirs.len(), 2, "got {dirs:?}");
         assert!(dirs.iter().any(|d| d == cfg.path()));
         assert!(dirs.iter().any(|d| d == &home.path().join(".claude")));
+    }
+
+    #[test]
+    fn claude_config_dirs_finds_claude_personal_sibling_without_env_var() {
+        // The cmux scenario: CLAUDE_CONFIG_DIR unset (a launcher that doesn't
+        // propagate it), so the only way to find a second account is globbing
+        // ~/.claude* siblings under $HOME rather than relying on the env var.
+        let _g = crate::rtk::env_test_lock();
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let home = tempfile::tempdir().unwrap();
+        write_fixture(&home.path().join(".claude"));
+        write_fixture(&home.path().join(".claude-personal"));
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::set_var("HOME", home.path());
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let dirs = claude_config_dirs();
+        restore("CLAUDE_CONFIG_DIR", prev_cfg);
+        restore("HOME", prev_home);
+        restore("XDG_CONFIG_HOME", prev_xdg);
+        assert_eq!(dirs.len(), 2, "got {dirs:?}");
+        assert!(dirs.iter().any(|d| d == &home.path().join(".claude")));
+        assert!(dirs.iter().any(|d| d == &home.path().join(".claude-personal")));
     }
 
     #[test]

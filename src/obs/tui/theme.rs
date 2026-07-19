@@ -11,9 +11,11 @@ use super::ThemeKind;
 /// contract every panel styles against.
 #[derive(Clone, Copy)]
 pub(crate) struct Palette {
+    #[allow(dead_code)] // parity anchor: mirrors the web's `--bg` var; no panel needs its own bg fill
     pub bg: Color,
     #[allow(dead_code)] // parity anchor: mirrors the web's `--panel` var; no panel needs a distinct fill yet
     pub panel: Color,
+    #[allow(dead_code)] // parity anchor: mirrors the web's `--line` var; the TUI borders use `dim` instead for terminal visibility (the web's near-bg hairline doesn't survive coarser terminal color rendering)
     pub line: Color,
     pub ink: Color,
     pub dim: Color,

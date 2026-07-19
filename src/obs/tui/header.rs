@@ -1,6 +1,9 @@
 //! Header panel: title + live status, the window/scope/view/theme/rate control
-//! strip, and the `$ saved` cost headline (the web `INDEX_HTML` header). Stub
-//! in T1; T3 renders the real widgets and carries its own `TestBackend` tests.
+//! strip (bare, above everything else, like a page title), and the `overview`
+//! headline — the `$ saved`/time-saved/measured/classified figures the web
+//! `INDEX_HTML` header shows across two lines, merged into one here. The
+//! surrounding frame (border, stat strip placement) is [`super::chrome`]'s;
+//! this file only renders the headline's content into the row it's given.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,23 +16,29 @@ use ratatui::Frame;
 use super::model;
 use super::{App, RateMode, ThemeKind, View};
 
-/// Title · live dot + status · active control labels · money headline.
-pub(crate) fn header(f: &mut Frame, area: Rect, app: &App) {
+/// Title · live dot + status · active control labels. Bare, no box — reads
+/// as the page's own title bar, above the framed panels.
+pub(crate) fn header_top(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // title + live dot
             Constraint::Length(1), // window/scope/view/theme/rate control strip
-            Constraint::Length(1), // "$X saved" headline
-            Constraint::Length(1), // measured/classified sub-line
         ])
         .split(area);
 
     f.render_widget(title_line(app), rows[0]);
     f.render_widget(control_strip(app), rows[1]);
-    let (headline, sub) = money_lines(app);
-    f.render_widget(headline, rows[2]);
-    f.render_widget(sub, rows[3]);
+}
+
+/// The overview headline, one line: `$ saved` · time saved · measured ·
+/// classified. Previously two lines (a money headline, then a
+/// measured/classified sub-line) with the applied-value time-saved figure
+/// buried in the `value` panel and hidden outside rate-mode; merged per
+/// request and surfaced here since it's the one number this dashboard never
+/// otherwise shows front and center.
+pub(crate) fn overview_line(f: &mut Frame, area: Rect, app: &App) {
+    f.render_widget(Paragraph::new(money_line(app)), area);
 }
 
 /// `lens dashboard` in accent bold, plus a live/stale dot: accent when the
@@ -102,13 +111,15 @@ fn control_strip(app: &App) -> Paragraph<'static> {
     Paragraph::new(Line::from(spans))
 }
 
-/// The `$ saved` headline + `measured · classified` sub-line. Mirrors the web
+/// `$X saved · ~Ys time saved · A measured · ~B classified`. Mirrors the web
 /// `renderCost`/`savedTop` math exactly: `savedTotal` = classified tokens
 /// (`saved_mcp`) plus RTK's since-open delta (already rebased into the
 /// snapshot by the run loop); dollars are the real per-model spend sum in
 /// Actual mode, else `savedTotal * rate/1e6`. Never folds an applied-value
-/// estimate into this `$`; it is measured/classified only.
-fn money_lines(app: &App) -> (Paragraph<'static>, Paragraph<'static>) {
+/// estimate into the `$` figure; only the time-saved figure comes from
+/// `applied_value` (`round_trips_avoided * rt_seconds`, the same basis the
+/// `value` panel's rate-mode caption uses).
+fn money_line(app: &App) -> Line<'static> {
     let rtk_delta = if app.snapshot["rtk"]["installed"].as_bool() == Some(true) {
         app.snapshot["rtk"]["total_saved"].as_i64().unwrap_or(0)
     } else {
@@ -122,20 +133,25 @@ fn money_lines(app: &App) -> (Paragraph<'static>, Paragraph<'static>) {
             .unwrap_or(0.0),
         _ => saved_total as f64 * app.rate / 1e6,
     };
+    let rts = model::applied_value(&app.snapshot)["round_trips_avoided"]
+        .as_f64()
+        .unwrap_or(0.0);
+    let time_saved = model::human_time(rts * app.rt_seconds);
 
-    let headline = Paragraph::new(Line::from(Span::styled(
-        format!("{} saved", model::money(dollars)),
-        Style::default().fg(app.palette.accent).add_modifier(Modifier::BOLD),
-    )));
-    let sub = Paragraph::new(Line::from(Span::styled(
-        format!(
-            "{} measured \u{b7} ~{} classified",
-            model::human_count(model::saved_measured_floor(&app.snapshot)),
-            model::human_count(saved_total.max(0) as u64)
+    let accent = Style::default().fg(app.palette.accent).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(app.palette.dim);
+    Line::from(vec![
+        Span::styled(format!("{} saved", model::money(dollars)), accent),
+        Span::styled("  \u{b7}  ", dim),
+        Span::styled(format!("{time_saved} time saved"), accent),
+        Span::styled("  \u{b7}  ", dim),
+        Span::styled(
+            format!("{} measured", model::human_count(model::saved_measured_floor(&app.snapshot))),
+            dim,
         ),
-        Style::default().fg(app.palette.dim),
-    )));
-    (headline, sub)
+        Span::styled(" \u{b7} ", dim),
+        Span::styled(format!("~{} classified", model::human_count(saved_total.max(0) as u64)), dim),
+    ])
 }
 
 #[cfg(test)]
@@ -175,8 +191,10 @@ mod tests {
     fn render(app: &App) -> String {
         let mut t = Terminal::new(TestBackend::new(120, 12)).unwrap();
         t.draw(|f| {
-            let a = f.area();
-            header(f, a, app);
+            let [top, rest] =
+                Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).areas(f.area());
+            header_top(f, top, app);
+            overview_line(f, rest, app);
         })
         .unwrap();
         t.backend().buffer().content().iter().map(|c| c.symbol()).collect()

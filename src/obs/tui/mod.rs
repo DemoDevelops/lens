@@ -27,6 +27,9 @@ pub(crate) mod header;
 pub(crate) mod tables;
 
 #[cfg(feature = "tui")]
+pub(crate) mod chrome;
+
+#[cfg(feature = "tui")]
 pub(crate) mod charts;
 
 #[cfg(feature = "tui")]
@@ -354,11 +357,44 @@ pub fn run(
 
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
     let mut last_tick = Instant::now();
+
+    // Background refresh plumbing: `compute_tick` is the slow part (observed
+    // ~2.8s scanning transcripts across every Claude config dir), so it never
+    // runs on this thread past the first frame — spawning it and picking up
+    // the result over a channel keeps every keypress redrawing immediately
+    // regardless of how long the scan takes. `generation` tags each spawn so
+    // a `w`/`s`/`r` change mid-scan doesn't get clobbered when an older,
+    // now-stale scan (for the previous window/scope) finishes later.
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, TickData)>();
+    let mut generation: u64 = 0;
+    let mut refresh_in_flight = false;
+    let spawn_refresh = |app: &App, gen: u64, tx: std::sync::mpsc::Sender<(u64, TickData)>| {
+        let dir = app.dir.clone();
+        let session = app.session.clone();
+        let scope_global = app.scope_global;
+        let window = app.window.clone();
+        let tz_offset = app.tz_offset;
+        let rtk_base = app.rtk_base;
+        std::thread::spawn(move || {
+            let data = compute_tick(dir, session, scope_global, window, tz_offset, rtk_base);
+            let _ = tx.send((gen, data));
+        });
+    };
+
     // No `?` past this point: every exit path must fall through to
     // `ratatui::restore()`, so errors break the loop into `res` instead.
     let res: Result<()> = loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
             break Ok(());
+        }
+        // Apply whatever background refresh has landed since the last frame;
+        // discard a result whose generation is behind the latest spawn (a
+        // stale scan for a window/scope the user has since changed away from).
+        while let Ok((gen, data)) = rx.try_recv() {
+            if gen == generation {
+                apply_tick(&mut app, data);
+                refresh_in_flight = false;
+            }
         }
         if let Err(e) = terminal.draw(|f| draw(f, &app)) {
             break Err(e.into());
@@ -374,14 +410,16 @@ pub fn run(
                         break Ok(());
                     }
                     // `w`/`s`/`r` change what the snapshot must contain; `on_key`
-                    // is pure state, so re-read here and reset the tick clock.
+                    // is pure state, so re-read here — always spawns, even over an
+                    // in-flight scan, so a deliberate setting change is never
+                    // delayed behind a slow periodic refresh for the old settings.
                     if matches!(
                         k.code,
                         KeyCode::Char('w') | KeyCode::Char('s') | KeyCode::Char('r')
                     ) {
-                        if let Err(e) = tick_refresh(&mut app) {
-                            break Err(e);
-                        }
+                        generation += 1;
+                        refresh_in_flight = true;
+                        spawn_refresh(&app, generation, tx.clone());
                         last_tick = Instant::now();
                     }
                 }
@@ -397,10 +435,13 @@ pub fn run(
                 }
             }
         }
-        if last_tick.elapsed() >= timeout {
-            if let Err(e) = tick_refresh(&mut app) {
-                break Err(e);
-            }
+        // Periodic refresh: skip while one's already in flight instead of piling
+        // up concurrent scans every time the interval elapses without a result
+        // back yet (the scan routinely takes longer than the default interval).
+        if last_tick.elapsed() >= timeout && !refresh_in_flight {
+            generation += 1;
+            refresh_in_flight = true;
+            spawn_refresh(&app, generation, tx.clone());
             last_tick = Instant::now();
         }
     };
@@ -418,7 +459,7 @@ pub fn run(
 /// - `w` → window ring: live/15m/1h/3h/today/all.
 /// - `s` → scope: global <-> each project.
 /// - `r` → rate basis: Actual → Fable → Opus → Sonnet → Haiku → Actual.
-/// - Up/Down → move the tools-table selection.
+/// - Down/`j` / Up/`k` → move the tools-table selection down/up.
 #[cfg(feature = "tui")]
 fn on_key(app: &mut App, key: event::KeyEvent) -> bool {
     match key.code {
@@ -492,102 +533,144 @@ fn on_key(app: &mut App, key: event::KeyEvent) -> bool {
                 app.rate = crate::obs::pricing::price_for(m).input;
             }
         }
-        KeyCode::Up => app.tool_sel = app.tool_sel.saturating_add(1),
-        KeyCode::Down => app.tool_sel = app.tool_sel.saturating_sub(1),
+        // Down/`j` moves toward the bottom of the list (higher index); Up/`k`
+        // moves back toward the top. `j`/`k` alias the arrows for terminals
+        // (or multiplexers) that intercept arrow keys for their own navigation.
+        KeyCode::Down | KeyCode::Char('j') => app.tool_sel = app.tool_sel.saturating_add(1),
+        KeyCode::Up | KeyCode::Char('k') => app.tool_sel = app.tool_sel.saturating_sub(1),
         _ => {}
     }
     false
 }
 
-/// Re-read the snapshot for the current scope/window and refresh the derived
-/// series — the old loop's per-tick body, factored out so `run` calls it for the
-/// first frame, every `interval`, and after a `w`/`s`/`r` scope/window change.
+/// One completed tick's worth of data — what [`compute_tick`] produces and
+/// [`run`]'s loop applies to `app` once it arrives, whether computed inline
+/// (the first frame) or on a background thread (every later refresh).
 #[cfg(feature = "tui")]
-fn tick_refresh(app: &mut App) -> Result<()> {
+struct TickData {
+    snapshot: Value,
+    saved_series: Vec<u64>,
+    bytes_series: Vec<u64>,
+    event_series: Vec<u64>,
+    rtk_base: Option<(i64, i64, i64)>,
+}
+
+/// The actual per-tick work: resolve scope/window to a snapshot and its
+/// derived series. Pure function of owned inputs (no `&App`) so it can run on
+/// a background thread — this is the slow part (`snapshot_json_since` scans
+/// the op-log *and* every Claude Code transcript file under every config dir,
+/// observed at ~2.8s against a real multi-account history), and running it on
+/// the main thread blocked every keypress for its duration.
+#[cfg(feature = "tui")]
+fn compute_tick(
+    dir: PathBuf,
+    session: Option<String>,
+    scope_global: bool,
+    window: Window,
+    tz_offset: i64,
+    mut rtk_base: Option<(i64, i64, i64)>,
+) -> TickData {
     // --global reads the machine-global mirror (cross-repo, no session filter);
     // otherwise the launch repo/session — also the fallback for every non-global
     // scope, since there is no per-project data-dir resolver.
-    let (d, sess) = if app.scope_global {
+    let (d, sess) = if scope_global {
         match crate::rtk::home_root() {
             Some(home) => (home, None),
-            None => (app.dir.clone(), app.session.clone()),
+            None => (dir.clone(), session.clone()),
         }
     } else {
-        (app.dir.clone(), app.session.clone())
+        (dir.clone(), session.clone())
     };
     // Resolve the window each tick so "last 1h" slides and "today" stays correct.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let since = app.window.since(now, app.tz_offset);
+    let since = window.since(now, tz_offset);
     let mut snap = snapshot_json_since(&d, sess.as_deref(), since, None);
     // Surface scope + window to the panels (the snapshot can't know them).
-    snap["scope_global"] = Value::Bool(app.scope_global);
-    snap["window_label"] = Value::String(app.window.label());
+    snap["scope_global"] = Value::Bool(scope_global);
+    snap["window_label"] = Value::String(window.label());
     // RTK gain is cumulative; show the delta since launch (base captured tick 1).
-    rebase_rtk(&mut snap, &mut app.rtk_base);
-    app.saved_series = model::series(&snap, "saved_buckets", 60);
-    app.bytes_series = model::series(&snap, "bytes_buckets", 60);
-    app.event_series = model::series(&snap, "event_buckets", 60);
-    app.snapshot = snap;
+    rebase_rtk(&mut snap, &mut rtk_base);
+    let saved_series = model::series(&snap, "saved_buckets", 60);
+    let bytes_series = model::series(&snap, "bytes_buckets", 60);
+    let event_series = model::series(&snap, "event_buckets", 60);
+    TickData {
+        snapshot: snap,
+        saved_series,
+        bytes_series,
+        event_series,
+        rtk_base,
+    }
+}
+
+/// Apply a completed [`TickData`] to `app`.
+#[cfg(feature = "tui")]
+fn apply_tick(app: &mut App, data: TickData) {
+    app.snapshot = data.snapshot;
+    app.saved_series = data.saved_series;
+    app.bytes_series = data.bytes_series;
+    app.event_series = data.event_series;
+    app.rtk_base = data.rtk_base;
+}
+
+/// Synchronous tick, run inline for the very first frame (before the loop
+/// starts, and for the non-tty one-frame fallback) where there's nothing yet
+/// to keep responsive.
+#[cfg(feature = "tui")]
+fn tick_refresh(app: &mut App) -> Result<()> {
+    let data = compute_tick(
+        app.dir.clone(),
+        app.session.clone(),
+        app.scope_global,
+        app.window.clone(),
+        app.tz_offset,
+        app.rtk_base,
+    );
+    apply_tick(app, data);
     Ok(())
 }
 
-/// Split the frame into panel areas in web DOM order and call each panel:
-/// header, stat strip, charts row, tools table, mechanism|rtk (2-col), applied
-/// value, activity, fullcharts (full view only), footer. The call order is the
-/// layout contract; T2/T8 refine the exact constraints.
+/// Split the frame into panel areas: header, stat strip, the tools table
+/// (sized to its real row count, not a fixed floor), then in full view two
+/// more rows of small boxes (sparklines, then session|value), a spacer, then
+/// the footer. Every panel is sized to its own content; the spacer (not any
+/// panel) absorbs leftover space on a tall terminal, so the footer settles at
+/// the bottom like a status bar instead of any box stretching into a mostly
+/// empty void.
 #[cfg(feature = "tui")]
 fn draw(f: &mut Frame, app: &App) {
     use ratatui::layout::{Constraint, Layout};
     let full = app.view == View::Full;
+    let term_width = f.area().width;
+    let frame_a_height = chrome::overview_tools_height(term_width, app);
+
     let mut rows = vec![
-        // header draws 4 internal rows (title, control strip, headline, sub-line);
-        // Length(3) was clipping the sub-line.
-        Constraint::Length(4),
-        // stat strip is one unwrapped Line — Length(1) is its whole need, the rest
-        // of the old Length(3) was blank.
-        Constraint::Length(1),
-        Constraint::Length(6), // charts row (saved/min · bytes/min)
-        // tools table: 10 canonical rows + header + border + hint line all grow
-        // with extra room, but never shrink below showing the canonical set.
-        Constraint::Min(10),
-        // by mechanism | rtk shell savings: side-by-side (full) or stacked (mini);
-        // rtk's 2-line "since opened" body needs border(2)+2.
-        Constraint::Length(if full { 4 } else { 8 }),
-        // applied value: totals(2) + "lens tools"(1) + 5 dimension rows + note(1).
-        Constraint::Min(9),
-        Constraint::Length(5), // session activity
+        // title + live dot + control strip: bare, above every framed panel.
+        Constraint::Length(2),
+        // overview + tools + info, one frame: sized to its content so it
+        // never balloons into a mostly-empty box on a tall terminal.
+        Constraint::Length(frame_a_height),
     ];
     if full {
-        rows.push(Constraint::Min(10)); // fullcharts (full view only)
+        rows.push(Constraint::Length(9)); // sparklines row
+        rows.push(Constraint::Length(chrome::session_value_height(term_width, app))); // session | value, one frame
+    } else {
+        rows.push(Constraint::Length(6)); // mini: sparklines only
     }
+    rows.push(Constraint::Min(0)); // spacer: absorbs leftover space, not any panel
     rows.push(Constraint::Length(1)); // footer
     let areas = Layout::vertical(rows).split(f.area());
 
-    header::header(f, areas[0], app);
-    tables::stat_strip(f, areas[1], app);
+    header::header_top(f, areas[0], app);
+    chrome::frame_overview_tools(f, areas[1], app);
     charts::charts_row(f, areas[2], app);
-    tables::tools_table(f, areas[3], app);
-    // Full: mechanism and rtk in two columns. Mini: stack them in one column so
-    // neither is squeezed to an unreadable width on a narrow terminal.
+
     if full {
-        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(areas[4]);
-        misc::mechanism(f, cols[0], app);
-        misc::rtk(f, cols[1], app);
-    } else {
-        let stacked =
-            Layout::vertical([Constraint::Length(4), Constraint::Length(4)]).split(areas[4]);
-        misc::mechanism(f, stacked[0], app);
-        misc::rtk(f, stacked[1], app);
+        chrome::frame_session_value(f, areas[3], app);
     }
-    value::applied_value(f, areas[5], app);
-    misc::activity(f, areas[6], app);
-    if full {
-        charts::fullcharts(f, areas[7], app);
-    }
+
     misc::footer(f, areas[areas.len() - 1], app);
 }
 
@@ -792,11 +875,16 @@ mod tests {
         let fable_input = crate::obs::pricing::price_for("fable").input;
         assert!((app.rate - fable_input).abs() < f64::EPSILON);
 
-        // Up/Down move the tools selection, saturating at 0.
+        // Down/`j` move the selection toward higher indices; Up/`k` move it back
+        // toward 0, saturating there instead of wrapping/going negative.
+        assert!(!on_key(&mut app, press(KeyCode::Down)));
+        assert_eq!(app.tool_sel, 1);
+        assert!(!on_key(&mut app, press(KeyCode::Char('j'))));
+        assert_eq!(app.tool_sel, 2);
         assert!(!on_key(&mut app, press(KeyCode::Up)));
         assert_eq!(app.tool_sel, 1);
-        assert!(!on_key(&mut app, press(KeyCode::Down)));
-        assert!(!on_key(&mut app, press(KeyCode::Down)));
+        assert!(!on_key(&mut app, press(KeyCode::Char('k'))));
+        assert!(!on_key(&mut app, press(KeyCode::Char('k'))));
         assert_eq!(app.tool_sel, 0);
 
         // `s` toggles global<->repo (idx 0 <-> 1) and relabels.

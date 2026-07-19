@@ -24,27 +24,27 @@
       "treatment_tokens": 610986
     },
     {
-      "control_acc": 0.7777777777777777,
-      "control_tokens": 1691519,
+      "control_acc": 0.611111111111111,
+      "control_tokens": 1449886,
       "mechanism": "discovery",
       "n": 6,
       "stats": {
-        "control_millis": 138086.0,
-        "control_millis_sd": 22376.02023496483,
-        "control_rounds": 37.666666666666664,
-        "control_rounds_sd": 7.745966692414834,
-        "control_tokens": 1527680.6666666667,
-        "control_tokens_sd": 208701.72007330353,
+        "control_millis": 144563.6666666667,
+        "control_millis_sd": 17266.24820599748,
+        "control_rounds": 31.666666666666668,
+        "control_rounds_sd": 2.943920288775949,
+        "control_tokens": 1518590.6666666667,
+        "control_tokens_sd": 122114.44520976578,
         "runs": 3,
-        "treatment_millis": 230757.3333333333,
-        "treatment_millis_sd": 40093.178907251655,
-        "treatment_rounds": 34.0,
-        "treatment_rounds_sd": 2.6246692913372702,
-        "treatment_tokens": 1725538.3333333333,
-        "treatment_tokens_sd": 126454.86017284324
+        "treatment_millis": 159924.33333333334,
+        "treatment_millis_sd": 28094.03926893469,
+        "treatment_rounds": 39.0,
+        "treatment_rounds_sd": 5.456901847914968,
+        "treatment_tokens": 1186916.3333333333,
+        "treatment_tokens_sd": 196861.13886696886
       },
-      "treatment_acc": 0.5,
-      "treatment_tokens": 1641266
+      "treatment_acc": 0.9444444444444443,
+      "treatment_tokens": 814038
     },
     {
       "control_acc": 0.16666666666666666,
@@ -122,62 +122,65 @@
         "answer": {},
         "context_bytes": 718,
         "correct": false,
-        "millis": 30597,
-        "rounds": 9,
-        "tokens": 411091,
+        "millis": 27199,
+        "rounds": 8,
+        "tokens": 303250,
         "tools": [
-          "Grep",
-          "Bash",
           "Bash",
           "Grep",
+          "Grep",
           "Read",
           "Read",
           "Grep",
           "Read",
-          "Bash"
+          "Read"
         ]
       },
       "control_stats": {
         "lens_runs": 0,
-        "mean_millis": 26507.0,
-        "mean_rounds": 16.666666666666668,
-        "mean_tokens": 337785.0,
+        "mean_millis": 33425.333333333336,
+        "mean_rounds": 9.333333333333334,
+        "mean_tokens": 401883.0,
         "runs": 3,
-        "stddev_millis": 17549.664289286753,
-        "stddev_rounds": 7.586537784494029,
-        "stddev_tokens": 196548.83570756656,
-        "success_rate": 0.3333333333333333
+        "stddev_millis": 6981.178521965726,
+        "stddev_rounds": 1.8856180831641267,
+        "stddev_tokens": 86762.27895039794,
+        "success_rate": 0.0
       },
       "id": "0060_real_agentic_transitive_callers_spec_for_language",
       "mechanism": "discovery",
       "treatment": {
-        "answer": {},
+        "answer": {
+          "caller_1": "any_spec_for_language",
+          "caller_2": "grep_ast",
+          "caller_3": "grep_ast_filtered",
+          "caller_4": "lens_grep_ast"
+        },
         "context_bytes": 718,
-        "correct": false,
-        "millis": 131625,
-        "rounds": 8,
-        "tokens": 447102,
+        "correct": true,
+        "millis": 3706,
+        "rounds": 7,
+        "tokens": 38049,
         "tools": [
           "ToolSearch",
-          "mcp__lens__lens_map",
-          "mcp__lens__lens_symbol",
-          "mcp__lens__lens_recall",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_links",
-          "mcp__lens__lens_run",
-          "Read"
+          "Agent",
+          "Grep",
+          "Read",
+          "Read",
+          "Grep",
+          "Grep"
         ]
       },
       "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 88391.66666666667,
+        "lens_runs": 0,
+        "mean_millis": 26961.0,
         "mean_rounds": 8.333333333333334,
-        "mean_tokens": 425689.6666666667,
+        "mean_tokens": 99679.0,
         "runs": 3,
-        "stddev_millis": 37134.08099785903,
-        "stddev_rounds": 0.4714045207910317,
-        "stddev_tokens": 17878.05183893244,
-        "success_rate": 0.0
+        "stddev_millis": 17529.547455653268,
+        "stddev_rounds": 1.247219128924647,
+        "stddev_tokens": 46274.09754927696,
+        "success_rate": 1.0
       }
     },
     {
@@ -185,13 +188,13 @@
         "answer": {
           "reach_1": true,
           "reach_2": false,
-          "reach_3": false
+          "reach_3": true
         },
         "context_bytes": 826,
-        "correct": true,
-        "millis": 15510,
+        "correct": false,
+        "millis": 37098,
         "rounds": 4,
-        "tokens": 141153,
+        "tokens": 133096,
         "tools": [
           "Read",
           "Read",
@@ -201,46 +204,50 @@
       },
       "control_stats": {
         "lens_runs": 0,
-        "mean_millis": 25883.666666666668,
-        "mean_rounds": 4.0,
-        "mean_tokens": 142045.66666666666,
+        "mean_millis": 35622.666666666664,
+        "mean_rounds": 5.0,
+        "mean_tokens": 165318.66666666666,
         "runs": 3,
-        "stddev_millis": 10996.388568778184,
-        "stddev_rounds": 0.0,
-        "stddev_tokens": 916.6010885633704,
-        "success_rate": 1.0
+        "stddev_millis": 10274.005396576784,
+        "stddev_rounds": 1.4142135623730951,
+        "stddev_tokens": 46998.180967163215,
+        "success_rate": 0.6666666666666666
       },
       "id": "0061_real_agentic_reachability_trio",
       "mechanism": "discovery",
       "treatment": {
         "answer": {
           "reach_1": true,
-          "reach_2": true,
+          "reach_2": false,
           "reach_3": false
         },
         "context_bytes": 826,
-        "correct": false,
-        "millis": 32373,
-        "rounds": 5,
-        "tokens": 184636,
+        "correct": true,
+        "millis": 38565,
+        "rounds": 9,
+        "tokens": 111072,
         "tools": [
           "ToolSearch",
-          "mcp__lens__lens_map",
-          "mcp__lens__lens_path",
-          "mcp__lens__lens_path",
-          "mcp__lens__lens_path"
+          "Agent",
+          "Grep",
+          "Grep",
+          "Read",
+          "Read",
+          "Grep",
+          "Read",
+          "Grep"
         ]
       },
       "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 41367.333333333336,
-        "mean_rounds": 5.0,
-        "mean_tokens": 171050.33333333334,
+        "lens_runs": 0,
+        "mean_millis": 35043.0,
+        "mean_rounds": 8.333333333333334,
+        "mean_tokens": 143871.66666666666,
         "runs": 3,
-        "stddev_millis": 8059.758322817267,
-        "stddev_rounds": 0.0,
-        "stddev_tokens": 21160.421015555326,
-        "success_rate": 0.0
+        "stddev_millis": 9610.230208827814,
+        "stddev_rounds": 2.494438257849294,
+        "stddev_tokens": 24824.450854393985,
+        "success_rate": 1.0
       }
     },
     {
@@ -248,64 +255,74 @@
         "answer": {},
         "context_bytes": 709,
         "correct": false,
-        "millis": 52318,
-        "rounds": 9,
-        "tokens": 462422,
+        "millis": 21477,
+        "rounds": 8,
+        "tokens": 336687,
         "tools": [
           "Read",
           "Grep",
           "Grep",
+          "Read",
+          "Read",
           "Grep",
           "Grep",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash"
+          "Read"
         ]
       },
       "control_stats": {
         "lens_runs": 0,
-        "mean_millis": 42249.333333333336,
-        "mean_rounds": 8.333333333333334,
-        "mean_tokens": 433244.3333333333,
+        "mean_millis": 32069.666666666668,
+        "mean_rounds": 8.666666666666666,
+        "mean_tokens": 336783.3333333333,
         "runs": 3,
-        "stddev_millis": 8034.390096467947,
-        "stddev_rounds": 0.4714045207910317,
-        "stddev_tokens": 25566.094035308215,
-        "success_rate": 0.3333333333333333
+        "stddev_millis": 11687.929994466751,
+        "stddev_rounds": 0.9428090415820634,
+        "stddev_tokens": 30081.85240676216,
+        "success_rate": 0.0
       },
       "id": "0062_real_agentic_transitive_callers_tag_from_release_url",
       "mechanism": "discovery",
       "treatment": {
-        "answer": {},
+        "answer": {
+          "caller_1": "latest_tag",
+          "caller_2": "main",
+          "caller_3": "run_update_check_cli",
+          "caller_4": "run_update_cli"
+        },
         "context_bytes": 709,
-        "correct": false,
-        "millis": 33957,
-        "rounds": 10,
-        "tokens": 399272,
+        "correct": true,
+        "millis": 5750,
+        "rounds": 16,
+        "tokens": 54661,
         "tools": [
           "ToolSearch",
-          "mcp__lens__lens_map",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_symbol",
-          "mcp__lens__lens_grep_ast",
-          "mcp__lens__lens_grep_ast",
-          "mcp__lens__lens_grep_ast",
-          "mcp__lens__lens_skeleton",
-          "mcp__lens__lens_symbol",
-          "mcp__lens__lens_symbol"
+          "Grep",
+          "Bash",
+          "Grep",
+          "Agent",
+          "Agent",
+          "Grep",
+          "Read",
+          "Read",
+          "Grep",
+          "Read",
+          "Grep",
+          "Read",
+          "Grep",
+          "Read",
+          "Bash"
         ]
       },
       "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 29232.666666666668,
-        "mean_rounds": 8.666666666666666,
-        "mean_tokens": 385663.0,
+        "lens_runs": 0,
+        "mean_millis": 26154.666666666668,
+        "mean_rounds": 10.333333333333334,
+        "mean_tokens": 200230.33333333334,
         "runs": 3,
-        "stddev_millis": 3607.404453189147,
-        "stddev_rounds": 0.9428090415820634,
-        "stddev_tokens": 9698.847594774685,
-        "success_rate": 0.0
+        "stddev_millis": 15462.326201304755,
+        "stddev_rounds": 4.027681991198191,
+        "stddev_tokens": 144455.4833511772,
+        "success_rate": 0.6666666666666666
       }
     },
     {
@@ -634,7 +651,7 @@
         "runs": 3,
         "stddev_millis": 4523.842491609194,
         "stddev_rounds": 0.816496580927726,
-        "stddev_tokens": 24445.383440550802,
+        "stddev_tokens": 24445.3834405508,
         "success_rate": 0.3333333333333333
       },
       "id": "0068_real_agentic_search_deny_requires_server",

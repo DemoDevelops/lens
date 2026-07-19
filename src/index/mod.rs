@@ -382,6 +382,53 @@ const DOC_RANK_PENALTY: f64 = 0.7;
 /// and the order is exactly today's BM25 + proximity.
 const IDENT_BOOST: f64 = 3.0;
 
+/// Multiplicative rank boost for a chunk that *defines* a queried identifier (its text
+/// carries `fn NAME` / `struct NAME` / `const NAME` etc.), applied once per distinct
+/// such identifier. Where [`IDENT_BOOST`] fires on any chunk that merely mentions the
+/// identifier, this discriminates the definition from call sites, comments, and tests,
+/// lifting the def chunk to the top hit so [`SearchContext::Rich`] renders the right
+/// unit. Gated by `LENS_DEF_BOOST` (default off): unset, `def_terms` is empty and the
+/// pass is a no-op, so the order is exactly today's BM25 + proximity.
+const DEF_BOOST: f64 = 4.0;
+
+/// Identifier-like query tokens (`[A-Za-z_][A-Za-z0-9_]{2,}`) that could name a symbol
+/// whose definition a chunk might carry. A pure split, so a query with no such token
+/// yields an empty list and the definition boost is a no-op.
+pub(crate) fn def_ident_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 3 && t.starts_with(|c: char| c.is_alphabetic() || c == '_'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `content` defines the exact identifier `ident`: a definition keyword (`fn`,
+/// `struct`, `const`, ...) immediately followed by `ident` as a whole word. Lexical and
+/// language-general (the keyword set spans the grammars lens indexes); the identifier
+/// boundary on both sides stops `fn foobar` from matching `foo`.
+fn defines_symbol(content: &str, ident: &str) -> bool {
+    const DEF_KW: &[&str] = &[
+        "fn", "struct", "enum", "trait", "type", "const", "static", "mod", "impl", "class",
+        "def", "func", "interface",
+    ];
+    let boundary = |c: char| !c.is_alphanumeric() && c != '_';
+    for kw in DEF_KW {
+        let needle = format!("{kw} {ident}");
+        let mut from = 0;
+        while let Some(rel) = content[from..].find(&needle) {
+            let start = from + rel;
+            let end = start + needle.len();
+            let before_ok = content[..start].chars().next_back().is_none_or(boundary);
+            let after_ok = content[end..].chars().next().is_none_or(boundary);
+            if before_ok && after_ok {
+                return true;
+            }
+            from = end;
+        }
+    }
+    false
+}
+
 /// BM25-ranked search over the stemmed `symbols` + `content` fields (the default
 /// path), with a deterministic term-proximity (min-window span) re-rank on top.
 /// Over-fetches a deeper BM25 pool (see `OVERFETCH_K`), re-ranks by the combined
@@ -419,8 +466,21 @@ fn ranked_search(
     } else {
         Vec::new()
     };
+    // Definition-boost terms: identifier-like query tokens whose defining chunk should
+    // outrank its mentions. Gated by `LENS_DEF_BOOST` (default off); unset yields an
+    // empty list so the per-candidate boost below is a no-op and the order is today's.
+    let def_boost_on = std::env::var("LENS_DEF_BOOST")
+        .map(|v| v != "0")
+        .unwrap_or(false);
+    let def_terms = if def_boost_on {
+        def_ident_terms(query)
+    } else {
+        Vec::new()
+    };
     // Context rendering per hit (env-gated, default Snippet = today's output verbatim).
     let ctx_mode = search_context_mode();
+    // Full chunks kept aside for `SearchContext::Rich`'s top-hit swap (empty otherwise).
+    let mut content_by_key: HashMap<String, String> = HashMap::new();
     // (path, chunk_id, snippet, combined_score)
     let mut rows: Vec<(String, String, String, f64)> = Vec::with_capacity(candidates.len());
     for (path, chunk_id, content, mut score) in candidates {
@@ -437,17 +497,34 @@ fn ranked_search(
                 }
             }
         }
+        // Definition boost: a chunk that DEFINES a queried identifier outranks one that
+        // merely mentions it, so the top hit is the definition (what `Rich` renders whole).
+        if !def_terms.is_empty() {
+            for t in &def_terms {
+                if defines_symbol(&content, t) {
+                    score *= DEF_BOOST;
+                }
+            }
+        }
         if terms.len() >= 2 {
             if let Some(span) = min_cover_span(&content, &terms) {
                 score += PROX_WEIGHT / span.max(1) as f64;
             }
         }
-        let snippet = match ctx_mode {
-            SearchContext::Snippet => ranked_snippet(&content, &terms),
-            SearchContext::Unit => {
-                unit_snippet(&content, &terms, &path).unwrap_or_else(|| ranked_snippet(&content, &terms))
+        let snippet = if ctx_mode == SearchContext::Chunk {
+            content
+        } else {
+            let rendered = match ctx_mode {
+                SearchContext::Unit => unit_snippet(&content, &terms, &path)
+                    .unwrap_or_else(|| ranked_snippet(&content, &terms)),
+                _ => ranked_snippet(&content, &terms),
+            };
+            // Rich keeps the full chunk aside, keyed by (path, chunk_id), so `render_final`
+            // can swap it in for the top hit once the final order is known.
+            if ctx_mode == SearchContext::Rich {
+                content_by_key.insert(format!("{path}\u{1f}{chunk_id}"), content);
             }
-            SearchContext::Chunk => content,
+            rendered
         };
         rows.push((path, chunk_id, snippet, score));
     }
@@ -491,26 +568,43 @@ fn ranked_search(
         });
         // The reported score stays the text combined score (fusion reorders, it does
         // not restate relevance), so an unfused hit's payload is unchanged.
-        return Ok(fused
+        let ordered: Vec<(String, String, String, f64)> = fused
             .into_iter()
-            .take(limit)
-            .map(|(_fused, _text_rank, path, _chunk_id, snippet, score)| SearchHit {
-                path,
-                snippet,
-                score,
+            .map(|(_fused, _text_rank, path, chunk_id, snippet, score)| {
+                (path, chunk_id, snippet, score)
             })
-            .collect());
+            .collect();
+        return Ok(render_final(ordered, limit, ctx_mode, &content_by_key));
     }
     // Truncate the over-fetched, re-ranked pool back to the caller's limit.
-    Ok(rows
-        .into_iter()
-        .take(limit)
+    Ok(render_final(rows, limit, ctx_mode, &content_by_key))
+}
+
+/// Truncate the ordered `(path, chunk_id, snippet, score)` pool to `limit` and map to
+/// [`SearchHit`]. In [`SearchContext::Rich`] the top hit's snippet is swapped for its
+/// full stored chunk (looked up in `content_by_key`), so the most relevant result
+/// carries its whole AST-bounded unit while the tail stays cheap snippets.
+fn render_final(
+    ordered: Vec<(String, String, String, f64)>,
+    limit: usize,
+    ctx_mode: SearchContext,
+    content_by_key: &HashMap<String, String>,
+) -> Vec<SearchHit> {
+    let mut top: Vec<(String, String, String, f64)> = ordered.into_iter().take(limit).collect();
+    if ctx_mode == SearchContext::Rich {
+        if let Some(first) = top.first_mut() {
+            if let Some(full) = content_by_key.get(&format!("{}\u{1f}{}", first.0, first.1)) {
+                first.2 = full.clone();
+            }
+        }
+    }
+    top.into_iter()
         .map(|(path, _chunk_id, snippet, score)| SearchHit {
             path,
             snippet,
             score,
         })
-        .collect())
+        .collect()
 }
 
 /// Whitespace-token width of a ranked snippet, mirroring the old FTS5
@@ -568,12 +662,14 @@ const SEARCH_UNIT_CAP_BYTES: usize = 2048;
 /// How `lens_search` renders each hit's context, selected by `LENS_SEARCH_CONTEXT`.
 /// `Snippet` (default) is today's byte-identical ~24-token window; `Unit` returns the
 /// match's enclosing definition (capped, snippet fallback); `Chunk` returns the whole
-/// stored index chunk (the blunt, ~4 KB variant, kept for A/B comparison).
+/// stored index chunk for every hit (the blunt ~4 KB-per-hit variant, kept for A/B);
+/// `Rich` returns the whole chunk for the top hit only, snippets for the rest.
 #[derive(Clone, Copy, PartialEq)]
 enum SearchContext {
     Snippet,
     Unit,
     Chunk,
+    Rich,
 }
 
 /// Read the search-context mode. Default `Snippet` keeps the current output verbatim,
@@ -582,6 +678,7 @@ fn search_context_mode() -> SearchContext {
     match std::env::var("LENS_SEARCH_CONTEXT").as_deref() {
         Ok("unit") => SearchContext::Unit,
         Ok("chunk") => SearchContext::Chunk,
+        Ok("rich") => SearchContext::Rich,
         _ => SearchContext::Snippet,
     }
 }
@@ -638,17 +735,22 @@ fn unit_snippet(content: &str, terms: &[String], path: &str) -> Option<String> {
         .filter_map(|t| lc.find(t.as_str()))
         .min()
         .unwrap_or(0);
+    enclosing_def(content, &spec, offset, SEARCH_UNIT_CAP_BYTES)
+}
+
+/// Walk up from byte `offset` in `content` to the nearest enclosing [`DEF_KINDS`] node,
+/// returning its verbatim source slice when it fits `cap`. Shared by [`unit_snippet`] (a
+/// query-match offset) and [`symbol_def_source`] (a graph-resolved line). Returns `None`
+/// when `content` has no grammar match at `offset`, the offset sits in no definition, or
+/// the enclosing definition exceeds `cap` (never a fragment).
+fn enclosing_def(content: &str, spec: &AnySpec, offset: usize, cap: usize) -> Option<String> {
     let mut parser = Parser::new();
     parser.set_language(&spec.language()).ok()?;
     let tree = parser.parse(content, None)?;
-    // Walk up from the token at the match to the nearest definition node. Return it whole
-    // when it fits the cap; when the enclosing definition is oversize (or the match is in
-    // no definition at all), return None so the caller emits a ranked snippet instead of a
-    // fragment.
     let mut node = tree.root_node().descendant_for_byte_range(offset, offset)?;
     loop {
         if DEF_KINDS.contains(&node.kind()) {
-            if node.end_byte() - node.start_byte() <= SEARCH_UNIT_CAP_BYTES {
+            if node.end_byte() - node.start_byte() <= cap {
                 return content
                     .get(node.start_byte()..node.end_byte())
                     .map(str::to_string);
@@ -657,6 +759,24 @@ fn unit_snippet(content: &str, terms: &[String], path: &str) -> Option<String> {
         }
         node = node.parent()?;
     }
+}
+
+/// The enclosing definition at 1-based `line` of a source file, verbatim, when it parses
+/// and fits `cap`. The graph-aware symbol fetch uses it: the graph resolves a symbol to
+/// its `(file, line)`, and this returns that definition's whole source to seed the top
+/// hit, so an exact-symbol query surfaces the definition even when FTS recall buries it.
+pub(crate) fn symbol_def_source(src: &str, path: &str, line: usize, cap: usize) -> Option<String> {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
+    let spec = any_spec_for_extension(ext)?;
+    // 1-based line -> byte offset of its first char (sum the bytes of the lines before it).
+    let mut offset = 0usize;
+    for (i, l) in src.split_inclusive('\n').enumerate() {
+        if i + 1 == line {
+            break;
+        }
+        offset += l.len();
+    }
+    enclosing_def(src, &spec, offset, cap)
 }
 
 /// Lowercased alphanumeric tokens of `text`, in order. Splits on non-alphanumeric
@@ -1781,6 +1901,47 @@ mod tests {
             None,
             "body match in an oversize fn must fall back to a ranked snippet"
         );
+    }
+
+    #[test]
+    fn defines_symbol_matches_defs_not_mentions() {
+        // The def-boost must fire on a real definition and not on a call site, a comment,
+        // or a longer identifier that merely contains the query token.
+        assert!(defines_symbol("pub fn pagerank(&self) -> Map {", "pagerank"));
+        assert!(defines_symbol(
+            "const SEARCH_UNIT_CAP_BYTES: usize = 2048;",
+            "SEARCH_UNIT_CAP_BYTES"
+        ));
+        assert!(defines_symbol("    struct SearchContext {\n", "SearchContext"));
+        assert!(!defines_symbol("    let r = pagerank(&tp);\n", "pagerank"));
+        assert!(!defines_symbol("// see pagerank for details", "pagerank"));
+        assert!(!defines_symbol("fn pagerankish() {}", "pagerank"));
+    }
+
+    #[test]
+    fn def_ident_terms_keeps_identifier_tokens() {
+        assert_eq!(def_ident_terms("chunk_by_ast"), vec!["chunk_by_ast".to_string()]);
+        assert_eq!(
+            def_ident_terms("the pagerank DAMP value"),
+            vec![
+                "the".to_string(),
+                "pagerank".to_string(),
+                "DAMP".to_string(),
+                "value".to_string()
+            ]
+        );
+        assert!(def_ident_terms("a b 12 x").is_empty());
+    }
+
+    #[test]
+    fn symbol_def_source_returns_def_at_line() {
+        let src = "fn alpha() {\n    let a = 1;\n}\n\nfn bravo() {\n    let b = 2;\n}\n";
+        // bravo's definition starts on line 5.
+        let out = symbol_def_source(src, "x.rs", 5, 2048).expect("def at line 5");
+        assert!(out.contains("fn bravo(") && out.contains("let b = 2"));
+        assert!(!out.contains("fn alpha("));
+        // Cap smaller than the definition falls back to None (never a fragment).
+        assert_eq!(symbol_def_source(src, "x.rs", 5, 4), None);
     }
 
 }

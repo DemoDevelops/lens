@@ -11,7 +11,7 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::darkroom;
 use crate::discovery::{self, graph::Graph, query as gquery};
-use crate::index::Index;
+use crate::index::{self, Index};
 use crate::obs::{self, OpLog};
 use crate::session::{self, store::SessionStore};
 use crate::store::Store;
@@ -614,6 +614,8 @@ impl Forge {
         {
             Ok(mut resp) => {
                 self.federate_nested_search(&mut resp, &req.queries, req.limit_per_query);
+                let targets = self.symbol_fetch_targets(&req.queries);
+                self.inject_symbol_defs(&mut resp, &targets, req.limit_per_query);
                 let returned = obs::json_len(&resp);
                 let hits: usize = resp.results.iter().map(|r| r.hits.len()).sum();
                 let note = format!("{} queries, {} hits", resp.results.len(), hits);
@@ -1140,6 +1142,79 @@ impl Forge {
 
     /// Per-file RRF rank map (stored path -> rank, 0 = most graph-central) for the
     /// `lens_search` fusion stage. Built ONLY from an already-persisted `graph.json`;
+    /// For each query, the `(file, line)` of the exact-named symbol definition it most
+    /// plausibly names, or `None`. Gated by `LENS_SYMBOL_FETCH` (default off); off, or an
+    /// absent graph, yields all-`None`. Among identifier tokens that exactly name a
+    /// definition node, the highest-importance one wins.
+    fn symbol_fetch_targets(&self, queries: &[String]) -> Vec<Option<(String, usize)>> {
+        let on = std::env::var("LENS_SYMBOL_FETCH")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+        if !on {
+            return vec![None; queries.len()];
+        }
+        let graph = match Graph::load(&self.graph_file()) {
+            Ok(g) => g,
+            Err(_) => return vec![None; queries.len()],
+        };
+        let importance = graph.importance();
+        const DEF_KINDS: &[&str] = &[
+            "function", "method", "struct", "enum", "trait", "interface", "class", "type", "mod",
+        ];
+        queries
+            .iter()
+            .map(|q| {
+                let mut best: Option<(String, usize, f64)> = None;
+                for t in index::def_ident_terms(q) {
+                    for n in graph.find_by_name(&t, None) {
+                        if !n.name.eq_ignore_ascii_case(&t) || !DEF_KINDS.contains(&n.kind.as_str())
+                        {
+                            continue;
+                        }
+                        let imp = importance.get(&n.id).copied().unwrap_or(0.0);
+                        if best.as_ref().map(|(_, _, b)| imp > *b).unwrap_or(true) {
+                            best = Some((n.file.clone(), n.line, imp));
+                        }
+                    }
+                }
+                best.map(|(f, l, _)| (f, l))
+            })
+            .collect()
+    }
+
+    /// Seed each query's results with its graph-resolved symbol definition as the top hit
+    /// (read from source, capped), so an exact-symbol query returns the definition even
+    /// when FTS recall buries it below the fetch pool. A no-op for queries with no target.
+    fn inject_symbol_defs(
+        &self,
+        resp: &mut SearchResponse,
+        targets: &[Option<(String, usize)>],
+        limit: usize,
+    ) {
+        const SYMBOL_FETCH_CAP: usize = 4096;
+        for (qi, tgt) in targets.iter().enumerate() {
+            let Some((file, line)) = tgt else { continue };
+            let Some(qr) = resp.results.get_mut(qi) else {
+                continue;
+            };
+            let Ok(src) = std::fs::read_to_string(self.repo_dir.join(file)) else {
+                continue;
+            };
+            let Some(def) = index::symbol_def_source(&src, file, *line, SYMBOL_FETCH_CAP) else {
+                continue;
+            };
+            // Skip if the top hit already carries this definition (avoid a duplicate top).
+            if qr.hits.first().is_some_and(|h| {
+                h.path == *file && (h.snippet.contains(&def) || def.contains(&h.snippet))
+            }) {
+                continue;
+            }
+            let score = qr.hits.first().map(|h| h.score).unwrap_or(1.0) + 1.0;
+            qr.hits.insert(0, SearchHit { path: file.clone(), snippet: def, score });
+            qr.hits.truncate(limit.max(1));
+        }
+    }
+
     /// an absent (or unreadable) graph yields an empty map, so fusion is a no-op and
     /// discovery is NEVER triggered from a search. Per-file score = sum of
     /// [`Graph::importance`] over the file's nodes; files are ranked by score desc,

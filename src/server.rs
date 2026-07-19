@@ -593,7 +593,7 @@ impl Forge {
 
     /// Search the full-text index with one or more queries.
     #[tool(
-        description = "Search the full-text index with one or more queries (BM25-ranked); returns top snippets with path and score per query. For symbol definitions/relationships use lens_symbol, not text search."
+        description = "Full-text search across all indexed content (BM25-ranked): finds where a string, idea, or usage appears anywhere, including inside function bodies, comments, strings, and config; returns ranked snippets with path and score per query. The only tool that sees inside definitions and finds call-sites/usages. For a named symbol's callers/callees use lens_symbol; for a ranked list of candidate symbols by meaning use lens_find."
     )]
     async fn lens_search(
         &self,
@@ -664,7 +664,7 @@ impl Forge {
 
     /// Find symbols by name and return their immediate connections.
     #[tool(
-        description = "Find graph symbols by name substring (+ optional kind) and return them with immediate connections. Large results are compacted with a lens_recall ref. If you only know what the symbol does, not its name, DO NOT guess substrings — use lens_find."
+        description = "Look up a declared symbol by exact name (+ optional kind); returns its location and immediate connections (callers/callees), NOT its source body (to read the code, lens_search the name). Large results are compacted with a lens_recall ref. If you know what the symbol does but not its exact name, use lens_find."
     )]
     async fn lens_symbol(
         &self,
@@ -693,7 +693,7 @@ impl Forge {
 
     /// Find symbols by natural-language meaning, ranked lexically (no embeddings).
     #[tool(
-        description = "Find symbols by natural-language query, ranked lexically (no embeddings): tokenizes the query and scores symbol names by word overlap (exact > prefix > substring, with a bonus for multi-word hits). Returns the best matches with their immediate connections. Use when you know what a symbol does but not its exact name. If you know the exact name, use lens_symbol instead."
+        description = "Find candidate symbols by natural-language meaning, ranked lexically over symbol names (no embeddings; exact > prefix > substring, plus a multi-word bonus): returns a ranked shortlist of symbols with their connections to disambiguate which one you mean, NOT the code. Know the exact name? use lens_symbol. Want actual code, text, or usages? use lens_search."
     )]
     async fn lens_find(
         &self,

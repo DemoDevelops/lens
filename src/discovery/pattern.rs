@@ -75,8 +75,16 @@ pub fn compile_pattern(pattern: &str, spec: &AnySpec) -> Result<String> {
         captures: 0,
         predicates: Vec::new(),
         meta_captures: Vec::new(),
+        has_concrete_token: false,
     };
     let body = emitter.emit(root)?;
+    if !emitter.has_concrete_token {
+        bail!(
+            "pattern must pin at least one concrete token (a literal identifier, method \
+             name, operator, etc.); a pattern made only of `$METAVAR` wildcards matches \
+             everything: `{pat}`"
+        );
+    }
     let mut predicates = emitter.predicates;
     for (_, caps) in &emitter.meta_captures {
         for later in &caps[1..] {
@@ -178,6 +186,10 @@ struct Emitter<'a> {
     predicates: Vec<String>,
     /// Metavariable name -> capture names, in first-occurrence order.
     meta_captures: Vec<(String, Vec<String>)>,
+    /// Set once the pattern pins any concrete token (text `#eq?` or a
+    /// fielded literal like an operator); false means the compiled query is
+    /// metavariables-only and would match essentially everything.
+    has_concrete_token: bool,
 }
 
 impl Emitter<'_> {
@@ -227,6 +239,7 @@ impl Emitter<'_> {
                     // A fielded anonymous token carries meaning (e.g.
                     // `operator: "=="`); unfielded punctuation does not.
                     let tok = child.utf8_text(self.src).unwrap_or("");
+                    self.has_concrete_token = true;
                     let _ = write!(out, " {f}: \"{}\"", escape(tok));
                 }
                 if !cursor.goto_next_sibling() {
@@ -259,6 +272,7 @@ impl Emitter<'_> {
             return Ok(format!("({})", node.kind()));
         }
         let cap = self.next_capture();
+        self.has_concrete_token = true;
         self.predicates
             .push(format!("(#eq? {cap} \"{}\")", escape(text)));
         Ok(format!("({}) {cap}", node.kind()))
@@ -410,5 +424,23 @@ mod tests {
     fn embedded_metavar_is_a_clear_error() {
         let err = compile("foo_$X()", "python").unwrap_err().to_string();
         assert!(err.contains("whole token"), "{err}");
+    }
+
+    /// T4: a bare metavariable pins nothing concrete and would match nearly
+    /// every node in a file, so it must be rejected with a clear message.
+    #[test]
+    fn bare_metavar_is_a_clear_error() {
+        let err = compile("$X", "rust").unwrap_err().to_string();
+        assert!(
+            err.contains("concrete token"),
+            "must name the concrete-token rule: {err}"
+        );
+    }
+
+    /// T4 non-regression: `$X.unwrap()` has a concrete token (`unwrap`)
+    /// alongside its metavariable receiver, so it must still compile.
+    #[test]
+    fn metavar_with_concrete_token_still_compiles() {
+        compile("$X.unwrap()", "rust").unwrap();
     }
 }

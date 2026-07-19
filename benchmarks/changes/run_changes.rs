@@ -1538,6 +1538,175 @@ fn gate_c42() -> (String, bool) {
     (s, pass)
 }
 
+// --- C43: scoped call resolution + stub identity (T1) ------------------------
+
+/// Build the `scoped_calls` fixture graph with `LENS_SCOPED_CALLS` forced to
+/// `v` for the build, then restored to unset (= default-on). `bench_changes`
+/// runs single-threaded, so the env flip is race-free here — never copy this
+/// pattern into a `cargo test` target (parallel `set_var` races).
+fn c43_graph(v: &str) -> lens::discovery::graph::Graph {
+    std::env::set_var("LENS_SCOPED_CALLS", v);
+    let g = discovery::discover(&changes_fixture("scoped_calls"), None)
+        .unwrap()
+        .graph;
+    std::env::remove_var("LENS_SCOPED_CALLS");
+    g
+}
+
+/// Target FILES of the `calls` edges from the node named `from_name` to nodes
+/// named `to_name`, in edge order.
+fn c43_call_targets(
+    g: &lens::discovery::graph::Graph,
+    from_name: &str,
+    to_name: &str,
+) -> Vec<String> {
+    let info: std::collections::HashMap<&str, (&str, &str)> = g
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), (n.name.as_str(), n.file.as_str())))
+        .collect();
+    g.edges
+        .iter()
+        .filter(|e| e.kind == "calls")
+        .filter(|e| {
+            info.get(e.from.as_str())
+                .map(|(n, _)| *n == from_name)
+                .unwrap_or(false)
+        })
+        .filter(|e| {
+            info.get(e.to.as_str())
+                .map(|(n, _)| *n == to_name)
+                .unwrap_or(false)
+        })
+        .filter_map(|e| info.get(e.to.as_str()).map(|(_, f)| f.to_string()))
+        .collect()
+}
+
+/// Count of `calls` edges whose endpoints are in different languages.
+fn c43_cross_language(g: &lens::discovery::graph::Graph) -> usize {
+    let lang: std::collections::HashMap<&str, &str> = g
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.language.as_str()))
+        .collect();
+    g.edges
+        .iter()
+        .filter(|e| e.kind == "calls")
+        .filter(|e| lang.get(e.from.as_str()) != lang.get(e.to.as_str()))
+        .count()
+}
+
+fn gate_c43() -> (String, bool) {
+    let g = c43_graph("1");
+    // (a) two same-named fns in different languages: zero cross-language edges,
+    // and the Rust caller's `shared_name` resolves to the Rust def only.
+    let cross = c43_cross_language(&g);
+    let shared_targets = c43_call_targets(&g, "drive", "shared_name");
+    // (b) qualified `Widget::build(n)`: exactly 1 target, in widget.rs (the file
+    // `Widget` is imported from), never decoy.rs — repo-wide, `build` is ambiguous.
+    let build_targets = c43_call_targets(&g, "drive", "build");
+    // (c) same-file dual `new`: ambiguous, so zero edges.
+    let new_edges = c43_call_targets(&g, "make", "new").len();
+    // (d) the same `use std::path::Path;` in two files (same line number) mints
+    // two DISTINCT stubs, each carrying its importing file's path.
+    let stubs: Vec<(&str, &str)> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "import" && n.name == "Path")
+        .map(|n| (n.id.as_str(), n.file.as_str()))
+        .collect();
+    let stub_ids: std::collections::BTreeSet<&str> = stubs.iter().map(|(id, _)| *id).collect();
+    let stub_files: std::collections::BTreeSet<&str> = stubs.iter().map(|(_, f)| *f).collect();
+    let stubs_ok = stubs.len() == 2
+        && stub_ids.len() == 2
+        && stub_files == ["stub_a.rs", "stub_b.rs"].into_iter().collect();
+
+    // Trip-proof: `LENS_SCOPED_CALLS=0` restores the fan-out exactly — the
+    // cross-language `shared_name` edge reappears and `make` links BOTH `new`s.
+    let g0 = c43_graph("0");
+    let cross0 = c43_cross_language(&g0);
+    let new0 = c43_call_targets(&g0, "make", "new").len();
+    let trip = cross0 > 0 && new0 == 2;
+
+    let pass = cross == 0
+        && shared_targets == vec!["helper.rs".to_string()]
+        && build_targets == vec!["widget.rs".to_string()]
+        && new_edges == 0
+        && stubs_ok
+        && trip;
+    let s = format!(
+        "## C43 - scoped call resolution + stub identity (T1)\n\nOn `fixtures/scoped_calls`: cross-language call edges **{cross}** (want 0); Rust `drive`'s `shared_name` targets **{shared_targets:?}** (want [\"helper.rs\"], never helper.py); qualified `Widget::build(n)` targets **{build_targets:?}** (want [\"widget.rs\"] via the import of `Widget`, never decoy.rs); same-file dual-`new` edges **{new_edges}** (want 0 — ambiguous emits nothing); `Path` import stubs **{}** with **{}** distinct ids across files **{stub_files:?}** (want 2 across stub_a.rs/stub_b.rs). Trip-proof (`LENS_SCOPED_CALLS=0` restores fan-out: cross-language edges **{cross0}** > 0, dual-`new` edges **{new0}** == 2): **{trip}**.\n",
+        stubs.len(),
+        stub_ids.len(),
+    );
+    (s, pass)
+}
+
+// --- C44: directed graph traversal (reachability, not mere connectivity) -----
+
+/// Directed-traversal gate (T2). Fixture graph built in-code:
+///   a -> b -> c   (a `calls` chain)
+///   d -> b        (an unrelated caller of b)
+/// Asserts the graph core separates reachability from connectivity:
+///   - directed `shortest_path` a -> c IS found (forward chain),
+///   - directed `shortest_path` c -> a is NOT found (no forward path back),
+///   - `neighbors(b, Callers)` = {a, d}   (fan-in via reverse edges only),
+///   - `neighbors(b, Callees)` = {c}      (fan-out via forward edges only),
+///   - `neighbors(b, Both)`    = {a, c, d} = callers ∪ callees, i.e. the legacy
+///     undirected behavior (both senses of every edge) preserved unchanged.
+///
+/// Runs under whatever `LENS_DIRECTED_PATH` is ambient; default-ON = directed.
+fn gate_c44() -> (String, bool) {
+    use lens::discovery::graph::{Direction, Graph, Node};
+    use std::collections::BTreeSet;
+
+    let mut g = Graph::new();
+    let a = g.add_node(Node::new("f.rs", "function", "a", 1, "rust"));
+    let b = g.add_node(Node::new("f.rs", "function", "b", 5, "rust"));
+    let c = g.add_node(Node::new("f.rs", "function", "c", 9, "rust"));
+    let d = g.add_node(Node::new("f.rs", "function", "d", 13, "rust"));
+    g.add_edge(&a, &b, "calls");
+    g.add_edge(&b, &c, "calls");
+    g.add_edge(&d, &b, "calls");
+
+    // Non-start node ids reachable from `start` walking `dir`.
+    let reached = |start: &str, dir: Direction| -> BTreeSet<String> {
+        let (nodes, _) = g.neighbors_directed(start, 5, dir);
+        nodes
+            .iter()
+            .map(|n| n.id.clone())
+            .filter(|id| id != start)
+            .collect()
+    };
+
+    // Directed reachability: forward chain reaches, reverse does not.
+    let fwd_found = g.shortest_path(&a, &c).is_some();
+    let back_found = g.shortest_path(&c, &a).is_some();
+
+    let callers = reached(&b, Direction::Callers);
+    let callees = reached(&b, Direction::Callees);
+    let both = reached(&b, Direction::Both);
+
+    let want_callers: BTreeSet<String> = [a.clone(), d.clone()].into_iter().collect();
+    let want_callees: BTreeSet<String> = [c.clone()].into_iter().collect();
+    let want_both: BTreeSet<String> = [a.clone(), c.clone(), d.clone()].into_iter().collect();
+    let both_is_union = both == (&callers | &callees);
+
+    let pass = fwd_found
+        && !back_found
+        && callers == want_callers
+        && callees == want_callees
+        && both == want_both
+        && both_is_union;
+
+    let s = format!(
+        "## C44 - directed graph traversal (reachability, not connectivity) (T2)\n\nFixture `a -> b -> c` plus unrelated `d -> b`. Directed `shortest_path` answers reachability (not connectivity), `neighbors` splits fan-in from fan-out, and `Direction::Both` preserves the legacy undirected behavior byte-for-byte. a->c reachable **{fwd_found}** (want true); c->a reachable **{back_found}** (want false); neighbors(b, callers) has {} nodes (want 2 = a,d); neighbors(b, callees) has {} nodes (want 1 = c); neighbors(b, both) == callers ∪ callees: **{both_is_union}**. Kill-switch `LENS_DIRECTED_PATH=0` restores undirected `shortest_path`.\n",
+        callers.len(),
+        callees.len(),
+    );
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -1620,6 +1789,10 @@ fn main() -> anyhow::Result<()> {
     println!("{s40}");
     let (s42, c42_ok) = gate_c42();
     println!("{s42}");
+    let (s43, c43_ok) = gate_c43();
+    println!("{s43}");
+    let (s44, c44_ok) = gate_c44();
+    println!("{s44}");
 
     println!("\n## Gates");
     let gates = [
@@ -1647,6 +1820,8 @@ fn main() -> anyhow::Result<()> {
         ("C22 memory record/query roundtrip + trip-proofs detect breakage", c22_ok),
         ("C40 personalized overview lifts touched-file symbol into budget", c40_ok),
         ("C42 AST-boundary chunking keeps straddling fn retrievable", c42_ok),
+        ("C43 scoped call resolution + stub identity", c43_ok),
+        ("C44 directed reachability + fan-in/fan-out; both preserves undirected", c44_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });
@@ -1664,4 +1839,59 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T1 real-corpus invariants, run explicitly by name:
+    /// `cargo test fanout_invariants_real_corpus -- --ignored`.
+    /// A fresh `discovery::discover` over THIS repo's own `src/` must contain
+    /// zero cross-language `calls` edges and zero per-caller same-name
+    /// multi-target edge groups (one call site never fans out to several
+    /// same-named definitions). Relies on the default-on `LENS_SCOPED_CALLS`
+    /// (scrub stale `LENS_*` shell vars first, per the standing gotcha);
+    /// #[ignore]d because it parses the whole live tree, not a fixture.
+    #[test]
+    #[ignore]
+    fn fanout_invariants_real_corpus() {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let g = discovery::discover(&src, None).unwrap().graph;
+        let info: std::collections::HashMap<&str, (&str, &str)> = g
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), (n.name.as_str(), n.language.as_str())))
+            .collect();
+        let mut total = 0usize;
+        let mut cross = 0usize;
+        let mut groups: std::collections::HashMap<
+            (&str, &str),
+            std::collections::BTreeSet<&str>,
+        > = std::collections::HashMap::new();
+        for e in g.edges.iter().filter(|e| e.kind == "calls") {
+            total += 1;
+            let (from, to) = match (info.get(e.from.as_str()), info.get(e.to.as_str())) {
+                (Some(f), Some(t)) => (f, t),
+                _ => continue,
+            };
+            if from.1 != to.1 {
+                cross += 1;
+            }
+            groups
+                .entry((e.from.as_str(), to.0))
+                .or_default()
+                .insert(e.to.as_str());
+        }
+        let multi = groups.values().filter(|s| s.len() > 1).count();
+        println!(
+            "[c43 real corpus] calls edges={total} cross_language={cross} \
+             multi_target_same_name_groups={multi}"
+        );
+        assert_eq!(cross, 0, "cross-language call edges must be 0");
+        assert_eq!(
+            multi, 0,
+            "per-caller same-name multi-target edge groups must be 0"
+        );
+    }
 }

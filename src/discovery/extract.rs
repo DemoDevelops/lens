@@ -153,6 +153,9 @@ pub fn all_specs() -> Vec<LangSpec> {
                 (call_expression function: (identifier) @call)
                 (call_expression function: (scoped_identifier name: (identifier) @call))
                 (call_expression function: (field_expression field: (field_identifier) @call))
+                (call_expression function: (generic_function function: (identifier) @call))
+                (call_expression function: (generic_function function: (scoped_identifier name: (identifier) @call)))
+                (call_expression function: (generic_function function: (field_expression field: (field_identifier) @call)))
                 (macro_invocation macro: (identifier) @call)
             "#,
             imports_query: r#"(use_declaration) @import"#,
@@ -1198,6 +1201,29 @@ fn main() {
         assert!(fx.calls.iter().any(|(_, c)| c == "helper"));
         // imported read
         assert!(fx.imports.iter().any(|(p, _)| p == "read"));
+    }
+
+    #[test]
+    fn rust_turbofish_calls() {
+        let src = r#"
+fn helper<T>() -> T { unimplemented!() }
+
+fn plain() -> i32 { 1 }
+
+fn main() {
+    let a = helper::<i32>();
+    let s = "5".parse::<i32>();
+    let v = Vec::<u8>::new();
+    let w = plain();
+}
+"#;
+        let spec = spec_for_language("rust").unwrap();
+        let fx = extract_file("a.rs", src, &spec).unwrap();
+        let callees: Vec<&str> = fx.calls.iter().map(|(_, c)| c.as_str()).collect();
+        assert!(callees.contains(&"helper"), "helper::<i32>() missing; callees: {callees:?}");
+        assert!(callees.contains(&"parse"), ".parse::<i32>() missing; callees: {callees:?}");
+        assert!(callees.contains(&"new"), "Vec::<u8>::new() missing; callees: {callees:?}");
+        assert!(callees.contains(&"plain"), "plain control call missing; callees: {callees:?}");
     }
 
     #[test]

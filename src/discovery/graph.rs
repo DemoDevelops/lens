@@ -49,6 +49,24 @@ pub struct Edge {
     pub kind: String,
 }
 
+/// Traversal direction over the (directed) edge set.
+///
+/// Edges point `from -> to` (e.g. a `calls` edge goes caller -> callee). A
+/// directed traversal follows a single sense of every edge:
+/// - [`Direction::Callees`] walks forward (`from -> to`): fan-out, "what does X reach".
+/// - [`Direction::Callers`] walks backward (`to -> from`): fan-in, "who reaches X".
+/// - [`Direction::Both`] walks either sense (undirected), preserving the legacy
+///   behavior of [`Graph::neighbors`] byte-for-byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Fan-in: reverse edges only (`to -> from`).
+    Callers,
+    /// Fan-out: forward edges only (`from -> to`).
+    Callees,
+    /// Undirected: both senses of every edge.
+    Both,
+}
+
 /// The whole structural graph. Serializes to `.lens/graph.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Graph {
@@ -283,24 +301,78 @@ impl Graph {
             .collect()
     }
 
-    /// Undirected adjacency over edges whose kind passes `keep`.
-    pub(crate) fn adjacency(&self, keep: impl Fn(&str) -> bool) -> HashMap<String, Vec<String>> {
+    /// Adjacency over edges whose kind passes `keep`, in the given `dir`.
+    /// Shared core for [`adjacency`](Self::adjacency) (undirected) and
+    /// [`adjacency_directed`](Self::adjacency_directed) (forward only). Edges are
+    /// iterated in Vec order so neighbor lists are deterministic; `Both` appends
+    /// `from -> to` then `to -> from` per edge, matching the historical layout.
+    fn adjacency_dir(
+        &self,
+        dir: Direction,
+        keep: impl Fn(&str) -> bool,
+    ) -> HashMap<String, Vec<String>> {
         let mut adj: HashMap<String, Vec<String>> = HashMap::new();
         for e in &self.edges {
             if !keep(&e.kind) {
                 continue;
             }
-            adj.entry(e.from.clone()).or_default().push(e.to.clone());
-            adj.entry(e.to.clone()).or_default().push(e.from.clone());
+            match dir {
+                Direction::Callees => {
+                    adj.entry(e.from.clone()).or_default().push(e.to.clone());
+                }
+                Direction::Callers => {
+                    adj.entry(e.to.clone()).or_default().push(e.from.clone());
+                }
+                Direction::Both => {
+                    adj.entry(e.from.clone()).or_default().push(e.to.clone());
+                    adj.entry(e.to.clone()).or_default().push(e.from.clone());
+                }
+            }
         }
         adj
     }
 
+    /// Undirected adjacency over edges whose kind passes `keep`.
+    pub(crate) fn adjacency(&self, keep: impl Fn(&str) -> bool) -> HashMap<String, Vec<String>> {
+        self.adjacency_dir(Direction::Both, keep)
+    }
+
+    /// Directed adjacency over edges whose kind passes `keep`: `from -> to` only,
+    /// no reverse edges added. This is the "reaches" relation used by directed
+    /// [`shortest_path`](Self::shortest_path) and [`Direction::Callees`] neighbor walks.
+    pub(crate) fn adjacency_directed(
+        &self,
+        keep: impl Fn(&str) -> bool,
+    ) -> HashMap<String, Vec<String>> {
+        self.adjacency_dir(Direction::Callees, keep)
+    }
+
     /// Subgraph within `depth` hops of `start` (undirected BFS). Returns the
     /// reachable nodes and the edges among them.
+    ///
+    /// Preserved for backward compatibility: identical to
+    /// [`neighbors_directed`](Self::neighbors_directed) with [`Direction::Both`].
     pub fn neighbors(&self, start: &str, depth: usize) -> (Vec<Node>, Vec<Edge>) {
+        self.neighbors_directed(start, depth, Direction::Both)
+    }
+
+    /// Subgraph within `depth` hops of `start`, walking edges in `dir`:
+    /// - [`Direction::Callees`]: transitive fan-out (forward edges only).
+    /// - [`Direction::Callers`]: transitive fan-in (reverse edges only).
+    /// - [`Direction::Both`]: undirected — byte-for-byte the legacy [`neighbors`](Self::neighbors).
+    ///
+    /// Returned [`Edge`] values keep their real `from`/`to`, so a consumer can
+    /// verify each hop's direction itself. The returned edge set is the subgraph
+    /// induced on the reachable node set (every edge with both endpoints visited),
+    /// regardless of `dir`.
+    pub fn neighbors_directed(
+        &self,
+        start: &str,
+        depth: usize,
+        dir: Direction,
+    ) -> (Vec<Node>, Vec<Edge>) {
         // Neighbors include every relationship, hierarchy included.
-        let adj = self.adjacency(|_| true);
+        let adj = self.adjacency_dir(dir, |_| true);
         let mut visited: HashSet<String> = HashSet::new();
         visited.insert(start.to_string());
         let mut frontier = vec![start.to_string()];
@@ -335,15 +407,26 @@ impl Graph {
         (nodes, edges)
     }
 
-    /// Shortest path (node ids) between two nodes via undirected BFS.
-    /// Returns `None` if disconnected.
+    /// Shortest path (node ids) from `from` to `to` via BFS. Returns `None` if
+    /// `to` is not reachable from `from`.
+    ///
+    /// Directed by default (`from -> to` follows forward `calls`/`imports` edges),
+    /// so this answers "does `from` reach `to`" rather than "are they connected in
+    /// either direction". Kill-switch `LENS_DIRECTED_PATH=0` restores the legacy
+    /// undirected traversal exactly. `contains` (hierarchy) edges are excluded in
+    /// both modes, so two symbols in the same file aren't trivially "connected".
     pub fn shortest_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
         if from == to {
             return Some(vec![from.to_string()]);
         }
-        // Reachability follows semantic flow (calls/imports), not containment,
-        // so two symbols in the same file aren't trivially "connected".
-        let adj = self.adjacency(|kind| kind != "contains");
+        // Reachability follows semantic flow (calls/imports), not containment.
+        let keep = |kind: &str| kind != "contains";
+        let directed = std::env::var("LENS_DIRECTED_PATH").map_or(true, |v| v.trim() != "0");
+        let adj = if directed {
+            self.adjacency_directed(keep)
+        } else {
+            self.adjacency(keep)
+        };
         let mut prev: HashMap<String, String> = HashMap::new();
         let mut visited: HashSet<String> = HashSet::new();
         visited.insert(from.to_string());
@@ -560,5 +643,64 @@ mod tests {
         assert!(ids.contains(&a.as_str()));
         assert!(ids.contains(&b.as_str()));
         assert_eq!(nodes.len(), 2);
+    }
+
+    /// Fixture: a -> b -> c (calls chain) plus an unrelated d -> b.
+    fn directed_fixture() -> Graph {
+        let mut g = sample(); // a -> b -> c, d isolated
+        let b = Node::make_id("f.rs", "function", "b", 5);
+        let d = Node::make_id("f.rs", "function", "d", 13);
+        g.add_edge(&d, &b, "calls");
+        g
+    }
+
+    #[test]
+    fn shortest_path_is_directed_by_default() {
+        // Directed default-ON: the forward chain reaches, the reverse does not.
+        // This is the fix for the false "connected" answer (bench 0061): a path
+        // query must answer "does `from` reach `to`", not "are they connected".
+        let g = directed_fixture();
+        let a = Node::make_id("f.rs", "function", "a", 1);
+        let c = Node::make_id("f.rs", "function", "c", 9);
+        assert!(g.shortest_path(&a, &c).is_some(), "forward a->c must reach");
+        assert!(
+            g.shortest_path(&c, &a).is_none(),
+            "reverse c->a must NOT reach under directed traversal"
+        );
+    }
+
+    #[test]
+    fn neighbors_direction_splits_fan_in_and_out() {
+        let g = directed_fixture();
+        let a = Node::make_id("f.rs", "function", "a", 1);
+        let b = Node::make_id("f.rs", "function", "b", 5);
+        let c = Node::make_id("f.rs", "function", "c", 9);
+        let d = Node::make_id("f.rs", "function", "d", 13);
+
+        let reached = |dir: Direction| -> HashSet<String> {
+            let (nodes, _) = g.neighbors_directed(&b, 5, dir);
+            nodes.into_iter().map(|n| n.id).filter(|id| *id != b).collect()
+        };
+        let callers = reached(Direction::Callers);
+        let callees = reached(Direction::Callees);
+        let both = reached(Direction::Both);
+
+        assert_eq!(callers, HashSet::from([a.clone(), d.clone()]), "fan-in = {{a, d}}");
+        assert_eq!(callees, HashSet::from([c.clone()]), "fan-out = {{c}}");
+        // `Both` is the undirected union of the two directed walks.
+        assert_eq!(both, HashSet::from([a, c, d]));
+        assert_eq!(both, &callers | &callees);
+    }
+
+    #[test]
+    fn neighbors_both_matches_legacy_neighbors_byte_for_byte() {
+        // The legacy `neighbors` API must be identical to the new
+        // `neighbors_directed(_, Both)` for both the node and edge Vecs.
+        let g = directed_fixture();
+        let b = Node::make_id("f.rs", "function", "b", 5);
+        let (legacy_nodes, legacy_edges) = g.neighbors(&b, 3);
+        let (dir_nodes, dir_edges) = g.neighbors_directed(&b, 3, Direction::Both);
+        assert_eq!(legacy_nodes, dir_nodes);
+        assert_eq!(legacy_edges, dir_edges);
     }
 }

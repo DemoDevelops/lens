@@ -247,6 +247,17 @@ pub struct GraphView {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retrieve_ref: Option<String>,
+    /// Resolution notes for an ambiguous exact-name query: present only when the
+    /// query matched more than one exact-name candidate, naming the chosen node
+    /// and how many others were passed over. Omitted when unambiguous, so
+    /// existing outputs stay byte-identical. Mirrors `PathResponse::resolved`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved: Vec<ResolvedNote>,
+    /// Count of matching root symbols BEFORE the `limit` cut (their pulled-in
+    /// neighbors are not counted). `None` when nothing was cut (every match was
+    /// returned), so existing outputs stay byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_matches: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

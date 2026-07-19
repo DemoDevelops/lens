@@ -51,6 +51,7 @@ pub fn query(
             })
             .then_with(|| a.id.cmp(&b.id))
     });
+    let total = matches.len();
     let mut node_ids: Vec<String> = Vec::new();
     for m in matches.into_iter().take(limit) {
         node_ids.push(m.id.clone());
@@ -60,7 +61,26 @@ pub fn query(
             node_ids.push(other.clone());
         }
     }
-    subgraph(graph, &node_ids)
+    let mut view = subgraph(graph, &node_ids);
+    view.total_matches = (total > limit).then_some(total);
+    view.resolved = ambiguity_note(graph, name);
+    view
+}
+
+/// The ambiguity note [`query`]/[`find_ranked_filtered`] attach to their
+/// [`GraphView`]: reuses [`resolve_note`]'s exact-name ranking (the same
+/// machinery `path` surfaces via `PathResponse::resolved`) so a query that
+/// exactly names more than one symbol reports which one won and how many it
+/// beat. Empty when unambiguous (or when nothing matches by exact name).
+fn ambiguity_note(graph: &Graph, token: &str) -> Vec<ResolvedNote> {
+    match resolve_note(graph, token) {
+        Some((chosen, other_candidates)) if other_candidates > 0 => vec![ResolvedNote {
+            query: token.to_string(),
+            chosen,
+            other_candidates,
+        }],
+        _ => Vec::new(),
+    }
 }
 
 /// True when a node's (repo-relative) `file` corresponds to one of the session's
@@ -200,6 +220,7 @@ fn find_ranked_filtered(
         }
     }
 
+    let total = scored.len();
     let mut node_ids: Vec<String> = Vec::new();
     for (_, id) in scored.into_iter().take(limit) {
         node_ids.push(id.to_string());
@@ -208,7 +229,10 @@ fn find_ranked_filtered(
             node_ids.push(other.clone());
         }
     }
-    subgraph(graph, &node_ids)
+    let mut view = subgraph(graph, &node_ids);
+    view.total_matches = (total > limit).then_some(total);
+    view.resolved = ambiguity_note(graph, query);
+    view
 }
 
 /// Compare two scored candidates by descending personalized-PR weight (the
@@ -308,6 +332,8 @@ pub fn neighbors_dir(graph: &Graph, node_id: &str, depth: usize, dir: Option<&st
         compact: None,
         truncated: false,
         retrieve_ref: None,
+        resolved: Vec::new(),
+        total_matches: None,
     }
 }
 
@@ -461,6 +487,8 @@ fn subgraph(graph: &Graph, ids: &[String]) -> GraphView {
         compact: None,
         truncated: false,
         retrieve_ref: None,
+        resolved: Vec::new(),
+        total_matches: None,
     }
 }
 
@@ -1049,5 +1077,59 @@ mod tests {
         let resp = path(&g, "a", "c");
         assert!(resp.found);
         assert!(resp.resolved.is_empty(), "unambiguous resolves carry no notes");
+    }
+
+    #[test]
+    fn query_reports_total_matches_and_resolves_ambiguity_by_importance() {
+        // Same fixture shape as `path`'s ambiguity test: two `target`s, one
+        // structurally important (three callers), one isolated. `query`
+        // (lens_symbol's engine) must surface the same ambiguity note `path`
+        // does, and report the pre-limit candidate count only when the `limit`
+        // cut actually drops a match.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn target() { sink(); }\n\
+             fn sink() {}\n\
+             fn u1() { target(); }\n\
+             fn u2() { target(); }\n\
+             fn u3() { target(); }\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("b.rs"), "fn target() {}\n").unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let view = query(&g, "target", None, 10, &[]);
+        let note = view
+            .resolved
+            .iter()
+            .find(|r| r.query == "target")
+            .expect("ambiguity note for the two `target`s");
+        assert_eq!(note.other_candidates, 1, "one other same-name candidate");
+        let chosen = g.node(&note.chosen).unwrap();
+        assert!(chosen.file.ends_with("a.rs"), "chose the important target");
+        assert!(
+            view.total_matches.is_none(),
+            "both matches fit under limit=10, nothing was cut"
+        );
+
+        let cut = query(&g, "target", None, 1, &[]);
+        assert_eq!(cut.total_matches, Some(2), "limit=1 cut one of the two matches");
+    }
+
+    #[test]
+    fn find_reports_total_matches_when_limit_cuts_candidates() {
+        let dir = tempdir().unwrap();
+        let mut src = String::new();
+        for i in 0..5 {
+            src.push_str(&format!("fn config_load_{i}() {{}}\n"));
+        }
+        fs::write(dir.path().join("r.rs"), src).unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let uncut = find(&g, "config", 10);
+        assert!(uncut.total_matches.is_none(), "limit=10 fits all 5 matches");
+        let cut = find(&g, "config", 2);
+        assert_eq!(cut.total_matches, Some(5), "limit=2 cut 3 of the 5 matches");
     }
 }

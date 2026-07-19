@@ -221,6 +221,19 @@ pub struct EdgeView {
     pub kind: String,
 }
 
+/// A note that a name/token resolved to one of several same-named candidates.
+/// Emitted only when the resolution was ambiguous (`other_candidates > 0`), so
+/// unambiguous outputs never carry it.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ResolvedNote {
+    /// The name/token that was resolved to a node.
+    pub query: String,
+    /// The chosen node's id: the highest graph-importance exact-name match.
+    pub chosen: String,
+    /// How many OTHER exact-name candidates were passed over (0 = unambiguous).
+    pub other_candidates: usize,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GraphView {
     pub nodes: Vec<NodeView>,
@@ -234,6 +247,17 @@ pub struct GraphView {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retrieve_ref: Option<String>,
+    /// Resolution notes for an ambiguous exact-name query: present only when the
+    /// query matched more than one exact-name candidate, naming the chosen node
+    /// and how many others were passed over. Omitted when unambiguous, so
+    /// existing outputs stay byte-identical. Mirrors `PathResponse::resolved`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved: Vec<ResolvedNote>,
+    /// Count of matching root symbols BEFORE the `limit` cut (their pulled-in
+    /// neighbors are not counted). `None` when nothing was cut (every match was
+    /// returned), so existing outputs stay byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_matches: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -255,6 +279,10 @@ pub struct GraphFindRequest {
     /// Max matching symbols to return (default 20).
     #[serde(default = "default_graph_limit")]
     pub limit: usize,
+    /// Optional kind filter (function, struct, class, method, interface, mod, ...):
+    /// candidates whose kind differs are excluded before ranking.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -264,6 +292,10 @@ pub struct GraphNeighborsRequest {
     /// Hops outward (default 1).
     #[serde(default = "default_depth")]
     pub depth: usize,
+    /// Which way to walk edges: "callers" (fan-in), "callees" (fan-out), or "both"
+    /// (undirected, the default). Unknown or absent falls back to "both".
+    #[serde(default)]
+    pub direction: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -279,6 +311,19 @@ pub struct PathResponse {
     pub found: bool,
     /// The node sequence of the shortest path (empty if none).
     pub path: Vec<NodeView>,
+    /// Per-hop edge kinds aligned with `path`: `edges[i]` connects `path[i]` and
+    /// `path[i+1]`, so `edges.len() == path.len().saturating_sub(1)`. Each edge
+    /// keeps its real `from`/`to` so a consumer can read the hop's direction.
+    /// Omitted (and empty) when there is no multi-node path, so single-node and
+    /// not-found outputs stay byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<EdgeView>,
+    /// Resolution notes for ambiguous `from`/`to` inputs: present only for a token
+    /// that matched more than one exact-name candidate, naming the chosen node and
+    /// how many others were passed over. Omitted entirely when both ends resolved
+    /// unambiguously, so unambiguous outputs stay byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved: Vec<ResolvedNote>,
 }
 
 // ---------------------------------------------------------------------------

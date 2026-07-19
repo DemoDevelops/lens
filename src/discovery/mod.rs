@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use tree_sitter::Tree;
 
 use extract::{FileExtract, MdLink, MdLinkKind};
-use graph::{Graph, Node};
+use graph::{Graph, Node, Origin};
 
 use crate::tools::DiscoverResponse;
 
@@ -206,6 +206,13 @@ struct FileResult {
 /// output depends ONLY on the set of `FileResult`s (not on how each was parsed),
 /// feeding it the same extracts always yields a byte-identical graph — which is
 /// how the incremental path stays identical to a from-scratch rebuild.
+/// Whether a `/`-separated relative path lives under a `benchmarks/`, `tests/`, or
+/// `fixtures/` directory at any depth — the bench/fixture provenance signal.
+fn is_bench_path(path: &str) -> bool {
+    path.split('/')
+        .any(|seg| matches!(seg, "benchmarks" | "tests" | "fixtures"))
+}
+
 fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> DiscoverOutcome {
     // Sort results by relative path for deterministic assembly order.
     file_results.sort_by(|a, b| a.rel.cmp(&b.rel));
@@ -250,12 +257,22 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
 
     let name_index = graph.name_index();
 
+    // Kill-switch (matches the reroute-rail flag convention): LENS_SCOPED_CALLS
+    // default ON; `=0` restores the pre-scoping fan-out call resolution exactly
+    // (every tier links ALL same-named candidates, unscoped by language).
+    let scoped = std::env::var("LENS_SCOPED_CALLS")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+
     // Per-file, per-name imported source files. For a `use`/`import` that resolves
     // to a real definition, record (importing_file, imported_name) -> the file that
     // DEFINES it. Used by call resolution to prefer the imported definition's file
     // before the repo-wide fallback. Built from the SAME name-index resolution the
     // import edges use, so the preferred file is exactly the import target's file.
-    // BTreeSet keeps the per-key file set deterministic.
+    // BTreeSet keeps the per-key file set deterministic. Both modes keep the
+    // existing first-match resolution (one source file per imported name — an
+    // import statement names ONE thing); scoped mode only adds a language filter
+    // so a Rust `use` can never be indexed to a same-named Python definition.
     let module_file: HashMap<&str, &str> = graph
         .nodes
         .iter()
@@ -267,14 +284,35 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         .iter()
         .map(|n| (n.id.as_str(), n.file.as_str()))
         .collect();
+    let node_lang: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.language.as_str()))
+        .collect();
     let mut imported_src: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
-    for (module_id, seg, _line, _lang) in &pending_imports {
-        let resolved: Option<&String> = name_index
-            .get(seg)
-            .and_then(|ids| ids.iter().find(|id| **id != *module_id));
-        if let (Some(target), Some(imp_file)) =
-            (resolved, module_file.get(module_id.as_str()).copied())
-        {
+    for (module_id, seg, _line, lang) in &pending_imports {
+        let imp_file = match module_file.get(module_id.as_str()).copied() {
+            Some(f) => f,
+            None => continue,
+        };
+        let ids = match name_index.get(seg) {
+            Some(ids) => ids,
+            None => continue,
+        };
+        if scoped {
+            let target = ids.iter().find(|id| {
+                **id != *module_id
+                    && node_lang.get(id.as_str()).copied() == Some(lang.as_str())
+            });
+            if let Some(target) = target {
+                if let Some(src_file) = node_file.get(target.as_str()).copied() {
+                    imported_src
+                        .entry((imp_file.to_string(), seg.clone()))
+                        .or_default()
+                        .insert(src_file.to_string());
+                }
+            }
+        } else if let Some(target) = ids.iter().find(|id| **id != *module_id) {
             if let Some(src_file) = node_file.get(target.as_str()).copied() {
                 imported_src
                     .entry((imp_file.to_string(), seg.clone()))
@@ -284,91 +322,27 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         }
     }
 
-    // Resolve calls scope-aware. For each callee name, prefer a definition in the
-    // SAME file as the caller; if none, prefer a definition in the file the caller
-    // IMPORTED that name from; only then fall back to the repo-wide name index.
-    // Same-file narrowing drops spurious cross-file edges from a reused name;
-    // import-file narrowing drops the spurious edges to OTHER files that happen to
-    // define the same name when the call is to an imported symbol. The graph borrows
-    // are scoped so the resolved list can be added back mutably.
-    let resolved_calls: Vec<(String, String)> = {
-        // name -> node ids, scoped per file (built from the nodes already added).
-        let mut defs_by_file: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
-        for n in &graph.nodes {
-            defs_by_file
-                .entry(n.file.as_str())
-                .or_default()
-                .entry(n.name.as_str())
-                .or_default()
-                .push(n.id.as_str());
-        }
-        let caller_file: HashMap<&str, &str> = graph
-            .nodes
-            .iter()
-            .map(|n| (n.id.as_str(), n.file.as_str()))
-            .collect();
-        let mut out: Vec<(String, String)> = Vec::new();
-        for (caller, callee) in &pending_calls {
-            let file = match caller_file.get(caller.as_str()) {
-                Some(f) => *f,
-                None => continue,
-            };
-            let same_file: Vec<&str> = defs_by_file
-                .get(file)
-                .and_then(|m| m.get(callee.as_str()))
-                .map(|ids| {
-                    ids.iter()
-                        .copied()
-                        .filter(|id| *id != caller.as_str())
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !same_file.is_empty() {
-                for t in same_file {
-                    out.push((caller.clone(), t.to_string()));
-                }
-                continue;
-            }
-            // Prefer the file(s) the callee name was imported from in this file.
-            let import_scoped: Vec<&String> = match imported_src
-                .get(&(file.to_string(), callee.clone()))
-            {
-                Some(src_files) => name_index
-                    .get(callee)
-                    .map(|ids| {
-                        ids.iter()
-                            .filter(|t| **t != *caller)
-                            .filter(|t| {
-                                node_file
-                                    .get(t.as_str())
-                                    .map(|f| src_files.contains(*f))
-                                    .unwrap_or(false)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                None => Vec::new(),
-            };
-            if !import_scoped.is_empty() {
-                for t in import_scoped {
-                    out.push((caller.clone(), t.clone()));
-                }
-            } else if let Some(targets) = name_index.get(callee) {
-                for t in targets {
-                    if t != caller {
-                        out.push((caller.clone(), t.clone()));
-                    }
-                }
-            }
-        }
-        out
+    let resolved_calls: Vec<(String, String)> = if scoped {
+        resolve_calls_scoped(&graph, &pending_calls, &imported_src)
+    } else {
+        resolve_calls_fanout(&graph, &pending_calls, &imported_src, &name_index)
     };
     for (caller, t) in resolved_calls {
         graph.add_edge(&caller, &t, "calls");
     }
 
     // Resolve imports: link to a matching repo symbol if present, else create an
-    // `import` node so the edge has a real endpoint.
+    // `import` node so the edge has a real endpoint. A stub's id is keyed on the
+    // IMPORTING file (`make_id(importing_file, "import", seg, line)`) and its
+    // `.file` holds that file's path — never the symbol name — so the same
+    // `use std::path::Path;` in two files mints two distinct stubs instead of
+    // fusing unrelated files onto one shared node.
+    let module_paths: HashMap<String, String> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "module")
+        .map(|n| (n.id.clone(), n.file.clone()))
+        .collect();
     for (module_id, seg, line, lang) in pending_imports {
         let resolved: Option<String> = name_index
             .get(&seg)
@@ -376,7 +350,11 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         match resolved {
             Some(target) => graph.add_edge(&module_id, &target, "imports"),
             None => {
-                let import_node = Node::new(&seg, "import", &seg, line, &lang);
+                let imp_file = module_paths
+                    .get(&module_id)
+                    .map(String::as_str)
+                    .unwrap_or(seg.as_str());
+                let import_node = Node::new(imp_file, "import", &seg, line, &lang);
                 let iid = import_node.id.clone();
                 graph.add_node(import_node);
                 graph.add_edge(&module_id, &iid, "imports");
@@ -401,6 +379,18 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
     // `aliases:` feed name-based (wikilink/reference) resolution.
     resolve_md_links(&mut graph, pending_md_links, pending_aliases);
 
+    // Mark bench/fixture provenance by path (T7): any node whose file lives under a
+    // `benchmarks/`, `tests/`, or `fixtures/` directory is `Bench` origin, taking
+    // precedence over an extract-time `Test` marking (whole-file fixture wins over
+    // an inner `#[cfg(test)]` span). Discounted, not excluded, in `Graph::importance`
+    // so self-referencing fixtures stop dominating overview ranks. Import/tag stubs
+    // are covered too, since their `.file` is the importing file's path.
+    for n in &mut graph.nodes {
+        if is_bench_path(&n.file) {
+            n.origin = Origin::Bench;
+        }
+    }
+
     // Deterministic ordering of the persisted graph.
     graph.nodes.sort_by(|a, b| a.id.cmp(&b.id));
     graph
@@ -420,6 +410,232 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         response,
         nested_repo_roots: Vec::new(),
     }
+}
+
+/// Scope-aware, ambiguity-refusing call resolution (`LENS_SCOPED_CALLS` on, the
+/// default). Tiers, per (caller, callee-name):
+///
+///   1. definitions in the caller's own file (single-language by construction);
+///   2. definitions in the file(s) this file imported the NAME itself from;
+///   3. definitions in ANY file this file imports a symbol from — the qualifier
+///      proxy for `Type::method` calls: extraction surfaces only the bare
+///      `method`, so the L15 import index (which knows `Type`'s source file)
+///      stands in for the missing qualifier. Path resolution, not receiver
+///      typing — no type inference of any kind;
+///   4. repo-wide.
+///
+/// Every tier is language-scoped (a Rust caller can never resolve to a Python
+/// def) and emits an edge ONLY when it names exactly one candidate: a tier with
+/// more than one same-named candidate (a same-file dual `new`, a bare method
+/// name defined repo-wide) is ambiguous and emits NO edge — never a fan-out. A
+/// tier with none falls through to the next. Deterministic: candidate lists
+/// follow `graph.nodes` insertion order and each emission is unique-or-nothing.
+fn resolve_calls_scoped(
+    graph: &Graph,
+    pending_calls: &[(String, String)],
+    imported_src: &HashMap<(String, String), BTreeSet<String>>,
+) -> Vec<(String, String)> {
+    // name -> node ids, scoped per file (built from the nodes already added).
+    let mut defs_by_file: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
+    for n in &graph.nodes {
+        defs_by_file
+            .entry(n.file.as_str())
+            .or_default()
+            .entry(n.name.as_str())
+            .or_default()
+            .push(n.id.as_str());
+    }
+    let caller_info: HashMap<&str, (&str, &str)> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), (n.file.as_str(), n.language.as_str())))
+        .collect();
+    let node_file: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.file.as_str()))
+        .collect();
+    // (language, name) -> candidate ids: the language-scoped name index.
+    let mut lang_index: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
+    for n in &graph.nodes {
+        lang_index
+            .entry((n.language.as_str(), n.name.as_str()))
+            .or_default()
+            .push(n.id.as_str());
+    }
+    // importing file -> every file it imports a symbol from (the L15 index
+    // unioned across imported names) — the tier-3 qualifier-proxy scope.
+    let mut imports_from: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+    for ((file, _name), srcs) in imported_src {
+        imports_from
+            .entry(file.as_str())
+            .or_default()
+            .extend(srcs.iter().map(String::as_str));
+    }
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (caller, callee) in pending_calls {
+        let (file, lang) = match caller_info.get(caller.as_str()) {
+            Some(fl) => *fl,
+            None => continue,
+        };
+        // Tier 1: same file.
+        let same_file: Vec<&str> = defs_by_file
+            .get(file)
+            .and_then(|m| m.get(callee.as_str()))
+            .map(|ids| {
+                ids.iter()
+                    .copied()
+                    .filter(|id| *id != caller.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        match same_file.len() {
+            1 => {
+                out.push((caller.clone(), same_file[0].to_string()));
+                continue;
+            }
+            0 => {}
+            // The name IS defined in this file, more than once: ambiguous,
+            // and a wider tier could only be wrong. No edge.
+            _ => continue,
+        }
+        let lang_candidates: &[&str] = lang_index
+            .get(&(lang, callee.as_str()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let within = |srcs: &dyn Fn(&str) -> bool| -> Vec<&str> {
+            lang_candidates
+                .iter()
+                .copied()
+                .filter(|id| *id != caller.as_str())
+                .filter(|id| node_file.get(*id).map(|f| srcs(f)).unwrap_or(false))
+                .collect()
+        };
+        // Tier 2: the file(s) this NAME was imported from.
+        if let Some(srcs) = imported_src.get(&(file.to_string(), callee.clone())) {
+            let cands = within(&|f: &str| srcs.contains(f));
+            match cands.len() {
+                1 => {
+                    out.push((caller.clone(), cands[0].to_string()));
+                    continue;
+                }
+                0 => {}
+                _ => continue,
+            }
+        }
+        // Tier 3: any file this file imports from (the `Type::method` proxy).
+        if let Some(srcs) = imports_from.get(file) {
+            let cands = within(&|f: &str| srcs.contains(f));
+            match cands.len() {
+                1 => {
+                    out.push((caller.clone(), cands[0].to_string()));
+                    continue;
+                }
+                0 => {}
+                _ => continue,
+            }
+        }
+        // Tier 4: repo-wide, same language, unique or nothing.
+        let cands: Vec<&str> = lang_candidates
+            .iter()
+            .copied()
+            .filter(|id| *id != caller.as_str())
+            .collect();
+        if cands.len() == 1 {
+            out.push((caller.clone(), cands[0].to_string()));
+        }
+    }
+    out
+}
+
+/// The pre-scoping fan-out resolution, preserved EXACTLY for
+/// `LENS_SCOPED_CALLS=0`: same-file -> import-file -> repo-wide, each tier
+/// linking every matching candidate, with no language scoping and no ambiguity
+/// refusal. Same-file narrowing drops spurious cross-file edges from a reused
+/// name; import-file narrowing drops the spurious edges to OTHER files that
+/// happen to define the same name when the call is to an imported symbol.
+fn resolve_calls_fanout(
+    graph: &Graph,
+    pending_calls: &[(String, String)],
+    imported_src: &HashMap<(String, String), BTreeSet<String>>,
+    name_index: &HashMap<String, Vec<String>>,
+) -> Vec<(String, String)> {
+    // name -> node ids, scoped per file (built from the nodes already added).
+    let mut defs_by_file: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
+    for n in &graph.nodes {
+        defs_by_file
+            .entry(n.file.as_str())
+            .or_default()
+            .entry(n.name.as_str())
+            .or_default()
+            .push(n.id.as_str());
+    }
+    let caller_file: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.file.as_str()))
+        .collect();
+    let node_file: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.file.as_str()))
+        .collect();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (caller, callee) in pending_calls {
+        let file = match caller_file.get(caller.as_str()) {
+            Some(f) => *f,
+            None => continue,
+        };
+        let same_file: Vec<&str> = defs_by_file
+            .get(file)
+            .and_then(|m| m.get(callee.as_str()))
+            .map(|ids| {
+                ids.iter()
+                    .copied()
+                    .filter(|id| *id != caller.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !same_file.is_empty() {
+            for t in same_file {
+                out.push((caller.clone(), t.to_string()));
+            }
+            continue;
+        }
+        // Prefer the file(s) the callee name was imported from in this file.
+        let import_scoped: Vec<&String> = match imported_src
+            .get(&(file.to_string(), callee.clone()))
+        {
+            Some(src_files) => name_index
+                .get(callee)
+                .map(|ids| {
+                    ids.iter()
+                        .filter(|t| **t != *caller)
+                        .filter(|t| {
+                            node_file
+                                .get(t.as_str())
+                                .map(|f| src_files.contains(*f))
+                                .unwrap_or(false)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        if !import_scoped.is_empty() {
+            for t in import_scoped {
+                out.push((caller.clone(), t.clone()));
+            }
+        } else if let Some(targets) = name_index.get(callee) {
+            for t in targets {
+                if t != caller {
+                    out.push((caller.clone(), t.clone()));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Resolve markdown cross-doc links into `imports` edges, and `#anchor`s into edges
@@ -513,13 +729,15 @@ fn resolve_md_links(
     }
 
     // Compute the edges and stubs first, then apply them, so no read borrow of the
-    // graph is held across a mutation.
+    // graph is held across a mutation. A stub carries the LINKING file's path so
+    // its node id is keyed on that file (same rule as unresolved code imports):
+    // the same broken `[[ghost]]` in two notes mints two distinct stubs.
     let mut edges: Vec<(String, String)> = Vec::new();
-    let mut stubs: Vec<(String, String, usize)> = Vec::new(); // (from_module, stub_name, line)
+    let mut stubs: Vec<(String, String, String, usize)> = Vec::new(); // (from_module, from_file, stub_name, line)
     // Transclusion embeds resolve exactly like wikilinks but drain to `embeds` edges,
     // so they collect separately.
     let mut embed_edges: Vec<(String, String)> = Vec::new();
-    let mut embed_stubs: Vec<(String, String, usize)> = Vec::new();
+    let mut embed_stubs: Vec<(String, String, String, usize)> = Vec::new();
     for (module_id, link) in pending_md_links {
         let file = match module_file.get(&module_id) {
             Some(f) => f.as_str(),
@@ -597,7 +815,12 @@ fn resolve_md_links(
                                     }
                                 }
                             }
-                            None => stubs.push((module_id.clone(), canonical, link.line)),
+                            None => stubs.push((
+                                module_id.clone(),
+                                file.to_string(),
+                                canonical,
+                                link.line,
+                            )),
                         }
                     }
                 }
@@ -632,16 +855,16 @@ fn resolve_md_links(
         }
     }
 
-    for (from, name, line) in stubs {
-        let stub = Node::new(&name, "import", &name, line, "markdown");
+    for (from, from_file, name, line) in stubs {
+        let stub = Node::new(&from_file, "import", &name, line, "markdown");
         let sid = stub.id.clone();
         graph.add_node(stub);
         graph.add_edge(&from, &sid, "imports");
     }
     // An unmatched embed keeps the same unresolved-link `import` stub marker as the
     // other link kinds, but its edge stays `embeds` so the link's syntax is preserved.
-    for (from, name, line) in embed_stubs {
-        let stub = Node::new(&name, "import", &name, line, "markdown");
+    for (from, from_file, name, line) in embed_stubs {
+        let stub = Node::new(&from_file, "import", &name, line, "markdown");
         let sid = stub.id.clone();
         graph.add_node(stub);
         graph.add_edge(&from, &sid, "embeds");
@@ -671,7 +894,7 @@ fn resolve_wikilike(
     module_file: &HashMap<String, String>,
     headings_by_file_slug: &HashMap<(String, String), Vec<String>>,
     edges: &mut Vec<(String, String)>,
-    stubs: &mut Vec<(String, String, usize)>,
+    stubs: &mut Vec<(String, String, String, usize)>,
 ) {
     if link.target.is_empty() {
         return;
@@ -687,7 +910,12 @@ fn resolve_wikilike(
     targets.sort();
     targets.dedup();
     if targets.is_empty() {
-        stubs.push((module_id.to_string(), link.target.clone(), link.line));
+        stubs.push((
+            module_id.to_string(),
+            file.to_string(),
+            link.target.clone(),
+            link.line,
+        ));
         return;
     }
     for target in &targets {
@@ -1731,5 +1959,65 @@ mod tests {
             full_ms, full.response.nodes, inc_ms, inc.files_reparsed, ratio
         );
         assert_eq!(inc.files_reparsed, 1, "exactly one file should reparse");
+    }
+
+    #[test]
+    fn is_bench_path_matches_dirs_at_any_depth() {
+        assert!(is_bench_path("benchmarks/changes/run_changes.rs"));
+        assert!(is_bench_path("tests/integration.rs"));
+        assert!(is_bench_path("crates/x/src/fixtures/sample.rs"));
+        assert!(!is_bench_path("src/discovery/mod.rs"));
+        assert!(!is_bench_path("src/server.rs"));
+    }
+
+    /// Q5 (T7 predicate 3): over a freshly built graph of lens's own repo, the
+    /// `benchmarks/` share of the top-50 importance ranks must fall below 10%
+    /// (measured baseline was 42% pre-discount). Ignored — it walks the whole real
+    /// repo. Run alone (no parallel env races):
+    /// `cargo test q5_bench_share_of_top50 -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn q5_bench_share_of_top50() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let graph = discover(repo, None).unwrap().graph;
+
+        // Top-50 by importance, deterministic id tie-break; count `benchmarks/`.
+        let bench_share = |discount: bool| -> usize {
+            if discount {
+                std::env::remove_var("LENS_ORIGIN_DISCOUNT");
+            } else {
+                std::env::set_var("LENS_ORIGIN_DISCOUNT", "0");
+            }
+            let imp = graph.importance();
+            let mut ranked: Vec<&Node> = graph.nodes.iter().collect();
+            ranked.sort_by(|a, b| {
+                let sb = imp.get(&b.id).copied().unwrap_or(0.0);
+                let sa = imp.get(&a.id).copied().unwrap_or(0.0);
+                sb.partial_cmp(&sa).unwrap().then_with(|| a.id.cmp(&b.id))
+            });
+            ranked
+                .iter()
+                .take(50)
+                .filter(|n| n.file.starts_with("benchmarks/"))
+                .count()
+        };
+
+        let before = bench_share(false);
+        let after = bench_share(true);
+        std::env::remove_var("LENS_ORIGIN_DISCOUNT");
+
+        let pct = |c: usize| c as f64 / 50.0 * 100.0;
+        println!(
+            "[Q5] benchmarks/ share of top-50 importance: before={before}/50 ({:.0}%) \
+             after={after}/50 ({:.0}%)",
+            pct(before),
+            pct(after)
+        );
+        assert!(
+            pct(after) < 10.0,
+            "benchmarks/ share of top-50 must be <10% after discount, got {:.0}% ({after}/50)",
+            pct(after)
+        );
+        assert!(after <= before, "discount must not increase bench share");
     }
 }

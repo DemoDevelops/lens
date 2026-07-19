@@ -41,6 +41,16 @@ pub struct TagsLangSpec {
     pub imports_query: Option<&'static str>,
 }
 
+impl TagsLangSpec {
+    /// Whether this language's registry entry produces import edges. Derived from
+    /// `imports_query` (rather than a separate field) so it can never drift out of
+    /// sync; the tool-surface layer reads this to report per-language capability
+    /// instead of relying on this module's doc comment alone.
+    pub fn produces_imports(&self) -> bool {
+        self.imports_query.is_some()
+    }
+}
+
 /// Unified dispatch over hand-written and tags-based specs, used at the discovery
 /// chokepoint so `lens_map` graphs both. Keeps the 6 hand-written specs (and every
 /// other consumer of [`LangSpec`]) byte-for-byte untouched: hand-written wins on a
@@ -129,6 +139,41 @@ pub fn any_spec_for_language(name: &str) -> Option<AnySpec> {
         .map(AnySpec::Tags)
 }
 
+// C/C++ tags.scm capture definitions only (no `@reference.call`), unlike every
+// other tags-language. Hand-authored supplements below add call edges, mirroring
+// the bash supplement pattern (a language with no usable tags.scm gets its query
+// hand-written entirely; here the grammar's own tags.scm is kept for defs and only
+// the call patterns are supplied).
+const C_CALL_SUPPLEMENT: &str = r#"
+    (call_expression function: (identifier) @name) @reference.call
+"#;
+
+// C++ additionally covers qualified (`Foo::bar()`) and field-access
+// (`obj.method()` / `ptr->method()`) callees, which C has no grammar for.
+const CPP_CALL_SUPPLEMENT: &str = r#"
+    (call_expression function: (identifier) @name) @reference.call
+    (call_expression function: (field_expression field: (field_identifier) @name)) @reference.call
+    (call_expression function: (qualified_identifier name: (identifier) @name)) @reference.call
+"#;
+
+/// C's `tags.scm` plus [`C_CALL_SUPPLEMENT`], compiled once and cached to `'static`
+/// (same `OnceLock` pattern as [`cached_tags_query`], which caches the compiled
+/// `Query`; this caches the source string the vec literal below needs).
+fn c_tags_query() -> &'static str {
+    static QUERY: OnceLock<String> = OnceLock::new();
+    QUERY
+        .get_or_init(|| format!("{}\n{}", tree_sitter_c::TAGS_QUERY, C_CALL_SUPPLEMENT))
+        .as_str()
+}
+
+/// As [`c_tags_query`] but for C++'s `tags.scm` plus [`CPP_CALL_SUPPLEMENT`].
+fn cpp_tags_query() -> &'static str {
+    static QUERY: OnceLock<String> = OnceLock::new();
+    QUERY
+        .get_or_init(|| format!("{}\n{}", tree_sitter_cpp::TAGS_QUERY, CPP_CALL_SUPPLEMENT))
+        .as_str()
+}
+
 /// The tags-based language registry. New languages are added here (plus a
 /// `Cargo.toml` dependency and a fixture test). Grouped by wave so merges of
 /// per-group work touch disjoint regions of this vec.
@@ -139,14 +184,14 @@ pub fn tags_registry() -> Vec<TagsLangSpec> {
             name: "c",
             extensions: &["c"],
             language: || tree_sitter_c::LANGUAGE.into(),
-            tags_query: tree_sitter_c::TAGS_QUERY,
+            tags_query: c_tags_query(),
             imports_query: None,
         },
         TagsLangSpec {
             name: "cpp",
             extensions: &["cpp", "cc", "cxx", "hpp", "hh", "h"],
             language: || tree_sitter_cpp::LANGUAGE.into(),
-            tags_query: tree_sitter_cpp::TAGS_QUERY,
+            tags_query: cpp_tags_query(),
             imports_query: None,
         },
         TagsLangSpec {
@@ -621,26 +666,33 @@ fn helper() {}
 
     #[test]
     fn c_extraction() {
-        // C tags.scm captures definitions only (no @reference.call); calls stay empty.
+        // C tags.scm captures definitions only; the C_CALL_SUPPLEMENT query adds the
+        // plain call_expression edge.
         let fx = extracts(
             "c",
             "int helper(int x) { return x + 1; }\nint add(int a, int b) { return helper(a) + b; }\n",
         );
         assert!(has_def(&fx, "add") && has_def(&fx, "helper"), "defs: {:?}", def_names(&fx));
+        assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
     }
 
     #[test]
     fn cpp_extraction() {
-        // C++ tags.scm captures definitions only (no references); calls stay empty.
+        // C++ tags.scm captures definitions only; the CPP_CALL_SUPPLEMENT query adds
+        // plain, qualified (ns::helper()), and field-access (w.render()) call edges.
         let fx = extracts(
             "cpp",
-            "int helper() { return 1; }\nclass Widget { public: int render() { return helper(); } };\n",
+            "namespace ns { int helper() { return 1; } }\n\
+             class Widget { public: int render() { return ns::helper(); } };\n\
+             int use_field(Widget w) { return w.render(); }\n",
         );
         assert!(
             has_def(&fx, "helper") && has_def(&fx, "render") && has_def(&fx, "Widget"),
             "defs: {:?}",
             def_names(&fx)
         );
+        assert!(has_call(&fx, "helper"), "qualified call ns::helper(): {:?}", fx.calls);
+        assert!(has_call(&fx, "render"), "field call w.render(): {:?}", fx.calls);
     }
 
     #[test]

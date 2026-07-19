@@ -7,6 +7,42 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Provenance of a symbol: production code, test code, or bench/fixture code.
+///
+/// Test (`#[cfg(test)]` Rust spans) and bench (files under `benchmarks/`,
+/// `tests/`, `fixtures/`) nodes are structurally real but should not compete with
+/// production code for [`Graph::importance`] — otherwise overview/ranking surfaces
+/// self-referencing fixtures instead of the code a reader cares about. They are
+/// discounted, not excluded.
+///
+/// `Prod` is the default and is skipped during serialization (see [`Node::origin`]),
+/// so a graph made entirely of production code serializes byte-for-byte as before
+/// this field existed, and an OLD `graph.json` (no `origin` key) deserializes to
+/// `Prod`. `origin` is deliberately NOT part of [`Node::make_id`]: it is metadata,
+/// so adding it never changes a node's id or perturbs dedup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    #[default]
+    Prod,
+    Test,
+    Bench,
+}
+
+impl Origin {
+    /// Whether this is the default (`Prod`) origin. Used as the `skip_serializing_if`
+    /// predicate so only test/bench nodes carry an explicit `origin` in the JSON.
+    pub fn is_prod(&self) -> bool {
+        matches!(self, Origin::Prod)
+    }
+}
+
+/// Kill-switch (reroute-rail convention): `LENS_ORIGIN_DISCOUNT` default-ON; `=0`
+/// disables the test/bench importance discount, restoring the pre-T7 ranking.
+fn origin_discount_on() -> bool {
+    std::env::var("LENS_ORIGIN_DISCOUNT").map_or(true, |v| v.trim() != "0")
+}
+
 /// A symbol in the codebase: a function, method, type, module, or import target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Node {
@@ -19,6 +55,10 @@ pub struct Node {
     /// 1-based line of the definition.
     pub line: usize,
     pub language: String,
+    /// Provenance (prod / test / bench). Skipped in JSON when `Prod` (the default),
+    /// so it is fully additive: old readers ignore it and old graphs load as `Prod`.
+    #[serde(default, skip_serializing_if = "Origin::is_prod")]
+    pub origin: Origin,
 }
 
 impl Node {
@@ -36,6 +76,7 @@ impl Node {
             file: file.to_string(),
             line,
             language: language.to_string(),
+            origin: Origin::Prod,
         }
     }
 }
@@ -47,6 +88,24 @@ pub struct Edge {
     pub to: String,
     /// calls | imports | contains | references
     pub kind: String,
+}
+
+/// Traversal direction over the (directed) edge set.
+///
+/// Edges point `from -> to` (e.g. a `calls` edge goes caller -> callee). A
+/// directed traversal follows a single sense of every edge:
+/// - [`Direction::Callees`] walks forward (`from -> to`): fan-out, "what does X reach".
+/// - [`Direction::Callers`] walks backward (`to -> from`): fan-in, "who reaches X".
+/// - [`Direction::Both`] walks either sense (undirected), preserving the legacy
+///   behavior of [`Graph::neighbors`] byte-for-byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Fan-in: reverse edges only (`to -> from`).
+    Callers,
+    /// Fan-out: forward edges only (`from -> to`).
+    Callees,
+    /// Undirected: both senses of every edge.
+    Both,
 }
 
 /// The whole structural graph. Serializes to `.lens/graph.json`.
@@ -141,10 +200,21 @@ impl Graph {
         if n == 0 {
             return HashMap::new();
         }
-        let base = 1.0 / n as f64;
-        let teleport: HashMap<&str, f64> =
-            self.nodes.iter().map(|nd| (nd.id.as_str(), base)).collect();
-        self.pagerank(&teleport)
+        let discount = origin_discount_on();
+        // Restart/teleport weight per node: prod = 1.0, test/bench = 0.1 when the
+        // discount is on (`LENS_ORIGIN_DISCOUNT`). Demoting the restart mass — not
+        // only the incoming edge weight in `pagerank` — is what keeps self-contained
+        // fixtures out of the top ranks: they score on teleport + dangling mass, not
+        // on inbound references, so an edge-weight discount alone barely moves them.
+        // Normalized to sum ~1 over all nodes, matching the uniform base it replaces.
+        let w = |nd: &Node| if discount && !nd.origin.is_prod() { 0.1 } else { 1.0 };
+        let total: f64 = self.nodes.iter().map(w).sum();
+        let teleport: HashMap<&str, f64> = self
+            .nodes
+            .iter()
+            .map(|nd| (nd.id.as_str(), w(nd) / total))
+            .collect();
+        self.pagerank(&teleport, discount)
     }
 
     /// Query-seeded personalized PageRank (L36): identical weighted reference
@@ -180,7 +250,7 @@ impl Graph {
                 (nd.id.as_str(), p)
             })
             .collect();
-        self.pagerank(&teleport)
+        self.pagerank(&teleport, origin_discount_on())
     }
 
     /// Weighted PageRank power-iteration over the reference (calls + imports)
@@ -190,9 +260,16 @@ impl Graph {
     /// Aider-style edge weighting (RepoGraph / aider repomap): a reference to a
     /// symbol used across more than five files, or to a private (`_`-prefixed)
     /// symbol, counts for 0.1x — too-common and internal symbols are less useful
-    /// to surface. Deterministic: same graph + same teleport -> same scores
-    /// (iterates the node/edge Vecs in order, never a HashMap).
-    fn pagerank(&self, teleport: &HashMap<&str, f64>) -> HashMap<String, f64> {
+    /// to surface. When `discount_nonprod` is set (the `LENS_ORIGIN_DISCOUNT`
+    /// default), a reference to a test/bench-origin symbol is discounted 0.1x by the
+    /// same mechanism, so fixtures and `#[cfg(test)]` code stop out-ranking real
+    /// code. Deterministic: same graph + same teleport -> same scores (iterates the
+    /// node/edge Vecs in order, never a HashMap).
+    fn pagerank(
+        &self,
+        teleport: &HashMap<&str, f64>,
+        discount_nonprod: bool,
+    ) -> HashMap<String, f64> {
         let n = self.nodes.len();
         if n == 0 {
             return HashMap::new();
@@ -208,6 +285,8 @@ impl Graph {
             .iter()
             .map(|nd| (nd.id.as_str(), nd.name.as_str()))
             .collect();
+        let node_origin: HashMap<&str, Origin> =
+            self.nodes.iter().map(|nd| (nd.id.as_str(), nd.origin)).collect();
         // Distinct referencing files per target (the aider "used across N files" signal).
         let mut target_files: HashMap<&str, HashSet<&str>> = HashMap::new();
         for e in &self.edges {
@@ -223,6 +302,9 @@ impl Graph {
                 w *= 0.1;
             }
             if node_name.get(to).map(|nm| nm.starts_with('_')).unwrap_or(false) {
+                w *= 0.1;
+            }
+            if discount_nonprod && node_origin.get(to).map(|o| !o.is_prod()).unwrap_or(false) {
                 w *= 0.1;
             }
             w
@@ -283,24 +365,78 @@ impl Graph {
             .collect()
     }
 
-    /// Undirected adjacency over edges whose kind passes `keep`.
-    pub(crate) fn adjacency(&self, keep: impl Fn(&str) -> bool) -> HashMap<String, Vec<String>> {
+    /// Adjacency over edges whose kind passes `keep`, in the given `dir`.
+    /// Shared core for [`adjacency`](Self::adjacency) (undirected) and
+    /// [`adjacency_directed`](Self::adjacency_directed) (forward only). Edges are
+    /// iterated in Vec order so neighbor lists are deterministic; `Both` appends
+    /// `from -> to` then `to -> from` per edge, matching the historical layout.
+    fn adjacency_dir(
+        &self,
+        dir: Direction,
+        keep: impl Fn(&str) -> bool,
+    ) -> HashMap<String, Vec<String>> {
         let mut adj: HashMap<String, Vec<String>> = HashMap::new();
         for e in &self.edges {
             if !keep(&e.kind) {
                 continue;
             }
-            adj.entry(e.from.clone()).or_default().push(e.to.clone());
-            adj.entry(e.to.clone()).or_default().push(e.from.clone());
+            match dir {
+                Direction::Callees => {
+                    adj.entry(e.from.clone()).or_default().push(e.to.clone());
+                }
+                Direction::Callers => {
+                    adj.entry(e.to.clone()).or_default().push(e.from.clone());
+                }
+                Direction::Both => {
+                    adj.entry(e.from.clone()).or_default().push(e.to.clone());
+                    adj.entry(e.to.clone()).or_default().push(e.from.clone());
+                }
+            }
         }
         adj
     }
 
+    /// Undirected adjacency over edges whose kind passes `keep`.
+    pub(crate) fn adjacency(&self, keep: impl Fn(&str) -> bool) -> HashMap<String, Vec<String>> {
+        self.adjacency_dir(Direction::Both, keep)
+    }
+
+    /// Directed adjacency over edges whose kind passes `keep`: `from -> to` only,
+    /// no reverse edges added. This is the "reaches" relation used by directed
+    /// [`shortest_path`](Self::shortest_path) and [`Direction::Callees`] neighbor walks.
+    pub(crate) fn adjacency_directed(
+        &self,
+        keep: impl Fn(&str) -> bool,
+    ) -> HashMap<String, Vec<String>> {
+        self.adjacency_dir(Direction::Callees, keep)
+    }
+
     /// Subgraph within `depth` hops of `start` (undirected BFS). Returns the
     /// reachable nodes and the edges among them.
+    ///
+    /// Preserved for backward compatibility: identical to
+    /// [`neighbors_directed`](Self::neighbors_directed) with [`Direction::Both`].
     pub fn neighbors(&self, start: &str, depth: usize) -> (Vec<Node>, Vec<Edge>) {
+        self.neighbors_directed(start, depth, Direction::Both)
+    }
+
+    /// Subgraph within `depth` hops of `start`, walking edges in `dir`:
+    /// - [`Direction::Callees`]: transitive fan-out (forward edges only).
+    /// - [`Direction::Callers`]: transitive fan-in (reverse edges only).
+    /// - [`Direction::Both`]: undirected — byte-for-byte the legacy [`neighbors`](Self::neighbors).
+    ///
+    /// Returned [`Edge`] values keep their real `from`/`to`, so a consumer can
+    /// verify each hop's direction itself. The returned edge set is the subgraph
+    /// induced on the reachable node set (every edge with both endpoints visited),
+    /// regardless of `dir`.
+    pub fn neighbors_directed(
+        &self,
+        start: &str,
+        depth: usize,
+        dir: Direction,
+    ) -> (Vec<Node>, Vec<Edge>) {
         // Neighbors include every relationship, hierarchy included.
-        let adj = self.adjacency(|_| true);
+        let adj = self.adjacency_dir(dir, |_| true);
         let mut visited: HashSet<String> = HashSet::new();
         visited.insert(start.to_string());
         let mut frontier = vec![start.to_string()];
@@ -335,15 +471,26 @@ impl Graph {
         (nodes, edges)
     }
 
-    /// Shortest path (node ids) between two nodes via undirected BFS.
-    /// Returns `None` if disconnected.
+    /// Shortest path (node ids) from `from` to `to` via BFS. Returns `None` if
+    /// `to` is not reachable from `from`.
+    ///
+    /// Directed by default (`from -> to` follows forward `calls`/`imports` edges),
+    /// so this answers "does `from` reach `to`" rather than "are they connected in
+    /// either direction". Kill-switch `LENS_DIRECTED_PATH=0` restores the legacy
+    /// undirected traversal exactly. `contains` (hierarchy) edges are excluded in
+    /// both modes, so two symbols in the same file aren't trivially "connected".
     pub fn shortest_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
         if from == to {
             return Some(vec![from.to_string()]);
         }
-        // Reachability follows semantic flow (calls/imports), not containment,
-        // so two symbols in the same file aren't trivially "connected".
-        let adj = self.adjacency(|kind| kind != "contains");
+        // Reachability follows semantic flow (calls/imports), not containment.
+        let keep = |kind: &str| kind != "contains";
+        let directed = std::env::var("LENS_DIRECTED_PATH").map_or(true, |v| v.trim() != "0");
+        let adj = if directed {
+            self.adjacency_directed(keep)
+        } else {
+            self.adjacency(keep)
+        };
         let mut prev: HashMap<String, String> = HashMap::new();
         let mut visited: HashSet<String> = HashSet::new();
         visited.insert(from.to_string());
@@ -499,6 +646,26 @@ mod tests {
     }
 
     #[test]
+    fn origin_is_additive_and_skips_default() {
+        // Old graph.json has no `origin` key: it must deserialize to `Prod`.
+        let old = r#"{"id":"x","name":"n","kind":"function","file":"f.rs","line":1,"language":"rust"}"#;
+        let n: Node = serde_json::from_str(old).unwrap();
+        assert_eq!(n.origin, Origin::Prod);
+
+        // A prod node must serialize WITHOUT an `origin` key (byte-identity for
+        // pre-existing all-prod graphs).
+        let js = serde_json::to_string(&n).unwrap();
+        assert!(!js.contains("origin"), "prod origin must be skipped: {js}");
+
+        // A test node serializes the field (lowercase) and round-trips.
+        let mut t = Node::new("f.rs", "function", "n", 1, "rust");
+        t.origin = Origin::Test;
+        let tjs = serde_json::to_string(&t).unwrap();
+        assert!(tjs.contains(r#""origin":"test""#), "{tjs}");
+        assert_eq!(serde_json::from_str::<Node>(&tjs).unwrap().origin, Origin::Test);
+    }
+
+    #[test]
     fn dedup_correctness() {
         let mut g = Graph::new();
         let id = g.add_node(Node::new("f.rs", "function", "a", 1, "rust"));
@@ -560,5 +727,64 @@ mod tests {
         assert!(ids.contains(&a.as_str()));
         assert!(ids.contains(&b.as_str()));
         assert_eq!(nodes.len(), 2);
+    }
+
+    /// Fixture: a -> b -> c (calls chain) plus an unrelated d -> b.
+    fn directed_fixture() -> Graph {
+        let mut g = sample(); // a -> b -> c, d isolated
+        let b = Node::make_id("f.rs", "function", "b", 5);
+        let d = Node::make_id("f.rs", "function", "d", 13);
+        g.add_edge(&d, &b, "calls");
+        g
+    }
+
+    #[test]
+    fn shortest_path_is_directed_by_default() {
+        // Directed default-ON: the forward chain reaches, the reverse does not.
+        // This is the fix for the false "connected" answer (bench 0061): a path
+        // query must answer "does `from` reach `to`", not "are they connected".
+        let g = directed_fixture();
+        let a = Node::make_id("f.rs", "function", "a", 1);
+        let c = Node::make_id("f.rs", "function", "c", 9);
+        assert!(g.shortest_path(&a, &c).is_some(), "forward a->c must reach");
+        assert!(
+            g.shortest_path(&c, &a).is_none(),
+            "reverse c->a must NOT reach under directed traversal"
+        );
+    }
+
+    #[test]
+    fn neighbors_direction_splits_fan_in_and_out() {
+        let g = directed_fixture();
+        let a = Node::make_id("f.rs", "function", "a", 1);
+        let b = Node::make_id("f.rs", "function", "b", 5);
+        let c = Node::make_id("f.rs", "function", "c", 9);
+        let d = Node::make_id("f.rs", "function", "d", 13);
+
+        let reached = |dir: Direction| -> HashSet<String> {
+            let (nodes, _) = g.neighbors_directed(&b, 5, dir);
+            nodes.into_iter().map(|n| n.id).filter(|id| *id != b).collect()
+        };
+        let callers = reached(Direction::Callers);
+        let callees = reached(Direction::Callees);
+        let both = reached(Direction::Both);
+
+        assert_eq!(callers, HashSet::from([a.clone(), d.clone()]), "fan-in = {{a, d}}");
+        assert_eq!(callees, HashSet::from([c.clone()]), "fan-out = {{c}}");
+        // `Both` is the undirected union of the two directed walks.
+        assert_eq!(both, HashSet::from([a, c, d]));
+        assert_eq!(both, &callers | &callees);
+    }
+
+    #[test]
+    fn neighbors_both_matches_legacy_neighbors_byte_for_byte() {
+        // The legacy `neighbors` API must be identical to the new
+        // `neighbors_directed(_, Both)` for both the node and edge Vecs.
+        let g = directed_fixture();
+        let b = Node::make_id("f.rs", "function", "b", 5);
+        let (legacy_nodes, legacy_edges) = g.neighbors(&b, 3);
+        let (dir_nodes, dir_edges) = g.neighbors_directed(&b, 3, Direction::Both);
+        assert_eq!(legacy_nodes, dir_nodes);
+        assert_eq!(legacy_edges, dir_edges);
     }
 }

@@ -632,7 +632,7 @@ impl Forge {
 
     /// Build the structural code graph for the repo.
     #[tool(
-        description = "Parse the repo with tree-sitter into a graph of symbols (functions, types, modules) and relationships (calls, imports, contains). Run once per repo; then query with lens_symbol/lens_links/lens_path — do not re-run per question."
+        description = "Parse the repo with tree-sitter into a graph of symbols (functions, types, modules) and relationships (calls, contains, and imports for a subset of languages). Import edges currently come only from the 6 hand-written languages (rust, python, javascript, typescript, go, swift); every tags-adapter language (c, cpp, csharp, java, kotlin, scala, ruby, php, lua, bash) produces calls/contains but zero import edges. Run once per repo; then query with lens_symbol/lens_links/lens_path — do not re-run per question. A path inside a nested git repo builds into THAT repo's own `.lens`; this session's lens_symbol/lens_links/lens_path will not see it (see the response note)."
     )]
     async fn lens_map(
         &self,
@@ -664,7 +664,7 @@ impl Forge {
 
     /// Find symbols by name and return their immediate connections.
     #[tool(
-        description = "Look up a declared symbol by exact name (+ optional kind); returns its location and immediate connections (callers/callees), NOT its source body (to read the code, lens_search the name). Large results are compacted with a lens_recall ref. If you know what the symbol does but not its exact name, use lens_find."
+        description = "Look up a declared symbol by name substring (case-insensitive; + optional kind); returns each match's location plus its immediate connections (calls, contains, imports, ...), NOT its source body (to read the code, lens_search the name). `limit` bounds the number of matching root symbols, not the total nodes returned — each root's neighbors come back on top of it. No match returns an empty result, not an error. An exact-name match among several candidates is reported via `resolved` (chosen node + how many others it beat). Large results are compacted with a lens_recall ref. If you know what the symbol does but not its exact name, use lens_find."
     )]
     async fn lens_symbol(
         &self,
@@ -693,7 +693,7 @@ impl Forge {
 
     /// Find symbols by natural-language meaning, ranked lexically (no embeddings).
     #[tool(
-        description = "Find candidate symbols by natural-language meaning, ranked lexically over symbol names (no embeddings; exact > prefix > substring, plus a multi-word bonus): returns a ranked shortlist of symbols with their connections to disambiguate which one you mean, NOT the code. Know the exact name? use lens_symbol. Want actual code, text, or usages? use lens_search."
+        description = "Find candidate symbols by natural-language meaning, ranked lexically over symbol names (no embeddings; exact > prefix > substring-at-a-word-boundary, plus a multi-word bonus): returns a ranked shortlist of symbols with their connections (calls, contains, imports, ...) to disambiguate which one you mean, NOT the code. Optional `kind` filters candidates before ranking. `limit` bounds the number of matching root symbols, not the total nodes returned. No match returns an empty result, not an error. Know the exact name? use lens_symbol. Want actual code, text, or usages? use lens_search."
     )]
     async fn lens_find(
         &self,
@@ -710,7 +710,7 @@ impl Forge {
                 return Err(e.into());
             }
         };
-        let view = gquery::find(&graph, &req.query, req.limit);
+        let view = gquery::find_kind(&graph, &req.query, req.limit, req.kind.as_deref());
         let raw_payload = view_payload_len(&view);
         let compacted = self.maybe_compact(view);
         self.record_graph_op(op, raw_payload, &compacted);
@@ -719,7 +719,7 @@ impl Forge {
 
     /// Return the local subgraph around a node.
     #[tool(
-        description = "Return the local subgraph within `depth` hops of a node id (from lens_symbol results). For a specific A-to-B connection use lens_path instead; this returns the whole neighborhood around one node."
+        description = "Return the local subgraph within `depth` hops of a node id or symbol name (from lens_symbol results, or a name resolved the same way lens_path resolves `from`/`to`). For a specific A-to-B connection use lens_path instead; this returns the whole neighborhood around one node. An id/name that resolves to nothing is an explicit error, never an empty graph."
     )]
     async fn lens_links(
         &self,
@@ -727,7 +727,7 @@ impl Forge {
     ) -> Result<Json<GraphView>, ToolFailure> {
         let op = self.ops.start(
             "lens_links",
-            serde_json::json!({ "node_id": req.node_id, "depth": req.depth }),
+            serde_json::json!({ "node_id": req.node_id, "depth": req.depth, "direction": req.direction }),
         );
         let graph = match self.load_graph() {
             Ok(g) => g,
@@ -736,7 +736,19 @@ impl Forge {
                 return Err(e.into());
             }
         };
-        let view = gquery::neighbors(&graph, &req.node_id, req.depth);
+        // Resolve a symbol NAME the same way `lens_path` resolves `from`/`to`,
+        // before falling back to treating `node_id` as a raw graph id. Neither
+        // resolving is an explicit error, never a silent empty graph (the
+        // measured defect: an unknown raw id used to yield an empty subgraph).
+        let Some(id) = gquery::resolve(&graph, &req.node_id) else {
+            let msg = format!(
+                "no node found for '{}': not a known node id and no symbol matches that name",
+                req.node_id
+            );
+            op.finish(0, 0, None, "error", msg.clone(), None);
+            return Err(ToolFailure::plain(msg));
+        };
+        let view = gquery::neighbors_dir(&graph, &id, req.depth, req.direction.as_deref());
         let raw_payload = view_payload_len(&view);
         let compacted = self.maybe_compact(view);
         self.record_graph_op(op, raw_payload, &compacted);
@@ -745,7 +757,7 @@ impl Forge {
 
     /// Shortest path between two symbols.
     #[tool(
-        description = "Find the shortest path between two symbols (by node id or name) via BFS over graph edges. For a symbol's whole neighborhood rather than one target, use lens_links instead."
+        description = "Find the shortest path between two symbols (by node id or name) via BFS over directed calls/imports edges. No path (or an unresolvable from/to) returns `found: false`, not an error. An ambiguous from/to name is reported via `resolved` (chosen node + how many others it beat). For a symbol's whole neighborhood rather than one target, use lens_links instead."
     )]
     async fn lens_path(
         &self,
@@ -802,7 +814,7 @@ impl Forge {
 
     /// Structural (tree-sitter) search: run an AST query, get path:line matches.
     #[tool(
-        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns path:line matches. For plain-text/idea search use lens_search; this is for syntax-shape matches."
+        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns one deduplicated path:line match per distinct call/pattern site (a call matched more than once internally, e.g. once per extra argument, still surfaces once). `limit` caps the underlying scan of raw captures before dedup, so `truncated: true` can still return fewer than `limit` matches. No match returns an empty result, not an error. For plain-text/idea search use lens_search; this is for syntax-shape matches."
     )]
     async fn lens_grep_ast(
         &self,
@@ -859,7 +871,19 @@ impl Forge {
             only_capture,
         ) {
             Ok(matches) => {
+                // `truncated` reflects the raw scan hitting `limit`, before dedup.
                 let truncated = matches.len() >= req.limit;
+                // Unanchored sibling matching (e.g. one alternative per call
+                // argument) can capture the same call/pattern site more than
+                // once. AstMatch carries no byte range, so dedupe on
+                // (path, line, text) — for a real duplicate capture (the same
+                // node matched twice) all three are identical.
+                let mut seen: std::collections::HashSet<(String, usize, String)> =
+                    std::collections::HashSet::new();
+                let matches: Vec<AstMatch> = matches
+                    .into_iter()
+                    .filter(|m| seen.insert((m.path.clone(), m.line, m.text.clone())))
+                    .collect();
                 let resp = GrepAstResponse { matches, truncated };
                 let returned = obs::json_len(&resp);
                 let note = format!("{} matches", resp.matches.len());
@@ -1305,7 +1329,7 @@ impl Forge {
         root: &Path,
         langs: Option<&[String]>,
     ) -> Result<Json<DiscoverResponse>, ToolFailure> {
-        let outcome = match discovery::discover(root, langs) {
+        let mut outcome = match discovery::discover(root, langs) {
             Ok(o) => o,
             Err(e) => {
                 op.finish(0, 0, None, "error", e.to_string(), None);
@@ -1317,6 +1341,13 @@ impl Forge {
             op.finish(0, 0, None, "error", e.to_string(), None);
             return Err(ToolFailure::recoverable(e.to_string()));
         }
+        // Federation is out of scope: this graph lives only in the nested repo's
+        // own `.lens`, so lens_symbol/lens_links/lens_path in THIS session (whose
+        // graph_cache and graph.json are the parent's) will never see it.
+        outcome.response.warnings.push(format!(
+            "built into {}/.lens; lens_symbol/lens_links/lens_path in THIS session will not see it",
+            nested_root.display()
+        ));
         let returned = obs::json_len(&outcome.response);
         let note = format!(
             "{} nodes, {} edges, {} files parsed (nested repo {})",
@@ -1756,6 +1787,8 @@ impl Forge {
             compact: Some(compact),
             truncated: true,
             retrieve_ref: reference,
+            resolved: view.resolved,
+            total_matches: view.total_matches,
         }
     }
 
@@ -1993,18 +2026,77 @@ mod tests {
         );
     }
 
-    /// End-to-end pattern path: `$X()` compiles, runs through the grep engine,
-    /// and surfaces only the `@match` capture (one hit per call site).
+    /// End-to-end pattern path: `helper()` (a concrete call, pinning the
+    /// `helper` token per the pattern.rs guard) compiles, runs through the grep
+    /// engine, and surfaces only the `@match` capture (one hit per call site).
     #[tokio::test]
     async fn grep_ast_pattern_path_matches_end_to_end() {
         let (f, _dir) = forge_with_source();
         let resp = f
-            .lens_grep_ast(Parameters(grep_ast_req(None, Some("$F()"), Some("rust"))))
+            .lens_grep_ast(Parameters(grep_ast_req(None, Some("helper()"), Some("rust"))))
             .await
             .unwrap();
-        // lib.rs has exactly one zero-argument call: `helper()`.
+        // lib.rs has exactly one call site: `helper()`.
         assert_eq!(resp.0.matches.len(), 1, "{:?}", resp.0.matches);
         assert!(resp.0.matches[0].text.contains("helper"), "{:?}", resp.0.matches);
+    }
+
+    /// T8: a single-metavar-arg pattern against a real multi-arg call is exactly
+    /// the shape that triggered unanchored-sibling duplication before the dedupe
+    /// fix: tree-sitter matches the pattern's one arg position against each of
+    /// the 3 real arguments in turn, producing 3 raw `@match` captures of the
+    /// SAME call node. Dedup on (path, line, text) must collapse them to 1.
+    #[tokio::test]
+    async fn grep_ast_pattern_dedupes_unanchored_sibling_matches() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("call.py"), "x = object()\nx.append(1, 2, 3)\n").unwrap();
+        let data = dir.path().join(".lens");
+        let f = Forge::with_paths(dir.path().to_path_buf(), data, 8192).unwrap();
+        let resp = f
+            .lens_grep_ast(Parameters(grep_ast_req(
+                None,
+                Some("x.append($A)"),
+                Some("python"),
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.0.matches.len(), 1, "{:?}", resp.0.matches);
+    }
+
+    /// T8: `lens_links` resolves a symbol NAME the same way `lens_path` resolves
+    /// `from`/`to`, not just a raw node id; an unresolvable input is an explicit
+    /// error naming it, never a silent empty graph.
+    #[tokio::test]
+    async fn lens_links_resolves_name_and_errors_on_unresolvable_input() {
+        let (f, _dir) = forge_with_source();
+        let ok = f
+            .lens_links(Parameters(GraphNeighborsRequest {
+                node_id: "helper".into(),
+                depth: 1,
+                direction: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !ok.0.nodes.is_empty(),
+            "name-form lookup must return a non-empty neighborhood"
+        );
+
+        let Err(err) = f
+            .lens_links(Parameters(GraphNeighborsRequest {
+                node_id: "totally_unresolvable_xyz_123".into(),
+                depth: 1,
+                direction: None,
+            }))
+            .await
+        else {
+            panic!("an unresolvable node_id must error, not return an empty graph")
+        };
+        assert!(
+            err.message.contains("totally_unresolvable_xyz_123"),
+            "{}",
+            err.message
+        );
     }
 
     /// Piped `stdin` never enters context, so `lens_run` must credit it (floor-capped)
@@ -2739,6 +2831,8 @@ mod tests {
             compact: None,
             truncated: false,
             retrieve_ref: None,
+            resolved: vec![],
+            total_matches: None,
         };
         let out = f.maybe_compact(view);
         assert!(!out.truncated);
@@ -2767,6 +2861,8 @@ mod tests {
             compact: None,
             truncated: false,
             retrieve_ref: None,
+            resolved: vec![],
+            total_matches: None,
         };
         let out = f.maybe_compact(view);
         assert!(out.truncated);

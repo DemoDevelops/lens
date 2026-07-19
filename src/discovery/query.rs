@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use super::graph::{Edge, Graph, Node};
-use crate::tools::{EdgeView, GraphView, NodeView, PathResponse};
+use super::graph::{Direction, Edge, Graph, Node};
+use crate::tools::{EdgeView, GraphView, NodeView, PathResponse, ResolvedNote};
 
 fn node_view(n: &Node) -> NodeView {
     NodeView {
@@ -51,6 +51,7 @@ pub fn query(
             })
             .then_with(|| a.id.cmp(&b.id))
     });
+    let total = matches.len();
     let mut node_ids: Vec<String> = Vec::new();
     for m in matches.into_iter().take(limit) {
         node_ids.push(m.id.clone());
@@ -60,7 +61,26 @@ pub fn query(
             node_ids.push(other.clone());
         }
     }
-    subgraph(graph, &node_ids)
+    let mut view = subgraph(graph, &node_ids);
+    view.total_matches = (total > limit).then_some(total);
+    view.resolved = ambiguity_note(graph, name);
+    view
+}
+
+/// The ambiguity note [`query`]/[`find_ranked_filtered`] attach to their
+/// [`GraphView`]: reuses [`resolve_note`]'s exact-name ranking (the same
+/// machinery `path` surfaces via `PathResponse::resolved`) so a query that
+/// exactly names more than one symbol reports which one won and how many it
+/// beat. Empty when unambiguous (or when nothing matches by exact name).
+fn ambiguity_note(graph: &Graph, token: &str) -> Vec<ResolvedNote> {
+    match resolve_note(graph, token) {
+        Some((chosen, other_candidates)) if other_candidates > 0 => vec![ResolvedNote {
+            query: token.to_string(),
+            chosen,
+            other_candidates,
+        }],
+        _ => Vec::new(),
+    }
 }
 
 /// True when a node's (repo-relative) `file` corresponds to one of the session's
@@ -102,6 +122,14 @@ pub fn find(graph: &Graph, query: &str, limit: usize) -> GraphView {
     find_ranked(graph, query, limit, FindRank::Blend)
 }
 
+/// Like [`find`] but restricting the lexical candidate set to nodes of `kind`
+/// (function | struct | class | method | ...) before ranking, so a wrong-kind
+/// same-name symbol can't survive the budget. `None` = no filter (identical to
+/// [`find`]). The `kind`-threaded seam consumed by `lens_find`.
+pub fn find_kind(graph: &Graph, query: &str, limit: usize, kind: Option<&str>) -> GraphView {
+    find_ranked_filtered(graph, query, limit, kind, FindRank::Blend)
+}
+
 /// How [`find_ranked`] orders the lexical candidate set before the `limit` cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindRank {
@@ -123,14 +151,29 @@ pub enum FindRank {
 /// rankings (every symbol with a lexical hit); only the order — and thus which
 /// survive the `limit` cut and contribute their neighbors — changes.
 pub fn find_ranked(graph: &Graph, query: &str, limit: usize, rank: FindRank) -> GraphView {
+    find_ranked_filtered(graph, query, limit, None, rank)
+}
+
+/// [`find_ranked`] with an optional `kind` filter applied to the candidate set
+/// before scoring/ranking. Split out so `lens_find`'s kind filter and the
+/// existing rank-only entry point share one body. `kind == None` is identical to
+/// [`find_ranked`].
+fn find_ranked_filtered(
+    graph: &Graph,
+    query: &str,
+    limit: usize,
+    kind: Option<&str>,
+    rank: FindRank,
+) -> GraphView {
     let tokens = tokenize(query);
     if tokens.is_empty() {
         return subgraph(graph, &[]);
     }
-    // Score every node; keep only those with a hit.
+    // Score every node of the requested kind; keep only those with a hit.
     let mut scored: Vec<(u32, &str)> = graph
         .nodes
         .iter()
+        .filter(|n| kind.map(|k| n.kind == k).unwrap_or(true))
         .filter_map(|n| {
             let s = score_name(&n.name, &tokens);
             (s > 0).then_some((s, n.id.as_str()))
@@ -177,6 +220,7 @@ pub fn find_ranked(graph: &Graph, query: &str, limit: usize, rank: FindRank) -> 
         }
     }
 
+    let total = scored.len();
     let mut node_ids: Vec<String> = Vec::new();
     for (_, id) in scored.into_iter().take(limit) {
         node_ids.push(id.to_string());
@@ -185,7 +229,10 @@ pub fn find_ranked(graph: &Graph, query: &str, limit: usize, rank: FindRank) -> 
             node_ids.push(other.clone());
         }
     }
-    subgraph(graph, &node_ids)
+    let mut view = subgraph(graph, &node_ids);
+    view.total_matches = (total > limit).then_some(total);
+    view.resolved = ambiguity_note(graph, query);
+    view
 }
 
 /// Compare two scored candidates by descending personalized-PR weight (the
@@ -226,8 +273,16 @@ fn tokenize(s: &str) -> Vec<String> {
 }
 
 /// Lexical score of a symbol `name` against query `tokens`: exact (3) > prefix (2) >
-/// substring (1) per token, summed over distinct hitting tokens, plus a bonus of
-/// 2 per hit beyond the first so multi-token matches outrank single-token ones.
+/// sub-token-boundary (1) per token, summed over distinct hitting tokens, plus a
+/// bonus of 2 per hit beyond the first so multi-token matches outrank single-token
+/// ones.
+///
+/// The tier-1 hit is boundary-anchored, not a raw substring: `name` is split on
+/// `_` and case transitions ([`tokenize`]), and a query token scores 1 only when
+/// it is the PREFIX of one of those sub-tokens (i.e. it lands on a `_`/camelCase
+/// boundary). So `"get"` matches `get_config`/`target_getter` but no longer
+/// matches `Widget` (mid-token) or `CONTROL_BUDGET` (neither `control` nor
+/// `budget` starts with `get`), the measured false-positive.
 fn score_name(name: &str, tokens: &[String]) -> u32 {
     let lname = name.to_ascii_lowercase();
     let name_tokens = tokenize(name);
@@ -238,7 +293,7 @@ fn score_name(name: &str, tokens: &[String]) -> u32 {
             3
         } else if lname.starts_with(t.as_str()) {
             2
-        } else if lname.contains(t.as_str()) {
+        } else if name_tokens.iter().any(|nt| nt.starts_with(t.as_str())) {
             1
         } else {
             0
@@ -254,28 +309,61 @@ fn score_name(name: &str, tokens: &[String]) -> u32 {
     total
 }
 
-/// Local subgraph within `depth` hops of `node_id`.
+/// Local subgraph within `depth` hops of `node_id` (undirected: every relation,
+/// both senses). Equivalent to [`neighbors_dir`] with `"both"`.
 pub fn neighbors(graph: &Graph, node_id: &str, depth: usize) -> GraphView {
-    let (nodes, edges) = graph.neighbors(node_id, depth);
+    neighbors_dir(graph, node_id, depth, None)
+}
+
+/// Local subgraph within `depth` hops of `node_id`, walking edges in `dir`:
+/// `"callers"` (fan-in, reverse edges), `"callees"` (fan-out, forward edges), or
+/// `"both"` / unknown / `None` (undirected, byte-for-byte the legacy
+/// [`neighbors`]). Threads T2's [`Direction`] into `lens_links`.
+pub fn neighbors_dir(graph: &Graph, node_id: &str, depth: usize, dir: Option<&str>) -> GraphView {
+    let direction = match dir {
+        Some("callers") => Direction::Callers,
+        Some("callees") => Direction::Callees,
+        _ => Direction::Both,
+    };
+    let (nodes, edges) = graph.neighbors_directed(node_id, depth, direction);
     GraphView {
         nodes: nodes.iter().map(node_view).collect(),
         edges: edges.iter().map(edge_view).collect(),
         compact: None,
         truncated: false,
         retrieve_ref: None,
+        resolved: Vec::new(),
+        total_matches: None,
     }
 }
 
-/// Shortest path between two symbols (by id or name).
+/// Shortest path between two symbols (by id or name). Carries per-hop edge kinds
+/// (`edges`) and, when a `from`/`to` name was ambiguous, resolution notes naming
+/// the chosen node and how many same-name candidates it beat (`resolved`).
 pub fn path(graph: &Graph, from: &str, to: &str) -> PathResponse {
-    let from_id = resolve(graph, from);
-    let to_id = resolve(graph, to);
-    let (from_id, to_id) = match (from_id, to_id) {
-        (Some(a), Some(b)) => (a, b),
+    let from_r = resolve_note(graph, from);
+    let to_r = resolve_note(graph, to);
+    // Surface ambiguity: a note per end that had >1 exact-name candidate.
+    let mut resolved: Vec<ResolvedNote> = Vec::new();
+    for (token, r) in [(from, &from_r), (to, &to_r)] {
+        if let Some((id, others)) = r {
+            if *others > 0 {
+                resolved.push(ResolvedNote {
+                    query: token.to_string(),
+                    chosen: id.clone(),
+                    other_candidates: *others,
+                });
+            }
+        }
+    }
+    let (from_id, to_id) = match (&from_r, &to_r) {
+        (Some((a, _)), Some((b, _))) => (a.clone(), b.clone()),
         _ => {
             return PathResponse {
                 found: false,
                 path: vec![],
+                edges: vec![],
+                resolved,
             }
         }
     };
@@ -286,37 +374,91 @@ pub fn path(graph: &Graph, from: &str, to: &str) -> PathResponse {
                 .filter_map(|id| graph.node(id))
                 .map(node_view)
                 .collect();
-            PathResponse { found: true, path }
+            let edges = path_edges(graph, &ids);
+            PathResponse {
+                found: true,
+                path,
+                edges,
+                resolved,
+            }
         }
         None => PathResponse {
             found: false,
             path: vec![],
+            edges: vec![],
+            resolved,
         },
     }
 }
 
-/// Resolve a token to a node id: exact id match first, then first name match.
-fn resolve(graph: &Graph, token: &str) -> Option<String> {
-    if graph.node(token).is_some() {
-        return Some(token.to_string());
-    }
-    graph
-        .find_by_name(token, None)
-        .into_iter()
-        .find_map(|n| {
-            if n.name == token {
-                Some(n.id.clone())
-            } else {
-                None
-            }
-        })
-        // fall back to substring match
-        .or_else(|| {
+/// Per-hop edges aligned with a node-id path: for each consecutive `(u, v)`, the
+/// connecting edge (excluding `contains`, matching [`Graph::shortest_path`]'s
+/// traversal), preferring the forward `u -> v` orientation but falling back to a
+/// reverse `v -> u` edge (undirected mode). Returned [`EdgeView`]s keep their real
+/// `from`/`to`/`kind`. Length is `ids.len().saturating_sub(1)`.
+fn path_edges(graph: &Graph, ids: &[String]) -> Vec<EdgeView> {
+    ids.windows(2)
+        .map(|w| {
+            let (u, v) = (&w[0], &w[1]);
             graph
-                .find_by_name(token, None)
-                .first()
-                .map(|n| n.id.clone())
+                .edges
+                .iter()
+                .find(|e| e.kind != "contains" && e.from == *u && e.to == *v)
+                .or_else(|| {
+                    graph
+                        .edges
+                        .iter()
+                        .find(|e| e.kind != "contains" && e.from == *v && e.to == *u)
+                })
+                .map(edge_view)
+                // Defensive: a real path hop always has a connecting edge; keep the
+                // alignment invariant if one is somehow absent.
+                .unwrap_or_else(|| EdgeView {
+                    from: u.clone(),
+                    to: v.clone(),
+                    kind: "unknown".to_string(),
+                })
         })
+        .collect()
+}
+
+/// Resolve a token (node id or symbol name) to a node id, picking the highest
+/// graph-importance candidate among same-name matches. The shared resolver for
+/// `lens_path` and (T8) `lens_links` name inputs, so both resolve identically.
+pub fn resolve(graph: &Graph, token: &str) -> Option<String> {
+    resolve_note(graph, token).map(|(id, _)| id)
+}
+
+/// Resolve `token` to a node id plus the count of OTHER exact-name candidates it
+/// beat. An exact id match wins outright (0 others). Otherwise, among exact-NAME
+/// matches, the highest graph-[`importance`](Graph::importance) node is chosen
+/// (id tie-break) — replacing the old id-hash-order pick that made
+/// `lens_path(from="main")` resolve to a `benchmarks/` fixture instead of the
+/// real entry point. Falls back to the first substring match (id order, reported
+/// unambiguous) when nothing matches by exact name.
+fn resolve_note(graph: &Graph, token: &str) -> Option<(String, usize)> {
+    if graph.node(token).is_some() {
+        return Some((token.to_string(), 0));
+    }
+    let by_name = graph.find_by_name(token, None);
+    let mut exact: Vec<&Node> = by_name.iter().copied().filter(|n| n.name == token).collect();
+    if !exact.is_empty() {
+        // T7 seam: once nodes carry a prod/test/bench origin flag, importance()
+        // discounts test/bench nodes, so this same ranking prefers the prod
+        // definition for free — no change needed here.
+        let importance = graph.importance();
+        exact.sort_by(|a, b| {
+            let ia = importance.get(&a.id).copied().unwrap_or(0.0);
+            let ib = importance.get(&b.id).copied().unwrap_or(0.0);
+            ib.partial_cmp(&ia)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        return Some((exact[0].id.clone(), exact.len() - 1));
+    }
+    // Substring fallback: preserve the legacy first-by-id pick (find_by_name is
+    // id-sorted), reported as unambiguous.
+    by_name.first().map(|n| (n.id.clone(), 0))
 }
 
 /// Build a deduplicated subgraph from a set of node ids, including edges whose
@@ -345,6 +487,8 @@ fn subgraph(graph: &Graph, ids: &[String]) -> GraphView {
         compact: None,
         truncated: false,
         retrieve_ref: None,
+        resolved: Vec::new(),
+        total_matches: None,
     }
 }
 
@@ -813,5 +957,179 @@ mod tests {
         let d1 = neighbors(&g, &a_id, 1);
         let d2 = neighbors(&g, &a_id, 2);
         assert!(d2.nodes.len() >= d1.nodes.len());
+    }
+
+    #[test]
+    fn score_name_substring_requires_token_boundary() {
+        // The measured false-positive: "get" must NOT match mid-token inside a
+        // longer identifier, only at a `_`/camelCase boundary.
+        let get = tokenize("get");
+        assert!(score_name("get_config", &get) > 0, "exact sub-token hits");
+        assert!(score_name("getConfig", &get) > 0, "camelCase sub-token hits");
+        assert!(score_name("target_getter", &get) > 0, "prefix of a sub-token hits");
+        assert_eq!(
+            score_name("Widget", &get),
+            0,
+            "'get' must not match mid-token inside Widget"
+        );
+        assert_eq!(
+            score_name("CONTROL_BUDGET", &get),
+            0,
+            "'get' must not match inside the BUDGET sub-token"
+        );
+    }
+
+    #[test]
+    fn find_kind_excludes_wrong_kind() {
+        // A struct and a function both match "config"; a kind filter must drop the
+        // wrong-kind one before it can survive the budget.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("r.rs"),
+            "pub struct config_widget;\npub fn config_load() {}\n",
+        )
+        .unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let funcs = find_kind(&g, "config", 5, Some("function"));
+        assert!(funcs.nodes.iter().any(|n| n.name == "config_load"));
+        assert!(
+            !funcs.nodes.iter().any(|n| n.name == "config_widget"),
+            "the struct must be filtered out by the function kind"
+        );
+        // No filter surfaces both.
+        let both = find_kind(&g, "config", 5, None);
+        assert!(both.nodes.iter().any(|n| n.name == "config_widget"));
+    }
+
+    #[test]
+    fn neighbors_dir_splits_callers_and_callees() {
+        // a -> b -> c: fan-in of b is {a}, fan-out is {c}.
+        let g = rust_graph();
+        let b_id = g
+            .find_by_name("b", Some("function"))
+            .first()
+            .unwrap()
+            .id
+            .clone();
+        let callers = neighbors_dir(&g, &b_id, 1, Some("callers"));
+        assert!(callers.nodes.iter().any(|n| n.name == "a"), "a calls b");
+        assert!(
+            !callers.nodes.iter().any(|n| n.name == "c"),
+            "c is a callee, not a caller"
+        );
+        let callees = neighbors_dir(&g, &b_id, 1, Some("callees"));
+        assert!(callees.nodes.iter().any(|n| n.name == "c"), "b calls c");
+        assert!(
+            !callees.nodes.iter().any(|n| n.name == "a"),
+            "a is a caller, not a callee"
+        );
+    }
+
+    #[test]
+    fn path_reports_edge_kinds_and_resolves_ambiguity_by_importance() {
+        // Two functions named `target`: the a.rs one is called by three fns
+        // (structurally important) and reaches `sink`; the b.rs one is isolated.
+        // resolve must pick the important one, report 1 other candidate, and the
+        // path must carry the `calls` edge kind for each hop.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn target() { sink(); }\n\
+             fn sink() {}\n\
+             fn u1() { target(); }\n\
+             fn u2() { target(); }\n\
+             fn u3() { target(); }\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("b.rs"), "fn target() {}\n").unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let resp = path(&g, "target", "sink");
+        assert!(resp.found, "the important target reaches sink");
+        assert_eq!(
+            resp.edges.len(),
+            resp.path.len().saturating_sub(1),
+            "edges align with hops"
+        );
+        assert!(
+            !resp.edges.is_empty() && resp.edges.iter().all(|e| e.kind == "calls"),
+            "each hop is a calls edge, kinds surfaced"
+        );
+        let note = resp
+            .resolved
+            .iter()
+            .find(|r| r.query == "target")
+            .expect("ambiguity note for the two `target`s");
+        assert_eq!(note.other_candidates, 1, "one other same-name candidate");
+        let chosen = g.node(&note.chosen).unwrap();
+        assert!(
+            chosen.file.ends_with("a.rs"),
+            "chose the structurally important target (a.rs), not the isolated b.rs one"
+        );
+    }
+
+    #[test]
+    fn path_unambiguous_omits_resolved_notes() {
+        // Unique names -> no ambiguity -> `resolved` stays empty (byte-identical
+        // to the pre-change shape after skip_serializing_if).
+        let g = rust_graph();
+        let resp = path(&g, "a", "c");
+        assert!(resp.found);
+        assert!(resp.resolved.is_empty(), "unambiguous resolves carry no notes");
+    }
+
+    #[test]
+    fn query_reports_total_matches_and_resolves_ambiguity_by_importance() {
+        // Same fixture shape as `path`'s ambiguity test: two `target`s, one
+        // structurally important (three callers), one isolated. `query`
+        // (lens_symbol's engine) must surface the same ambiguity note `path`
+        // does, and report the pre-limit candidate count only when the `limit`
+        // cut actually drops a match.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn target() { sink(); }\n\
+             fn sink() {}\n\
+             fn u1() { target(); }\n\
+             fn u2() { target(); }\n\
+             fn u3() { target(); }\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("b.rs"), "fn target() {}\n").unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let view = query(&g, "target", None, 10, &[]);
+        let note = view
+            .resolved
+            .iter()
+            .find(|r| r.query == "target")
+            .expect("ambiguity note for the two `target`s");
+        assert_eq!(note.other_candidates, 1, "one other same-name candidate");
+        let chosen = g.node(&note.chosen).unwrap();
+        assert!(chosen.file.ends_with("a.rs"), "chose the important target");
+        assert!(
+            view.total_matches.is_none(),
+            "both matches fit under limit=10, nothing was cut"
+        );
+
+        let cut = query(&g, "target", None, 1, &[]);
+        assert_eq!(cut.total_matches, Some(2), "limit=1 cut one of the two matches");
+    }
+
+    #[test]
+    fn find_reports_total_matches_when_limit_cuts_candidates() {
+        let dir = tempdir().unwrap();
+        let mut src = String::new();
+        for i in 0..5 {
+            src.push_str(&format!("fn config_load_{i}() {{}}\n"));
+        }
+        fs::write(dir.path().join("r.rs"), src).unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let uncut = find(&g, "config", 10);
+        assert!(uncut.total_matches.is_none(), "limit=10 fits all 5 matches");
+        let cut = find(&g, "config", 2);
+        assert_eq!(cut.total_matches, Some(5), "limit=2 cut 3 of the 5 matches");
     }
 }

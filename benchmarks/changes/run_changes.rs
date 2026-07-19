@@ -1707,6 +1707,153 @@ fn gate_c44() -> (String, bool) {
     (s, pass)
 }
 
+// --- C45: query-layer semantics + schema (resolve, scoring, views) (T6) ------
+
+/// Query-layer gate (T6). Synthetic graph built in-code:
+///   src `main` (src/app.rs) called by c1,c2,c3 and calling `helper` — the
+///     structurally important entry point;
+///   bench `main` (benchmarks/fix.rs) — an isolated same-name decoy;
+///   `config_load` (fn) + `config_widget` (struct) — a kind collision;
+///   `get_config` (fn) + `Widget` (struct) — a sub-token collision.
+/// Asserts the four T6 query-semantics fixes together:
+///   - `resolve("main")` ranks by graph importance -> the src def, and the path
+///     response reports exactly 1 other same-name candidate (ambiguity visible);
+///   - the path response carries per-hop edge kinds (`calls`);
+///   - `find` with a `kind` filter excludes the wrong-kind same-name match;
+///   - a `"get"` sub-token query excludes boundary-violating names (`Widget`).
+fn gate_c45() -> (String, bool) {
+    use lens::discovery::graph::{Graph, Node};
+
+    let mut g = Graph::new();
+    let src_main = g.add_node(Node::new("src/app.rs", "function", "main", 1, "rust"));
+    let bench_main = g.add_node(Node::new("benchmarks/fix.rs", "function", "main", 1, "rust"));
+    let helper = g.add_node(Node::new("src/app.rs", "function", "helper", 10, "rust"));
+    let c1 = g.add_node(Node::new("src/app.rs", "function", "c1", 20, "rust"));
+    let c2 = g.add_node(Node::new("src/app.rs", "function", "c2", 24, "rust"));
+    let c3 = g.add_node(Node::new("src/app.rs", "function", "c3", 28, "rust"));
+    // Kind collision + sub-token collision decoys.
+    g.add_node(Node::new("src/app.rs", "function", "config_load", 40, "rust"));
+    g.add_node(Node::new("src/app.rs", "struct", "config_widget", 44, "rust"));
+    g.add_node(Node::new("src/app.rs", "function", "get_config", 50, "rust"));
+    g.add_node(Node::new("src/app.rs", "struct", "Widget", 54, "rust"));
+    // Edges: c1/c2/c3 -> src main (fan-in makes it important); src main -> helper.
+    g.add_edge(&c1, &src_main, "calls");
+    g.add_edge(&c2, &src_main, "calls");
+    g.add_edge(&c3, &src_main, "calls");
+    g.add_edge(&src_main, &helper, "calls");
+
+    // (a) resolve-by-importance + ambiguity visibility + (b) per-hop edge kinds.
+    let resp = gquery::path(&g, "main", "helper");
+    let note = resp.resolved.iter().find(|r| r.query == "main");
+    let chose_src = note.map(|n| n.chosen == src_main).unwrap_or(false);
+    let one_other = note.map(|n| n.other_candidates == 1).unwrap_or(false);
+    let not_bench = note.map(|n| n.chosen != bench_main).unwrap_or(false);
+    let edges_aligned = resp.found && resp.edges.len() == resp.path.len().saturating_sub(1);
+    let edge_kinds_ok = !resp.edges.is_empty() && resp.edges.iter().all(|e| e.kind == "calls");
+
+    // (c) kind filter excludes the wrong-kind same-name match.
+    let funcs = gquery::find_kind(&g, "config", 10, Some("function"));
+    let has_config_load = funcs.nodes.iter().any(|n| n.name == "config_load");
+    let no_config_widget = !funcs.nodes.iter().any(|n| n.name == "config_widget");
+
+    // (d) sub-token query excludes boundary-violating names.
+    let gets = gquery::find(&g, "get", 10);
+    let has_get_config = gets.nodes.iter().any(|n| n.name == "get_config");
+    let no_widget = !gets.nodes.iter().any(|n| n.name == "Widget");
+
+    let pass = chose_src
+        && one_other
+        && not_bench
+        && edges_aligned
+        && edge_kinds_ok
+        && has_config_load
+        && no_config_widget
+        && has_get_config
+        && no_widget;
+
+    let s = format!(
+        "## C45 - query-layer semantics + schema (resolve, scoring, views) (T6)\n\nSynthetic graph: src `main` (called by c1/c2/c3, calls `helper`) vs isolated bench `main`; a fn/struct kind collision on `config`; a sub-token collision on `get`/`Widget`. `resolve(\"main\")` chose the src def **{chose_src}** (not the bench decoy **{not_bench}**) and reported exactly 1 other candidate **{one_other}**; path edges align with hops **{edges_aligned}** and every hop kind is `calls` **{edge_kinds_ok}**; `find(config, kind=function)` keeps `config_load` **{has_config_load}** and drops the struct `config_widget` **{no_config_widget}**; `find(\"get\")` keeps `get_config` **{has_get_config}** and drops mid-token `Widget` **{no_widget}**.\n",
+    );
+    (s, pass)
+}
+
+// --- C46: test/fixture marking + importance discount (T7) ---------------------
+
+/// Provenance/importance gate (T7). On-disk fixture run through the real
+/// `discover` pipeline:
+///   benchmarks/cluster.rs - 6 fns (b0..b5) that all call each other (a dense,
+///     self-referencing bench cluster that inflates naive PageRank);
+///   src/app.rs - a prod hub `run` called by 10 callers + `helper`, plus a
+///     `#[cfg(test)] mod tests { fn my_test() {...} }`.
+/// Asserts the three T7 outcomes end-to-end (path-based bench marking, cfg(test)
+/// brace-range detection, importance discount):
+///   - with the discount ON (default), the top-10 importance ranks contain NO
+///     bench-origin node;
+///   - the `#[cfg(test)]` fn `my_test` is flagged `Test`, the prod fn `run` is
+///     `Prod`, and a cluster fn `b0` is `Bench`;
+///   - trip-proof: `LENS_ORIGIN_DISCOUNT=0` lets the dense bench cluster back into
+///     the top-10, proving the discount (not the fixture shape) removes it.
+fn gate_c46() -> (String, bool) {
+    use lens::discovery::graph::{Graph, Node, Origin};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("benchmarks")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+
+    // Dense self-referencing bench cluster: each b{i} calls every other b{j}.
+    let mut cluster = String::new();
+    for i in 0..6 {
+        let calls: String = (0..6).filter(|j| *j != i).map(|j| format!("b{j}(); ")).collect();
+        cluster.push_str(&format!("fn b{i}() {{ {calls}}}\n"));
+    }
+    std::fs::write(root.join("benchmarks/cluster.rs"), cluster).unwrap();
+
+    // Prod hub `run` (fan-in 10) + helper, plus a `#[cfg(test)]` module.
+    let mut app = String::from("fn helper() -> i32 { 1 }\nfn run() -> i32 { helper() }\n");
+    for i in 0..10 {
+        app.push_str(&format!("fn call_{i}() -> i32 {{ run() }}\n"));
+    }
+    app.push_str("\n#[cfg(test)]\nmod tests {\n    fn my_test() -> i32 { super::run() }\n}\n");
+    std::fs::write(root.join("src/app.rs"), app).unwrap();
+
+    // Count bench-origin nodes among the top-10 importance ranks (id tie-break).
+    let bench_in_top10 = |g: &Graph| -> usize {
+        let imp = g.importance();
+        let mut ranked: Vec<&Node> = g.nodes.iter().collect();
+        ranked.sort_by(|a, b| {
+            let sb = imp.get(&b.id).copied().unwrap_or(0.0);
+            let sa = imp.get(&a.id).copied().unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap().then_with(|| a.id.cmp(&b.id))
+        });
+        ranked.into_iter().take(10).filter(|n| n.origin == Origin::Bench).count()
+    };
+
+    std::env::remove_var("LENS_ORIGIN_DISCOUNT");
+    let g = discovery::discover(root, None).unwrap().graph;
+    let bench_top = bench_in_top10(&g);
+
+    let origin_of = |name: &str| g.nodes.iter().find(|n| n.name == name).map(|n| n.origin);
+    let my_test_is_test = origin_of("my_test") == Some(Origin::Test);
+    let run_is_prod = origin_of("run") == Some(Origin::Prod);
+    let b0_is_bench = origin_of("b0") == Some(Origin::Bench);
+
+    // Trip-proof: without the discount the dense cluster returns to the top-10.
+    std::env::set_var("LENS_ORIGIN_DISCOUNT", "0");
+    let bench_top0 = bench_in_top10(&g);
+    std::env::remove_var("LENS_ORIGIN_DISCOUNT");
+
+    let pass = bench_top == 0
+        && my_test_is_test
+        && run_is_prod
+        && b0_is_bench
+        && bench_top0 > 0;
+    let s = format!(
+        "## C46 - test/fixture marking + importance discount (T7)\n\nOn-disk fixture: a dense self-referencing bench cluster (benchmarks/cluster.rs) + a prod hub `run` (src/app.rs) with a `#[cfg(test)]` test fn. Bench-origin nodes in top-10 importance **{bench_top}** (want 0); `#[cfg(test)]` `my_test` flagged Test **{my_test_is_test}**; prod `run` flagged Prod **{run_is_prod}**; cluster `b0` flagged Bench **{b0_is_bench}**. Trip-proof (`LENS_ORIGIN_DISCOUNT=0` lets the cluster back in: bench in top-10 **{bench_top0}** > 0). Kill-switch `LENS_ORIGIN_DISCOUNT=0` restores the pre-T7 ranking.\n",
+    );
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -1793,6 +1940,10 @@ fn main() -> anyhow::Result<()> {
     println!("{s43}");
     let (s44, c44_ok) = gate_c44();
     println!("{s44}");
+    let (s45, c45_ok) = gate_c45();
+    println!("{s45}");
+    let (s46, c46_ok) = gate_c46();
+    println!("{s46}");
 
     println!("\n## Gates");
     let gates = [
@@ -1822,6 +1973,8 @@ fn main() -> anyhow::Result<()> {
         ("C42 AST-boundary chunking keeps straddling fn retrievable", c42_ok),
         ("C43 scoped call resolution + stub identity", c43_ok),
         ("C44 directed reachability + fan-in/fan-out; both preserves undirected", c44_ok),
+        ("C45 resolve-by-importance + ambiguity + edge kinds + kind/sub-token filters", c45_ok),
+        ("C46 test/bench marking + importance discount keeps fixtures out of top ranks", c46_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });

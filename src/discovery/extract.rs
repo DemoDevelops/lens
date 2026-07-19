@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{InputEdit, Language, Node as TsNode, Parser, Point, Query, QueryCursor, Tree};
 
-use super::graph::Node;
+use super::graph::{Node, Origin};
 
 // Compiled queries per language, cached for the process lifetime.
 // tree_sitter::Query is Send + Sync (upstream unsafe impl), so LazyLock/OnceLock are safe.
@@ -398,6 +398,69 @@ fn byte_to_point(s: &str, byte: usize) -> Point {
     Point::new(row, col)
 }
 
+/// Byte spans (`[start, end)`) of every Rust item governed by a `#[cfg(test)]`
+/// gate: for each such attribute, the FULL span of the item it decorates, so a
+/// `#[cfg(test)] mod tests { ... }` contributes the whole module brace-range and
+/// every nested def falls inside it. Real brace-range detection off the parse
+/// tree, NOT a "line-cut to EOF" heuristic: production code after the test module
+/// is outside the span. Iterative DFS; spans may nest/overlap, which
+/// [`byte_in_spans`] handles.
+fn collect_cfg_test_spans(root: &TsNode, src: &[u8]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "attribute_item" && is_cfg_test_attr(&node, src) {
+            if let Some(gov) = governed_item(&node, src) {
+                spans.push((gov.start_byte(), gov.end_byte()));
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    spans
+}
+
+/// The item a `#[cfg(test)]` attribute governs. In tree-sitter-rust an outer
+/// `attribute_item` is a SIBLING of the item it decorates (both children of
+/// `source_file`/`declaration_list`), so the governed item is the next named
+/// sibling, skipping any stacked attributes. An inner `#![cfg(test)]` instead
+/// governs its enclosing block/module/file (its parent).
+fn governed_item<'a>(attr: &TsNode<'a>, src: &[u8]) -> Option<TsNode<'a>> {
+    if node_text(attr, src).trim_start().starts_with("#![") {
+        return attr.parent();
+    }
+    let mut sib = attr.next_named_sibling();
+    while let Some(s) = sib {
+        if s.kind() == "attribute_item" {
+            sib = s.next_named_sibling();
+        } else {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Whether an `attribute_item`'s text is a `#[cfg(test)]`-style compile gate:
+/// a `cfg(...)` (or inner `#![cfg(...)]`) whose predicate mentions `test` and is
+/// not negated. Deliberately conservative — `cfg_attr(...)` (conditional attribute
+/// application, not a compile gate) and any `not(...)` (e.g. `cfg(not(test))`,
+/// which is PRODUCTION code) are excluded, so prod code is never mis-marked test.
+fn is_cfg_test_attr(attr_item: &TsNode, src: &[u8]) -> bool {
+    let text: String = node_text(attr_item, src)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let is_cfg = text.starts_with("#[cfg(") || text.starts_with("#![cfg(");
+    is_cfg && text.contains("test") && !text.contains("not(")
+}
+
+/// Whether `byte` falls inside any `[start, end)` span.
+fn byte_in_spans(byte: usize, spans: &[(usize, usize)]) -> bool {
+    spans.iter().any(|(s, e)| byte >= *s && byte < *e)
+}
+
 /// Extract symbols and relationships from an already-parsed `tree` over `source`.
 /// Shared by the from-scratch and incremental parse paths so both produce an
 /// identical [`FileExtract`] for identical source.
@@ -425,6 +488,14 @@ fn extract_from_tree(
     // Use process-wide cached queries (compiled once per language per process).
     let queries = cached_queries(spec)?;
 
+    // Byte spans governed by a `#[cfg(test)]` gate (Rust only), so a def inside one
+    // is marked test-origin and discounted for importance. Empty for other langs.
+    let cfg_test_spans = if spec.name == "rust" {
+        collect_cfg_test_spans(&root, src)
+    } else {
+        Vec::new()
+    };
+
     // --- definitions ---
     let defs_q = &queries.defs;
     let capture_names = defs_q.capture_names();
@@ -436,7 +507,10 @@ fn extract_from_tree(
             let name_node = cap.node;
             let name = node_text(&name_node, src);
             let line = name_node.start_position().row + 1;
-            let node = Node::new(path, kind, &name, line, spec.name);
+            let mut node = Node::new(path, kind, &name, line, spec.name);
+            if byte_in_spans(name_node.start_byte(), &cfg_test_spans) {
+                node.origin = Origin::Test;
+            }
             let nid = node.id.clone();
             contains.push((module.id.clone(), nid.clone()));
             // Record callable scope (the definition node wrapping the name).
@@ -1201,6 +1275,47 @@ fn main() {
         assert!(fx.calls.iter().any(|(_, c)| c == "helper"));
         // imported read
         assert!(fx.imports.iter().any(|(p, _)| p == "read"));
+    }
+
+    #[test]
+    fn rust_cfg_test_span_marks_only_test_origin() {
+        // Brace-range detection, NOT a line-cut heuristic: `after` sits BELOW the
+        // `#[cfg(test)]` module yet stays prod; only defs inside the module's
+        // brace-range are `Test`. `cfg(not(test))` is production, never test.
+        let src = r#"
+fn before() -> i32 { 1 }
+
+#[cfg(test)]
+mod tests {
+    fn inside_test() -> i32 { 2 }
+}
+
+fn after() -> i32 { 3 }
+
+#[cfg(not(test))]
+fn prod_only() -> i32 { 4 }
+"#;
+        let spec = spec_for_language("rust").unwrap();
+        let fx = extract_file("a.rs", src, &spec).unwrap();
+        let origin_of = |name: &str| {
+            fx.defs
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("missing def {name}"))
+                .origin
+        };
+        assert_eq!(origin_of("before"), Origin::Prod);
+        assert_eq!(origin_of("inside_test"), Origin::Test);
+        assert_eq!(
+            origin_of("after"),
+            Origin::Prod,
+            "def after the test mod must stay prod (brace-range, not line-cut)"
+        );
+        assert_eq!(
+            origin_of("prod_only"),
+            Origin::Prod,
+            "cfg(not(test)) is production code"
+        );
     }
 
     #[test]

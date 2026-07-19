@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use tree_sitter::Tree;
 
 use extract::{FileExtract, MdLink, MdLinkKind};
-use graph::{Graph, Node};
+use graph::{Graph, Node, Origin};
 
 use crate::tools::DiscoverResponse;
 
@@ -206,6 +206,13 @@ struct FileResult {
 /// output depends ONLY on the set of `FileResult`s (not on how each was parsed),
 /// feeding it the same extracts always yields a byte-identical graph — which is
 /// how the incremental path stays identical to a from-scratch rebuild.
+/// Whether a `/`-separated relative path lives under a `benchmarks/`, `tests/`, or
+/// `fixtures/` directory at any depth — the bench/fixture provenance signal.
+fn is_bench_path(path: &str) -> bool {
+    path.split('/')
+        .any(|seg| matches!(seg, "benchmarks" | "tests" | "fixtures"))
+}
+
 fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> DiscoverOutcome {
     // Sort results by relative path for deterministic assembly order.
     file_results.sort_by(|a, b| a.rel.cmp(&b.rel));
@@ -371,6 +378,18 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
     // the code graph stays byte-identical to before this pass existed. Frontmatter
     // `aliases:` feed name-based (wikilink/reference) resolution.
     resolve_md_links(&mut graph, pending_md_links, pending_aliases);
+
+    // Mark bench/fixture provenance by path (T7): any node whose file lives under a
+    // `benchmarks/`, `tests/`, or `fixtures/` directory is `Bench` origin, taking
+    // precedence over an extract-time `Test` marking (whole-file fixture wins over
+    // an inner `#[cfg(test)]` span). Discounted, not excluded, in `Graph::importance`
+    // so self-referencing fixtures stop dominating overview ranks. Import/tag stubs
+    // are covered too, since their `.file` is the importing file's path.
+    for n in &mut graph.nodes {
+        if is_bench_path(&n.file) {
+            n.origin = Origin::Bench;
+        }
+    }
 
     // Deterministic ordering of the persisted graph.
     graph.nodes.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1940,5 +1959,65 @@ mod tests {
             full_ms, full.response.nodes, inc_ms, inc.files_reparsed, ratio
         );
         assert_eq!(inc.files_reparsed, 1, "exactly one file should reparse");
+    }
+
+    #[test]
+    fn is_bench_path_matches_dirs_at_any_depth() {
+        assert!(is_bench_path("benchmarks/changes/run_changes.rs"));
+        assert!(is_bench_path("tests/integration.rs"));
+        assert!(is_bench_path("crates/x/src/fixtures/sample.rs"));
+        assert!(!is_bench_path("src/discovery/mod.rs"));
+        assert!(!is_bench_path("src/server.rs"));
+    }
+
+    /// Q5 (T7 predicate 3): over a freshly built graph of lens's own repo, the
+    /// `benchmarks/` share of the top-50 importance ranks must fall below 10%
+    /// (measured baseline was 42% pre-discount). Ignored — it walks the whole real
+    /// repo. Run alone (no parallel env races):
+    /// `cargo test q5_bench_share_of_top50 -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn q5_bench_share_of_top50() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let graph = discover(repo, None).unwrap().graph;
+
+        // Top-50 by importance, deterministic id tie-break; count `benchmarks/`.
+        let bench_share = |discount: bool| -> usize {
+            if discount {
+                std::env::remove_var("LENS_ORIGIN_DISCOUNT");
+            } else {
+                std::env::set_var("LENS_ORIGIN_DISCOUNT", "0");
+            }
+            let imp = graph.importance();
+            let mut ranked: Vec<&Node> = graph.nodes.iter().collect();
+            ranked.sort_by(|a, b| {
+                let sb = imp.get(&b.id).copied().unwrap_or(0.0);
+                let sa = imp.get(&a.id).copied().unwrap_or(0.0);
+                sb.partial_cmp(&sa).unwrap().then_with(|| a.id.cmp(&b.id))
+            });
+            ranked
+                .iter()
+                .take(50)
+                .filter(|n| n.file.starts_with("benchmarks/"))
+                .count()
+        };
+
+        let before = bench_share(false);
+        let after = bench_share(true);
+        std::env::remove_var("LENS_ORIGIN_DISCOUNT");
+
+        let pct = |c: usize| c as f64 / 50.0 * 100.0;
+        println!(
+            "[Q5] benchmarks/ share of top-50 importance: before={before}/50 ({:.0}%) \
+             after={after}/50 ({:.0}%)",
+            pct(before),
+            pct(after)
+        );
+        assert!(
+            pct(after) < 10.0,
+            "benchmarks/ share of top-50 must be <10% after discount, got {:.0}% ({after}/50)",
+            pct(after)
+        );
+        assert!(after <= before, "discount must not increase bench share");
     }
 }

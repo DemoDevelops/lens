@@ -7,6 +7,42 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Provenance of a symbol: production code, test code, or bench/fixture code.
+///
+/// Test (`#[cfg(test)]` Rust spans) and bench (files under `benchmarks/`,
+/// `tests/`, `fixtures/`) nodes are structurally real but should not compete with
+/// production code for [`Graph::importance`] — otherwise overview/ranking surfaces
+/// self-referencing fixtures instead of the code a reader cares about. They are
+/// discounted, not excluded.
+///
+/// `Prod` is the default and is skipped during serialization (see [`Node::origin`]),
+/// so a graph made entirely of production code serializes byte-for-byte as before
+/// this field existed, and an OLD `graph.json` (no `origin` key) deserializes to
+/// `Prod`. `origin` is deliberately NOT part of [`Node::make_id`]: it is metadata,
+/// so adding it never changes a node's id or perturbs dedup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    #[default]
+    Prod,
+    Test,
+    Bench,
+}
+
+impl Origin {
+    /// Whether this is the default (`Prod`) origin. Used as the `skip_serializing_if`
+    /// predicate so only test/bench nodes carry an explicit `origin` in the JSON.
+    pub fn is_prod(&self) -> bool {
+        matches!(self, Origin::Prod)
+    }
+}
+
+/// Kill-switch (reroute-rail convention): `LENS_ORIGIN_DISCOUNT` default-ON; `=0`
+/// disables the test/bench importance discount, restoring the pre-T7 ranking.
+fn origin_discount_on() -> bool {
+    std::env::var("LENS_ORIGIN_DISCOUNT").map_or(true, |v| v.trim() != "0")
+}
+
 /// A symbol in the codebase: a function, method, type, module, or import target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Node {
@@ -19,6 +55,10 @@ pub struct Node {
     /// 1-based line of the definition.
     pub line: usize,
     pub language: String,
+    /// Provenance (prod / test / bench). Skipped in JSON when `Prod` (the default),
+    /// so it is fully additive: old readers ignore it and old graphs load as `Prod`.
+    #[serde(default, skip_serializing_if = "Origin::is_prod")]
+    pub origin: Origin,
 }
 
 impl Node {
@@ -36,6 +76,7 @@ impl Node {
             file: file.to_string(),
             line,
             language: language.to_string(),
+            origin: Origin::Prod,
         }
     }
 }
@@ -159,10 +200,21 @@ impl Graph {
         if n == 0 {
             return HashMap::new();
         }
-        let base = 1.0 / n as f64;
-        let teleport: HashMap<&str, f64> =
-            self.nodes.iter().map(|nd| (nd.id.as_str(), base)).collect();
-        self.pagerank(&teleport)
+        let discount = origin_discount_on();
+        // Restart/teleport weight per node: prod = 1.0, test/bench = 0.1 when the
+        // discount is on (`LENS_ORIGIN_DISCOUNT`). Demoting the restart mass — not
+        // only the incoming edge weight in `pagerank` — is what keeps self-contained
+        // fixtures out of the top ranks: they score on teleport + dangling mass, not
+        // on inbound references, so an edge-weight discount alone barely moves them.
+        // Normalized to sum ~1 over all nodes, matching the uniform base it replaces.
+        let w = |nd: &Node| if discount && !nd.origin.is_prod() { 0.1 } else { 1.0 };
+        let total: f64 = self.nodes.iter().map(w).sum();
+        let teleport: HashMap<&str, f64> = self
+            .nodes
+            .iter()
+            .map(|nd| (nd.id.as_str(), w(nd) / total))
+            .collect();
+        self.pagerank(&teleport, discount)
     }
 
     /// Query-seeded personalized PageRank (L36): identical weighted reference
@@ -198,7 +250,7 @@ impl Graph {
                 (nd.id.as_str(), p)
             })
             .collect();
-        self.pagerank(&teleport)
+        self.pagerank(&teleport, origin_discount_on())
     }
 
     /// Weighted PageRank power-iteration over the reference (calls + imports)
@@ -208,9 +260,16 @@ impl Graph {
     /// Aider-style edge weighting (RepoGraph / aider repomap): a reference to a
     /// symbol used across more than five files, or to a private (`_`-prefixed)
     /// symbol, counts for 0.1x — too-common and internal symbols are less useful
-    /// to surface. Deterministic: same graph + same teleport -> same scores
-    /// (iterates the node/edge Vecs in order, never a HashMap).
-    fn pagerank(&self, teleport: &HashMap<&str, f64>) -> HashMap<String, f64> {
+    /// to surface. When `discount_nonprod` is set (the `LENS_ORIGIN_DISCOUNT`
+    /// default), a reference to a test/bench-origin symbol is discounted 0.1x by the
+    /// same mechanism, so fixtures and `#[cfg(test)]` code stop out-ranking real
+    /// code. Deterministic: same graph + same teleport -> same scores (iterates the
+    /// node/edge Vecs in order, never a HashMap).
+    fn pagerank(
+        &self,
+        teleport: &HashMap<&str, f64>,
+        discount_nonprod: bool,
+    ) -> HashMap<String, f64> {
         let n = self.nodes.len();
         if n == 0 {
             return HashMap::new();
@@ -226,6 +285,8 @@ impl Graph {
             .iter()
             .map(|nd| (nd.id.as_str(), nd.name.as_str()))
             .collect();
+        let node_origin: HashMap<&str, Origin> =
+            self.nodes.iter().map(|nd| (nd.id.as_str(), nd.origin)).collect();
         // Distinct referencing files per target (the aider "used across N files" signal).
         let mut target_files: HashMap<&str, HashSet<&str>> = HashMap::new();
         for e in &self.edges {
@@ -241,6 +302,9 @@ impl Graph {
                 w *= 0.1;
             }
             if node_name.get(to).map(|nm| nm.starts_with('_')).unwrap_or(false) {
+                w *= 0.1;
+            }
+            if discount_nonprod && node_origin.get(to).map(|o| !o.is_prod()).unwrap_or(false) {
                 w *= 0.1;
             }
             w
@@ -579,6 +643,26 @@ mod tests {
         let g2 = Graph::load(&p).unwrap();
         assert_eq!(g.nodes.len(), g2.nodes.len());
         assert_eq!(g.edges.len(), g2.edges.len());
+    }
+
+    #[test]
+    fn origin_is_additive_and_skips_default() {
+        // Old graph.json has no `origin` key: it must deserialize to `Prod`.
+        let old = r#"{"id":"x","name":"n","kind":"function","file":"f.rs","line":1,"language":"rust"}"#;
+        let n: Node = serde_json::from_str(old).unwrap();
+        assert_eq!(n.origin, Origin::Prod);
+
+        // A prod node must serialize WITHOUT an `origin` key (byte-identity for
+        // pre-existing all-prod graphs).
+        let js = serde_json::to_string(&n).unwrap();
+        assert!(!js.contains("origin"), "prod origin must be skipped: {js}");
+
+        // A test node serializes the field (lowercase) and round-trips.
+        let mut t = Node::new("f.rs", "function", "n", 1, "rust");
+        t.origin = Origin::Test;
+        let tjs = serde_json::to_string(&t).unwrap();
+        assert!(tjs.contains(r#""origin":"test""#), "{tjs}");
+        assert_eq!(serde_json::from_str::<Node>(&tjs).unwrap().origin, Origin::Test);
     }
 
     #[test]

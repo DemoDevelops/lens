@@ -197,7 +197,7 @@ impl Index {
                 Err(_) => continue,
             };
             store.delete_path(&writer, path_str);
-            for (i, chunk) in chunk_file(&file, &content).iter().enumerate() {
+            for (i, (chunk, start_line)) in chunk_file_with_lines(&file, &content).into_iter().enumerate() {
                 if chunk.trim().is_empty() {
                     continue;
                 }
@@ -205,8 +205,9 @@ impl Index {
                     &writer,
                     path_str,
                     &format!("{path_str}#{i}"),
-                    &chunk_symbols(chunk),
-                    chunk,
+                    &chunk_symbols(&chunk),
+                    &chunk,
+                    start_line,
                 )?;
                 chunks_added += 1;
             }
@@ -291,8 +292,9 @@ impl Index {
             }
             store.delete_chunk_id(&writer, chunk_id);
             // Session-continuity records carry no code symbols, so the symbols field
-            // is empty (they rank on content only).
-            store.add_chunk(&writer, path, chunk_id, "", content)?;
+            // is empty (they rank on content only). Not file-scoped, so `line`
+            // defaults to 1.
+            store.add_chunk(&writer, path, chunk_id, "", content, 1)?;
             added += 1;
         }
         if added == 0 {
@@ -481,9 +483,9 @@ fn ranked_search(
     let ctx_mode = search_context_mode();
     // Full chunks kept aside for `SearchContext::Rich`'s top-hit swap (empty otherwise).
     let mut content_by_key: HashMap<String, String> = HashMap::new();
-    // (path, chunk_id, snippet, combined_score)
-    let mut rows: Vec<(String, String, String, f64)> = Vec::with_capacity(candidates.len());
-    for (path, chunk_id, content, mut score) in candidates {
+    // (path, chunk_id, snippet, line, combined_score)
+    let mut rows: Vec<(String, String, String, u64, f64)> = Vec::with_capacity(candidates.len());
+    for (path, chunk_id, content, line, mut score) in candidates {
         if is_doc_path(&path) {
             score *= DOC_RANK_PENALTY;
         }
@@ -526,13 +528,13 @@ fn ranked_search(
             }
             rendered
         };
-        rows.push((path, chunk_id, snippet, score));
+        rows.push((path, chunk_id, snippet, line, score));
     }
     // Re-rank: higher combined score first, then a stable (path, chunk_id) tiebreak.
     // With no proximity boost this reproduces the BM25 order, so the truncation below
     // leaves the unboosted top-L identical to a plain limit-L fetch.
     rows.sort_by(|a, b| {
-        b.3.partial_cmp(&a.3)
+        b.4.partial_cmp(&a.4)
             .unwrap_or(Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
             .then_with(|| a.1.cmp(&b.1))
@@ -547,16 +549,16 @@ fn ranked_search(
     let rrf_on = std::env::var("LENS_RRF").map(|v| v != "0").unwrap_or(true);
     if rrf_on && !file_ranks.is_empty() {
         const RRF_K: f64 = 60.0;
-        // (fused_score, text_rank, path, chunk_id, snippet, text_score)
-        let mut fused: Vec<(f64, usize, String, String, String, f64)> = rows
+        // (fused_score, text_rank, path, chunk_id, snippet, line, text_score)
+        let mut fused: Vec<(f64, usize, String, String, String, u64, f64)> = rows
             .into_iter()
             .enumerate()
-            .map(|(text_rank, (path, chunk_id, snippet, score))| {
+            .map(|(text_rank, (path, chunk_id, snippet, line, score))| {
                 let mut f = 1.0 / (RRF_K + text_rank as f64);
                 if let Some(file_rank) = file_ranks.get(&path) {
                     f += 1.0 / (RRF_K + *file_rank as f64);
                 }
-                (f, text_rank, path, chunk_id, snippet, score)
+                (f, text_rank, path, chunk_id, snippet, line, score)
             })
             .collect();
         // Fused score desc; tie-break text_rank asc, then path asc.
@@ -568,10 +570,10 @@ fn ranked_search(
         });
         // The reported score stays the text combined score (fusion reorders, it does
         // not restate relevance), so an unfused hit's payload is unchanged.
-        let ordered: Vec<(String, String, String, f64)> = fused
+        let ordered: Vec<(String, String, String, u64, f64)> = fused
             .into_iter()
-            .map(|(_fused, _text_rank, path, chunk_id, snippet, score)| {
-                (path, chunk_id, snippet, score)
+            .map(|(_fused, _text_rank, path, chunk_id, snippet, line, score)| {
+                (path, chunk_id, snippet, line, score)
             })
             .collect();
         return Ok(render_final(ordered, limit, ctx_mode, &content_by_key));
@@ -580,17 +582,18 @@ fn ranked_search(
     Ok(render_final(rows, limit, ctx_mode, &content_by_key))
 }
 
-/// Truncate the ordered `(path, chunk_id, snippet, score)` pool to `limit` and map to
-/// [`SearchHit`]. In [`SearchContext::Rich`] the top hit's snippet is swapped for its
-/// full stored chunk (looked up in `content_by_key`), so the most relevant result
-/// carries its whole AST-bounded unit while the tail stays cheap snippets.
+/// Truncate the ordered `(path, chunk_id, snippet, line, score)` pool to `limit` and
+/// map to [`SearchHit`]. In [`SearchContext::Rich`] the top hit's snippet is swapped
+/// for its full stored chunk (looked up in `content_by_key`), so the most relevant
+/// result carries its whole AST-bounded unit while the tail stays cheap snippets.
 fn render_final(
-    ordered: Vec<(String, String, String, f64)>,
+    ordered: Vec<(String, String, String, u64, f64)>,
     limit: usize,
     ctx_mode: SearchContext,
     content_by_key: &HashMap<String, String>,
 ) -> Vec<SearchHit> {
-    let mut top: Vec<(String, String, String, f64)> = ordered.into_iter().take(limit).collect();
+    let mut top: Vec<(String, String, String, u64, f64)> =
+        ordered.into_iter().take(limit).collect();
     if ctx_mode == SearchContext::Rich {
         if let Some(first) = top.first_mut() {
             if let Some(full) = content_by_key.get(&format!("{}\u{1f}{}", first.0, first.1)) {
@@ -599,10 +602,11 @@ fn render_final(
         }
     }
     top.into_iter()
-        .map(|(path, _chunk_id, snippet, score)| SearchHit {
+        .map(|(path, _chunk_id, snippet, line, score)| SearchHit {
             path,
             snippet,
             score,
+            line: line as usize,
         })
         .collect()
 }
@@ -877,21 +881,21 @@ fn structural_search(store: &TantivyStore, query: &str, limit: usize) -> Result<
     // Over-fetch like ranked_search, then rank by literal-occurrence count below.
     let fetch = limit.saturating_mul(OVERFETCH_K).min(OVERFETCH_CAP);
     let needle = q.to_lowercase();
-    // (path, chunk_id, snippet, occurrence_count)
-    let mut hits: Vec<(String, String, String, f64)> = store
+    // (path, chunk_id, snippet, line, occurrence_count)
+    let mut hits: Vec<(String, String, String, u64, f64)> = store
         .structural_candidates(q, fetch)?
         .into_iter()
-        .filter_map(|(path, chunk_id, content)| {
+        .filter_map(|(path, chunk_id, content, line)| {
             let count = content.to_lowercase().matches(&needle).count();
             if count == 0 {
                 return None; // drop trigram false positives (ngram is a superset)
             }
-            Some((path, chunk_id, structural_snippet(&content, q), count as f64))
+            Some((path, chunk_id, structural_snippet(&content, q), line, count as f64))
         })
         .collect();
     // Sort by occurrence count desc, then a stable (path, chunk_id) tiebreak.
     hits.sort_by(|a, b| {
-        b.3.partial_cmp(&a.3)
+        b.4.partial_cmp(&a.4)
             .unwrap_or(Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
             .then_with(|| a.1.cmp(&b.1))
@@ -899,10 +903,11 @@ fn structural_search(store: &TantivyStore, query: &str, limit: usize) -> Result<
     hits.truncate(limit);
     Ok(hits
         .into_iter()
-        .map(|(path, _chunk_id, snippet, score)| SearchHit {
+        .map(|(path, _chunk_id, snippet, line, score)| SearchHit {
             path,
             snippet,
             score,
+            line: line as usize,
         })
         .collect())
 }
@@ -959,6 +964,24 @@ fn chunk_file(path: &Path, content: &str) -> Vec<String> {
         Some(spec) if ast_on => chunk_by_ast(content, &spec, AST_CHUNK_BYTES),
         _ => chunk_by_lines(content, CODE_WINDOW),
     }
+}
+
+/// [`chunk_file`] paired with each chunk's 1-based starting line, so the FTS index
+/// can store per-chunk line metadata for `SearchHit::line`. Every chunker tiles
+/// `content` into consecutive, non-overlapping line ranges (see [`chunk_by_ast`]'s
+/// doc: chunks concatenate back to the exact source), so a running total of each
+/// preceding chunk's own line count gives the exact start line without touching the
+/// chunkers themselves.
+fn chunk_file_with_lines(path: &Path, content: &str) -> Vec<(String, u64)> {
+    let mut line = 1u64;
+    chunk_file(path, content)
+        .into_iter()
+        .map(|chunk| {
+            let start = line;
+            line += chunk.lines().count() as u64;
+            (chunk, start)
+        })
+        .collect()
 }
 
 fn chunk_markdown(content: &str) -> Vec<String> {
@@ -1857,6 +1880,46 @@ mod tests {
             chunk_by_lines(&src, CODE_WINDOW),
             "an extension with no tree-sitter grammar must use line-window chunking"
         );
+    }
+
+    /// T14: [`chunk_file_with_lines`] reports each chunk's exact 1-based start line,
+    /// computed from the cumulative line count of the chunks before it. A 250-line
+    /// unknown-extension file falls back to the fixed [`CODE_WINDOW`] (100 lines)
+    /// line-window chunker, so the chunk boundaries — and thus the expected start
+    /// lines — are known exactly.
+    #[test]
+    fn chunk_file_with_lines_reports_correct_start_lines() {
+        let content: String = (0..250).map(|i| format!("line {i}\n")).collect();
+        let chunks = chunk_file_with_lines(Path::new("x.unknownext"), &content);
+        assert_eq!(chunks.len(), 3, "250 lines / 100-line window = 3 chunks");
+        assert_eq!(chunks[0].1, 1);
+        assert_eq!(chunks[1].1, 101);
+        assert_eq!(chunks[2].1, 201);
+        // The line-window fallback's own chunking is untouched: the content still
+        // matches chunk_file's raw output.
+        let plain = chunk_file(Path::new("x.unknownext"), &content);
+        assert_eq!(chunks.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(), plain);
+    }
+
+    /// T14: `SearchHit::line` carries the hit chunk's real start line end to end
+    /// (chunking -> `add_chunk` -> `ranked_candidates` -> `render_final`). A markdown
+    /// file's headings give a known, deterministic chunk boundary independent of any
+    /// env-gated chunking switch: the second heading starts on line 4.
+    #[test]
+    fn search_hit_line_matches_known_chunk_start() {
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("notes.md"),
+            "# Intro\nline a\nline b\n# Target\nmarker_needle here\n",
+        )
+        .unwrap();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+        let out = idx.search(&["marker_needle".into()], 5).unwrap();
+        let hits = &out.results[0].hits;
+        assert!(!hits.is_empty(), "must find the marker chunk");
+        assert_eq!(hits[0].line, 4, "the `# Target` chunk starts on line 4");
     }
 
     #[test]

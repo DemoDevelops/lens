@@ -3,6 +3,7 @@
 //! concurrency stress (shared stores, WAL) with zero corruption + roundtrip; and
 //! explain mode never changes a tool result payload.
 
+use std::io::Write as _;
 use std::time::Duration;
 
 use rmcp::model::CallToolRequestParams;
@@ -313,4 +314,99 @@ async fn explain_mode_does_not_change_result_payload() {
     // ops.log written in both regardless.
     assert!(data_off.path().join("ops.log").exists());
     assert!(data_on.path().join("ops.log").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Plan T2: would-fire mirrors for the two new reroute arms (bash_grep,
+// read_runfile) added alongside the H4 rtk-denominator fix.
+// ---------------------------------------------------------------------------
+
+/// Seed a populated `index.db` in `data_dir` so `routing::index_present`
+/// returns true — the in-crate `seed_index` fixture is `#[cfg(test)]` and
+/// unreachable from this integration crate (same fixture SQL as
+/// `routing_tests.rs`/`rtk_tests.rs`).
+fn seed_index(data_dir: &std::path::Path) {
+    let conn = rusqlite::Connection::open(data_dir.join("index.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS file_manifest(path TEXT PRIMARY KEY, mtime INTEGER NOT NULL);
+         INSERT OR REPLACE INTO file_manifest(path, mtime) VALUES ('src/f0.rs', 123);",
+    )
+    .unwrap();
+}
+
+/// Run `lens hook claude PreToolUse` with `payload` on stdin under an
+/// explicit routing env (mirrors `rtk_tests.rs`'s `run_pretooluse`, a
+/// synchronous subprocess call rather than this file's async MCP client).
+fn run_pretooluse(payload: &Value, envs: &[(&str, &str)], data_dir: &std::path::Path) {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_lens"));
+    cmd.args(["hook", "claude", "PreToolUse"])
+        .env("LENS_DIR", data_dir)
+        .env_remove("LENS_ROUTING")
+        .env_remove("LENS_ROUTING_MCP")
+        // Deterministic regardless of whether the host machine has rtk
+        // installed + hooked (H4's rtk-deferred split is covered separately
+        // in `rtk_tests.rs`; this test only cares about the plain shape
+        // counters, mirroring `routing_tests.rs`'s `run_hook`).
+        .env("LENS_DEFER_BASH_TO_RTK", "0")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn hook");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().expect("hook output");
+}
+
+#[test]
+fn new_reroute_arms_would_fire_on_their_shapes() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP", "up")];
+
+    // Broad grep-shaped Bash command -> bash_grep_would_fire.
+    let grep_bash = json!({
+        "session_id": "s1", "cwd": d.path().to_string_lossy(),
+        "tool_name": "Bash", "tool_input": { "command": "grep -rn foo src/" }
+    });
+    run_pretooluse(&grep_bash, &envs, d.path());
+
+    // Offset/limit Read of a code file -> read_runfile_would_fire.
+    let offset_read = json!({
+        "session_id": "s1", "cwd": d.path().to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": "src/big.rs", "offset": 100, "limit": 50 }
+    });
+    run_pretooluse(&offset_read, &envs, d.path());
+
+    let store = Store::open(d.path()).unwrap();
+    assert_eq!(
+        store.get_stat("bash_grep_would_fire").unwrap(),
+        1,
+        "grep-shaped Bash command bumps bash_grep_would_fire"
+    );
+    assert_eq!(
+        store.get_stat("read_runfile_would_fire").unwrap(),
+        1,
+        "offset/limit code-file Read bumps read_runfile_would_fire"
+    );
+
+    // A narrow single-file Bash grep is the deliberate escape hatch — it must
+    // NOT bump bash_grep_would_fire.
+    let narrow_grep_bash = json!({
+        "session_id": "s1", "cwd": d.path().to_string_lossy(),
+        "tool_name": "Bash", "tool_input": { "command": "grep foo src/main.rs" }
+    });
+    run_pretooluse(&narrow_grep_bash, &envs, d.path());
+    assert_eq!(
+        store.get_stat("bash_grep_would_fire").unwrap(),
+        1,
+        "a narrow single-file Bash grep must not bump bash_grep_would_fire"
+    );
 }

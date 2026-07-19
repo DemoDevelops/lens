@@ -5,6 +5,7 @@
   "ground_truth": { "function": "mcp_redirect" },
   "check": "contains",
   "primary_mechanism": "search",
+  "lens_fn": "lens_search",
   "evidence": ["mcp_redirect"],
   "treatment": { "queries": ["deny steer agent lens tool only when server reachable never pointed at missing tool"] }
 }

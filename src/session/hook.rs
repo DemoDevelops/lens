@@ -175,7 +175,18 @@ fn elink_would_fire(data_dir: &Path, session_id: &str, tool: &str, tool_input: &
         return false;
     };
     let k = crate::routing::reroute::edit_callers::min_callers();
-    crate::routing::reroute::edit_callers::caller_nudge(&graph, &sym, k).is_some()
+    crate::routing::reroute::edit_callers::caller_count(&graph, &sym).is_some_and(|n| n >= k)
+}
+
+/// Is `cmd` a grep-shaped Bash segment that would classify to something other
+/// than the deliberate `NarrowExact` escape hatch? Powers
+/// `bash_grep_would_fire` via T1's `reroute::bash_grep::parse_grep_seg` +
+/// `classify` — a single-file scope is left alone (the rail's escape hatch),
+/// so it must not count as a would-fire.
+fn bash_grep_shape(cmd: &str) -> bool {
+    routing::reroute::bash_grep::parse_grep_seg(cmd)
+        .map(|seg| routing::reroute::bash_grep::classify(&seg))
+        .is_some_and(|c| !matches!(c, routing::reroute::bash_grep::BashGrepClass::NarrowExact))
 }
 
 /// Nearest enclosing repo root at or above `start`: the deepest ancestor that
@@ -287,7 +298,16 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             // CURRENT tool: `{p}_next_{class}` for a live arm (rail flag ON),
             // `{p}_shadow_next_{class}` for a shadow arm (flag OFF).
             let class6 = follower_class6(&tool, &ti);
-            for p in ["gsym", "rskel", "bagg", "elink", "gast", "rovr"] {
+            for p in [
+                "gsym",
+                "rskel",
+                "bagg",
+                "elink",
+                "gast",
+                "rovr",
+                "bash_grep",
+                "read_runfile",
+            ] {
                 if routing::throttle::take(&data_dir, &session_id, &format!("{p}-live-pending")) {
                     if let Some(s) = &stats_store {
                         let _ = s.bump_stat(&format!("{p}_next_{class6}"), 1);
@@ -362,6 +382,13 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 0
             };
 
+            // Computed once per event and reused for `rc.rtk_active` further
+            // below: on rtk machines the Bash wrap/rewrite stage defers to
+            // rtk (H0), so the Bash-rail would-fire denominators must split
+            // out events rtk would have deferred anyway (H4) rather than
+            // count them against a near-zero live denominator.
+            let rtk_active = crate::rtk::rtk_active(&data_dir);
+
             // Reroute-rail follower counters (six rails, grep-scope shape):
             // re-derive each rail's would-fire on THIS event with the same
             // classifier + gates route_inner uses, bump `{p}_would_fire`
@@ -387,15 +414,31 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                     };
                     routing::throttle::bump(&data_dir, &session_id, &pk);
                 };
-                // Live-arm union per rail, matching route_inner EXACTLY.
-                // gsym/rskel/rovr/elink nudges fire only at Level::Nudge.
-                let live_std = |deny: bool, nudge: bool| {
-                    (deny && level.steers()) || (nudge && level.nudges() && !level.steers())
+                // Bash-rail variant of `arm` (H4): bumps
+                // `{prefix}_would_fire_rtk_deferred` instead of
+                // `{prefix}_would_fire` when rtk is deferring this Bash call,
+                // so dashboard adoption % is never computed against rtk's
+                // near-zero live denominator.
+                let arm_rtk_aware = |prefix: &str, enabled: bool| {
+                    if let Some(s) = &stats_store {
+                        let key = if rtk_active {
+                            format!("{prefix}_would_fire_rtk_deferred")
+                        } else {
+                            format!("{prefix}_would_fire")
+                        };
+                        let _ = s.bump_stat(&key, 1);
+                    }
+                    let pk = if enabled {
+                        format!("{prefix}-live-pending")
+                    } else {
+                        format!("{prefix}-shadow-pending")
+                    };
+                    routing::throttle::bump(&data_dir, &session_id, &pk);
                 };
-                // gast/bagg nudges fire at every nudging level (deny + nudge
-                // share a one-shot key, so no double-fire).
-                let live_gb =
-                    |deny: bool, nudge: bool| (deny && level.steers()) || (nudge && level.nudges());
+                // Live-arm gate per rail, matching route_inner EXACTLY. Nudge
+                // arms are retired (T5); a rail is live iff its deny arm is
+                // enabled at a steering level.
+                let live = |deny: bool| deny && level.steers();
                 match tool.as_str() {
                     "Grep" => {
                         let pat = ti.get("pattern").and_then(Value::as_str).unwrap_or("");
@@ -414,26 +457,14 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                             let gsym = gsym_shape
                                 && routing::reroute::grep_symbol::graph_resolves(&data_dir, pat);
                             if gsym {
-                                arm(
-                                    "gsym",
-                                    live_std(
-                                        routing::grep_symbol_deny_enabled(),
-                                        routing::grep_symbol_nudge_enabled(),
-                                    ),
-                                );
+                                arm("gsym", live(routing::grep_symbol_deny_enabled()));
                             } else if gsym_shape {
                                 if let Some(s) = &stats_store {
                                     let _ = s.bump_stat("gsym_graph_miss", 1);
                                 }
                             }
                             if gast {
-                                arm(
-                                    "gast",
-                                    live_gb(
-                                        routing::grep_ast_deny_enabled(),
-                                        routing::grep_ast_nudge_enabled(),
-                                    ),
-                                );
+                                arm("gast", live(routing::grep_ast_deny_enabled()));
                             }
                         }
                     }
@@ -461,23 +492,24 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                             );
                         if (rskel || rovr) && mcp_ready && routing::index_present(&data_dir) {
                             if rskel {
-                                arm(
-                                    "rskel",
-                                    live_std(
-                                        routing::read_skeleton_deny_enabled(),
-                                        routing::read_skeleton_nudge_enabled(),
-                                    ),
-                                );
+                                arm("rskel", live(routing::read_skeleton_deny_enabled()));
                             }
                             if rovr {
-                                arm(
-                                    "rovr",
-                                    live_std(
-                                        routing::read_overview_deny_enabled(),
-                                        routing::read_overview_nudge_enabled(),
-                                    ),
-                                );
+                                arm("rovr", live(routing::read_overview_deny_enabled()));
                             }
+                        }
+                        // H5 would-fire mirror: offset/limit code Reads (T3's
+                        // `read_is_analysis_shaped`) — the shape whose
+                        // correct target is `lens_run_file`. No rtk split
+                        // needed — rtk only defers Bash, not Read. No live
+                        // deny arm exists yet, so `enabled` stays false — T5
+                        // wires the real flag/classify gate when it lands.
+                        if level.nudges()
+                            && routing::reroute::read_skeleton::read_is_analysis_shaped(&ti)
+                            && mcp_ready
+                            && routing::index_present(&data_dir)
+                        {
+                            arm("read_runfile", false);
                         }
                     }
                     "Bash" => {
@@ -487,13 +519,20 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                             && mcp_ready
                             && routing::index_present(&data_dir)
                         {
-                            arm(
-                                "bagg",
-                                live_gb(
-                                    routing::bash_agg_deny_enabled(),
-                                    routing::bash_agg_nudge_enabled(),
-                                ),
-                            );
+                            arm_rtk_aware("bagg", live(routing::bash_agg_deny_enabled()));
+                        }
+                        // H1 would-fire mirror: grep-shaped Bash commands
+                        // (T1's classifier), same rtk-active denominator
+                        // split as bagg above. No live deny arm exists yet,
+                        // so `enabled` stays false — T5 wires the real
+                        // flag/classify gate into `bash_decision` when it
+                        // lands.
+                        if level.nudges()
+                            && bash_grep_shape(cmd)
+                            && mcp_ready
+                            && routing::index_present(&data_dir)
+                        {
+                            arm_rtk_aware("bash_grep", false);
                         }
                     }
                     // Graph load only on Edit events, guarded — see
@@ -505,13 +544,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                             && routing::index_present(&data_dir)
                             && elink_would_fire(&data_dir, &session_id, &tool, &ti) =>
                     {
-                        arm(
-                            "elink",
-                            live_std(
-                                routing::edit_links_deny_enabled(),
-                                routing::edit_links_nudge_enabled(),
-                            ),
-                        );
+                        arm("elink", live(routing::edit_links_deny_enabled()));
                     }
                     _ => {}
                 }
@@ -526,7 +559,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                 bin: &bin,
                 data_dir: &data_dir,
                 session_id: &session_id,
-                rtk_active: crate::rtk::rtk_active(&data_dir),
+                rtk_active,
                 reads_since_map,
             };
             let decision = routing::route(&tool, &ti, &rc);
@@ -1262,6 +1295,12 @@ mod tests {
     #[test]
     fn deny_only_rail_attributes_follower_live_not_shadow() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Also serializes with mod.rs's `mcp_ready` tests: both mutate the
+        // process-global `LENS_ROUTING_MCP` var and run in the same `cargo
+        // test --lib` binary, so a single crate-wide lock is required.
+        let _mcp_guard = crate::routing::MCP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let data_dir = super::super::resolve_data_dir(dir.path());
         std::fs::create_dir_all(&data_dir).unwrap();

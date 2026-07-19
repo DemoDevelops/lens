@@ -1,0 +1,11 @@
+{
+  "id": "0070_real_agentic_query_pub_fn_survey",
+  "prompt": "How many public functions (`pub fn`) does src/discovery/query.rs declare at its top level, and which one is alphabetically first? Answer with keys `fn_count` and `first_alpha`.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "fn_count": 10, "first_alpha": "find" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_overview",
+  "evidence": ["find", "query"],
+  "treatment": { "skeleton": "../../src/discovery/query.rs" }
+}

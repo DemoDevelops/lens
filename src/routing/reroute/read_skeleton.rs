@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use serde_json::Value;
+
 /// Code extensions eligible for the skeleton reroute (case-insensitive,
 /// matched after the last `.`). The plan's minimum set plus sensible
 /// siblings (`jsx` alongside `js`/`tsx`; `h`/`hpp` alongside `c`/`cpp`).
@@ -33,21 +35,32 @@ pub fn read_is_skeletonizable(
         && extension(path).is_some_and(|ext| CODE_EXTENSIONS.contains(&ext.as_str()))
 }
 
+/// Per-file throttle key for the rskel rail, so each distinct file gets its
+/// own one-shot instead of sharing a single per-session key. Mirrors the
+/// `elink:{sym}` per-symbol pattern (`crate::routing::edited_decl_symbol`'s
+/// caller in `mod.rs`), keyed on `path` instead of a symbol.
+pub(crate) fn rskel_key(path: &str) -> String {
+    format!("read-skeleton:{path}")
+}
+
+/// Is this Read's `tool_input` a bounded (`offset`/`limit`) read of a code
+/// file? This is the shape [`read_is_skeletonizable`] exempts from the
+/// whole-file skeleton deny — its correct target isn't `lens_skeleton` (it's
+/// already bounded) but `lens_run_file`, so routing can point it there
+/// instead of silently passing it through.
+pub(crate) fn read_is_analysis_shaped(tool_input: &Value) -> bool {
+    let path = tool_input["file_path"].as_str().unwrap_or("");
+    let has_offset_or_limit =
+        tool_input.get("offset").is_some() || tool_input.get("limit").is_some();
+    has_offset_or_limit && extension(path).is_some_and(|ext| CODE_EXTENSIONS.contains(&ext.as_str()))
+}
+
 /// Deny reason for a skeletonizable Read: mirrors
 /// [`crate::routing::GREP_FIRST_DENY_REASON`]'s shape, keyed on the Read's
 /// `path` instead of the prompt's phrasing.
 pub fn deny_reason(path: &str) -> String {
     format!(
         "This Read pulls in a whole code file you haven't edited — lens_skeleton answers it without the full-file dump. First: lens_skeleton(path=\"{path}\"). Need one function's body verbatim? lens_skeleton(path=\"{path}\", include_bodies=[\"the_fn\"]) returns it in the same call. Read is for when you're about to Edit (Edit must match exact bytes) — once you've edited this file this session, Read passes through untouched. If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_skeleton,lens_recall\")."
-    )
-}
-
-/// Soft-suggestion Context nudge for a skeletonizable Read — the same
-/// `lens_skeleton` guidance as [`deny_reason`], phrased as a suggestion.
-/// Never blocks: the rail's `Level::Nudge` arm.
-pub fn nudge(path: &str) -> String {
-    format!(
-        "This Read pulls in a whole code file you haven't edited — lens_skeleton(path=\"{path}\") shows its signatures and structure without the full-file dump, and lens_skeleton(path=\"{path}\", include_bodies=[\"the_fn\"]) returns any body you need verbatim in the same call. Read stays right when you're about to Edit (Edit must match exact bytes). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_skeleton,lens_recall\")."
     )
 }
 
@@ -96,17 +109,40 @@ mod tests {
     }
 
     #[test]
+    fn rskel_key_is_per_file() {
+        assert_eq!(rskel_key("src/lib.rs"), "read-skeleton:src/lib.rs");
+        assert_ne!(rskel_key("src/lib.rs"), rskel_key("src/main.rs"));
+    }
+
+    #[test]
+    fn offset_read_of_code_file_is_analysis_shaped() {
+        let input = serde_json::json!({"file_path": "src/lib.rs", "offset": 10});
+        assert!(read_is_analysis_shaped(&input));
+    }
+
+    #[test]
+    fn limit_read_of_code_file_is_analysis_shaped() {
+        let input = serde_json::json!({"file_path": "src/lib.rs", "limit": 50});
+        assert!(read_is_analysis_shaped(&input));
+    }
+
+    #[test]
+    fn whole_file_read_is_not_analysis_shaped() {
+        let input = serde_json::json!({"file_path": "src/lib.rs"});
+        assert!(!read_is_analysis_shaped(&input));
+    }
+
+    #[test]
+    fn offset_read_of_non_code_file_is_not_analysis_shaped() {
+        let input = serde_json::json!({"file_path": "README.md", "offset": 10});
+        assert!(!read_is_analysis_shaped(&input));
+    }
+
+    #[test]
     fn deny_reason_names_the_skeleton_call_and_include_bodies() {
         let r = deny_reason("src/x.rs");
         assert!(r.contains("lens_skeleton"));
         assert!(r.contains("include_bodies"));
     }
 
-    #[test]
-    fn nudge_names_the_skeleton_call_and_include_bodies() {
-        let n = nudge("src/x.rs");
-        assert!(n.contains("lens_skeleton(path=\"src/x.rs\""));
-        assert!(n.contains("include_bodies"));
-        assert!(n.contains("ToolSearch"));
-    }
 }

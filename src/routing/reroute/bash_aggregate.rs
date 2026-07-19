@@ -38,14 +38,6 @@ pub fn is_data_aggregate(cmd: &str) -> bool {
     aggregate_re().is_match(cmd) && !file_write_re().is_match(cmd)
 }
 
-/// Context nudge (never a deny — extends the [`super::super::BASH_NUDGE`]
-/// family) pointing an aggregate/reshape Bash pipeline at `lens_run`: the
-/// shell pipeline runs inside the darkroom, so its bulk output never lands in
-/// context — only what's printed comes back.
-pub fn nudge() -> String {
-    "<context_guidance>\n  <tip>\n    This pipeline counts, sorts, or reshapes data — run it inside lens_run(language=\"shell\", code=\"...\") instead of Bash: the shell pipeline executes in the darkroom and only what you print comes back, so the raw rows never land in context. If lens_run isn't loaded yet, load it first: ToolSearch(query: \"select:lens_run,lens_recall\").\n  </tip>\n</context_guidance>".to_string()
-}
-
 /// Deny reason for a Bash `cmd` [`is_data_aggregate`] identified as a
 /// counting/sorting/reshaping pipeline: names the exact `lens_run` call with
 /// `cmd` embedded as its `code` arg, includes the `ToolSearch` bootstrap line
@@ -73,7 +65,7 @@ pub fn nudge() -> String {
 /// Mitigation: the live gate keeps this deny conservative — it fires only
 /// while steering, only once per session (`nudge_once("bash-agg")`), never on
 /// a stateful or file-write-shaped command, and `LENS_BASH_AGG_DENY=0`
-/// kill-switches it independently of the nudge ([`nudge`]).
+/// kill-switches it.
 pub fn deny_reason(cmd: &str) -> String {
     format!(
         "This Bash pipeline counts, sorts, or reshapes data (\"{cmd}\") — run it inside the darkroom instead of Bash: lens_run(language=\"shell\", code=\"{cmd}\"). Only what you print comes back, so the raw rows never land in context. If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_run,lens_recall\"). This fires once per prompt — the same command will pass if you re-run it verbatim."
@@ -103,11 +95,6 @@ mod tests {
         assert!(!is_data_aggregate("wc -l < f > out.txt"));
         assert!(!is_data_aggregate("sort | uniq -c | tee counts.txt"));
         assert!(!is_data_aggregate("cat <<'EOF' | wc -l\nhi\nEOF"));
-    }
-
-    #[test]
-    fn nudge_names_lens_run() {
-        assert!(nudge().contains("lens_run"));
     }
 
     #[test]

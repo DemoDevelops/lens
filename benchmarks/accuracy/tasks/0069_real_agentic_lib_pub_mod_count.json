@@ -1,0 +1,11 @@
+{
+  "id": "0069_real_agentic_lib_pub_mod_count",
+  "prompt": "How many top-level `pub mod` declarations exist directly in src/lib.rs, and which one is alphabetically first? Answer with keys `mod_count` and `first_module`.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "mod_count": 13, "first_module": "darkroom" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_map",
+  "evidence": ["darkroom", "wrap"],
+  "treatment": { "skeleton": "../../src/lib.rs" }
+}

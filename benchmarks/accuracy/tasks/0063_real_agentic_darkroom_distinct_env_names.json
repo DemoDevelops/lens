@@ -5,6 +5,7 @@
   "ground_truth": { "count": 42 },
   "check": "numeric_tolerance",
   "primary_mechanism": "darkroom",
+  "lens_fn": "lens_run",
   "evidence": ["42", "LENS_WALK_DEBOUNCE_MS", "LENS_SNAPSHOT_BUDGET"],
   "treatment": {
     "language": "python",

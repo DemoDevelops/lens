@@ -176,26 +176,6 @@ pub fn deny_reason(pattern: &str) -> String {
     out
 }
 
-/// Soft-suggestion Context nudge for a symbol-shaped Grep — the same
-/// `lens_symbol`/`lens_find` guidance as [`deny_reason`], phrased as a
-/// suggestion. Never blocks: the rail's `Level::Nudge` arm.
-pub fn nudge(pattern: &str) -> String {
-    let trimmed = pattern.trim();
-    let (ident, is_clean) = extract_identifier(trimmed);
-    let mut out = format!(
-        "This grep pattern looks like a symbol lookup (\"{trimmed}\") — one lens call answers it directly instead of a grep chain: lens_symbol(name=\"{ident}\")."
-    );
-    if !is_clean {
-        out.push_str(&format!(
-            " \"{trimmed}\" isn't a clean identifier and lens_symbol needs a name — lens_find(query=\"{trimmed}\") takes a free-text query instead."
-        ));
-    }
-    out.push_str(
-        " If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_symbol,lens_find,lens_links\").",
-    );
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,17 +207,6 @@ mod tests {
         let r = deny_reason("handle_connection");
         assert!(r.contains("lens_symbol"));
         assert!(r.contains("ToolSearch"));
-    }
-
-    #[test]
-    fn nudge_suggests_without_blocking_language() {
-        let n = nudge("handle_connection");
-        assert!(n.contains("lens_symbol(name=\"handle_connection\")"));
-        assert!(n.contains("ToolSearch"));
-        assert!(
-            !n.contains("fires once per prompt"),
-            "the nudge is a suggestion, not a deny: {n}"
-        );
     }
 
     fn write_graph(dir: &std::path::Path, name: &str) {

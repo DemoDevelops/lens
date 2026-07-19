@@ -9,6 +9,7 @@
   },
   "check": "contains",
   "primary_mechanism": "discovery",
+  "lens_fn": "lens_path",
   "evidence": ["build_snapshot", "grep_scope_deny_enabled", "inspect_escalation"],
   "treatment": { "graph_op": "path", "from": "session_start", "to": "build_snapshot" }
 }

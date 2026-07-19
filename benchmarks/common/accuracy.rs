@@ -103,6 +103,13 @@ pub struct Task {
     #[serde(default)]
     pub tolerance: Option<f64>,
     pub primary_mechanism: String,
+    /// The lens MCP function this task primarily exercises (e.g.
+    /// `"lens_search"`), tagged on every `real_agentic_*` task. Powers the
+    /// per-function aggregation in `function_report`; absent (`None`) for the
+    /// pre-agentic mechanism tasks, which don't map to a single agent-chosen
+    /// tool.
+    #[serde(default)]
+    pub lens_fn: Option<String>,
     /// Substrings that must be present in a context for the answer to be
     /// derivable (used by the mock oracle; see `mock_answer`).
     pub evidence: Vec<String>,
@@ -188,8 +195,10 @@ pub struct ArmResult {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub rounds: usize,
     /// Wall-clock milliseconds of the live session (the result envelope's
-    /// `duration_ms`). Agentic arms only; zero and skipped elsewhere.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// `duration_ms`). Agentic arms only; zero and skipped elsewhere. Renamed
+    /// on the wire to `duration_ms` — the third headline metric (time-to-
+    /// answer) of the optimization-toolkit positioning.
+    #[serde(rename = "duration_ms", default, skip_serializing_if = "is_zero")]
     pub millis: usize,
     /// Tool names in call order. Agentic arms only; empty and skipped elsewhere.
     /// This is what shows whether an arm organically reached a lens tool.
@@ -937,11 +946,20 @@ impl ArmIsolation {
     }
 }
 
-/// The lens arm's hooks shell the *installed* `~/.cargo/bin/lens` (that is what
-/// `lens setup` registers) while its MCP tools come from `target/release/lens`.
-/// Verified benign: both builds emit a byte-identical SessionStart guide, repo
-/// map, and rail nudge; only a durable-memory state footnote differs, which is
-/// data rather than code.
+/// `--mcp-config` always points at `lens_release_bin` (this run's own build),
+/// not whatever binary a prior `lens session install` happened to register
+/// globally. `--settings` merges onto the ambient config rather than
+/// replacing it, so it cannot redirect an already-registered hook's command
+/// to a different binary; that means the AMBIENT hooks must independently
+/// already point at this same binary for a lens-arm run to be valid, which
+/// the caller is responsible for arranging before running the bench (e.g. by
+/// temporarily repointing the real, installed session hooks at
+/// `lens_release_bin` for the run's duration, then restoring them). A
+/// mismatch here is exactly what voided the 560e862 acceptance run (hooks and
+/// MCP disagreeing on the tool set produced "No matching deferred tools
+/// found" and zero organic `mcp__lens__*` calls, yet the validity gate at the
+/// time only checked that the guide fired); `validate_arm_run` is the
+/// backstop that now catches a recurrence instead of scoring it as a loss.
 fn arm_isolation() -> anyhow::Result<ArmIsolation> {
     if !supports_strict_mcp_config() {
         return Err(anyhow::anyhow!(
@@ -949,10 +967,12 @@ fn arm_isolation() -> anyhow::Result<ArmIsolation> {
              isolated from the ambient lens MCP server; refusing to run an invalid A/B"
         ));
     }
+    let bin = lens_release_bin();
+    eprintln!("agentic bench: --mcp-config resolves to {}", bin.display());
     Ok(ArmIsolation {
         baseline_mcp: write_temp_json(&json!({ "mcpServers": {} }))?,
         baseline_settings: write_temp_json(&baseline_settings_json())?,
-        lens_mcp: write_temp_json(&mcp_config_json(&lens_release_bin()))?,
+        lens_mcp: write_temp_json(&mcp_config_json(&bin))?,
         lens_settings: write_temp_json(&lens_settings_json())?,
     })
 }
@@ -993,7 +1013,7 @@ fn lens_settings_json() -> Value {
     json!({ "env": { "LENS_ROUTING": "full" } })
 }
 
-fn lens_release_bin() -> PathBuf {
+pub fn lens_release_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/release/lens")
 }
 
@@ -1040,19 +1060,13 @@ fn run_agentic_arm(task: &Task, model: &str, arm: &ArmSpec) -> anyhow::Result<Ar
             Ok(run) => {
                 // A misconfigured arm is not worth retrying, and silently measuring
                 // it is how the first two builds shipped an invalid A/B.
-                if (run.guide_injections > 0) != arm.expects_guide {
-                    return Err(anyhow::anyhow!(
-                        "arm [{}] expected lens guide={} but saw {} injection(s): its routing \
-                         config did not take, so the arm is measuring the wrong thing",
-                        arm.allowed_tools,
-                        arm.expects_guide,
-                        run.guide_injections
-                    ));
+                if let Err(msg) = validate_arm_run(&run, arm) {
+                    return Err(anyhow::anyhow!(msg));
                 }
                 if run.hit_turn_cap {
                     eprintln!(
-                        "  WARNING: agentic [{}] hit --max-turns 8; scored as a failed run \
-                         (no answer inside the turn budget) — a deny rail costs a round to recover",
+                        "  WARNING: agentic [{}] hit the CLI's own turn cap (no --max-turns is \
+                         passed); scored as a failed run (no answer inside the turn budget)",
                         arm.allowed_tools
                     );
                 }
@@ -1109,6 +1123,33 @@ impl AgenticRun {
     }
 }
 
+/// The validity gate. Two failure modes, both fatal rather than silently
+/// scored: the SessionStart guide didn't fire the way this arm expects (its
+/// routing config didn't take), and — the exact bug that voided the 560e862
+/// acceptance run — the guide fired but the arm made ZERO organic
+/// `mcp__lens__*` calls, which happens when the hooks binary and
+/// `--mcp-config` binary disagree on the tool set ("No matching deferred
+/// tools found"). `resolve_bench_binary` fixes the root cause; this is the
+/// backstop that catches a future recurrence instead of scoring it as a loss.
+fn validate_arm_run(run: &AgenticRun, arm: &ArmSpec) -> Result<(), String> {
+    if (run.guide_injections > 0) != arm.expects_guide {
+        return Err(format!(
+            "arm [{}] expected lens guide={} but saw {} injection(s): its routing \
+             config did not take, so the arm is measuring the wrong thing",
+            arm.allowed_tools, arm.expects_guide, run.guide_injections
+        ));
+    }
+    if arm.expects_guide && !run.tools.iter().any(|t| t.starts_with("mcp__lens__")) {
+        return Err(format!(
+            "arm [{}] guide fired but made ZERO mcp__lens__* tool calls: the hooks \
+             shell-out and --mcp-config binaries likely disagree on the tool set \
+             (the 560e862 bug); refusing to score this run",
+            arm.allowed_tools
+        ));
+    }
+    Ok(())
+}
+
 /// One live `claude -p` seeing exactly the MCP servers in `arm.mcp_config` and the
 /// tools permitted by `arm.allowed_tools`. Wall-clock bounded by `perl alarm`
 /// (headless `claude` has no timeout flag, macOS has no `timeout`).
@@ -1121,7 +1162,7 @@ fn claude_agentic_attempt(
     let effort = std::env::var("LENS_BENCH_EFFORT").unwrap_or_else(|_| "low".to_string());
     let mut cmd = Command::new("perl");
     cmd.current_dir(workdir)
-        .args(["-e", "alarm shift; exec @ARGV", "180"])
+        .args(["-e", "alarm shift; exec @ARGV", "600"])
         .arg("claude")
         .arg("-p")
         .arg(prompt)
@@ -1144,8 +1185,7 @@ fn claude_agentic_attempt(
     cmd.args(["--effort", effort.as_str()])
         .args(["--allowedTools", arm.allowed_tools])
         .args(["--output-format", "stream-json"])
-        .arg("--verbose")
-        .args(["--max-turns", "8"]);
+        .arg("--verbose");
 
     let out = cmd
         .stdin(Stdio::null())
@@ -1566,6 +1606,96 @@ pub fn aggregate(results: &[TaskResult]) -> Vec<Group> {
     groups
 }
 
+// --- Per-function aggregation (Contracts bench schema) ----------------------
+
+/// One row of the Contracts bench schema for `results/agentic/real.json`'s
+/// `overall`/`per_function` arrays: one arm (`"lens"` or `"baseline"`) of one
+/// group (`"overall"`, or a `lens_fn` value), folded across every task that
+/// names it. Each task contributes its own K-run fold (or its single value,
+/// for a `runs = 1` task), so `n` is a task count, matching the convention
+/// `aggregate`'s `Group` already uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionStats {
+    #[serde(rename = "fn")]
+    pub function: String,
+    pub arm: String,
+    pub n: usize,
+    pub success_mean: f64,
+    pub success_std: f64,
+    pub tokens_mean: f64,
+    pub tokens_std: f64,
+    pub duration_ms_mean: f64,
+    pub duration_ms_std: f64,
+}
+
+/// Fold `results` into the Contracts `overall` + `per_function` tables: two
+/// rows (`lens` vs `baseline`) per group, meaned/stddev'd across every task
+/// that carries the group's `lens_fn` tag. `tasks` supplies the tag (matched
+/// to `results` by id); tasks with no `lens_fn` don't participate — the
+/// pre-agentic mechanism tasks don't map to a single agent-chosen tool.
+pub fn function_report(tasks: &[Task], results: &[TaskResult]) -> (Vec<FunctionStats>, Vec<FunctionStats>) {
+    let tag: std::collections::HashMap<&str, &str> = tasks
+        .iter()
+        .filter_map(|t| t.lens_fn.as_deref().map(|f| (t.id.as_str(), f)))
+        .collect();
+    let tagged: Vec<&TaskResult> = results
+        .iter()
+        .filter(|r| tag.contains_key(r.id.as_str()))
+        .collect();
+
+    let overall = arm_pair("overall", &tagged);
+
+    let mut fns: Vec<&str> = tag.values().copied().collect();
+    fns.sort_unstable();
+    fns.dedup();
+    let per_function = fns
+        .into_iter()
+        .flat_map(|f| {
+            let rows: Vec<&TaskResult> = tagged
+                .iter()
+                .filter(|r| tag.get(r.id.as_str()) == Some(&f))
+                .copied()
+                .collect();
+            arm_pair(f, &rows)
+        })
+        .collect();
+    (overall, per_function)
+}
+
+/// Both arms' `FunctionStats` for one group's tasks.
+fn arm_pair(name: &str, rows: &[&TaskResult]) -> Vec<FunctionStats> {
+    ["lens", "baseline"]
+        .into_iter()
+        .map(|arm| {
+            let per_task: Vec<ArmRow> = rows
+                .iter()
+                .map(|r| match arm {
+                    "lens" => arm_row(&r.treatment, r.treatment_stats.as_ref()),
+                    _ => arm_row(&r.control, r.control_stats.as_ref()),
+                })
+                .collect();
+            fold_function_rows(name, arm, &per_task)
+        })
+        .collect()
+}
+
+fn fold_function_rows(name: &str, arm: &str, rows: &[ArmRow]) -> FunctionStats {
+    let success: Vec<f64> = rows.iter().map(|r| r.success).collect();
+    let tokens: Vec<f64> = rows.iter().map(|r| r.tokens).collect();
+    let millis: Vec<f64> = rows.iter().map(|r| r.millis).collect();
+    FunctionStats {
+        function: name.to_string(),
+        arm: arm.to_string(),
+        n: rows.len(),
+        success_mean: mean(&success),
+        success_std: stddev(&success),
+        tokens_mean: mean(&tokens),
+        tokens_std: stddev(&tokens),
+        duration_ms_mean: mean(&millis),
+        duration_ms_std: stddev(&millis),
+    }
+}
+
 /// Render the accuracy table (§4.4 of the plan). `model_label` names the arm's
 /// model; `pending` true means no real-model run has happened yet.
 pub fn render_accuracy_markdown(groups: &[Group], model_label: &str, pending: bool) -> String {
@@ -1920,6 +2050,160 @@ mod agentic_isolation_tests {
              arm is not lens-as-installed"
         );
         assert!(baseline.tokens > 0 && lens.tokens > 0, "both arms must report usage");
+    }
+}
+
+#[cfg(test)]
+mod validity_gate_tests {
+    use super::{validate_arm_run, AgenticRun, ArmSpec, LENS_TOOLS};
+    use std::path::Path;
+
+    fn arm(expects_guide: bool) -> ArmSpec<'static> {
+        ArmSpec {
+            allowed_tools: LENS_TOOLS,
+            mcp_config: Path::new("/tmp/mcp.json"),
+            settings: Path::new("/tmp/settings.json"),
+            expects_guide,
+        }
+    }
+
+    fn run(guide_injections: usize, tools: Vec<&str>) -> AgenticRun {
+        AgenticRun {
+            answer: "{}".to_string(),
+            tools: tools.into_iter().map(str::to_string).collect(),
+            tokens: 10,
+            guide_injections,
+            hit_turn_cap: false,
+            duration_ms: 100,
+        }
+    }
+
+    /// The exact 560e862 failure mode: the SessionStart guide fired (routing
+    /// config took) but the arm made zero organic `mcp__lens__*` calls (the
+    /// hooks/mcp-config binary mismatch). Must be REJECTED, not scored.
+    #[test]
+    fn guide_fired_but_zero_lens_calls_is_rejected() {
+        let r = run(1, vec!["Read", "Bash"]);
+        let err = validate_arm_run(&r, &arm(true)).expect_err("must be invalid");
+        assert!(err.contains("ZERO mcp__lens__"), "{err}");
+    }
+
+    #[test]
+    fn guide_fired_with_a_lens_call_is_valid() {
+        let r = run(1, vec!["Bash", "mcp__lens__lens_search"]);
+        assert!(validate_arm_run(&r, &arm(true)).is_ok());
+    }
+
+    #[test]
+    fn baseline_with_no_guide_and_no_lens_calls_is_valid() {
+        let r = run(0, vec!["Read", "Bash"]);
+        assert!(validate_arm_run(&r, &arm(false)).is_ok());
+    }
+
+    #[test]
+    fn missing_guide_on_a_lens_arm_is_rejected() {
+        let r = run(0, vec!["mcp__lens__lens_search"]);
+        let err = validate_arm_run(&r, &arm(true)).expect_err("must be invalid");
+        assert!(err.contains("expected lens guide"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod function_report_tests {
+    use super::{function_report, ArmResult, FunctionStats, Task, TaskResult};
+    use serde_json::json;
+
+    fn tagged_task(id: &str, lens_fn: &str) -> Task {
+        serde_json::from_value(json!({
+            "id": id,
+            "prompt": "p",
+            "fixtures": ["fixtures/repo"],
+            "ground_truth": { "a": "b" },
+            "check": "contains",
+            "primary_mechanism": "search",
+            "lens_fn": lens_fn,
+            "evidence": ["b"],
+            "treatment": { "queries": ["q"] }
+        }))
+        .expect("task spec")
+    }
+
+    fn arm(correct: bool, tokens: usize, millis: usize) -> ArmResult {
+        ArmResult { correct, tokens, context_bytes: tokens, answer: json!({}), rounds: 1, millis, tools: vec![] }
+    }
+
+    fn result(id: &str, mechanism: &str, control: ArmResult, treatment: ArmResult) -> TaskResult {
+        TaskResult { id: id.to_string(), mechanism: mechanism.to_string(), control, treatment, control_stats: None, treatment_stats: None }
+    }
+
+    #[test]
+    fn groups_by_lens_fn_and_folds_both_arms() {
+        let tasks = vec![
+            tagged_task("t1", "lens_search"),
+            tagged_task("t2", "lens_search"),
+            tagged_task("t3", "lens_symbol"),
+        ];
+        let results = vec![
+            result("t1", "search", arm(false, 2000, 0), arm(true, 1000, 8000)),
+            result("t2", "search", arm(false, 2000, 0), arm(true, 1400, 8400)),
+            result("t3", "search", arm(true, 500, 0), arm(true, 300, 3000)),
+        ];
+        let (overall, per_function) = function_report(&tasks, &results);
+
+        // overall = both arms folded across all 3 tagged tasks.
+        assert_eq!(overall.len(), 2);
+        let lens_overall = overall.iter().find(|r| r.arm == "lens").expect("lens row");
+        assert_eq!(lens_overall.function, "overall");
+        assert_eq!(lens_overall.n, 3);
+        assert!((lens_overall.success_mean - 1.0).abs() < 1e-9);
+
+        // per_function has one lens+baseline pair per distinct tag.
+        let fns: std::collections::HashSet<&str> =
+            per_function.iter().map(|r| r.function.as_str()).collect();
+        assert_eq!(fns, std::collections::HashSet::from(["lens_search", "lens_symbol"]));
+        let search_lens: &FunctionStats = per_function
+            .iter()
+            .find(|r| r.function == "lens_search" && r.arm == "lens")
+            .expect("lens_search/lens row");
+        assert_eq!(search_lens.n, 2);
+        assert!((search_lens.tokens_mean - 1200.0).abs() < 1e-9, "{}", search_lens.tokens_mean);
+        assert!((search_lens.duration_ms_mean - 8200.0).abs() < 1e-9, "{}", search_lens.duration_ms_mean);
+    }
+
+    #[test]
+    fn untagged_tasks_do_not_participate() {
+        let mut untagged = tagged_task("t1", "lens_search");
+        untagged.lens_fn = None;
+        let results = vec![result("t1", "search", arm(false, 2000, 0), arm(true, 1000, 8000))];
+        let (overall, per_function) = function_report(&[untagged], &results);
+        assert!(overall.iter().all(|r| r.n == 0));
+        assert!(per_function.is_empty());
+    }
+
+    /// Contract shape check (Bench schema): `{fn, arm, n, success_mean,
+    /// success_std, tokens_mean, tokens_std, duration_ms_mean,
+    /// duration_ms_std}`, round-tripped through JSON without loss.
+    #[test]
+    fn function_stats_round_trips_through_json_with_contract_keys() {
+        let row = FunctionStats {
+            function: "lens_search".to_string(),
+            arm: "lens".to_string(),
+            n: 3,
+            success_mean: 1.0,
+            success_std: 0.0,
+            tokens_mean: 1234.5,
+            tokens_std: 45.2,
+            duration_ms_mean: 8200.0,
+            duration_ms_std: 300.1,
+        };
+        let v = serde_json::to_value(&row).expect("serialize");
+        assert_eq!(v["fn"], "lens_search", "the Contract key is `fn`, not `function`: {v}");
+        assert_eq!(v["arm"], "lens");
+        assert_eq!(v["n"], 3);
+        let back: FunctionStats = serde_json::from_value(v).expect("round trip");
+        assert_eq!(back.function, row.function);
+        assert_eq!(back.duration_ms_mean, row.duration_ms_mean);
+        assert_eq!(back.duration_ms_std, row.duration_ms_std);
     }
 }
 

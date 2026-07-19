@@ -334,6 +334,7 @@ pub fn neighbors_dir(graph: &Graph, node_id: &str, depth: usize, dir: Option<&st
         retrieve_ref: None,
         resolved: Vec::new(),
         total_matches: None,
+        trim_note: None,
     }
 }
 
@@ -489,6 +490,7 @@ fn subgraph(graph: &Graph, ids: &[String]) -> GraphView {
         retrieve_ref: None,
         resolved: Vec::new(),
         total_matches: None,
+        trim_note: None,
     }
 }
 

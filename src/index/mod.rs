@@ -11,15 +11,25 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use regex::Regex;
+use tree_sitter::{Node as TsNode, Parser};
 
 pub use schema::Index;
 
 use self::tantivy_index::TantivyStore;
 use crate::discovery;
+use crate::discovery::tags_adapter::{any_spec_for_extension, AnySpec};
 use crate::tools::{IndexResponse, QueryResult, SearchHit, SearchResponse};
 
 /// Lines per chunk for non-markdown files.
 const CODE_WINDOW: usize = 100;
+
+/// Target byte span for AST-boundary chunks (see [`chunk_by_ast`]): a code file is
+/// split at tree-sitter node boundaries into chunks of roughly this size, so a chunk
+/// holds a whole function/impl rather than a fixed line cut. Byte-based, distinct from
+/// `CODE_WINDOW`'s lines and `SNIPPET_TOKENS`' whitespace tokens. ~4 KB is on the order
+/// of 130 lines of code, keeping granularity comparable to the line-window fallback
+/// while leaving any file this size or smaller as a single chunk.
+const AST_CHUNK_BYTES: usize = 4096;
 
 /// A re-index touching at least this many changed files is a bulk build, so the
 /// Tantivy writer fans out across all cores; smaller edits use a single writer thread
@@ -372,6 +382,53 @@ const DOC_RANK_PENALTY: f64 = 0.7;
 /// and the order is exactly today's BM25 + proximity.
 const IDENT_BOOST: f64 = 3.0;
 
+/// Multiplicative rank boost for a chunk that *defines* a queried identifier (its text
+/// carries `fn NAME` / `struct NAME` / `const NAME` etc.), applied once per distinct
+/// such identifier. Where [`IDENT_BOOST`] fires on any chunk that merely mentions the
+/// identifier, this discriminates the definition from call sites, comments, and tests,
+/// lifting the def chunk to the top hit so [`SearchContext::Rich`] renders the right
+/// unit. Gated by `LENS_DEF_BOOST` (default off): unset, `def_terms` is empty and the
+/// pass is a no-op, so the order is exactly today's BM25 + proximity.
+const DEF_BOOST: f64 = 4.0;
+
+/// Identifier-like query tokens (`[A-Za-z_][A-Za-z0-9_]{2,}`) that could name a symbol
+/// whose definition a chunk might carry. A pure split, so a query with no such token
+/// yields an empty list and the definition boost is a no-op.
+pub(crate) fn def_ident_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 3 && t.starts_with(|c: char| c.is_alphabetic() || c == '_'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `content` defines the exact identifier `ident`: a definition keyword (`fn`,
+/// `struct`, `const`, ...) immediately followed by `ident` as a whole word. Lexical and
+/// language-general (the keyword set spans the grammars lens indexes); the identifier
+/// boundary on both sides stops `fn foobar` from matching `foo`.
+fn defines_symbol(content: &str, ident: &str) -> bool {
+    const DEF_KW: &[&str] = &[
+        "fn", "struct", "enum", "trait", "type", "const", "static", "mod", "impl", "class",
+        "def", "func", "interface",
+    ];
+    let boundary = |c: char| !c.is_alphanumeric() && c != '_';
+    for kw in DEF_KW {
+        let needle = format!("{kw} {ident}");
+        let mut from = 0;
+        while let Some(rel) = content[from..].find(&needle) {
+            let start = from + rel;
+            let end = start + needle.len();
+            let before_ok = content[..start].chars().next_back().is_none_or(boundary);
+            let after_ok = content[end..].chars().next().is_none_or(boundary);
+            if before_ok && after_ok {
+                return true;
+            }
+            from = end;
+        }
+    }
+    false
+}
+
 /// BM25-ranked search over the stemmed `symbols` + `content` fields (the default
 /// path), with a deterministic term-proximity (min-window span) re-rank on top.
 /// Over-fetches a deeper BM25 pool (see `OVERFETCH_K`), re-ranks by the combined
@@ -409,6 +466,21 @@ fn ranked_search(
     } else {
         Vec::new()
     };
+    // Definition-boost terms: identifier-like query tokens whose defining chunk should
+    // outrank its mentions. Gated by `LENS_DEF_BOOST` (default off); unset yields an
+    // empty list so the per-candidate boost below is a no-op and the order is today's.
+    let def_boost_on = std::env::var("LENS_DEF_BOOST")
+        .map(|v| v != "0")
+        .unwrap_or(false);
+    let def_terms = if def_boost_on {
+        def_ident_terms(query)
+    } else {
+        Vec::new()
+    };
+    // Context rendering per hit (env-gated, default Snippet = today's output verbatim).
+    let ctx_mode = search_context_mode();
+    // Full chunks kept aside for `SearchContext::Rich`'s top-hit swap (empty otherwise).
+    let mut content_by_key: HashMap<String, String> = HashMap::new();
     // (path, chunk_id, snippet, combined_score)
     let mut rows: Vec<(String, String, String, f64)> = Vec::with_capacity(candidates.len());
     for (path, chunk_id, content, mut score) in candidates {
@@ -425,12 +497,35 @@ fn ranked_search(
                 }
             }
         }
+        // Definition boost: a chunk that DEFINES a queried identifier outranks one that
+        // merely mentions it, so the top hit is the definition (what `Rich` renders whole).
+        if !def_terms.is_empty() {
+            for t in &def_terms {
+                if defines_symbol(&content, t) {
+                    score *= DEF_BOOST;
+                }
+            }
+        }
         if terms.len() >= 2 {
             if let Some(span) = min_cover_span(&content, &terms) {
                 score += PROX_WEIGHT / span.max(1) as f64;
             }
         }
-        let snippet = ranked_snippet(&content, &terms);
+        let snippet = if ctx_mode == SearchContext::Chunk {
+            content
+        } else {
+            let rendered = match ctx_mode {
+                SearchContext::Unit => unit_snippet(&content, &terms, &path)
+                    .unwrap_or_else(|| ranked_snippet(&content, &terms)),
+                _ => ranked_snippet(&content, &terms),
+            };
+            // Rich keeps the full chunk aside, keyed by (path, chunk_id), so `render_final`
+            // can swap it in for the top hit once the final order is known.
+            if ctx_mode == SearchContext::Rich {
+                content_by_key.insert(format!("{path}\u{1f}{chunk_id}"), content);
+            }
+            rendered
+        };
         rows.push((path, chunk_id, snippet, score));
     }
     // Re-rank: higher combined score first, then a stable (path, chunk_id) tiebreak.
@@ -473,26 +568,43 @@ fn ranked_search(
         });
         // The reported score stays the text combined score (fusion reorders, it does
         // not restate relevance), so an unfused hit's payload is unchanged.
-        return Ok(fused
+        let ordered: Vec<(String, String, String, f64)> = fused
             .into_iter()
-            .take(limit)
-            .map(|(_fused, _text_rank, path, _chunk_id, snippet, score)| SearchHit {
-                path,
-                snippet,
-                score,
+            .map(|(_fused, _text_rank, path, chunk_id, snippet, score)| {
+                (path, chunk_id, snippet, score)
             })
-            .collect());
+            .collect();
+        return Ok(render_final(ordered, limit, ctx_mode, &content_by_key));
     }
     // Truncate the over-fetched, re-ranked pool back to the caller's limit.
-    Ok(rows
-        .into_iter()
-        .take(limit)
+    Ok(render_final(rows, limit, ctx_mode, &content_by_key))
+}
+
+/// Truncate the ordered `(path, chunk_id, snippet, score)` pool to `limit` and map to
+/// [`SearchHit`]. In [`SearchContext::Rich`] the top hit's snippet is swapped for its
+/// full stored chunk (looked up in `content_by_key`), so the most relevant result
+/// carries its whole AST-bounded unit while the tail stays cheap snippets.
+fn render_final(
+    ordered: Vec<(String, String, String, f64)>,
+    limit: usize,
+    ctx_mode: SearchContext,
+    content_by_key: &HashMap<String, String>,
+) -> Vec<SearchHit> {
+    let mut top: Vec<(String, String, String, f64)> = ordered.into_iter().take(limit).collect();
+    if ctx_mode == SearchContext::Rich {
+        if let Some(first) = top.first_mut() {
+            if let Some(full) = content_by_key.get(&format!("{}\u{1f}{}", first.0, first.1)) {
+                first.2 = full.clone();
+            }
+        }
+    }
+    top.into_iter()
         .map(|(path, _chunk_id, snippet, score)| SearchHit {
             path,
             snippet,
             score,
         })
-        .collect())
+        .collect()
 }
 
 /// Whitespace-token width of a ranked snippet, mirroring the old FTS5
@@ -539,6 +651,132 @@ fn ranked_snippet(content: &str, terms: &[String]) -> String {
         out.push_str(" …");
     }
     out
+}
+
+/// Byte cap for the adaptive enclosing-unit returned by `LENS_SEARCH_CONTEXT=unit`:
+/// the match's enclosing definition is returned whole when it fits, otherwise the
+/// search falls back to [`ranked_snippet`]. ~2 KB returns ~90% of this repo's
+/// functions whole while bounding worst-case context to a few hundred tokens.
+const SEARCH_UNIT_CAP_BYTES: usize = 2048;
+
+/// How `lens_search` renders each hit's context, selected by `LENS_SEARCH_CONTEXT`.
+/// `Snippet` (default) is today's byte-identical ~24-token window; `Unit` returns the
+/// match's enclosing definition (capped, snippet fallback); `Chunk` returns the whole
+/// stored index chunk for every hit (the blunt ~4 KB-per-hit variant, kept for A/B);
+/// `Rich` returns the whole chunk for the top hit only, snippets for the rest.
+#[derive(Clone, Copy, PartialEq)]
+enum SearchContext {
+    Snippet,
+    Unit,
+    Chunk,
+    Rich,
+}
+
+/// Read the search-context mode. Default `Snippet` keeps the current output verbatim,
+/// so with the env unset every existing search result is byte-identical.
+fn search_context_mode() -> SearchContext {
+    match std::env::var("LENS_SEARCH_CONTEXT").as_deref() {
+        Ok("unit") => SearchContext::Unit,
+        Ok("chunk") => SearchContext::Chunk,
+        Ok("rich") => SearchContext::Rich,
+        _ => SearchContext::Snippet,
+    }
+}
+
+/// Function- and type-definition node kinds across the tree-sitter grammars lens parses,
+/// used by [`unit_snippet`] to find the enclosing definition of a match. Statement-level
+/// kinds (Rust `let_declaration`, JS `variable_declaration`, ...) are deliberately absent
+/// so the walk returns the whole enclosing function, not the single statement the match
+/// sits on.
+const DEF_KINDS: &[&str] = &[
+    // rust
+    "function_item",
+    "struct_item",
+    "enum_item",
+    "trait_item",
+    "impl_item",
+    "mod_item",
+    "union_item",
+    "macro_definition",
+    // python, c/c++
+    "function_definition",
+    "class_definition",
+    // javascript / typescript
+    "function_declaration",
+    "generator_function_declaration",
+    "method_definition",
+    "class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    // go, java
+    "method_declaration",
+    "type_declaration",
+    "constructor_declaration",
+];
+
+/// The enclosing definition around the first query-term match in `content`, returned as a
+/// verbatim source slice when it parses and fits [`SEARCH_UNIT_CAP_BYTES`]. Descends to the
+/// token at the match, then walks up to the nearest [`DEF_KINDS`] node (fn/struct/impl/
+/// class/method). Returns `None` (caller falls back to [`ranked_snippet`]) when: the file
+/// has no grammar, the chunk doesn't parse, the match sits in no definition (e.g. a
+/// top-level comment), or the enclosing definition is larger than the cap. It never returns
+/// a sub-fragment of an oversize definition, so a name query inside a large function yields
+/// a snippet fallback, not the bare identifier. Uses the same spec as [`chunk_by_ast`].
+fn unit_snippet(content: &str, terms: &[String], path: &str) -> Option<String> {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
+    let spec = any_spec_for_extension(ext)?;
+    // Byte offset of the first matching term. `to_ascii_lowercase` is length-preserving
+    // and the proximity terms are already lowercased ASCII, so the offset maps straight
+    // back into `content`. No match (query stemmed past the surface form) starts at 0,
+    // mirroring `ranked_snippet`'s `unwrap_or(0)`.
+    let lc = content.to_ascii_lowercase();
+    let offset = terms
+        .iter()
+        .filter_map(|t| lc.find(t.as_str()))
+        .min()
+        .unwrap_or(0);
+    enclosing_def(content, &spec, offset, SEARCH_UNIT_CAP_BYTES)
+}
+
+/// Walk up from byte `offset` in `content` to the nearest enclosing [`DEF_KINDS`] node,
+/// returning its verbatim source slice when it fits `cap`. Shared by [`unit_snippet`] (a
+/// query-match offset) and [`symbol_def_source`] (a graph-resolved line). Returns `None`
+/// when `content` has no grammar match at `offset`, the offset sits in no definition, or
+/// the enclosing definition exceeds `cap` (never a fragment).
+fn enclosing_def(content: &str, spec: &AnySpec, offset: usize, cap: usize) -> Option<String> {
+    let mut parser = Parser::new();
+    parser.set_language(&spec.language()).ok()?;
+    let tree = parser.parse(content, None)?;
+    let mut node = tree.root_node().descendant_for_byte_range(offset, offset)?;
+    loop {
+        if DEF_KINDS.contains(&node.kind()) {
+            if node.end_byte() - node.start_byte() <= cap {
+                return content
+                    .get(node.start_byte()..node.end_byte())
+                    .map(str::to_string);
+            }
+            return None;
+        }
+        node = node.parent()?;
+    }
+}
+
+/// The enclosing definition at 1-based `line` of a source file, verbatim, when it parses
+/// and fits `cap`. The graph-aware symbol fetch uses it: the graph resolves a symbol to
+/// its `(file, line)`, and this returns that definition's whole source to seed the top
+/// hit, so an exact-symbol query surfaces the definition even when FTS recall buries it.
+pub(crate) fn symbol_def_source(src: &str, path: &str, line: usize, cap: usize) -> Option<String> {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
+    let spec = any_spec_for_extension(ext)?;
+    // 1-based line -> byte offset of its first char (sum the bytes of the lines before it).
+    let mut offset = 0usize;
+    for (i, l) in src.split_inclusive('\n').enumerate() {
+        if i + 1 == line {
+            break;
+        }
+        offset += l.len();
+    }
+    enclosing_def(src, &spec, offset, cap)
 }
 
 /// Lowercased alphanumeric tokens of `text`, in order. Splits on non-alphanumeric
@@ -700,16 +938,26 @@ fn is_doc_path(path: &str) -> bool {
     path.ends_with(".md") || path.ends_with(".markdown")
 }
 
-/// Split a file into chunks: markdown by headings, everything else by line windows.
+/// Split a file into chunks: markdown by headings, code by AST node boundaries (via
+/// [`chunk_by_ast`] for any grammar we can parse), and everything else by line windows.
+///
+/// The `LENS_AST_CHUNK` kill switch (default on; `=0` forces the old fixed line-window
+/// path, mirroring `LENS_RRF`/`LENS_IDENT_RERANK`) is read once per file — cheap, since
+/// `chunk_file` is called once per file, not per chunk — and is the recall gate's
+/// trip-proof. An extension with no tree-sitter grammar always falls back to line
+/// windows regardless of the switch.
 fn chunk_file(path: &Path, content: &str) -> Vec<String> {
-    let is_md = matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("md") | Some("markdown")
-    );
+    let ext = path.extension().and_then(|e| e.to_str());
+    let is_md = matches!(ext, Some("md") | Some("markdown"));
     if is_md {
-        chunk_markdown(content)
-    } else {
-        chunk_by_lines(content, CODE_WINDOW)
+        return chunk_markdown(content);
+    }
+    let ast_on = std::env::var("LENS_AST_CHUNK")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    match ext.and_then(any_spec_for_extension) {
+        Some(spec) if ast_on => chunk_by_ast(content, &spec, AST_CHUNK_BYTES),
+        _ => chunk_by_lines(content, CODE_WINDOW),
     }
 }
 
@@ -738,6 +986,82 @@ fn chunk_by_lines(content: &str, window: usize) -> Vec<String> {
         return vec![];
     }
     lines.chunks(window).map(|w| w.join("\n")).collect()
+}
+
+/// Split code into chunks aligned to tree-sitter node boundaries. A top-level named
+/// node within `limit` bytes becomes one chunk; a node exceeding `limit` is split into
+/// its named children (recursively); adjacent under-limit siblings merge by byte span
+/// until the next would push the span past `limit`.
+///
+/// Chunks are consecutive byte slices of `content` (each runs from the previous chunk's
+/// end to the current boundary, the last to end-of-file), so they tile the file exactly:
+/// inter-node gaps — whitespace, punctuation the grammar leaves between named nodes — are
+/// absorbed into the adjoining chunk and no byte is dropped, hence `chunks.concat()`
+/// recovers `content` verbatim. A non-empty input yields at least one chunk.
+///
+/// Falls back to [`chunk_by_lines`] when the grammar yields no usable tree: the parser
+/// can't load the language, `parse` returns `None`, or the root node has no named
+/// children (an empty or fully-unparsed file).
+fn chunk_by_ast(content: &str, spec: &AnySpec, limit: usize) -> Vec<String> {
+    let language = spec.language();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return chunk_by_lines(content, CODE_WINDOW);
+    }
+    let tree = match parser.parse(content, None) {
+        Some(t) => t,
+        None => return chunk_by_lines(content, CODE_WINDOW),
+    };
+    let root = tree.root_node();
+    if root.named_child_count() == 0 {
+        return chunk_by_lines(content, CODE_WINDOW);
+    }
+
+    // Flatten to atomic (start_byte, end_byte) units in source order.
+    let mut units: Vec<(usize, usize)> = Vec::new();
+    collect_units(root, limit, &mut units);
+    if units.is_empty() {
+        return chunk_by_lines(content, CODE_WINDOW);
+    }
+
+    // Merge adjacent units greedily by byte span, materializing each chunk as the
+    // consecutive slice `content[chunk_start..boundary]` so gaps are covered. The span
+    // is measured from the current group's first unit start; when the next unit would
+    // push it past `limit`, flush at the previous unit's end and start a new group.
+    let mut chunks: Vec<String> = Vec::new();
+    let mut chunk_start = 0usize;
+    let mut group_start = units[0].0;
+    let mut last_end = units[0].1;
+    for &(start, end) in &units[1..] {
+        if end - group_start > limit {
+            chunks.push(content[chunk_start..last_end].to_string());
+            chunk_start = last_end;
+            group_start = start;
+        }
+        last_end = end;
+    }
+    // Final group extends to end-of-file so any trailing gap is covered.
+    chunks.push(content[chunk_start..].to_string());
+    chunks
+}
+
+/// Recursively flatten a node's named descendants into atomic `(start_byte, end_byte)`
+/// units for [`chunk_by_ast`]: a named child within `limit` bytes is one unit; an
+/// oversize child is split into ITS named children; an oversize node with no named
+/// children is kept whole (nothing left to split). Units come out in source order and
+/// are pairwise disjoint (a unit is never an ancestor of another).
+fn collect_units(node: TsNode<'_>, limit: usize, out: &mut Vec<(usize, usize)>) {
+    let mut cursor = node.walk();
+    let children: Vec<TsNode> = node.named_children(&mut cursor).collect();
+    drop(cursor);
+    for child in children {
+        let (start, end) = (child.start_byte(), child.end_byte());
+        if end - start <= limit || child.named_child_count() == 0 {
+            out.push((start, end));
+        } else {
+            collect_units(child, limit, out);
+        }
+    }
 }
 
 /// True when `path`'s extension matches [`BINARY_EXT_DENYLIST`] (case-insensitive).
@@ -1461,4 +1785,163 @@ mod tests {
             fused.results[0].hits[0].path
         );
     }
+
+    // ── AST-boundary chunking (L32) ─────────────────────────────────────────
+
+    #[test]
+    fn chunk_by_ast_aligns_to_fn_boundaries_and_covers_every_byte() {
+        use std::fmt::Write as _;
+
+        // A > 100-line file with two substantial top-level fns: `alpha` behind a
+        // leading `#[attr]` and `beta` declared `pub`, so the two chunk-start forms
+        // (`#[`, `pub fn `) are both exercised alongside plain `fn `. Each body carries
+        // uniquely-named markers so coverage can be checked line by line.
+        let mut src = String::from("#[allow(dead_code)]\nfn alpha() {\n");
+        for i in 0..48 {
+            writeln!(src, "    let alpha_marker_{i} = {i};").unwrap();
+        }
+        src.push_str("}\n\npub fn beta() {\n");
+        for i in 0..48 {
+            writeln!(src, "    let beta_marker_{i} = {i};").unwrap();
+        }
+        src.push_str("}\n");
+        assert!(src.lines().count() > 100, "fixture must exceed 100 lines");
+
+        let spec = any_spec_for_extension("rs").unwrap();
+        // Limit between one fn's byte size (~half the file) and the two combined, so
+        // each fn is kept whole yet the pair does not merge into a single chunk.
+        let limit = src.len() * 3 / 5;
+        let chunks = chunk_by_ast(&src, &spec, limit);
+
+        // Every chunk, once left-trimmed, starts on a definition boundary — a fn, a
+        // `pub fn`, or a doc-comment/attribute line that precedes one — never mid-body.
+        for (i, c) in chunks.iter().enumerate() {
+            let t = c.trim_start();
+            assert!(
+                t.starts_with("fn ")
+                    || t.starts_with("pub fn ")
+                    || t.starts_with("///")
+                    || t.starts_with("#["),
+                "chunk {i} must start on a definition boundary, got: {:?}",
+                &t[..t.len().min(40)]
+            );
+        }
+
+        // The two fns land in SEPARATE chunks.
+        let ai = chunks
+            .iter()
+            .position(|c| c.contains("fn alpha("))
+            .expect("a chunk must contain alpha");
+        let bi = chunks
+            .iter()
+            .position(|c| c.contains("fn beta("))
+            .expect("a chunk must contain beta");
+        assert_ne!(ai, bi, "alpha and beta must fall in different chunks");
+
+        // Full byte coverage: the chunks tile the file exactly (gap-free, no join
+        // separator), so concatenation recovers every byte — hence every body line.
+        assert_eq!(chunks.concat(), src, "chunks must recover the whole file verbatim");
+        assert!(
+            chunks.iter().any(|c| c.contains("alpha_marker_47")),
+            "alpha's body must survive intact across the chunks"
+        );
+        assert!(
+            chunks.iter().any(|c| c.contains("beta_marker_47")),
+            "beta's body must survive intact across the chunks"
+        );
+
+        // An unknown extension has no grammar, so `chunk_file` falls back to the fixed
+        // line-window chunker (byte-identical to calling it directly).
+        assert_eq!(
+            chunk_file(Path::new("x.unknownext"), &src),
+            chunk_by_lines(&src, CODE_WINDOW),
+            "an extension with no tree-sitter grammar must use line-window chunking"
+        );
+    }
+
+    #[test]
+    fn unit_snippet_returns_the_whole_enclosing_fn_not_its_neighbors() {
+        // Three small top-level fns; the match sits in the middle one. The enclosing-unit
+        // render (LENS_SEARCH_CONTEXT=unit) must hand back `bravo` whole and neither
+        // neighbor, where a fixed line window would bleed across the boundaries.
+        let src = "fn alpha() {\n    let a = 1;\n}\n\nfn bravo() {\n    let unique_marker = 2;\n}\n\nfn gamma() {\n    let c = 3;\n}\n";
+        let terms = vec!["unique_marker".to_string()];
+        let out = unit_snippet(src, &terms, "x.rs").expect("enclosing unit for a parseable rs chunk");
+        assert!(
+            out.contains("fn bravo(") && out.contains("unique_marker"),
+            "must return the matched fn, got: {out:?}"
+        );
+        assert!(
+            !out.contains("fn alpha(") && !out.contains("fn gamma("),
+            "must exclude neighbor fns, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn unit_snippet_falls_back_when_enclosing_fn_exceeds_cap() {
+        use std::fmt::Write as _;
+        // A fn far larger than the cap: the enclosing definition cannot be returned whole,
+        // so unit_snippet returns None (the caller emits a ranked snippet) rather than a
+        // fragment. Regression guard for the bare-identifier bug where a query matching the
+        // fn NAME inside an oversize fn returned just the name.
+        let mut src = String::from("fn oversize_target() {\n");
+        let mut i = 0;
+        while src.len() <= SEARCH_UNIT_CAP_BYTES * 2 {
+            writeln!(src, "    let filler_{i} = {i};").unwrap();
+            i += 1;
+        }
+        src.push_str("}\n");
+        assert_eq!(
+            unit_snippet(&src, &["oversize_target".to_string()], "x.rs"),
+            None,
+            "name match in an oversize fn must fall back, not return the bare identifier"
+        );
+        assert_eq!(
+            unit_snippet(&src, &["filler_7".to_string()], "x.rs"),
+            None,
+            "body match in an oversize fn must fall back to a ranked snippet"
+        );
+    }
+
+    #[test]
+    fn defines_symbol_matches_defs_not_mentions() {
+        // The def-boost must fire on a real definition and not on a call site, a comment,
+        // or a longer identifier that merely contains the query token.
+        assert!(defines_symbol("pub fn pagerank(&self) -> Map {", "pagerank"));
+        assert!(defines_symbol(
+            "const SEARCH_UNIT_CAP_BYTES: usize = 2048;",
+            "SEARCH_UNIT_CAP_BYTES"
+        ));
+        assert!(defines_symbol("    struct SearchContext {\n", "SearchContext"));
+        assert!(!defines_symbol("    let r = pagerank(&tp);\n", "pagerank"));
+        assert!(!defines_symbol("// see pagerank for details", "pagerank"));
+        assert!(!defines_symbol("fn pagerankish() {}", "pagerank"));
+    }
+
+    #[test]
+    fn def_ident_terms_keeps_identifier_tokens() {
+        assert_eq!(def_ident_terms("chunk_by_ast"), vec!["chunk_by_ast".to_string()]);
+        assert_eq!(
+            def_ident_terms("the pagerank DAMP value"),
+            vec![
+                "the".to_string(),
+                "pagerank".to_string(),
+                "DAMP".to_string(),
+                "value".to_string()
+            ]
+        );
+        assert!(def_ident_terms("a b 12 x").is_empty());
+    }
+
+    #[test]
+    fn symbol_def_source_returns_def_at_line() {
+        let src = "fn alpha() {\n    let a = 1;\n}\n\nfn bravo() {\n    let b = 2;\n}\n";
+        // bravo's definition starts on line 5.
+        let out = symbol_def_source(src, "x.rs", 5, 2048).expect("def at line 5");
+        assert!(out.contains("fn bravo(") && out.contains("let b = 2"));
+        assert!(!out.contains("fn alpha("));
+        // Cap smaller than the definition falls back to None (never a fragment).
+        assert_eq!(symbol_def_source(src, "x.rs", 5, 4), None);
+    }
+
 }

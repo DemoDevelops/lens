@@ -1507,6 +1507,37 @@ fn gate_c40() -> (String, bool) {
     (s, pass)
 }
 
+// --- C42: AST-boundary chunking keeps a straddling fn retrievable (L32) -----
+
+/// Two ordinary single-token words that must co-occur in one retrieval chunk
+/// to win the query. `straddle_target.rs` has both inside its ONE function
+/// that straddles line 100 (a marker comment before the line-100 boundary, a
+/// tag string after it), each exactly once; 8 decoys in `fixtures/ast_chunk`
+/// repeat a single term 3x and never mention the other, so no chunk but the
+/// target's whole-function chunk can score on both terms at once.
+const C42_QUERY: &str = "alpha bravo";
+const C42_TARGET: &str = "straddle_target.rs";
+
+/// 1-based rank (via [`c18_rank`]) of `C42_TARGET` for `C42_QUERY` over
+/// `fixtures/ast_chunk`.
+fn measure_c42() -> usize {
+    let data = tempfile::tempdir().unwrap();
+    let index = Index::open(data.path()).unwrap();
+    index.index_path(&changes_fixture("ast_chunk"), true).unwrap();
+    let resp = index.search(&[C42_QUERY.to_string()], 10).unwrap();
+    c18_rank(&resp.results[0].hits, C42_TARGET)
+}
+
+fn gate_c42() -> (String, bool) {
+    let rank = measure_c42();
+    // ABSOLUTE, like C18: no baseline.json entry.
+    let pass = rank == 1;
+    let s = format!(
+        "## C42 - AST-boundary chunking keeps a straddling fn retrievable (L32)\n\nQuery `\"{C42_QUERY}\"` over `fixtures/ast_chunk`: `{C42_TARGET}` carries both terms inside the one function straddling line 100 (marker before, tag after); 8 decoys each repeat a single term 3x and never the other. Under AST chunking the straddling function is one atomic unit (well under `AST_CHUNK_BYTES`), so both terms co-occur in a single chunk and outscore every decoy's single-term hit. Target `{C42_TARGET}` rank **{rank}** (1 = top). Gate (absolute, trip-proof via `LENS_AST_CHUNK=0`, which falls back to the 100-line window and splits the marker from the tag): the straddling target is rank 1 under AST chunking.\n"
+    );
+    (s, pass)
+}
+
 fn capture_baseline() -> Baseline {
     let (c5_mrr, c5_p_at_5) = measure_c5();
     let c7_mrr = measure_c7();
@@ -1587,6 +1618,8 @@ fn main() -> anyhow::Result<()> {
     println!("{s22}");
     let (s40, c40_ok) = gate_c40();
     println!("{s40}");
+    let (s42, c42_ok) = gate_c42();
+    println!("{s42}");
 
     println!("\n## Gates");
     let gates = [
@@ -1613,6 +1646,7 @@ fn main() -> anyhow::Result<()> {
         ("C21 pattern/S-expression parity + trip-proof detects mismatch", c21_ok),
         ("C22 memory record/query roundtrip + trip-proofs detect breakage", c22_ok),
         ("C40 personalized overview lifts touched-file symbol into budget", c40_ok),
+        ("C42 AST-boundary chunking keeps straddling fn retrievable", c42_ok),
     ];
     for (name, ok) in gates {
         println!("- {} {name}", if ok { "PASS" } else { "FAIL" });

@@ -1,0 +1,15 @@
+{
+  "id": "0060_real_agentic_transitive_callers_spec_for_language",
+  "prompt": "Excluding test code (#[cfg(test)] modules and #[test] functions), exactly 4 functions call `spec_for_language` (defined in src/discovery/extract.rs) transitively — directly or through any chain of function calls. List them sorted alphabetically: caller_1 is alphabetically first.",
+  "fixtures": ["../../src"],
+  "ground_truth": {
+    "caller_1": "any_spec_for_language",
+    "caller_2": "grep_ast",
+    "caller_3": "grep_ast_filtered",
+    "caller_4": "lens_grep_ast"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["any_spec_for_language", "grep_ast_filtered", "lens_grep_ast"],
+  "treatment": { "graph_op": "neighbors", "name": "spec_for_language", "depth": 3 }
+}

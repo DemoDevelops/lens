@@ -1,0 +1,14 @@
+{
+  "id": "0061_real_agentic_reachability_trio",
+  "prompt": "Following function calls only (a calls b, transitively) and ignoring test code, answer yes or no for each pair: reach_1 = can `session_start` (src/session/hook.rs) reach `build_snapshot` (src/session/snapshot.rs)? reach_2 = can `session_start` reach `grep_scope_deny_enabled` (src/routing/mod.rs)? reach_3 = can `matches_bounded` (src/routing/classify.rs) reach `inspect_escalation` (src/routing/mod.rs)?",
+  "fixtures": ["../../src"],
+  "ground_truth": {
+    "reach_1": "yes",
+    "reach_2": "no",
+    "reach_3": "no"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["build_snapshot", "grep_scope_deny_enabled", "inspect_escalation"],
+  "treatment": { "graph_op": "path", "from": "session_start", "to": "build_snapshot" }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "0066_real_agentic_ast_unwraps_discovery_mod",
+  "prompt": "In the file src/discovery/mod.rs, excluding everything gated by #[cfg(test)], exactly how many .unwrap() method calls are there?",
+  "fixtures": ["../../src"],
+  "ground_truth": { "count": 2 },
+  "check": "numeric_tolerance",
+  "primary_mechanism": "discovery",
+  "evidence": ["2"],
+  "treatment": {
+    "language": "python",
+    "script": "p='../../src/discovery/mod.rs'\ncut=None\nfor i,l in enumerate(open(p),1):\n    if '#[cfg(test)]' in l: cut=i; break\nn=0\nfor i,l in enumerate(open(p),1):\n    if cut and i>=cut: break\n    if '.unwrap()' in l and not l.strip().startswith('//'):\n        n+=l.count('.unwrap()'); print('site:', i, l.strip()[:90])\nprint('non-test .unwrap() calls in src/discovery/mod.rs:', n)"
+  }
+}

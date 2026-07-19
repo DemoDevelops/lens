@@ -187,6 +187,14 @@ pub struct ArmResult {
     /// their serialized shape is unchanged.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub rounds: usize,
+    /// Wall-clock milliseconds of the live session (the result envelope's
+    /// `duration_ms`). Agentic arms only; zero and skipped elsewhere.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub millis: usize,
+    /// Tool names in call order. Agentic arms only; empty and skipped elsewhere.
+    /// This is what shows whether an arm organically reached a lens tool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -203,6 +211,16 @@ pub struct ArmStats {
     pub stddev_tokens: f64,
     pub mean_rounds: f64,
     pub stddev_rounds: f64,
+    /// Wall-clock mean/spread in milliseconds. `#[serde(default)]` so results
+    /// serialized before time was measured still deserialize (as 0).
+    #[serde(default)]
+    pub mean_millis: f64,
+    #[serde(default)]
+    pub stddev_millis: f64,
+    /// Runs where the arm made at least one `mcp__lens__*` call — the organic
+    /// lens-adoption count for this arm.
+    #[serde(default)]
+    pub lens_runs: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,6 +282,7 @@ fn fold_arm(runs: &[ArmResult]) -> Option<ArmStats> {
     let successes: Vec<f64> = runs.iter().map(|r| r.correct as u8 as f64).collect();
     let tokens: Vec<f64> = runs.iter().map(|r| r.tokens as f64).collect();
     let rounds: Vec<f64> = runs.iter().map(|r| r.rounds as f64).collect();
+    let millis: Vec<f64> = runs.iter().map(|r| r.millis as f64).collect();
     Some(ArmStats {
         runs: runs.len(),
         success_rate: mean(&successes),
@@ -271,6 +290,12 @@ fn fold_arm(runs: &[ArmResult]) -> Option<ArmStats> {
         stddev_tokens: stddev(&tokens),
         mean_rounds: mean(&rounds),
         stddev_rounds: stddev(&rounds),
+        mean_millis: mean(&millis),
+        stddev_millis: stddev(&millis),
+        lens_runs: runs
+            .iter()
+            .filter(|r| r.tools.iter().any(|t| t.starts_with("mcp__lens__")))
+            .count(),
     })
 }
 
@@ -329,6 +354,8 @@ fn run_arm(task: &Task, model: &Model, context: &str) -> anyhow::Result<ArmResul
         context_bytes: context.len(),
         answer,
         rounds: 0, // handed its context; it calls nothing
+        millis: 0,
+        tools: vec![],
     })
 }
 
@@ -1024,8 +1051,8 @@ fn run_agentic_arm(task: &Task, model: &str, arm: &ArmSpec) -> anyhow::Result<Ar
                 }
                 if run.hit_turn_cap {
                     eprintln!(
-                        "  WARNING: agentic [{}] hit --max-turns 8; this answer is truncated, \
-                         not a real result — a deny rail costs a round to recover",
+                        "  WARNING: agentic [{}] hit --max-turns 8; scored as a failed run \
+                         (no answer inside the turn budget) — a deny rail costs a round to recover",
                         arm.allowed_tools
                     );
                 }
@@ -1039,6 +1066,8 @@ fn run_agentic_arm(task: &Task, model: &str, arm: &ArmSpec) -> anyhow::Result<Ar
                     context_bytes: prompt.len(),
                     answer,
                     rounds: run.rounds(),
+                    millis: run.duration_ms,
+                    tools: run.tools,
                 });
             }
             Err(e) => {
@@ -1070,6 +1099,8 @@ struct AgenticRun {
     /// deny rail costs the lens arm a round to recover, so the cap can silently
     /// depress its result.
     hit_turn_cap: bool,
+    /// Wall-clock milliseconds from the result envelope's `duration_ms`.
+    duration_ms: usize,
 }
 
 impl AgenticRun {
@@ -1125,6 +1156,14 @@ fn claude_agentic_attempt(
         .wait_with_output()
         .map_err(|e| format!("waiting on claude: {e}"))?;
     if !out.status.success() {
+        // `--max-turns` exhaustion exits non-zero with an `error_max_turns`
+        // result line and no answer. That is a *scored* outcome (the arm failed
+        // the task inside the turn budget), not a transport failure to retry.
+        if let Ok(run) = parse_agentic_stream(&String::from_utf8_lossy(&out.stdout)) {
+            if run.hit_turn_cap {
+                return Ok(run);
+            }
+        }
         return Err(format!(
             "claude exited {}: {}",
             out.status,
@@ -1150,6 +1189,33 @@ fn parse_agentic_stream(stream: &str) -> Result<AgenticRun, String> {
         .rev()
         .find(|o| o.get("type").and_then(Value::as_str) == Some("result"))
         .ok_or("stream-json carried no result line")?;
+    // The guide reaches a session as SessionStart hook output, which streams as
+    // `type: system` lines. Counting the raw stream instead would false-positive
+    // on arms that Read/Grep the source files defining the guide template
+    // (src/routing/mod.rs), killing valid whole-src baselines at the validity gate.
+    let guide_injections = lines
+        .iter()
+        .filter(|o| o.get("type").and_then(Value::as_str) == Some("system"))
+        .map(|o| o.to_string().matches(GUIDE_SENTINEL).count())
+        .sum();
+    let hit_turn_cap =
+        result.get("subtype").and_then(Value::as_str) == Some("error_max_turns");
+    let duration_ms = result
+        .get("duration_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    if hit_turn_cap {
+        // Turn-cap exhaustion carries no `.result`; the run is a scored failure
+        // (empty answer), not a parse error.
+        return Ok(AgenticRun {
+            answer: String::new(),
+            tools: tool_use_names(&lines),
+            tokens: result.get("usage").map(usage_tokens).unwrap_or(0),
+            guide_injections,
+            hit_turn_cap,
+            duration_ms,
+        });
+    }
     if result.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
         return Err(format!(
             "claude reported is_error: {}",
@@ -1165,8 +1231,9 @@ fn parse_agentic_stream(stream: &str) -> Result<AgenticRun, String> {
         answer,
         tools: tool_use_names(&lines),
         tokens: result.get("usage").map(usage_tokens).unwrap_or(0),
-        guide_injections: stream.matches(GUIDE_SENTINEL).count(),
-        hit_turn_cap: result.get("subtype").and_then(Value::as_str) == Some("error_max_turns"),
+        guide_injections,
+        hit_turn_cap,
+        duration_ms,
     })
 }
 
@@ -1376,6 +1443,16 @@ pub struct GroupStats {
     pub treatment_rounds: f64,
     pub control_rounds_sd: f64,
     pub treatment_rounds_sd: f64,
+    /// Wall-clock milliseconds, same sum-of-task-means convention as tokens.
+    /// `#[serde(default)]` so pre-time result files still deserialize.
+    #[serde(default)]
+    pub control_millis: f64,
+    #[serde(default)]
+    pub treatment_millis: f64,
+    #[serde(default)]
+    pub control_millis_sd: f64,
+    #[serde(default)]
+    pub treatment_millis_sd: f64,
 }
 
 impl Group {
@@ -1391,6 +1468,10 @@ impl Group {
             treatment_rounds: 0.0,
             control_rounds_sd: 0.0,
             treatment_rounds_sd: 0.0,
+            control_millis: 0.0,
+            treatment_millis: 0.0,
+            control_millis_sd: 0.0,
+            treatment_millis_sd: 0.0,
         })
     }
 }
@@ -1403,6 +1484,8 @@ struct ArmRow {
     tokens_sd: f64,
     rounds: f64,
     rounds_sd: f64,
+    millis: f64,
+    millis_sd: f64,
 }
 
 fn arm_row(r: &ArmResult, stats: Option<&ArmStats>) -> ArmRow {
@@ -1413,6 +1496,8 @@ fn arm_row(r: &ArmResult, stats: Option<&ArmStats>) -> ArmRow {
             tokens_sd: s.stddev_tokens,
             rounds: s.mean_rounds,
             rounds_sd: s.stddev_rounds,
+            millis: s.mean_millis,
+            millis_sd: s.stddev_millis,
         },
         None => ArmRow {
             success: r.correct as u8 as f64,
@@ -1420,6 +1505,8 @@ fn arm_row(r: &ArmResult, stats: Option<&ArmStats>) -> ArmRow {
             tokens_sd: 0.0,
             rounds: r.rounds as f64,
             rounds_sd: 0.0,
+            millis: r.millis as f64,
+            millis_sd: 0.0,
         },
     }
 }
@@ -1461,6 +1548,10 @@ pub fn aggregate(results: &[TaskResult]) -> Vec<Group> {
             treatment_rounds: treat.iter().map(|a| a.rounds).sum(),
             control_rounds_sd: stddev_of_sum(ctrl.iter().map(|a| a.rounds_sd)),
             treatment_rounds_sd: stddev_of_sum(treat.iter().map(|a| a.rounds_sd)),
+            control_millis: ctrl.iter().map(|a| a.millis).sum(),
+            treatment_millis: treat.iter().map(|a| a.millis).sum(),
+            control_millis_sd: stddev_of_sum(ctrl.iter().map(|a| a.millis_sd)),
+            treatment_millis_sd: stddev_of_sum(treat.iter().map(|a| a.millis_sd)),
         });
         groups.push(Group {
             mechanism: mech.to_string(),
@@ -1487,8 +1578,8 @@ pub fn render_accuracy_markdown(groups: &[Group], model_label: &str, pending: bo
     // single-run table has nothing to put in them, so it keeps its original shape.
     let detailed = groups.iter().any(|g| g.stats.is_some());
     if detailed {
-        s.push_str("| Task set | N | Runs | Control success | lens success | Δ success | Control tokens | lens tokens | Token Δ | Control rounds | lens rounds |\n");
-        s.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+        s.push_str("| Task set | N | Runs | Control success | lens success | Δ success | Control tokens | lens tokens | Token Δ | Control rounds | lens rounds | Control time | lens time |\n");
+        s.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     } else {
         s.push_str("| Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |\n");
         s.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
@@ -1526,7 +1617,7 @@ fn group_row(g: &Group, delta: f64, detailed: bool) -> String {
     }
     let k = g.stats_or_single();
     format!(
-        "| {} tasks | {} | {} | {:.0}% | {:.0}% | {:+.0}pp | {} | {} | {:+.0} | {} | {} |\n",
+        "| {} tasks | {} | {} | {:.0}% | {:.0}% | {:+.0}pp | {} | {} | {:+.0} | {} | {} | {}s | {}s |\n",
         cap(&g.mechanism),
         g.n,
         k.runs,
@@ -1538,6 +1629,8 @@ fn group_row(g: &Group, delta: f64, detailed: bool) -> String {
         k.treatment_tokens - k.control_tokens,
         spread(k.control_rounds, k.control_rounds_sd, 1),
         spread(k.treatment_rounds, k.treatment_rounds_sd, 1),
+        spread(k.control_millis / 1000.0, k.control_millis_sd / 1000.0, 1),
+        spread(k.treatment_millis / 1000.0, k.treatment_millis_sd / 1000.0, 1),
     )
 }
 
@@ -1904,6 +1997,33 @@ not even json
     fn missing_result_line_is_an_error() {
         let stream = r#"{"type":"system","subtype":"init"}"#;
         assert!(parse_agentic_stream(stream).is_err());
+    }
+
+    /// `--max-turns` exhaustion (`is_error` + `error_max_turns`, no `.result`)
+    /// is a scored failure — empty answer, cap flagged — not a parse error.
+    #[test]
+    fn max_turns_exhaustion_is_a_scored_failure_not_an_error() {
+        let stream = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Grep"}]}}
+{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":25070,"usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let run = parse_agentic_stream(stream).expect("scored, not an error");
+        assert!(run.hit_turn_cap);
+        assert_eq!(run.answer, "");
+        assert_eq!(run.rounds(), 1);
+        assert_eq!(run.tokens, 15);
+        assert_eq!(run.duration_ms, 25070, "wall-clock survives the cap path");
+        assert_eq!(run.tools, vec!["Grep"], "tool sequence survives the cap path");
+    }
+
+    /// The guide sentinel only counts from `system` lines (hook output). An arm
+    /// that Reads the source file defining the guide template echoes the
+    /// sentinel through a tool_result `user` line, which must not count.
+    #[test]
+    fn guide_sentinel_in_tool_results_does_not_count_as_injection() {
+        let stream = r#"{"type":"system","subtype":"hook_response","output":"<context_window_protection>guide</context_window_protection>"}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"const BLOCK_HEAD: &str = \"<context_window_protection>\";"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"{}","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let run = parse_agentic_stream(stream).expect("parse");
+        assert_eq!(run.guide_injections, 1, "system line counts, tool_result does not");
     }
 
     #[test]

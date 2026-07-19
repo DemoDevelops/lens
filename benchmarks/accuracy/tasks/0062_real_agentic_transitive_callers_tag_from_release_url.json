@@ -1,0 +1,15 @@
+{
+  "id": "0062_real_agentic_transitive_callers_tag_from_release_url",
+  "prompt": "Excluding test code (#[cfg(test)] modules and #[test] functions), exactly 4 functions call `tag_from_release_url` (defined in src/setup.rs) transitively — directly or through any chain of function calls. List them sorted alphabetically: caller_1 is alphabetically first.",
+  "fixtures": ["../../src"],
+  "ground_truth": {
+    "caller_1": "latest_tag",
+    "caller_2": "main",
+    "caller_3": "run_update_check_cli",
+    "caller_4": "run_update_cli"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "evidence": ["latest_tag", "run_update_check_cli", "run_update_cli"],
+  "treatment": { "graph_op": "neighbors", "name": "tag_from_release_url", "depth": 3 }
+}

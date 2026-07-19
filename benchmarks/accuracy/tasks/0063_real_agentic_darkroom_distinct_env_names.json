@@ -1,0 +1,13 @@
+{
+  "id": "0063_real_agentic_darkroom_distinct_env_names",
+  "prompt": "Non-test code under src/ reads configuration from LENS_-prefixed environment variables via std::env::var or std::env::var_os with a string-literal name. Excluding test code (anything gated by #[cfg(test)]), exactly how many DISTINCT LENS_* variable names are read that way? Count distinct names, not read sites.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "count": 42 },
+  "check": "numeric_tolerance",
+  "primary_mechanism": "darkroom",
+  "evidence": ["42", "LENS_WALK_DEBOUNCE_MS", "LENS_SNAPSHOT_BUDGET"],
+  "treatment": {
+    "language": "python",
+    "script": "import re, os\nroot='../../src'\nnames=set()\nfor dirp,_,files in os.walk(root):\n    for f in files:\n        if not f.endswith('.rs'): continue\n        p=os.path.join(dirp,f); cut=None\n        for i,l in enumerate(open(p),1):\n            if '#[cfg(test)]' in l: cut=i; break\n        for i,l in enumerate(open(p),1):\n            if cut and i>=cut: break\n            for m in re.finditer(r'var(?:_os)?\\(\\s*\"(LENS_[A-Z0-9_]+)\"', l): names.add(m.group(1))\nprint('distinct LENS_* env names read (non-test):', len(names))\nprint('\\n'.join(sorted(names)))"
+  }
+}

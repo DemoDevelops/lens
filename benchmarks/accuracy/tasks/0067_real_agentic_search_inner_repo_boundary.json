@@ -1,0 +1,10 @@
+{
+  "id": "0067_real_agentic_search_inner_repo_boundary",
+  "prompt": "A user opens lens in a folder that happens to contain a separate project's git checkout inside it. One function detects that a requested path belongs to that inner repository, so its index is built into that repository's own .lens directory instead of the parent's. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "enclosing_nested_repo" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "evidence": ["enclosing_nested_repo"],
+  "treatment": { "queries": ["path belongs to inner git repository build index into its own lens directory not parent"] }
+}

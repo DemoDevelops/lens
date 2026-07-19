@@ -1,0 +1,10 @@
+{
+  "id": "0068_real_agentic_search_deny_requires_server",
+  "prompt": "When routing wants to block a tool call and steer the agent toward a lens tool instead, one function makes sure that steering decision is only emitted while the lens server can actually be reached, so the agent is never pointed at a tool that is not there. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "mcp_redirect" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "evidence": ["mcp_redirect"],
+  "treatment": { "queries": ["deny steer agent lens tool only when server reachable never pointed at missing tool"] }
+}

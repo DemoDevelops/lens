@@ -1,0 +1,13 @@
+{
+  "id": "0064_real_agentic_darkroom_nontest_unwrap_total",
+  "prompt": "Across all of src/, excluding test code (anything gated by #[cfg(test)], including test-only helper functions), exactly how many .unwrap() method calls are there? Count real calls only, not occurrences inside string literals or comments.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "count": 20 },
+  "check": "numeric_tolerance",
+  "primary_mechanism": "darkroom",
+  "evidence": ["20", "throttle"],
+  "treatment": {
+    "language": "python",
+    "script": "import os\nroot='../../src'\ntotal=0; per={}\nfor dirp,_,files in os.walk(root):\n    for f in files:\n        if not f.endswith('.rs'): continue\n        p=os.path.join(dirp,f); cut=None\n        for i,l in enumerate(open(p),1):\n            if '#[cfg(test)]' in l: cut=i; break\n        n=0\n        for i,l in enumerate(open(p),1):\n            if cut and i>=cut: break\n            s=l.strip()\n            if '.unwrap()' in l and not s.startswith('//') and 'description = ' not in l:\n                n+=l.count('.unwrap()')\n        if n: per[os.path.relpath(p,root)]=n; total+=n\nprint('non-test .unwrap() calls in src/:', total)\nprint(per)"
+  }
+}

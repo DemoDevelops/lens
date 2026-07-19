@@ -593,7 +593,7 @@ impl Forge {
 
     /// Search the full-text index with one or more queries.
     #[tool(
-        description = "Full-text search across all indexed content (BM25-ranked): finds where a string, idea, or usage appears anywhere, including inside function bodies, comments, strings, and config; returns ranked snippets with path and score per query. The only tool that sees inside definitions and finds call-sites/usages. For a named symbol's callers/callees use lens_symbol; for a ranked list of candidate symbols by meaning use lens_find."
+        description = "Full-text search across all indexed content (BM25-ranked): finds where a string, idea, or usage appears anywhere, including inside function bodies, comments, strings, and config; returns ranked snippets with path and score per query. When the query names a symbol, its full definition is returned as the top hit (resolved via the graph), answering a symbol lookup in one call. The only tool that sees inside bodies and finds call-sites/usages. For a named symbol's callers/callees use lens_symbol; for a ranked list of candidate symbols by meaning use lens_find."
     )]
     async fn lens_search(
         &self,
@@ -1143,13 +1143,13 @@ impl Forge {
     /// Per-file RRF rank map (stored path -> rank, 0 = most graph-central) for the
     /// `lens_search` fusion stage. Built ONLY from an already-persisted `graph.json`;
     /// For each query, the `(file, line)` of the exact-named symbol definition it most
-    /// plausibly names, or `None`. Gated by `LENS_SYMBOL_FETCH` (default off); off, or an
-    /// absent graph, yields all-`None`. Among identifier tokens that exactly name a
-    /// definition node, the highest-importance one wins.
+    /// plausibly names, or `None`. Gated by `LENS_SYMBOL_FETCH` (default on; `=0` disables);
+    /// off, or an absent graph, yields all-`None`. Among identifier tokens that exactly name
+    /// a definition node, the highest-importance one wins.
     fn symbol_fetch_targets(&self, queries: &[String]) -> Vec<Option<(String, usize)>> {
         let on = std::env::var("LENS_SYMBOL_FETCH")
             .map(|v| v != "0")
-            .unwrap_or(false);
+            .unwrap_or(true);
         if !on {
             return vec![None; queries.len()];
         }

@@ -467,11 +467,11 @@ fn ranked_search(
         Vec::new()
     };
     // Definition-boost terms: identifier-like query tokens whose defining chunk should
-    // outrank its mentions. Gated by `LENS_DEF_BOOST` (default off); unset yields an
-    // empty list so the per-candidate boost below is a no-op and the order is today's.
+    // outrank its mentions. Gated by `LENS_DEF_BOOST` (default on; `=0` disables); when
+    // off, `def_terms` is empty so the per-candidate boost below is a no-op (old order).
     let def_boost_on = std::env::var("LENS_DEF_BOOST")
         .map(|v| v != "0")
-        .unwrap_or(false);
+        .unwrap_or(true);
     let def_terms = if def_boost_on {
         def_ident_terms(query)
     } else {
@@ -663,7 +663,7 @@ const SEARCH_UNIT_CAP_BYTES: usize = 2048;
 /// `Snippet` (default) is today's byte-identical ~24-token window; `Unit` returns the
 /// match's enclosing definition (capped, snippet fallback); `Chunk` returns the whole
 /// stored index chunk for every hit (the blunt ~4 KB-per-hit variant, kept for A/B);
-/// `Rich` returns the whole chunk for the top hit only, snippets for the rest.
+/// `Rich` (opt-in) returns the whole chunk for the top hit only, snippets for the rest.
 #[derive(Clone, Copy, PartialEq)]
 enum SearchContext {
     Snippet,

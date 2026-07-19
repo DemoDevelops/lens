@@ -1,0 +1,11 @@
+{
+  "id": "0077_real_agentic_search_compound_name_parts",
+  "prompt": "So that a query for part of a compound name still matches, one function breaks a camelCase or PascalCase identifier into its constituent words for the index. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "split_subwords" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_search",
+  "evidence": ["split_subwords"],
+  "treatment": { "queries": ["break camelCase PascalCase identifier into constituent words so partial name query matches"] }
+}

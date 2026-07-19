@@ -1,0 +1,11 @@
+{
+  "id": "0076_real_agentic_search_fold_inner_repo_hits",
+  "prompt": "When a search runs in a folder that contains other git checkouts inside it, one function folds each inner project's own full-text hits into the outer response, capped per query. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "federate_nested_search" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_search",
+  "evidence": ["federate_nested_search"],
+  "treatment": { "queries": ["fold inner git checkout full text hits into outer search response capped per query"] }
+}

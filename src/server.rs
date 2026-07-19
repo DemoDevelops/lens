@@ -616,7 +616,7 @@ impl Forge {
 
     /// Search the full-text index with one or more queries.
     #[tool(
-        description = "Full-text search across all indexed content (BM25-ranked): finds where a string, idea, or usage appears anywhere, including inside function bodies, comments, strings, and config; returns ranked snippets with path and score per query. When the query names a symbol, its full definition is returned as the top hit (resolved via the graph), answering a symbol lookup in one call. The only tool that sees inside bodies and finds call-sites/usages. For a named symbol's callers/callees use lens_symbol; for a ranked list of candidate symbols by meaning use lens_find."
+        description = "Full-text search across all indexed content (BM25-ranked): finds where a string, idea, or usage appears anywhere, including inside function bodies, comments, strings, and config; returns ranked snippets per query, each with path, match line, and the definition names the hit's chunk carries (`symbols` — often the answer to a which-function-does-X question). When the query names a symbol, its full definition is returned as the top hit (resolved via the graph), answering a symbol lookup in one call. The only tool that sees inside bodies and finds call-sites/usages. For a named symbol's callers/callees use lens_symbol; for a ranked list of candidate symbols by meaning use lens_find."
     )]
     async fn lens_search(
         &self,
@@ -1260,6 +1260,12 @@ impl Forge {
         queries
             .iter()
             .map(|q| {
+                // A prose-shaped query describes behavior; a bare token in it that
+                // happens to name a symbol (`path`, `server`) must not pin that
+                // unrelated definition to the top hit. See `index::is_prose_query`.
+                if index::is_prose_query(q) {
+                    return None;
+                }
                 let mut best: Option<(String, usize, f64)> = None;
                 for t in index::def_ident_terms(q) {
                     for n in graph.find_by_name(&t, None) {
@@ -1308,7 +1314,13 @@ impl Forge {
             let score = qr.hits.first().map(|h| h.score).unwrap_or(1.0) + 1.0;
             qr.hits.insert(
                 0,
-                SearchHit { path: file.clone(), snippet: def, score, line: *line },
+                SearchHit {
+                    path: file.clone(),
+                    snippet: def,
+                    score,
+                    line: *line,
+                    symbols: Vec::new(),
+                },
             );
             qr.hits.truncate(limit.max(1));
         }

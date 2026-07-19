@@ -1,0 +1,11 @@
+{
+  "id": "0078_real_agentic_search_tightest_term_window",
+  "prompt": "The proximity re-rank needs to know how tightly a chunk packs the query's words: one function computes the smallest token window that covers at least one occurrence of every term. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "min_cover_span" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_search",
+  "evidence": ["min_cover_span"],
+  "treatment": { "queries": ["smallest token window covering one occurrence of every query term proximity"] }
+}

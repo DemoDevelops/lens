@@ -1,0 +1,11 @@
+{
+  "id": "0075_real_agentic_search_prune_deleted_files",
+  "prompt": "After files are deleted from the repo, one function removes their leftover chunks from the full-text index so the deleted files stop appearing in results. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "prune_missing" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_search",
+  "evidence": ["prune_missing"],
+  "treatment": { "queries": ["remove leftover chunks for deleted files from index so they stop showing in results"] }
+}

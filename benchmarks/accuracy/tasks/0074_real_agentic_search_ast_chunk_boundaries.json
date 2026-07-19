@@ -1,0 +1,11 @@
+{
+  "id": "0074_real_agentic_search_ast_chunk_boundaries",
+  "prompt": "When lens indexes a code file, one function splits it into chunks aligned to syntax-tree node boundaries, so a chunk holds a whole function or impl block instead of cutting at a fixed line count. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "chunk_by_ast" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_search",
+  "evidence": ["chunk_by_ast"],
+  "treatment": { "queries": ["split code file into chunks aligned to syntax tree node boundaries whole function not fixed line cut"] }
+}

@@ -189,9 +189,17 @@ pub struct SearchHit {
     pub path: String,
     pub snippet: String,
     pub score: f64,
-    /// 1-based line the hit's chunk starts at, so a caller can jump straight to
-    /// it instead of re-searching the file.
+    /// 1-based line of the snippet's matched window (the chunk's start line when no
+    /// query term surfaces in the chunk), so a caller can jump straight to the match
+    /// instead of re-searching the file.
     pub line: usize,
+    /// Definition names the hit's chunk carries that the snippet does not already
+    /// show (source order, capped), so a "which function does X" query can read
+    /// candidate answers off the hit even when the snippet window doesn't reach
+    /// them. Empty for prose/markdown chunks and for single-term queries (which
+    /// already name their target).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub symbols: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

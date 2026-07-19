@@ -30,7 +30,9 @@ use tantivy::{doc, Index as TIndex, IndexReader, IndexWriter, ReloadPolicy, Tant
 /// The `symbols` field is weighted this many times over `content`, matching the
 /// FTS5 `bm25(chunks, 0.0, 0.0, 5.0, 1.0)` intent (symbols 5x content) so a query
 /// naming a symbol ranks its defining file above files that only mention the term.
-const SYMBOLS_BOOST: f32 = 5.0;
+/// `mod.rs` passes 1.0 instead for prose-shaped queries (see `is_prose_query`),
+/// where a generic token that happens to name a symbol must not dominate.
+pub(crate) const SYMBOLS_BOOST: f32 = 5.0;
 
 /// Trigram width for the substring/operator ngram field (mirrors FTS5 `trigram`).
 const NGRAM: usize = 3;
@@ -263,10 +265,16 @@ impl TantivyStore {
     }
 
     /// Ranked candidate pool: OR-join of the query's stemmed tokens across `symbols`
-    /// (boosted [`SYMBOLS_BOOST`]x) and `content`, top `fetch` by Tantivy BM25.
-    /// Returns `(path, chunk_id, content, line, base_score)`; `mod.rs` applies the
+    /// (boosted `symbols_boost`x — [`SYMBOLS_BOOST`] normally, 1.0 for prose-shaped
+    /// queries) and `content`, top `fetch` by Tantivy BM25. Returns
+    /// `(path, chunk_id, content, line, base_score)`; `mod.rs` applies the
     /// doc penalty + proximity re-rank on top.
-    pub fn ranked_candidates(&self, query: &str, fetch: usize) -> Result<Vec<RankedCandidate>> {
+    pub fn ranked_candidates(
+        &self,
+        query: &str,
+        fetch: usize,
+        symbols_boost: f32,
+    ) -> Result<Vec<RankedCandidate>> {
         self.reader.reload().context("reloading tantivy reader")?;
         let searcher = self.reader.searcher();
         let terms = self.analyze(STEM_TOKENIZER, query);
@@ -280,7 +288,7 @@ impl TantivyStore {
                     Term::from_field_text(self.fields.symbols, t),
                     IndexRecordOption::WithFreqs,
                 )),
-                SYMBOLS_BOOST,
+                symbols_boost,
             );
             let conq = TermQuery::new(
                 Term::from_field_text(self.fields.content, t),

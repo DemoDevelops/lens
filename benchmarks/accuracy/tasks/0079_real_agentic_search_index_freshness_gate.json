@@ -1,0 +1,11 @@
+{
+  "id": "0079_real_agentic_search_index_freshness_gate",
+  "prompt": "Before answering a search, one function makes sure the full-text index actually exists and is up to date, kicking off a build when it is missing or stale. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "ensure_index" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_search",
+  "evidence": ["ensure_index"],
+  "treatment": { "queries": ["make sure full text index exists and fresh before search build when missing or stale"] }
+}

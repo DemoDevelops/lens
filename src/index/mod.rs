@@ -15,7 +15,7 @@ use tree_sitter::{Node as TsNode, Parser};
 
 pub use schema::Index;
 
-use self::tantivy_index::TantivyStore;
+use self::tantivy_index::{TantivyStore, SYMBOLS_BOOST};
 use crate::discovery;
 use crate::discovery::tags_adapter::{any_spec_for_extension, AnySpec};
 use crate::tools::{IndexResponse, QueryResult, SearchHit, SearchResponse};
@@ -389,8 +389,9 @@ const IDENT_BOOST: f64 = 3.0;
 /// such identifier. Where [`IDENT_BOOST`] fires on any chunk that merely mentions the
 /// identifier, this discriminates the definition from call sites, comments, and tests,
 /// lifting the def chunk to the top hit so [`SearchContext::Rich`] renders the right
-/// unit. Gated by `LENS_DEF_BOOST` (default off): unset, `def_terms` is empty and the
-/// pass is a no-op, so the order is exactly today's BM25 + proximity.
+/// unit. Gated by `LENS_DEF_BOOST` (default on; `=0` disables). Never applied to a
+/// prose-shaped query (see [`is_prose_query`]): its bare tokens would otherwise 4x an
+/// unrelated one-word definition (`fn path`) over the chunk that answers the query.
 const DEF_BOOST: f64 = 4.0;
 
 /// Identifier-like query tokens (`[A-Za-z_][A-Za-z0-9_]{2,}`) that could name a symbol
@@ -445,7 +446,12 @@ fn ranked_search(
     // Over-fetch a deeper BM25 pool than the caller asked for, so the proximity
     // re-rank below can pull a tight-span chunk ranked beyond L into the final top-L.
     let fetch = limit.saturating_mul(OVERFETCH_K).min(OVERFETCH_CAP);
-    let candidates = store.ranked_candidates(query, fetch)?;
+    // Prose-shaped queries (see `is_prose_query`) drop the symbols-field weight to 1x
+    // and skip the definition boost below: a generic token that happens to name a
+    // symbol (`path`, `server`) must not pin an unrelated definition to the top.
+    let prose = is_prose_query(query);
+    let symbols_boost = if prose { 1.0 } else { SYMBOLS_BOOST };
+    let candidates = store.ranked_candidates(query, fetch, symbols_boost)?;
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -469,12 +475,13 @@ fn ranked_search(
         Vec::new()
     };
     // Definition-boost terms: identifier-like query tokens whose defining chunk should
-    // outrank its mentions. Gated by `LENS_DEF_BOOST` (default on; `=0` disables); when
-    // off, `def_terms` is empty so the per-candidate boost below is a no-op (old order).
+    // outrank its mentions. Gated by `LENS_DEF_BOOST` (default on; `=0` disables) and
+    // skipped for prose-shaped queries; either way `def_terms` is empty so the
+    // per-candidate boost below is a no-op (old order).
     let def_boost_on = std::env::var("LENS_DEF_BOOST")
         .map(|v| v != "0")
         .unwrap_or(true);
-    let def_terms = if def_boost_on {
+    let def_terms = if def_boost_on && !prose {
         def_ident_terms(query)
     } else {
         Vec::new()
@@ -483,8 +490,10 @@ fn ranked_search(
     let ctx_mode = search_context_mode();
     // Full chunks kept aside for `SearchContext::Rich`'s top-hit swap (empty otherwise).
     let mut content_by_key: HashMap<String, String> = HashMap::new();
-    // (path, chunk_id, snippet, line, combined_score)
-    let mut rows: Vec<(String, String, String, u64, f64)> = Vec::with_capacity(candidates.len());
+    // (path, chunk_id, snippet, line, combined_score, def_names)
+    #[allow(clippy::type_complexity)]
+    let mut rows: Vec<(String, String, String, u64, f64, Vec<String>)> =
+        Vec::with_capacity(candidates.len());
     for (path, chunk_id, content, line, mut score) in candidates {
         if is_doc_path(&path) {
             score *= DOC_RANK_PENALTY;
@@ -513,22 +522,43 @@ fn ranked_search(
                 score += PROX_WEIGHT / span.max(1) as f64;
             }
         }
-        let snippet = if ctx_mode == SearchContext::Chunk {
-            content
+        // Definition names surfaced on the hit (code chunks, multi-term queries): a
+        // ~4 KB AST chunk can hold several definitions, and the answer to a "which
+        // function does X" query is often a name the 24-token snippet window never
+        // reaches. A single-term query already names its target, so it pays nothing.
+        // Names the snippet ends up showing anyway are filtered below, keeping the
+        // payload from re-taxing later turns with duplicates.
+        let mut syms = if terms.len() >= 2 && !is_doc_path(&path) {
+            def_names(&content, HIT_SYMBOLS_CAP)
         } else {
-            let rendered = match ctx_mode {
-                SearchContext::Unit => unit_snippet(&content, &terms, &path)
-                    .unwrap_or_else(|| ranked_snippet(&content, &terms)),
-                _ => ranked_snippet(&content, &terms),
+            Vec::new()
+        };
+        let (snippet, hit_line) = if ctx_mode == SearchContext::Chunk {
+            (content, line)
+        } else {
+            let (rendered, hit_line) = match ctx_mode {
+                SearchContext::Unit => (
+                    unit_snippet(&content, &terms, &path)
+                        .unwrap_or_else(|| ranked_snippet(&content, &terms)),
+                    line,
+                ),
+                _ => {
+                    // Report the line of the snippet's anchor match, not the chunk
+                    // head: a multi-definition chunk otherwise cites a line up to
+                    // ~100 lines above the match.
+                    let (s, off) = ranked_snippet_at(&content, &terms);
+                    (s, line + content[..off].matches('\n').count() as u64)
+                }
             };
             // Rich keeps the full chunk aside, keyed by (path, chunk_id), so `render_final`
             // can swap it in for the top hit once the final order is known.
             if ctx_mode == SearchContext::Rich {
                 content_by_key.insert(format!("{path}\u{1f}{chunk_id}"), content);
             }
-            rendered
+            (rendered, hit_line)
         };
-        rows.push((path, chunk_id, snippet, line, score));
+        syms.retain(|n| !snippet.contains(n.as_str()));
+        rows.push((path, chunk_id, snippet, hit_line, score, syms));
     }
     // Re-rank: higher combined score first, then a stable (path, chunk_id) tiebreak.
     // With no proximity boost this reproduces the BM25 order, so the truncation below
@@ -549,16 +579,17 @@ fn ranked_search(
     let rrf_on = std::env::var("LENS_RRF").map(|v| v != "0").unwrap_or(true);
     if rrf_on && !file_ranks.is_empty() {
         const RRF_K: f64 = 60.0;
-        // (fused_score, text_rank, path, chunk_id, snippet, line, text_score)
-        let mut fused: Vec<(f64, usize, String, String, String, u64, f64)> = rows
+        // (fused_score, text_rank, path, chunk_id, snippet, line, text_score, def_names)
+        #[allow(clippy::type_complexity)]
+        let mut fused: Vec<(f64, usize, String, String, String, u64, f64, Vec<String>)> = rows
             .into_iter()
             .enumerate()
-            .map(|(text_rank, (path, chunk_id, snippet, line, score))| {
+            .map(|(text_rank, (path, chunk_id, snippet, line, score, syms))| {
                 let mut f = 1.0 / (RRF_K + text_rank as f64);
                 if let Some(file_rank) = file_ranks.get(&path) {
                     f += 1.0 / (RRF_K + *file_rank as f64);
                 }
-                (f, text_rank, path, chunk_id, snippet, line, score)
+                (f, text_rank, path, chunk_id, snippet, line, score, syms)
             })
             .collect();
         // Fused score desc; tie-break text_rank asc, then path asc.
@@ -570,10 +601,11 @@ fn ranked_search(
         });
         // The reported score stays the text combined score (fusion reorders, it does
         // not restate relevance), so an unfused hit's payload is unchanged.
-        let ordered: Vec<(String, String, String, u64, f64)> = fused
+        #[allow(clippy::type_complexity)]
+        let ordered: Vec<(String, String, String, u64, f64, Vec<String>)> = fused
             .into_iter()
-            .map(|(_fused, _text_rank, path, chunk_id, snippet, line, score)| {
-                (path, chunk_id, snippet, line, score)
+            .map(|(_fused, _text_rank, path, chunk_id, snippet, line, score, syms)| {
+                (path, chunk_id, snippet, line, score, syms)
             })
             .collect();
         return Ok(render_final(ordered, limit, ctx_mode, &content_by_key));
@@ -582,17 +614,18 @@ fn ranked_search(
     Ok(render_final(rows, limit, ctx_mode, &content_by_key))
 }
 
-/// Truncate the ordered `(path, chunk_id, snippet, line, score)` pool to `limit` and
-/// map to [`SearchHit`]. In [`SearchContext::Rich`] the top hit's snippet is swapped
-/// for its full stored chunk (looked up in `content_by_key`), so the most relevant
+/// Truncate the ordered `(path, chunk_id, snippet, line, score, def_names)` pool to
+/// `limit` and map to [`SearchHit`]. In [`SearchContext::Rich`] the top hit's snippet is
+/// swapped for its full stored chunk (looked up in `content_by_key`), so the most relevant
 /// result carries its whole AST-bounded unit while the tail stays cheap snippets.
+#[allow(clippy::type_complexity)]
 fn render_final(
-    ordered: Vec<(String, String, String, u64, f64)>,
+    ordered: Vec<(String, String, String, u64, f64, Vec<String>)>,
     limit: usize,
     ctx_mode: SearchContext,
     content_by_key: &HashMap<String, String>,
 ) -> Vec<SearchHit> {
-    let mut top: Vec<(String, String, String, u64, f64)> =
+    let mut top: Vec<(String, String, String, u64, f64, Vec<String>)> =
         ordered.into_iter().take(limit).collect();
     if ctx_mode == SearchContext::Rich {
         if let Some(first) = top.first_mut() {
@@ -602,11 +635,12 @@ fn render_final(
         }
     }
     top.into_iter()
-        .map(|(path, _chunk_id, snippet, line, score)| SearchHit {
+        .map(|(path, _chunk_id, snippet, line, score, symbols)| SearchHit {
             path,
             snippet,
             score,
             line: line as usize,
+            symbols,
         })
         .collect()
 }
@@ -617,29 +651,62 @@ fn render_final(
 const SNIPPET_TOKENS: usize = 24;
 
 /// A deterministic snippet for a ranked hit: a ~[`SNIPPET_TOKENS`]-token window
-/// around the first query-term match in `content`, with matched tokens bracketed
-/// `[like]` and a ` … ` marker where text is elided (mirrors the old FTS5 snippet).
+/// around the anchor match in `content`, with matched tokens bracketed `[like]` and
+/// a ` … ` marker where text is elided (mirrors the old FTS5 snippet).
 /// A pure function of `(content, terms)`, so it is byte-stable across different
 /// `limit`s — the over-fetch prefix invariant depends on it.
 fn ranked_snippet(content: &str, terms: &[String]) -> String {
-    let toks: Vec<&str> = content.split_whitespace().collect();
+    ranked_snippet_at(content, terms).0
+}
+
+/// [`ranked_snippet`] plus the byte offset of the window's anchor token in `content`
+/// (0 when nothing matches), so the caller can report the line of the match rather
+/// than the chunk head. The anchor is the matched token whose surrounding window
+/// covers the most DISTINCT query terms (ties: the earliest such token), so a
+/// multi-term query snippets the densest region, not the first lone term. A
+/// single-term query anchors on its first match — exactly the old first-match
+/// window, byte for byte.
+fn ranked_snippet_at(content: &str, terms: &[String]) -> (String, usize) {
+    let toks = ws_tokens(content);
     if toks.is_empty() {
-        return String::new();
+        return (String::new(), 0);
     }
     let is_match = |t: &str| {
         let low = t.to_lowercase();
         terms.iter().any(|q| low.contains(q.as_str()))
     };
-    // Start the window a few tokens before the first match so the match sits in
-    // context, not at the very edge.
-    let first = toks.iter().position(|t| is_match(t)).unwrap_or(0);
-    let start = first.saturating_sub(4);
-    let end = (start + SNIPPET_TOKENS).min(toks.len());
+    let window = |anchor: usize| {
+        // Start the window a few tokens before the anchor so the match sits in
+        // context, not at the very edge.
+        let start = anchor.saturating_sub(4);
+        (start, (start + SNIPPET_TOKENS).min(toks.len()))
+    };
+    let mut anchor = 0usize;
+    let mut best_cover = 0usize;
+    for (i, (_, t)) in toks.iter().enumerate() {
+        if !is_match(t) {
+            continue;
+        }
+        let (start, end) = window(i);
+        let cover = terms
+            .iter()
+            .filter(|q| {
+                toks[start..end]
+                    .iter()
+                    .any(|(_, t)| t.to_lowercase().contains(q.as_str()))
+            })
+            .count();
+        if cover > best_cover {
+            best_cover = cover;
+            anchor = i;
+        }
+    }
+    let (start, end) = window(anchor);
     let mut out = String::new();
     if start > 0 {
         out.push_str("… ");
     }
-    for (i, t) in toks[start..end].iter().enumerate() {
+    for (i, (_, t)) in toks[start..end].iter().enumerate() {
         if i > 0 {
             out.push(' ');
         }
@@ -653,6 +720,58 @@ fn ranked_snippet(content: &str, terms: &[String]) -> String {
     }
     if end < toks.len() {
         out.push_str(" …");
+    }
+    (out, toks[anchor].0)
+}
+
+/// Whitespace tokens of `content` with their byte offsets, for snippet anchoring.
+fn ws_tokens(content: &str) -> Vec<(usize, &str)> {
+    let mut toks: Vec<(usize, &str)> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in content.char_indices() {
+        if c.is_whitespace() {
+            if let Some(s) = start.take() {
+                toks.push((s, &content[s..i]));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        toks.push((s, &content[s..]));
+    }
+    toks
+}
+
+/// Cap on the per-hit `symbols` list (see [`def_names`]): enough for every definition
+/// a typical ~4 KB chunk carries without padding each hit with a long tail.
+const HIT_SYMBOLS_CAP: usize = 12;
+
+/// Definition names captured in a chunk, source order, deduped, capped — the
+/// [`SearchHit::symbols`] payload. Distinct from [`chunk_symbols`] (which feeds the
+/// FTS field): display-grade keywords only (no `let`/`var` locals), no subword
+/// expansion, no sorting. This is for the reader: a hit whose 24-token snippet
+/// window can't reach a definition still names it.
+fn def_names(content: &str, cap: usize) -> Vec<String> {
+    static DEF_NAME_RE: OnceLock<Regex> = OnceLock::new();
+    let re = DEF_NAME_RE.get_or_init(|| {
+        Regex::new(
+            r"\b(?:fn|func|function|def|struct|enum|trait|interface|class|impl|mod|const|static|type)\s+([A-Za-z_][A-Za-z0-9_]*)",
+        )
+        .expect("def-name regex")
+    });
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for c in re.captures_iter(content) {
+        if let Some(m) = c.get(1) {
+            let name = m.as_str();
+            if seen.insert(name) {
+                out.push(name.to_string());
+                if out.len() >= cap {
+                    break;
+                }
+            }
+        }
     }
     out
 }
@@ -832,6 +951,28 @@ fn strong_ident_terms(query: &str) -> Vec<String> {
     terms
 }
 
+/// Minimum whitespace-token count for a query to be prose-shaped ([`is_prose_query`]).
+/// The observed hijacks came from 10+-token behavior descriptions; 5 keeps short
+/// keyword queries ("nested repo boundary") on the identifier-weighted path.
+const PROSE_MIN_TOKENS: usize = 5;
+
+/// True for a prose-shaped query: at least [`PROSE_MIN_TOKENS`] whitespace tokens and
+/// no strong compound identifier (see [`strong_ident_terms`]). Such a query describes
+/// behavior rather than naming a symbol, so the identifier-oriented ranking levers —
+/// the [`SYMBOLS_BOOST`]x `symbols` field weight, the bare-word [`DEF_BOOST`], and the
+/// server's graph symbol-def injection — stand down for it: a generic token like
+/// `path` or `server` that happens to name a symbol would otherwise pin that unrelated
+/// definition to the top hit. Identifier-bearing and short queries never qualify, so
+/// their ranking is byte-identical. Gated by `LENS_PROSE_PROFILE` (default on; `=0`
+/// restores the old behavior for every query).
+pub(crate) fn is_prose_query(query: &str) -> bool {
+    let on = std::env::var("LENS_PROSE_PROFILE")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    on && query.split_whitespace().count() >= PROSE_MIN_TOKENS
+        && strong_ident_terms(query).is_empty()
+}
+
 /// Tightest token-position window covering at least one occurrence of every term
 /// in `terms` within `content`, expressed as `max_pos - min_pos` (adjacent terms
 /// give 1). `None` when some term never appears, so no proximity boost applies.
@@ -908,6 +1049,7 @@ fn structural_search(store: &TantivyStore, query: &str, limit: usize) -> Result<
             snippet,
             score,
             line: line as usize,
+            symbols: Vec::new(),
         })
         .collect())
 }
@@ -1634,6 +1776,88 @@ mod tests {
         );
     }
 
+    // ── prose-query profile ─────────────────────────────────────────────────
+
+    /// Serializes the `LENS_PROSE_PROFILE`-sensitive tests so their process-global
+    /// env mutation cannot interleave (same pattern as `BOOST_TEST_LOCK`).
+    static PROSE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn is_prose_query_shape_and_kill_switch() {
+        let _guard = PROSE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LENS_PROSE_PROFILE");
+        // 5+ bare words: prose.
+        assert!(is_prose_query("path belongs to inner repository boundary"));
+        // A compound identifier anywhere disqualifies.
+        assert!(!is_prose_query("where does chunk_by_ast split the file exactly"));
+        // Short keyword queries stay on the identifier-weighted path.
+        assert!(!is_prose_query("nested repo boundary"));
+        assert!(!is_prose_query("authenticate"));
+        // Kill switch: =0 turns the profile off for every query.
+        std::env::set_var("LENS_PROSE_PROFILE", "0");
+        let off = is_prose_query("path belongs to inner repository boundary");
+        std::env::remove_var("LENS_PROSE_PROFILE");
+        assert!(!off, "LENS_PROSE_PROFILE=0 must disable the prose profile");
+    }
+
+    /// Fixture for the prose-profile tests: `generic.rs` DEFINES the bare word `path`
+    /// (a tiny chunk, so the 5x symbols weight + 4x def boost make it the top hit
+    /// under the old behavior), while `answer.rs` merely carries the query's words in
+    /// a comment. Which one leads is decided solely by the prose profile.
+    fn prose_corpus() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("generic.rs"), "pub fn path() {}\n").unwrap();
+        fs::write(
+            dir.path().join("answer.rs"),
+            "fn resolve_boundary() {\n    // a requested path belongs to an inner nested repository boundary\n}\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn prose_query_ranks_answer_over_bare_word_def() {
+        let _guard = PROSE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LENS_PROSE_PROFILE"); // default ON
+        let data = tempdir().unwrap();
+        let src = prose_corpus();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(src.path(), true).unwrap();
+        let hits = &idx
+            .search(&["path belongs to inner nested repository boundary".into()], 5)
+            .unwrap()
+            .results[0]
+            .hits;
+        assert!(
+            hits[0].path.ends_with("answer.rs"),
+            "prose profile must rank the answering chunk over `fn path`, got {}",
+            hits[0].path
+        );
+    }
+
+    #[test]
+    fn prose_profile_off_restores_bare_word_def_ranking() {
+        let _guard = PROSE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LENS_PROSE_PROFILE", "0");
+        let data = tempdir().unwrap();
+        let src = prose_corpus();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(src.path(), true).unwrap();
+        let top = idx
+            .search(&["path belongs to inner nested repository boundary".into()], 5)
+            .unwrap()
+            .results[0]
+            .hits[0]
+            .path
+            .clone();
+        // Restore BEFORE asserting so a failed assertion can't leak "0" onward.
+        std::env::remove_var("LENS_PROSE_PROFILE");
+        assert!(
+            top.ends_with("generic.rs"),
+            "with the profile off, the symbols weight + def boost keep `fn path` on top, got {top}"
+        );
+    }
+
     // ── RRF graph-importance fusion (L43) ───────────────────────────────────
 
     /// Serializes the two `LENS_RRF`-sensitive tests so their process-global env
@@ -1901,12 +2125,13 @@ mod tests {
         assert_eq!(chunks.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(), plain);
     }
 
-    /// T14: `SearchHit::line` carries the hit chunk's real start line end to end
-    /// (chunking -> `add_chunk` -> `ranked_candidates` -> `render_final`). A markdown
-    /// file's headings give a known, deterministic chunk boundary independent of any
-    /// env-gated chunking switch: the second heading starts on line 4.
+    /// T14 (amended): `SearchHit::line` carries the MATCH's line end to end
+    /// (chunking -> `add_chunk` -> `ranked_candidates` -> `render_final`), not the
+    /// chunk head. A markdown file's headings give a known, deterministic chunk
+    /// boundary independent of any env-gated chunking switch: the `# Target` chunk
+    /// starts on line 4 and the marker sits one line below it.
     #[test]
-    fn search_hit_line_matches_known_chunk_start() {
+    fn search_hit_line_lands_on_the_match_line() {
         let data = tempdir().unwrap();
         let dir = tempdir().unwrap();
         fs::write(
@@ -1919,7 +2144,64 @@ mod tests {
         let out = idx.search(&["marker_needle".into()], 5).unwrap();
         let hits = &out.results[0].hits;
         assert!(!hits.is_empty(), "must find the marker chunk");
-        assert_eq!(hits[0].line, 4, "the `# Target` chunk starts on line 4");
+        assert_eq!(
+            hits[0].line, 5,
+            "the marker sits on line 5, one below its chunk's `# Target` head"
+        );
+    }
+
+    /// The snippet (and the reported line) must anchor on the window covering the
+    /// most distinct query terms, not on the chunk's first lone term match — the
+    /// multi-definition-chunk blindness behind the 0067 bench miss.
+    #[test]
+    fn snippet_and_line_anchor_on_densest_term_window() {
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        let mut body = String::from("alpha filler\n");
+        for _ in 0..30 {
+            body.push_str("nothing here\n");
+        }
+        body.push_str("alpha beta gamma\n"); // line 32, inside the same 100-line chunk
+        fs::write(dir.path().join("notes.unknownext"), &body).unwrap();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+        let out = idx.search(&["alpha beta gamma".into()], 5).unwrap();
+        let hit = &out.results[0].hits[0];
+        assert!(
+            hit.snippet.contains("[alpha] [beta] [gamma]"),
+            "snippet must cover the dense window, got: {}",
+            hit.snippet
+        );
+        assert_eq!(hit.line, 32, "hit line must cite the dense window's line");
+    }
+
+    /// Every ranked code hit lists its chunk's definition names that the snippet
+    /// window can't reach (source order, no locals, visible names filtered), so a
+    /// "which function does X" answer is readable off the hit. Markdown hits carry
+    /// none. The marker sits deep enough inside `second_def` that neither `fn` line
+    /// lands in the 24-token window.
+    #[test]
+    fn hit_lists_chunk_definition_names_and_md_stays_empty() {
+        let data = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pair.rs"),
+            "fn first_def() {\n    let a = 1;\n}\n\nfn second_def() {\n    let pad1 = 1;\n    let pad2 = 2;\n    let pad3 = 3;\n    let pad4 = 4;\n    let pad5 = 5;\n    // marker_beacon lives here\n}\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("notes.md"), "# Heading\nmarker_beacon in prose\n").unwrap();
+        let idx = Index::open(data.path()).unwrap();
+        idx.index_path(dir.path(), true).unwrap();
+        let out = idx.search(&["marker_beacon lives".into()], 5).unwrap();
+        let hits = &out.results[0].hits;
+        let rs = hits.iter().find(|h| h.path.ends_with("pair.rs")).expect("rs hit");
+        assert_eq!(
+            rs.symbols,
+            vec!["first_def", "second_def"],
+            "code hit lists its defs in source order, locals excluded"
+        );
+        let md = hits.iter().find(|h| h.path.ends_with("notes.md")).expect("md hit");
+        assert!(md.symbols.is_empty(), "markdown hit carries no symbols");
     }
 
     #[test]

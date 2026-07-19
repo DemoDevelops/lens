@@ -5,3 +5,7 @@
 /artifacts/
 /benchmarks/toolsel/results/intent_miss.json
 /benchmarks/toolsel/results/intent_mined_cases.json
+
+# meridian:memory-bank
+.claude/skills/
+.claude/meridian/

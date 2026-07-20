@@ -413,7 +413,7 @@ fn extract_tags_from_tree(
 
     // --- pass 2: calls (@reference.call) ---
     // Built after pass 1 so enclosing_scope can resolve a call's caller.
-    let mut calls: Vec<(String, String)> = Vec::new();
+    let mut calls: Vec<(String, String, usize)> = Vec::new();
     let mut ccur = QueryCursor::new();
     let mut cit = ccur.matches(qref, root, src);
     while let Some(m) = cit.next() {
@@ -442,7 +442,7 @@ fn extract_tags_from_tree(
         }
         let caller = enclosing_scope(&nn, &scope_map, &scope_kinds)
             .unwrap_or_else(|| module.id.clone());
-        calls.push((caller, callee));
+        calls.push((caller, callee, nn.start_position().row + 1));
     }
 
     // --- imports (only if the spec opts in) ---
@@ -585,7 +585,7 @@ fn main() {
 
         // The keystone edge: main calls helper.
         assert!(
-            fx.calls.iter().any(|(_, c)| c == "helper"),
+            fx.calls.iter().any(|(_, c, _)| c == "helper"),
             "calls: {:?}",
             fx.calls
         );
@@ -619,8 +619,8 @@ fn helper() {}
         let helper_edges: Vec<&String> = fx
             .calls
             .iter()
-            .filter(|(_, c)| c == "helper")
-            .map(|(caller, _)| caller)
+            .filter(|(_, c, _)| c == "helper")
+            .map(|(caller, _, _)| caller)
             .collect();
         assert!(!helper_edges.is_empty(), "calls: {:?}", fx.calls);
         assert!(
@@ -661,7 +661,7 @@ fn helper() {}
         fx.defs.iter().any(|n| n.name == name)
     }
     fn has_call(fx: &FileExtract, name: &str) -> bool {
-        fx.calls.iter().any(|(_, c)| c == name)
+        fx.calls.iter().any(|(_, c, _)| c == name)
     }
 
     #[test]

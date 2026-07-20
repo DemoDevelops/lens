@@ -88,6 +88,15 @@ pub struct Edge {
     pub to: String,
     /// calls | imports | contains | references
     pub kind: String,
+    /// 1-based line of the CALL SITE (the call expression, in the `from` node's
+    /// file) for `calls` edges — the witness evidence `transitive_closure`
+    /// surfaces. `None` for non-call edges and for graphs persisted before this
+    /// field existed. Skipped in JSON when absent, so a lineless edge serializes
+    /// byte-identically to the pre-line shape and old readers (serde ignores
+    /// unknown keys) are unaffected. Deliberately NOT part of the dedup identity
+    /// (see [`Graph::add_edge_at`]): it is evidence about an edge, not a new edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
 /// Traversal direction over the (directed) edge set.
@@ -115,10 +124,12 @@ pub struct Graph {
     pub edges: Vec<Edge>,
     /// Dedup sets: skipped by serde so the on-disk JSON is unchanged.
     /// Rebuilt lazily from the Vecs if out of sync (e.g. after deserialization).
+    /// Edges dedup on `(from, to, kind)` ONLY — `Edge::line` is evidence, not
+    /// identity, so the edge set stays identical to the pre-line build.
     #[serde(skip)]
     node_ids: HashSet<String, foldhash::fast::RandomState>,
     #[serde(skip)]
-    edges_seen: HashSet<Edge, foldhash::fast::RandomState>,
+    edges_seen: HashSet<(String, String, String), foldhash::fast::RandomState>,
 }
 
 impl Graph {
@@ -130,7 +141,11 @@ impl Graph {
     /// This happens exactly once after deserialization.
     fn sync_dedup_sets(&mut self) {
         self.node_ids = self.nodes.iter().map(|n| n.id.clone()).collect();
-        self.edges_seen = self.edges.iter().cloned().collect();
+        self.edges_seen = self
+            .edges
+            .iter()
+            .map(|e| (e.from.clone(), e.to.clone(), e.kind.clone()))
+            .collect();
     }
 
     /// Insert a node if its id is new; returns the id either way.
@@ -145,18 +160,28 @@ impl Graph {
         id
     }
 
-    /// Insert an edge if an identical one isn't already present.
+    /// Insert an edge if an identical `(from, to, kind)` one isn't already present.
     pub fn add_edge(&mut self, from: &str, to: &str, kind: &str) {
+        self.add_edge_at(from, to, kind, None);
+    }
+
+    /// [`add_edge`](Self::add_edge) carrying the call-site line ([`Edge::line`]).
+    /// Dedup ignores the line: the FIRST insertion of a `(from, to, kind)` wins,
+    /// so a repeated call (same caller, same callee, later line) records the
+    /// earliest call site — deterministic because assembly feeds edges in sorted
+    /// file order and, within a file, in source order.
+    pub fn add_edge_at(&mut self, from: &str, to: &str, kind: &str, line: Option<usize>) {
         if self.edges_seen.len() != self.edges.len() {
             self.sync_dedup_sets();
         }
-        let edge = Edge {
-            from: from.to_string(),
-            to: to.to_string(),
-            kind: kind.to_string(),
-        };
-        if self.edges_seen.insert(edge.clone()) {
-            self.edges.push(edge);
+        let key = (from.to_string(), to.to_string(), kind.to_string());
+        if self.edges_seen.insert(key) {
+            self.edges.push(Edge {
+                from: from.to_string(),
+                to: to.to_string(),
+                kind: kind.to_string(),
+                line,
+            });
         }
     }
 
@@ -663,6 +688,35 @@ mod tests {
         let tjs = serde_json::to_string(&t).unwrap();
         assert!(tjs.contains(r#""origin":"test""#), "{tjs}");
         assert_eq!(serde_json::from_str::<Node>(&tjs).unwrap().origin, Origin::Test);
+    }
+
+    #[test]
+    fn edge_line_is_additive_and_dedup_ignores_line() {
+        // Old graph.json edges carry no `line` key: they must deserialize to None.
+        let old = r#"{"from":"a","to":"b","kind":"calls"}"#;
+        let e: Edge = serde_json::from_str(old).unwrap();
+        assert_eq!(e.line, None);
+        // A lineless edge serializes byte-identically to the pre-line shape.
+        assert!(
+            !serde_json::to_string(&e).unwrap().contains("line"),
+            "absent line must be skipped in JSON"
+        );
+
+        // A line-carrying edge round-trips.
+        let mut g = Graph::new();
+        let a = g.add_node(Node::new("f.rs", "function", "a", 1, "rust"));
+        let b = g.add_node(Node::new("f.rs", "function", "b", 5, "rust"));
+        g.add_edge_at(&a, &b, "calls", Some(2));
+        let js = serde_json::to_string(&g.edges[0]).unwrap();
+        assert!(js.contains(r#""line":2"#), "{js}");
+        assert_eq!(serde_json::from_str::<Edge>(&js).unwrap().line, Some(2));
+
+        // Dedup keys on (from, to, kind) only: a second call site for the same
+        // edge is dropped and the FIRST line is kept, so the edge set (and every
+        // count/order downstream) is identical to the pre-line build.
+        g.add_edge_at(&a, &b, "calls", Some(9));
+        assert_eq!(g.edges.len(), 1, "same (from,to,kind) must dedup");
+        assert_eq!(g.edges[0].line, Some(2), "first call site wins");
     }
 
     #[test]

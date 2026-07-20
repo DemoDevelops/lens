@@ -185,7 +185,9 @@ fn merge_nested_graph(graph: &mut Graph, nested_root: &Path, walk_root: &Path) {
     }
     for edge in nested.edges {
         if let (Some(from), Some(to)) = (id_map.get(&edge.from), id_map.get(&edge.to)) {
-            graph.add_edge(from, to, &edge.kind);
+            // Carry the call-site line through: the witness FILE resolves via the
+            // (remapped) from-node at query time, so only the line needs copying.
+            graph.add_edge_at(from, to, &edge.kind, edge.line);
         }
     }
 }
@@ -222,7 +224,7 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
     let mut langs_used: BTreeSet<String> = BTreeSet::new();
 
     // Raw, cross-file relationships resolved after all nodes exist.
-    let mut pending_calls: Vec<(String, String)> = Vec::new();
+    let mut pending_calls: Vec<(String, String, usize)> = Vec::new();
     let mut pending_imports: Vec<(String, String, usize, String)> = Vec::new(); // (module_id, seg, line, lang)
     let mut pending_md_links: Vec<(String, MdLink)> = Vec::new(); // (linking module_id, link)
     let mut pending_tags: Vec<(String, String)> = Vec::new(); // (module_id, tag)
@@ -322,13 +324,13 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
         }
     }
 
-    let resolved_calls: Vec<(String, String)> = if scoped {
+    let resolved_calls: Vec<(String, String, usize)> = if scoped {
         resolve_calls_scoped(&graph, &pending_calls, &imported_src)
     } else {
         resolve_calls_fanout(&graph, &pending_calls, &imported_src, &name_index)
     };
-    for (caller, t) in resolved_calls {
-        graph.add_edge(&caller, &t, "calls");
+    for (caller, t, line) in resolved_calls {
+        graph.add_edge_at(&caller, &t, "calls", Some(line));
     }
 
     // Resolve imports: link to a matching repo symbol if present, else create an
@@ -432,9 +434,9 @@ fn assemble_graph(mut file_results: Vec<FileResult>, warnings: Vec<String>) -> D
 /// follow `graph.nodes` insertion order and each emission is unique-or-nothing.
 fn resolve_calls_scoped(
     graph: &Graph,
-    pending_calls: &[(String, String)],
+    pending_calls: &[(String, String, usize)],
     imported_src: &HashMap<(String, String), BTreeSet<String>>,
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, usize)> {
     // name -> node ids, scoped per file (built from the nodes already added).
     let mut defs_by_file: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
     for n in &graph.nodes {
@@ -473,8 +475,8 @@ fn resolve_calls_scoped(
             .extend(srcs.iter().map(String::as_str));
     }
 
-    let mut out: Vec<(String, String)> = Vec::new();
-    for (caller, callee) in pending_calls {
+    let mut out: Vec<(String, String, usize)> = Vec::new();
+    for (caller, callee, line) in pending_calls {
         let (file, lang) = match caller_info.get(caller.as_str()) {
             Some(fl) => *fl,
             None => continue,
@@ -492,7 +494,7 @@ fn resolve_calls_scoped(
             .unwrap_or_default();
         match same_file.len() {
             1 => {
-                out.push((caller.clone(), same_file[0].to_string()));
+                out.push((caller.clone(), same_file[0].to_string(), *line));
                 continue;
             }
             0 => {}
@@ -517,7 +519,7 @@ fn resolve_calls_scoped(
             let cands = within(&|f: &str| srcs.contains(f));
             match cands.len() {
                 1 => {
-                    out.push((caller.clone(), cands[0].to_string()));
+                    out.push((caller.clone(), cands[0].to_string(), *line));
                     continue;
                 }
                 0 => {}
@@ -529,7 +531,7 @@ fn resolve_calls_scoped(
             let cands = within(&|f: &str| srcs.contains(f));
             match cands.len() {
                 1 => {
-                    out.push((caller.clone(), cands[0].to_string()));
+                    out.push((caller.clone(), cands[0].to_string(), *line));
                     continue;
                 }
                 0 => {}
@@ -543,7 +545,7 @@ fn resolve_calls_scoped(
             .filter(|id| *id != caller.as_str())
             .collect();
         if cands.len() == 1 {
-            out.push((caller.clone(), cands[0].to_string()));
+            out.push((caller.clone(), cands[0].to_string(), *line));
         }
     }
     out
@@ -557,10 +559,10 @@ fn resolve_calls_scoped(
 /// happen to define the same name when the call is to an imported symbol.
 fn resolve_calls_fanout(
     graph: &Graph,
-    pending_calls: &[(String, String)],
+    pending_calls: &[(String, String, usize)],
     imported_src: &HashMap<(String, String), BTreeSet<String>>,
     name_index: &HashMap<String, Vec<String>>,
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, usize)> {
     // name -> node ids, scoped per file (built from the nodes already added).
     let mut defs_by_file: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
     for n in &graph.nodes {
@@ -581,8 +583,8 @@ fn resolve_calls_fanout(
         .iter()
         .map(|n| (n.id.as_str(), n.file.as_str()))
         .collect();
-    let mut out: Vec<(String, String)> = Vec::new();
-    for (caller, callee) in pending_calls {
+    let mut out: Vec<(String, String, usize)> = Vec::new();
+    for (caller, callee, line) in pending_calls {
         let file = match caller_file.get(caller.as_str()) {
             Some(f) => *f,
             None => continue,
@@ -599,7 +601,7 @@ fn resolve_calls_fanout(
             .unwrap_or_default();
         if !same_file.is_empty() {
             for t in same_file {
-                out.push((caller.clone(), t.to_string()));
+                out.push((caller.clone(), t.to_string(), *line));
             }
             continue;
         }
@@ -625,12 +627,12 @@ fn resolve_calls_fanout(
         };
         if !import_scoped.is_empty() {
             for t in import_scoped {
-                out.push((caller.clone(), t.clone()));
+                out.push((caller.clone(), t.clone(), *line));
             }
         } else if let Some(targets) = name_index.get(callee) {
             for t in targets {
                 if t != caller {
-                    out.push((caller.clone(), t.clone()));
+                    out.push((caller.clone(), t.clone(), *line));
                 }
             }
         }
@@ -1386,12 +1388,23 @@ mod tests {
             "merged node id must differ from its standalone id (file changed)"
         );
 
-        assert!(
-            out.graph.edges.iter().any(
-                |e| e.kind == "calls" && e.from == merged_fn.id && e.to == merged_helper.id
-            ),
-            "calls edge between nested symbols must survive the id remap; edges={:?}",
-            out.graph.edges
+        let merged_edge = out
+            .graph
+            .edges
+            .iter()
+            .find(|e| e.kind == "calls" && e.from == merged_fn.id && e.to == merged_helper.id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "calls edge between nested symbols must survive the id remap; edges={:?}",
+                    out.graph.edges
+                )
+            });
+        // The call-site line (inner.rs line 2) must survive the merge too, so
+        // transitive_closure witnesses work across nested-repo boundaries.
+        assert_eq!(
+            merged_edge.line,
+            Some(2),
+            "nested edge's call-site line must be carried through the merge"
         );
     }
 

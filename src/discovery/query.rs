@@ -1,6 +1,9 @@
 //! Graph traversal: `lens_symbol`, `lens_links`, `lens_path`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use anyhow::{bail, Result};
+use serde::Serialize;
 
 use super::graph::{Direction, Edge, Graph, Node, Origin};
 use crate::tools::{EdgeView, GraphView, NodeView, PathResponse, ResolvedNote};
@@ -481,6 +484,202 @@ fn resolve_note(graph: &Graph, token: &str) -> Option<(String, usize)> {
     // Substring fallback: preserve the legacy first-by-id pick (find_by_name is
     // id-sorted), reported as unambiguous.
     by_name.first().map(|n| (n.id.clone(), 0))
+}
+
+/// One symbol reached by [`transitive_closure`]: its identity/location plus the
+/// BFS evidence — the hop count from the root and the `witness` call site
+/// proving the edge that put it on a shortest path.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClosureNode {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    /// 1-based line of this node's own definition.
+    pub line: usize,
+    /// Hops from the root (1 = a direct caller/callee).
+    pub hops: usize,
+    /// prod | test | bench. All-or-none per response (the
+    /// [`strip_all_prod_origins`] rule): omitted everywhere when every reported
+    /// node is prod, present on every node otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// `file:line` of the CALL SITE proving the edge connecting this node to its
+    /// BFS parent — an edge on a shortest path back to the root. The file is the
+    /// calling side's file in both directions (for callers, this node's own
+    /// file). `None` only for graphs persisted before edges carried call-site
+    /// lines ([`Edge::line`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness: Option<String>,
+}
+
+/// The result of [`transitive_closure`]: the complete set of nodes reachable
+/// from `root` within `depth` strictly directed hops over `calls` edges.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransitiveClosure {
+    /// Resolved root node id (the importance winner when the name was ambiguous).
+    pub root: String,
+    pub root_name: String,
+    pub root_file: String,
+    /// 1-based line of the root's definition.
+    pub root_line: usize,
+    /// "callers" | "callees".
+    pub direction: String,
+    /// The hop bound the BFS ran with.
+    pub depth: usize,
+    /// Always true: the returned set is the COMPLETE closure within `depth` hops
+    /// (an exhaustive directed BFS), never a sample or an undirected ball.
+    pub complete: bool,
+    /// Nodes reached within `depth` hops, root excluded — the full reach,
+    /// regardless of `prod_only`.
+    pub count_total: usize,
+    /// Reached nodes whose origin is neither test nor bench.
+    pub count_prod: usize,
+    /// Reached nodes in BFS order (hops ascending, deterministic within a hop).
+    /// `prod_only` filters this list to exactly the `count_prod` prod nodes.
+    pub nodes: Vec<ClosureNode>,
+    /// Ambiguity note when `root` exactly named more than one symbol: which node
+    /// won (by importance, like [`path`]) and how many candidates it beat.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved: Vec<ResolvedNote>,
+}
+
+/// Directed transitive closure with witnesses: every node within `depth` hops of
+/// `root` following ONLY `calls` edges in one direction — [`Direction::Callers`]
+/// walks fan-in ("who transitively calls root"), [`Direction::Callees`] fan-out
+/// ("what does root transitively call"). Strictly directed at EVERY hop: never
+/// the undirected ball [`neighbors`] grows at depth>1, and never a
+/// `contains`/`imports` hop (a caller is someone with a call site, not an
+/// importer). Each reached node carries its hop count and a `witness`: the
+/// call-site `file:line` of the edge that first discovered it, which BFS
+/// guarantees lies on a shortest path back to the root — so one call answers
+/// "who reaches this, and where is the proof".
+///
+/// `root` may be a node id or a name; an ambiguous name resolves by importance
+/// exactly like [`path`] ([`resolve_note`]) and is reported in `resolved`. An
+/// unresolvable root is an explicit error, never a silent empty closure.
+/// `prod_only` filters the REPORTED node list to prod-origin nodes (its length
+/// then equals `count_prod`); `count_total` always counts the full reach, and
+/// traversal itself is origin-blind so hop counts stay true even through a
+/// test-origin intermediate.
+pub fn transitive_closure(
+    graph: &Graph,
+    root: &str,
+    direction: Direction,
+    depth: usize,
+    prod_only: bool,
+) -> Result<TransitiveClosure> {
+    let dir_name = match direction {
+        Direction::Callers => "callers",
+        Direction::Callees => "callees",
+        Direction::Both => bail!("transitive closure is strictly directed: use callers or callees"),
+    };
+    let (root_id, others) = resolve_note(graph, root)
+        .ok_or_else(|| anyhow::anyhow!("no symbol matching '{root}' in the graph"))?;
+    let root_node = graph
+        .node(&root_id)
+        .ok_or_else(|| anyhow::anyhow!("no symbol matching '{root}' in the graph"))?;
+    let resolved = if others > 0 {
+        vec![ResolvedNote {
+            query: root.to_string(),
+            chosen: root_id.clone(),
+            other_candidates: others,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    // Directed adjacency over `calls` edges only, keyed by the node a hop stands
+    // on. The edge Vec is assembly-sorted, so per-key lists — and therefore BFS
+    // order, first-visit parents, and witnesses — are deterministic.
+    let mut adj: HashMap<&str, Vec<&Edge>> = HashMap::new();
+    for e in &graph.edges {
+        if e.kind != "calls" {
+            continue;
+        }
+        let key = match direction {
+            Direction::Callers => e.to.as_str(),
+            _ => e.from.as_str(),
+        };
+        adj.entry(key).or_default().push(e);
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(root_id.clone());
+    let mut frontier: Vec<String> = vec![root_id.clone()];
+    let mut reached: Vec<ClosureNode> = Vec::new();
+    for hops in 1..=depth {
+        let mut next: Vec<String> = Vec::new();
+        for id in &frontier {
+            for e in adj.get(id.as_str()).map(Vec::as_slice).unwrap_or_default() {
+                let other = match direction {
+                    Direction::Callers => &e.from,
+                    _ => &e.to,
+                };
+                if !visited.insert(other.clone()) {
+                    continue;
+                }
+                next.push(other.clone());
+                // Defensive: assembled graphs never dangle, but a missing
+                // endpoint must not panic a query.
+                let Some(n) = graph.node(other) else { continue };
+                // The call site lives in the CALLING side's file (`e.from`).
+                let witness = e
+                    .line
+                    .and_then(|l| graph.node(&e.from).map(|c| format!("{}:{l}", c.file)));
+                reached.push(ClosureNode {
+                    id: n.id.clone(),
+                    name: n.name.clone(),
+                    kind: n.kind.clone(),
+                    file: n.file.clone(),
+                    line: n.line,
+                    hops,
+                    origin: Some(
+                        match n.origin {
+                            Origin::Prod => "prod",
+                            Origin::Test => "test",
+                            Origin::Bench => "bench",
+                        }
+                        .to_string(),
+                    ),
+                    witness,
+                });
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    let count_total = reached.len();
+    let count_prod = reached
+        .iter()
+        .filter(|n| n.origin.as_deref() == Some("prod"))
+        .count();
+    let mut nodes = reached;
+    if prod_only {
+        nodes.retain(|n| n.origin.as_deref() == Some("prod"));
+    }
+    // All-or-none origin labeling, same rule as [`strip_all_prod_origins`].
+    if nodes.iter().all(|n| n.origin.as_deref() == Some("prod")) {
+        for n in &mut nodes {
+            n.origin = None;
+        }
+    }
+    Ok(TransitiveClosure {
+        root: root_id,
+        root_name: root_node.name.clone(),
+        root_file: root_node.file.clone(),
+        root_line: root_node.line,
+        direction: dir_name.to_string(),
+        depth,
+        complete: true,
+        count_total,
+        count_prod,
+        nodes,
+        resolved,
+    })
 }
 
 /// Build a deduplicated subgraph from a set of node ids, including edges whose
@@ -1205,5 +1404,226 @@ mod tests {
         assert!(clean.nodes.iter().all(|n| n.origin.is_none()));
         let js = serde_json::to_string(&clean.nodes).unwrap();
         assert!(!js.contains("origin"), "all-prod nodes must not serialize origin");
+    }
+
+    /// Fixture for the closure tests: a strictly directed call chain
+    /// `top -> mid -> target` plus an unrelated function, one file, built by the
+    /// real `discover` pipeline. The TempDir is returned so witness-content
+    /// assertions can read the fixture back before it is cleaned up.
+    fn chain_fixture() -> (tempfile::TempDir, Graph) {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("lib.rs"),
+            "fn target() {}\n\
+             fn mid() { target(); }\n\
+             fn top() { mid(); }\n\
+             fn unrelated() {}\n",
+        )
+        .unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+        (dir, g)
+    }
+
+    #[test]
+    fn closure_callers_reports_exact_set_hops_and_witnesses() {
+        let (dir, g) = chain_fixture();
+        let c = transitive_closure(&g, "target", Direction::Callers, 5, false).unwrap();
+        assert!(
+            c.complete,
+            "the closure must claim completeness for its depth"
+        );
+        assert_eq!(c.depth, 5);
+        assert_eq!(c.root_name, "target");
+        assert_eq!((c.count_total, c.count_prod), (2, 2));
+        let node = |name: &str| {
+            c.nodes
+                .iter()
+                .find(|n| n.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from closure"))
+        };
+        let (mid, top) = (node("mid"), node("top"));
+        assert_eq!(mid.hops, 1, "mid calls target directly");
+        assert_eq!(top.hops, 2, "top reaches target only through mid");
+        assert!(
+            !c.nodes
+                .iter()
+                .any(|n| n.name == "unrelated" || n.name == "target"),
+            "neither the root nor a non-caller may appear"
+        );
+        // All-prod response drops origin entirely (same rule as NodeView).
+        assert!(c.nodes.iter().all(|n| n.origin.is_none()));
+
+        // Witnesses are the real call sites: mid's edge to target is the
+        // `target();` on line 2, top's edge to mid the `mid();` on line 3 — and
+        // the LINE CONTENT at each witness names the callee, proving the witness
+        // points at the genuine call expression, not a plausible-looking string.
+        assert_eq!(mid.witness.as_deref(), Some("lib.rs:2"));
+        assert_eq!(top.witness.as_deref(), Some("lib.rs:3"));
+        for (n, callee) in [(mid, "target"), (top, "mid")] {
+            let w = n.witness.as_deref().unwrap();
+            let (file, line) = w.rsplit_once(':').unwrap();
+            let text = fs::read_to_string(dir.path().join(file)).unwrap();
+            let content = text
+                .lines()
+                .nth(line.parse::<usize>().unwrap() - 1)
+                .unwrap();
+            assert!(
+                content.contains(&format!("{callee}(")),
+                "witness {w} must point at the `{callee}` call site; line reads: {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn closure_respects_depth_cut() {
+        let (_dir, g) = chain_fixture();
+        let c = transitive_closure(&g, "target", Direction::Callers, 1, false).unwrap();
+        assert_eq!(c.depth, 1);
+        let names: Vec<&str> = c.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["mid"],
+            "top is 2 hops away and must be cut at depth 1"
+        );
+        assert_eq!(c.count_total, 1);
+    }
+
+    #[test]
+    fn closure_callees_direction_walks_fan_out() {
+        let (dir, g) = chain_fixture();
+        let c = transitive_closure(&g, "top", Direction::Callees, 5, false).unwrap();
+        assert_eq!(c.direction, "callees");
+        assert_eq!(c.count_total, 2);
+        let node = |name: &str| {
+            c.nodes
+                .iter()
+                .find(|n| n.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from closure"))
+        };
+        let (mid, target) = (node("mid"), node("target"));
+        assert_eq!(mid.hops, 1);
+        assert_eq!(target.hops, 2);
+        // Callee-direction witnesses live in the CALLER's file: top's `mid();`
+        // call on line 3 discovers mid; mid's `target();` on line 2 discovers
+        // target. Each witness line names the reached callee.
+        assert_eq!(mid.witness.as_deref(), Some("lib.rs:3"));
+        assert_eq!(target.witness.as_deref(), Some("lib.rs:2"));
+        let text = fs::read_to_string(dir.path().join("lib.rs")).unwrap();
+        assert!(text.lines().nth(2).unwrap().contains("mid("));
+        assert!(text.lines().nth(1).unwrap().contains("target("));
+    }
+
+    /// The prod_only contract (T2 decision, documented here): traversal is
+    /// origin-blind (reachability is structural, so hop counts stay true even
+    /// through test-origin intermediates), `count_total` always counts the full
+    /// reach, `count_prod` always excludes test/bench-origin nodes, and
+    /// `prod_only` filters the REPORTED list so its length equals `count_prod`.
+    #[test]
+    fn closure_prod_only_filters_list_and_count_consistently() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "pub fn target() {}\n\
+             pub fn prod_caller() { target(); }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 fn test_caller() { super::target(); }\n\
+             }\n",
+        )
+        .unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let all = transitive_closure(&g, "target", Direction::Callers, 3, false).unwrap();
+        assert_eq!((all.count_total, all.count_prod), (2, 1));
+        let origin_of = |name: &str| {
+            all.nodes
+                .iter()
+                .find(|n| n.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .origin
+                .clone()
+        };
+        assert_eq!(
+            origin_of("prod_caller").as_deref(),
+            Some("prod"),
+            "a mixed response labels every node"
+        );
+        assert_eq!(origin_of("test_caller").as_deref(), Some("test"));
+
+        let prod = transitive_closure(&g, "target", Direction::Callers, 3, true).unwrap();
+        assert_eq!(
+            (prod.count_total, prod.count_prod),
+            (2, 1),
+            "counts describe the closure, not the filter"
+        );
+        let names: Vec<&str> = prod.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["prod_caller"],
+            "prod_only reports only prod-origin callers"
+        );
+        assert_eq!(
+            prod.nodes.len(),
+            prod.count_prod,
+            "the filtered list length equals count_prod"
+        );
+    }
+
+    #[test]
+    fn closure_unresolvable_root_is_an_explicit_error() {
+        let (_dir, g) = chain_fixture();
+        let err = transitive_closure(&g, "no_such_symbol_zzz", Direction::Callers, 2, false)
+            .expect_err("an unknown root must error, not return an empty closure");
+        assert!(
+            err.to_string().contains("no_such_symbol_zzz"),
+            "the error must name the unresolvable token: {err}"
+        );
+    }
+
+    #[test]
+    fn closure_resolves_ambiguous_root_by_importance_and_reports_it() {
+        // Same two-`target` shape as path's ambiguity test: the a.rs target is
+        // structurally important (three callers), the b.rs one isolated.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn target() { sink(); }\n\
+             fn sink() {}\n\
+             fn u1() { target(); }\n\
+             fn u2() { target(); }\n\
+             fn u3() { target(); }\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("b.rs"), "fn target() {}\n").unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        let c = transitive_closure(&g, "target", Direction::Callers, 2, false).unwrap();
+        assert_eq!(
+            c.root_file, "a.rs",
+            "importance picks the called-by-three target"
+        );
+        let note = c
+            .resolved
+            .iter()
+            .find(|r| r.query == "target")
+            .expect("ambiguity note for the two `target`s");
+        assert_eq!(note.other_candidates, 1);
+        assert_eq!(note.chosen, c.root);
+        let mut names: Vec<&str> = c.nodes.iter().map(|n| n.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["u1", "u2", "u3"],
+            "exactly the three direct callers"
+        );
+    }
+
+    #[test]
+    fn closure_rejects_undirected_direction() {
+        let (_dir, g) = chain_fixture();
+        assert!(
+            transitive_closure(&g, "target", Direction::Both, 2, false).is_err(),
+            "Both would be the undirected ball the closure exists to eliminate"
+        );
     }
 }

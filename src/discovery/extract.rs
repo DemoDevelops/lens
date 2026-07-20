@@ -101,8 +101,10 @@ pub struct MdLink {
 pub struct FileExtract {
     pub module: Node,
     pub defs: Vec<Node>,
-    /// (caller_node_id, callee_name)
-    pub calls: Vec<(String, String)>,
+    /// (caller_node_id, callee_name, call_site_line): the 1-based line of the
+    /// call expression itself, carried into [`Edge::line`](super::graph::Edge::line)
+    /// at assembly so callers/callees traversals can cite the exact call site.
+    pub calls: Vec<(String, String, usize)>,
     /// (path_segment, line)
     pub imports: Vec<(String, usize)>,
     /// (module_id, def_id) containment
@@ -524,7 +526,7 @@ fn extract_from_tree(
     }
 
     // --- calls ---
-    let mut calls: Vec<(String, String)> = Vec::new();
+    let mut calls: Vec<(String, String, usize)> = Vec::new();
     let scope_kinds = fn_scope_kinds(spec.name);
     let calls_q = &queries.calls;
     let mut ccur = QueryCursor::new();
@@ -535,9 +537,10 @@ fn extract_from_tree(
             if callee.is_empty() {
                 continue;
             }
+            let line = cap.node.start_position().row + 1;
             let caller = enclosing_scope(&cap.node, &scope_map, scope_kinds)
                 .unwrap_or_else(|| module.id.clone());
-            calls.push((caller, callee));
+            calls.push((caller, callee, line));
         }
     }
 
@@ -1241,7 +1244,7 @@ func makeGreeting(_ n: String) -> String { "hi" }
             assert!(names.contains(&want), "missing def {want}; got {names:?}");
         }
 
-        let callees: Vec<&str> = fx.calls.iter().map(|(_, c)| c.as_str()).collect();
+        let callees: Vec<&str> = fx.calls.iter().map(|(_, c, _)| c.as_str()).collect();
         assert!(callees.contains(&"makeGreeting"), "callees: {callees:?}"); // greet() body
         assert!(callees.contains(&"greet"), "callees: {callees:?}"); // p.greet()
 
@@ -1271,8 +1274,9 @@ fn main() {
         let ks = kinds(&fx.defs);
         assert!(ks.contains(&"function".to_string()));
         assert!(ks.contains(&"struct".to_string()));
-        // main calls helper
-        assert!(fx.calls.iter().any(|(_, c)| c == "helper"));
+        // main calls helper, and the call SITE line (line 9: `let w = helper();`)
+        // is captured — the witness evidence transitive_closure surfaces.
+        assert!(fx.calls.iter().any(|(_, c, l)| c == "helper" && *l == 9));
         // imported read
         assert!(fx.imports.iter().any(|(p, _)| p == "read"));
     }
@@ -1334,7 +1338,7 @@ fn main() {
 "#;
         let spec = spec_for_language("rust").unwrap();
         let fx = extract_file("a.rs", src, &spec).unwrap();
-        let callees: Vec<&str> = fx.calls.iter().map(|(_, c)| c.as_str()).collect();
+        let callees: Vec<&str> = fx.calls.iter().map(|(_, c, _)| c.as_str()).collect();
         assert!(callees.contains(&"helper"), "helper::<i32>() missing; callees: {callees:?}");
         assert!(callees.contains(&"parse"), ".parse::<i32>() missing; callees: {callees:?}");
         assert!(callees.contains(&"new"), "Vec::<u8>::new() missing; callees: {callees:?}");
@@ -1358,7 +1362,7 @@ def helper():
         let ks = kinds(&fx.defs);
         assert!(ks.contains(&"function".to_string()));
         assert!(ks.contains(&"class".to_string()));
-        assert!(fx.calls.iter().any(|(_, c)| c == "helper"));
+        assert!(fx.calls.iter().any(|(_, c, _)| c == "helper"));
         assert!(fx.imports.iter().any(|(p, _)| p == "os"));
     }
 
@@ -1380,7 +1384,7 @@ const arrow = () => helper();
         assert!(ks.contains(&"function".to_string()));
         assert!(ks.contains(&"class".to_string()));
         assert!(ks.contains(&"method".to_string()));
-        assert!(fx.calls.iter().any(|(_, c)| c == "helper"));
+        assert!(fx.calls.iter().any(|(_, c, _)| c == "helper"));
         assert!(fx.imports.iter().any(|(p, _)| p == "thing" || p == "mod"));
     }
 
@@ -1403,7 +1407,7 @@ function compute(): number { return 1; }
         assert!(ks.contains(&"interface".to_string()));
         assert!(ks.contains(&"class".to_string()));
         assert!(ks.contains(&"method".to_string()));
-        assert!(fx.calls.iter().any(|(_, c)| c == "compute"));
+        assert!(fx.calls.iter().any(|(_, c, _)| c == "compute"));
     }
 
     #[test]
@@ -1427,7 +1431,7 @@ func main() {
         let ks = kinds(&fx.defs);
         assert!(ks.contains(&"function".to_string()));
         assert!(ks.contains(&"struct".to_string()));
-        assert!(fx.calls.iter().any(|(_, c)| c == "helper"));
+        assert!(fx.calls.iter().any(|(_, c, _)| c == "helper"));
         assert!(fx.imports.iter().any(|(p, _)| p == "fmt"));
     }
 

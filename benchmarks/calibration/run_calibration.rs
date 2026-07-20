@@ -117,7 +117,7 @@ fn collect_lang(spec: &TagsLangSpec) -> LangCalibration {
             for d in &fx.defs {
                 hand_defs.insert((rel.clone(), d.name.clone()));
             }
-            for (_, callee) in &fx.calls {
+            for (_, callee, _) in &fx.calls {
                 hand_calls.insert((rel.clone(), callee.clone()));
             }
             hand_imports += fx.imports.len();
@@ -126,7 +126,7 @@ fn collect_lang(spec: &TagsLangSpec) -> LangCalibration {
             for d in &fx.defs {
                 tags_defs.insert((rel.clone(), d.name.clone()));
             }
-            for (_, callee) in &fx.calls {
+            for (_, callee, _) in &fx.calls {
                 tags_calls.insert((rel.clone(), callee.clone()));
             }
             tags_imports += fx.imports.len();

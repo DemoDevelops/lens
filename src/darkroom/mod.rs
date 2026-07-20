@@ -9,7 +9,7 @@ pub mod runtimes;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -43,6 +43,57 @@ fn go_build_cache_dir() -> &'static PathBuf {
 
 /// How much of a truncated stdout to keep at the head and at the tail.
 const PREVIEW_SIDE: usize = 2048;
+
+/// How long to wait for the stdout/stderr readers once the child has exited or
+/// been killed. EOF normally arrives immediately; the bound only fires when an
+/// escaped process (e.g. a `setsid` daemon) still holds the pipe's write end,
+/// which would otherwise wedge the handler until that process exits.
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// Read `pipe` to EOF on a task, accumulating into a shared buffer so
+/// [`drain_reader`] can hand back whatever was read even when it gives up
+/// before EOF.
+fn spawn_reader<R>(mut pipe: R) -> (tokio::task::JoinHandle<()>, Arc<Mutex<Vec<u8>>>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::clone(&buf);
+    let task = tokio::spawn(async move {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => shared.lock().unwrap().extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    (task, buf)
+}
+
+/// Await a reader task, giving up after [`PIPE_DRAIN_GRACE`] if the pipe never
+/// reaches EOF, and return the bytes read so far.
+async fn drain_reader(task: tokio::task::JoinHandle<()>, buf: Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+    let abort = task.abort_handle();
+    if tokio::time::timeout(PIPE_DRAIN_GRACE, task).await.is_err() {
+        abort.abort();
+    }
+    std::mem::take(&mut *buf.lock().unwrap())
+}
+
+/// Kill the child's entire process group, then reap the child. `Child::kill`
+/// alone signals only the immediate child (e.g. the bash shell), so anything
+/// it spawned survives as an orphan, keeps the stdout pipe open, and wedges
+/// the pipe drain until it exits. Children are spawned with `process_group(0)`,
+/// so the group id is the child's own pid.
+async fn kill_child_group(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+    }
+    let _ = child.kill().await;
+    child.wait().await.ok();
+}
 
 /// Run a darkroom request. `repo_dir` is the working directory for the child
 /// process. `max_inline` is the stdout byte threshold above which output is
@@ -121,6 +172,9 @@ async fn run_with_args(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Own process group so a timeout kills the whole tree, not just the shell.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -135,18 +189,8 @@ async fn run_with_args(
 
     // Hand stdout/stderr to reader tasks so we can still kill the child on
     // timeout (which only needs &mut child for wait()/kill()).
-    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
-    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
-    let out_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf).await;
-        buf
-    });
-    let err_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut buf).await;
-        buf
-    });
+    let (out_task, out_buf) = spawn_reader(child.stdout.take().expect("stdout piped"));
+    let (err_task, err_buf) = spawn_reader(child.stderr.take().expect("stderr piped"));
 
     if let Some(input) = req.stdin.as_ref() {
         if let Some(mut si) = child.stdin.take() {
@@ -164,14 +208,13 @@ async fn run_with_args(
         Ok(Err(e)) => return Err(format!("waiting on child: {e}")),
         Err(_elapsed) => {
             timed_out = true;
-            let _ = child.kill().await;
-            child.wait().await.ok();
+            kill_child_group(&mut child).await;
             std::process::ExitStatus::default()
         }
     };
 
-    let stdout_bytes_full = out_task.await.unwrap_or_default();
-    let stderr_bytes_full = err_task.await.unwrap_or_default();
+    let stdout_bytes_full = drain_reader(out_task, out_buf).await;
+    let stderr_bytes_full = drain_reader(err_task, err_buf).await;
     let stdout_full = String::from_utf8_lossy(&stdout_bytes_full).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_bytes_full).into_owned();
 
@@ -286,24 +329,17 @@ async fn run_go_cached(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Own process group so a timeout kills the whole tree, not just the binary.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return Err(format!("failed to spawn Go binary: {e}")),
     };
 
-    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
-    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
-    let out_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf).await;
-        buf
-    });
-    let err_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut buf).await;
-        buf
-    });
+    let (out_task, out_buf) = spawn_reader(child.stdout.take().expect("stdout piped"));
+    let (err_task, err_buf) = spawn_reader(child.stderr.take().expect("stderr piped"));
 
     if let Some(input) = req.stdin.as_ref() {
         if let Some(mut si) = child.stdin.take() {
@@ -321,14 +357,13 @@ async fn run_go_cached(
         Ok(Err(e)) => return Err(format!("waiting on Go child: {e}")),
         Err(_elapsed) => {
             timed_out = true;
-            let _ = child.kill().await;
-            child.wait().await.ok();
+            kill_child_group(&mut child).await;
             std::process::ExitStatus::default()
         }
     };
 
-    let stdout_bytes_full = out_task.await.unwrap_or_default();
-    let stderr_bytes_full = err_task.await.unwrap_or_default();
+    let stdout_bytes_full = drain_reader(out_task, out_buf).await;
+    let stderr_bytes_full = drain_reader(err_task, err_buf).await;
     let stdout_full = String::from_utf8_lossy(&stdout_bytes_full).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_bytes_full).into_owned();
 
@@ -458,6 +493,49 @@ mod tests {
         assert!(r.timed_out);
         assert_ne!(r.exit_code, 0);
         assert!(!r.stdout.contains("done"));
+    }
+
+    // Regression: a timed-out script whose *grandchild* (here a background
+    // `sleep`) holds the stdout pipe must neither wedge the call until that
+    // grandchild exits nor leave it running. Before the process-group kill,
+    // `Child::kill` took out only the shell, the orphan kept the pipe's write
+    // end open, and the drain blocked on EOF for the grandchild's lifetime.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_grandchildren_and_returns_promptly() {
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+        let pid_file = dir.path().join("bg.pid");
+        let req = ExecuteRequest {
+            language: "bash".into(),
+            code: format!("sleep 60 & echo $! > \"{}\"\nsleep 60", pid_file.display()),
+            timeout_secs: 1,
+            stdin: None,
+        };
+        let start = std::time::Instant::now();
+        let r = run(req, dir.path(), &store, 8192).await.unwrap();
+        assert!(r.timed_out);
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "orphaned grandchild wedged the call for {:?}",
+            start.elapsed()
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // The group kill must take the background sleep too. Poll briefly:
+        // the orphan is reaped by init/launchd after the SIGKILL lands.
+        let mut alive = true;
+        for _ in 0..40 {
+            alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!alive, "grandchild {pid} survived the process-group kill");
     }
 
     #[tokio::test]

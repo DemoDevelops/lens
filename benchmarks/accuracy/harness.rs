@@ -16,8 +16,9 @@ mod accuracy;
 use std::path::PathBuf;
 
 use accuracy::{
-    aggregate, default_model, function_report, lens_release_bin, load_tasks,
-    render_accuracy_markdown, run_task, Model, TaskResult,
+    adoption_report, aggregate, default_model, filter_tasks, function_report, lens_release_bin,
+    load_task_set, load_tasks, render_accuracy_markdown, render_adoption_markdown,
+    run_agentic_suite, run_task, set_label, Model, TaskResult,
 };
 
 #[tokio::main]
@@ -71,25 +72,47 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let all_tasks = load_tasks()?; // unfiltered, for the lens_fn tag lookup below
-    let mut tasks = load_tasks()?;
-    // Optional focus filter: `LENS_BENCH_ONLY=<substr>` keeps only tasks
-    // whose mechanism or id contains the substring (e.g. "discovery"). Used to
-    // re-run a single mechanism without spending calls on the rest.
-    let mut filtered = false;
-    if let Ok(only) = std::env::var("LENS_BENCH_ONLY") {
-        if !only.is_empty() {
-            tasks.retain(|t| t.primary_mechanism.contains(&only) || t.id.contains(&only));
-            filtered = true;
-            eprintln!("filter LENS_BENCH_ONLY={only} -> {} task(s)", tasks.len());
-        }
+    let tasks = load_tasks()?;
+
+    // Two composable filters, applied as an intersection (see `filter_tasks`).
+    // `LENS_BENCH_SET=<path>` pins the run to a frozen per-release task set (a
+    // JSON array of ids), so a version's numbers are always over the SAME tasks
+    // — the fix for a prior run that invalidly compared different-sized sets
+    // across versions. `LENS_BENCH_ONLY=<substr>` narrows by id or mechanism.
+    let set_env = std::env::var("LENS_BENCH_SET").ok().filter(|s| !s.is_empty());
+    let set_ids: Option<Vec<String>> = match &set_env {
+        Some(raw) => Some(load_task_set(raw)?),
+        None => None,
+    };
+    let task_set = set_env.as_deref().map(set_label);
+    let only = std::env::var("LENS_BENCH_ONLY").ok().filter(|s| !s.is_empty());
+    let tasks = filter_tasks(tasks, set_ids.as_deref(), only.as_deref());
+    if let Some(label) = &task_set {
+        eprintln!("LENS_BENCH_SET={label} -> {} task(s)", tasks.len());
     }
-    let mut results: Vec<TaskResult> = Vec::new();
-    for task in &tasks {
-        match run_task(task, &model, runs).await {
-            Ok(r) => results.push(r),
-            Err(e) => eprintln!("task {} failed: {e}", task.id),
-        }
+    if let Some(only) = &only {
+        eprintln!("LENS_BENCH_ONLY={only} -> {} task(s)", tasks.len());
     }
+    // Only `LENS_BENCH_ONLY` triggers the merge-into-existing path below (a
+    // partial re-run that updates its tasks in place); a `LENS_BENCH_SET` run is
+    // the canonical full record for its version and writes fresh.
+    let filtered = only.is_some();
+
+    let mut results: Vec<TaskResult> = if let Model::ClaudeAgentic(id) = &model {
+        // The agentic backend canary-gates both arm configs once before scoring
+        // (aborts loudly on a broken arm) and records adoption misses instead of
+        // dropping zero-lens cells.
+        run_agentic_suite(&tasks, id, runs).await?
+    } else {
+        let mut r = Vec::new();
+        for task in &tasks {
+            match run_task(task, &model, runs).await {
+                Ok(x) => r.push(x),
+                Err(e) => eprintln!("task {} failed: {e}", task.id),
+            }
+        }
+        r
+    };
 
     // `LENS_BENCH_OUT` redirects results so concurrent runs don't clobber the
     // shared committed path (the default), enabling parallel trials.
@@ -134,10 +157,19 @@ async fn main() -> anyhow::Result<()> {
 
     let groups = aggregate(&results);
     println!("# lens accuracy benchmark\n");
+    if let Some(label) = &task_set {
+        println!("Task set: `{label}`\n");
+    }
     print!(
         "{}",
         render_accuracy_markdown(&groups, &model.label(), pending)
     );
+    // Per-model lens adoption: agentic-only (tools-off treatment arms call
+    // nothing by construction), computed from the canary-scored zero-lens misses.
+    let adoption = (backend == "agentic").then(|| adoption_report(&results));
+    if let Some(a) = &adoption {
+        print!("{}", render_adoption_markdown(a, &model.label()));
+    }
 
     // The Contracts bench schema: `overall` + `per_function` folded across
     // whatever tasks carry a `lens_fn` tag (populated for every real_agentic_*
@@ -151,7 +183,9 @@ async fn main() -> anyhow::Result<()> {
     let payload = serde_json::json!({
         "mode": mode,
         "model": model.label(),
+        "task_set": task_set,
         "bench_binary": bench_binary,
+        "adoption": adoption,
         "groups": groups,
         "tasks": results,
         "overall": overall,

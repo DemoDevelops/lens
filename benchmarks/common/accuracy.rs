@@ -135,6 +135,52 @@ pub fn load_tasks() -> anyhow::Result<Vec<Task>> {
     Ok(tasks)
 }
 
+// --- Frozen task sets --------------------------------------------------------
+
+/// Resolve a `LENS_BENCH_SET` value to a file path: absolute as given, else
+/// relative to the accuracy root, so `sets/0.10.json` resolves from anywhere.
+pub fn resolve_set_path(raw: &str) -> PathBuf {
+    let p = PathBuf::from(raw);
+    if p.is_absolute() {
+        p
+    } else {
+        accuracy_root().join(raw)
+    }
+}
+
+/// The set label stamped into the output JSON + report header: the set file's
+/// stem (`sets/0.10.json` -> `0.10`), so a version's numbers name their set.
+pub fn set_label(raw: &str) -> String {
+    Path::new(raw)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| raw.to_string())
+}
+
+/// Load a frozen task set: a JSON array of task ids (`["0060_...", ...]`).
+pub fn load_task_set(raw: &str) -> anyhow::Result<Vec<String>> {
+    let path = resolve_set_path(raw);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("reading task set {}: {e}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("parsing task set {}: {e}", path.display()))
+}
+
+/// Apply the two composable task filters as an INTERSECTION: `set` (exact ids
+/// from a `LENS_BENCH_SET` file) then `only` (the `LENS_BENCH_ONLY` substring on
+/// id or mechanism). Either may be absent; when both are present a task must
+/// satisfy BOTH, so a frozen set can still be re-run one mechanism at a time
+/// rather than one filter replacing the other.
+pub fn filter_tasks(mut tasks: Vec<Task>, set: Option<&[String]>, only: Option<&str>) -> Vec<Task> {
+    if let Some(set) = set {
+        tasks.retain(|t| set.iter().any(|id| id == &t.id));
+    }
+    if let Some(only) = only.filter(|s| !s.is_empty()) {
+        tasks.retain(|t| t.primary_mechanism.contains(only) || t.id.contains(only));
+    }
+    tasks
+}
+
 // --- Model ------------------------------------------------------------------
 
 /// The agent. Both arms use the same model; only the context differs.
@@ -204,10 +250,24 @@ pub struct ArmResult {
     /// This is what shows whether an arm organically reached a lens tool.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// True when this is a lens-arm agentic run whose canary already proved the
+    /// lens plumbing works, yet the session made ZERO organic `mcp__lens__*`
+    /// calls — a genuine non-adoption, not broken config. Recorded (not dropped)
+    /// so the per-model `adoption_rate` reflects it; a prior run instead refused
+    /// and DROPPED these cells, which destroyed the adoption signal and biased
+    /// the record toward lens-engaging tasks. Skipped when false, so every
+    /// tools-off/baseline cell and every committed pre-canary result serializes
+    /// byte-identically.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub adoption_miss: bool,
 }
 
 fn is_zero(n: &usize) -> bool {
     *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// K-run fold for one arm. Only present when an arm ran more than once, so a
@@ -365,6 +425,7 @@ fn run_arm(task: &Task, model: &Model, context: &str) -> anyhow::Result<ArmResul
         rounds: 0, // handed its context; it calls nothing
         millis: 0,
         tools: vec![],
+        adoption_miss: false, // tools-off arm; adoption is an agentic concept
     })
 }
 
@@ -1088,10 +1149,13 @@ fn run_agentic_arm(task: &Task, model: &str, arm: &ArmSpec) -> anyhow::Result<Ar
         match claude_agentic_attempt(&prompt, model, arm) {
             Ok(run) => {
                 // A misconfigured arm is not worth retrying, and silently measuring
-                // it is how the first two builds shipped an invalid A/B.
-                if let Err(msg) = validate_arm_run(&run, arm) {
-                    return Err(anyhow::anyhow!(msg));
-                }
+                // it is how the first two builds shipped an invalid A/B. Post-canary
+                // a zero-lens lens-arm run is no longer fatal: it scores and carries
+                // `adoption_miss`, which the gate returns here.
+                let adoption_miss = match validate_arm_run(&run, arm) {
+                    Ok(miss) => miss,
+                    Err(msg) => return Err(anyhow::anyhow!(msg)),
+                };
                 if run.hit_turn_cap {
                     eprintln!(
                         "  WARNING: agentic [{}] hit the CLI's own turn cap (no --max-turns is \
@@ -1111,6 +1175,7 @@ fn run_agentic_arm(task: &Task, model: &str, arm: &ArmSpec) -> anyhow::Result<Ar
                     rounds: run.rounds(),
                     millis: run.duration_ms,
                     tools: run.tools,
+                    adoption_miss,
                 });
             }
             Err(e) => {
@@ -1152,31 +1217,25 @@ impl AgenticRun {
     }
 }
 
-/// The validity gate. Three failure modes, all fatal rather than silently
-/// scored: the SessionStart guide didn't fire the way this arm expects (its
-/// routing config didn't take), and — the exact bug that voided the 560e862
-/// acceptance run — the guide fired but the arm made ZERO organic
-/// `mcp__lens__*` calls, which happens when the hooks binary and
-/// `--mcp-config` binary disagree on the tool set ("No matching deferred
-/// tools found"). `resolve_bench_binary` fixes the root cause; this is the
-/// backstop that catches a future recurrence instead of scoring it as a loss.
-/// Third: a run whose transcript carried no usage anywhere parses as tokens=0
-/// (task 0079's lens cell did, across all three runs) and would silently
-/// flatter the arm's token mean if scored.
-fn validate_arm_run(run: &AgenticRun, arm: &ArmSpec) -> Result<(), String> {
+/// The validity gate, post-canary. Two failure modes remain fatal; the third —
+/// a guide-fired lens arm that made ZERO organic `mcp__lens__*` calls — is no
+/// longer dropped. The per-(model, arm) canary has already proven this arm's
+/// lens plumbing reaches lens (the 560e862 "hooks/mcp-config binaries disagree"
+/// bug would have failed the canary and aborted the suite), so a zero-lens
+/// organic run is a genuine ADOPTION MISS: it SCORES and returns `true` here so
+/// the caller records it, instead of being refused and silently deleted from the
+/// record (which destroyed per-model adoption signal and biased the set toward
+/// lens-engaging tasks). Still fatal: the SessionStart guide didn't fire the way
+/// this arm expects (routing config didn't take), and a transcript that carried
+/// no usage anywhere parses as tokens=0 (task 0079's lens cell did, across all
+/// three runs) and would silently flatter the arm's token mean. Returns
+/// `Ok(adoption_miss)`.
+fn validate_arm_run(run: &AgenticRun, arm: &ArmSpec) -> Result<bool, String> {
     if (run.guide_injections > 0) != arm.expects_guide {
         return Err(format!(
             "arm [{}] expected lens guide={} but saw {} injection(s): its routing \
              config did not take, so the arm is measuring the wrong thing",
             arm.allowed_tools, arm.expects_guide, run.guide_injections
-        ));
-    }
-    if arm.expects_guide && !run.tools.iter().any(|t| t.starts_with("mcp__lens__")) {
-        return Err(format!(
-            "arm [{}] guide fired but made ZERO mcp__lens__* tool calls: the hooks \
-             shell-out and --mcp-config binaries likely disagree on the tool set \
-             (the 560e862 bug); refusing to score this run",
-            arm.allowed_tools
         ));
     }
     if run.tokens == 0 {
@@ -1187,7 +1246,120 @@ fn validate_arm_run(run: &AgenticRun, arm: &ArmSpec) -> Result<(), String> {
             arm.allowed_tools
         ));
     }
+    let adoption_miss =
+        arm.expects_guide && !run.tools.iter().any(|t| t.starts_with("mcp__lens__"));
+    Ok(adoption_miss)
+}
+
+// --- Canary gate + gated suite ----------------------------------------------
+
+/// The canary prompt forces exactly one lens call, so a passing lens arm is
+/// unambiguous and a broken one is loud. Run through the SAME plumbing as the
+/// scored arm (`--mcp-config`, settings/hooks file, binary), it proves config
+/// validity ONCE per (model, arm) before any task is scored.
+const CANARY_PROMPT: &str = "Use the `mcp__lens__lens_search` tool exactly once, with its \
+    `queries` argument set to [\"canary\"]. Then reply with only the minified JSON object \
+    {\"canary\":\"ok\"} and nothing else — no prose, no code fences.";
+
+/// Did the forced-lens session behave as this arm's config promises? The lens
+/// arm must REACH lens (its plumbing works); the baseline arm must NOT (its
+/// isolation holds). A pass either way means the arm measures the right thing,
+/// so an organic zero-lens run on the lens arm can be trusted as real
+/// non-adoption rather than silently-broken config.
+fn canary_verdict(run: &AgenticRun, arm: &ArmSpec) -> bool {
+    let reached_lens = run.tools.iter().any(|t| t.starts_with("mcp__lens__"));
+    if arm.expects_guide {
+        reached_lens
+    } else {
+        !reached_lens
+    }
+}
+
+/// Run the canary for one arm config: a live `claude -p` forced-lens session
+/// through the arm's exact plumbing, retried once for a transient kill. Returns
+/// the pass/fail verdict; a transport failure that never yields a transcript is
+/// an error (the config can't be proven either way, so the suite aborts).
+fn run_canary(model: &str, arm: &ArmSpec) -> anyhow::Result<bool> {
+    let mut last_err = String::new();
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        match claude_agentic_attempt(CANARY_PROMPT, model, arm) {
+            Ok(run) => return Ok(canary_verdict(&run, arm)),
+            Err(e) => {
+                eprintln!(
+                    "  canary [{}] attempt {} failed: {e}",
+                    arm.allowed_tools,
+                    attempt + 1
+                );
+                last_err = e;
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "canary session never produced a transcript: {last_err}"
+    ))
+}
+
+/// Abort the suite loudly when the canary failed: a broken arm makes every cell
+/// untrustworthy, so NO cell is scored at all (a prior run instead silently
+/// dropped the zero-lens cells, which is exactly the failure this replaces).
+/// Split out so the "no scored cells on canary fail" contract is unit-testable
+/// with an injected verdict.
+fn canary_gate(canary_ok: bool) -> anyhow::Result<()> {
+    if !canary_ok {
+        anyhow::bail!(
+            "CANARY FAILED: an arm's forced-lens session did not behave as its config \
+             promises (the lens arm must reach lens; the baseline must not). The plumbing \
+             is broken, so refusing to score ANY cell — see the per-arm FAIL line above."
+        );
+    }
     Ok(())
+}
+
+/// Score the whole task list behind the canary gate: abort with NO results when
+/// the canary failed, else run every task. Kept separate from the live canary so
+/// the gate is testable with an injected verdict (a real canary needs a session).
+async fn score_gated(
+    tasks: &[Task],
+    model: &Model,
+    runs: usize,
+    canary_ok: bool,
+) -> anyhow::Result<Vec<TaskResult>> {
+    canary_gate(canary_ok)?;
+    let mut results = Vec::new();
+    for task in tasks {
+        match run_task(task, model, runs).await {
+            Ok(r) => results.push(r),
+            Err(e) => eprintln!("task {} failed: {e}", task.id),
+        }
+    }
+    Ok(results)
+}
+
+/// Agentic-backend entry: canary-gate BOTH arm configs once (the lens arm's
+/// plumbing must reach lens; the baseline's isolation must keep it out), log
+/// each verdict, then score every task — or abort loudly if either canary
+/// failed. The canary runs once per suite, not per task: the arm plumbing is
+/// identical across tasks, so one forced-lens session per arm proves it for the
+/// whole run.
+pub async fn run_agentic_suite(
+    tasks: &[Task],
+    model: &str,
+    runs: usize,
+) -> anyhow::Result<Vec<TaskResult>> {
+    let iso = arm_isolation()?;
+    let mut canary_ok = true;
+    for (label, arm) in [("baseline", iso.baseline()), ("lens", iso.lens_arm())] {
+        let pass = run_canary(model, &arm)?;
+        eprintln!(
+            "canary [{label} arm, model={model}]: {}",
+            if pass { "PASS" } else { "FAIL" }
+        );
+        canary_ok &= pass;
+    }
+    score_gated(tasks, &Model::ClaudeAgentic(model.to_string()), runs, canary_ok).await
 }
 
 /// One live `claude -p` seeing exactly the MCP servers in `arm.mcp_config` and the
@@ -1765,6 +1937,68 @@ fn fold_function_rows(name: &str, arm: &str, rows: &[ArmRow]) -> FunctionStats {
     }
 }
 
+// --- Adoption metric --------------------------------------------------------
+
+/// Per-run lens adoption for one suite (one model): across every treatment
+/// (lens-arm) run, how many organically reached a lens tool. `adoption_rate` is
+/// that share; `adoption_misses` is its complement — the zero-lens runs the
+/// canary proved were real non-adoption, not broken config, and which now SCORE
+/// instead of being dropped. Only meaningful for the agentic backend (tools-off
+/// treatment arms call nothing by construction), so the harness computes it only
+/// there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdoptionStats {
+    pub lens_runs: usize,
+    pub total_runs: usize,
+    pub adoption_misses: usize,
+    pub adoption_rate: f64,
+}
+
+/// Fold the treatment arms of `results` into the suite's adoption stats. A
+/// K-run task contributes its fold's `lens_runs`/`runs`; a single-run task
+/// contributes one run, adopted iff it did not record an `adoption_miss`.
+pub fn adoption_report(results: &[TaskResult]) -> AdoptionStats {
+    let mut lens_runs = 0usize;
+    let mut total_runs = 0usize;
+    for r in results {
+        match &r.treatment_stats {
+            Some(s) => {
+                lens_runs += s.lens_runs;
+                total_runs += s.runs;
+            }
+            None => {
+                total_runs += 1;
+                if !r.treatment.adoption_miss {
+                    lens_runs += 1;
+                }
+            }
+        }
+    }
+    let adoption_rate = if total_runs == 0 {
+        0.0
+    } else {
+        lens_runs as f64 / total_runs as f64
+    };
+    AdoptionStats {
+        lens_runs,
+        total_runs,
+        adoption_misses: total_runs - lens_runs,
+        adoption_rate,
+    }
+}
+
+/// One-line adoption readout for the rendered report.
+pub fn render_adoption_markdown(a: &AdoptionStats, model_label: &str) -> String {
+    format!(
+        "\n**Lens adoption (`{model_label}`):** {:.0}% of lens-arm runs reached a lens tool \
+         ({}/{}); {} adoption miss(es) scored (canary-proven non-adoption, not dropped).\n",
+        a.adoption_rate * 100.0,
+        a.lens_runs,
+        a.total_runs,
+        a.adoption_misses,
+    )
+}
+
 /// Render the accuracy table (§4.4 of the plan). `model_label` names the arm's
 /// model; `pending` true means no real-model run has happened yet.
 pub fn render_accuracy_markdown(groups: &[Group], model_label: &str, pending: bool) -> String {
@@ -2166,26 +2400,30 @@ mod validity_gate_tests {
         }
     }
 
-    /// The exact 560e862 failure mode: the SessionStart guide fired (routing
-    /// config took) but the arm made zero organic `mcp__lens__*` calls (the
-    /// hooks/mcp-config binary mismatch). Must be REJECTED, not scored.
+    /// The 560e862 failure mode (guide fired, zero organic `mcp__lens__*` calls)
+    /// used to be REJECTED and dropped here. Post-canary it is a scored ADOPTION
+    /// MISS: the canary gate upstream already proved the lens plumbing reaches
+    /// lens, so this is genuine non-adoption, not broken config — `validate_arm_run`
+    /// returns `Ok(true)` (score it, flag it) instead of deleting the cell.
     #[test]
-    fn guide_fired_but_zero_lens_calls_is_rejected() {
+    fn guide_fired_zero_lens_calls_scores_as_adoption_miss() {
         let r = run(1, vec!["Read", "Bash"]);
-        let err = validate_arm_run(&r, &arm(true)).expect_err("must be invalid");
-        assert!(err.contains("ZERO mcp__lens__"), "{err}");
+        let miss = validate_arm_run(&r, &arm(true)).expect("scored, not dropped");
+        assert!(miss, "a canary-passed lens arm with zero lens calls is an adoption miss");
     }
 
     #[test]
-    fn guide_fired_with_a_lens_call_is_valid() {
+    fn guide_fired_with_a_lens_call_is_valid_and_not_a_miss() {
         let r = run(1, vec!["Bash", "mcp__lens__lens_search"]);
-        assert!(validate_arm_run(&r, &arm(true)).is_ok());
+        let miss = validate_arm_run(&r, &arm(true)).expect("valid");
+        assert!(!miss, "a lens call is adoption, not a miss");
     }
 
     #[test]
     fn baseline_with_no_guide_and_no_lens_calls_is_valid() {
         let r = run(0, vec!["Read", "Bash"]);
-        assert!(validate_arm_run(&r, &arm(false)).is_ok());
+        let miss = validate_arm_run(&r, &arm(false)).expect("valid");
+        assert!(!miss, "the baseline arm is never an adoption miss");
     }
 
     #[test]
@@ -2228,7 +2466,7 @@ mod function_report_tests {
     }
 
     fn arm(correct: bool, tokens: usize, millis: usize) -> ArmResult {
-        ArmResult { correct, tokens, context_bytes: tokens, answer: json!({}), rounds: 1, millis, tools: vec![] }
+        ArmResult { correct, tokens, context_bytes: tokens, answer: json!({}), rounds: 1, millis, tools: vec![], adoption_miss: false }
     }
 
     fn result(id: &str, mechanism: &str, control: ArmResult, treatment: ArmResult) -> TaskResult {
@@ -2451,5 +2689,190 @@ not even json
     fn stddev_of_a_sum_adds_variances_not_deviations() {
         // 3² + 4² = 5², not 3 + 4.
         assert_eq!(stddev_of_sum([3.0, 4.0].into_iter()), 5.0);
+    }
+}
+
+#[cfg(test)]
+mod canary_set_adoption_tests {
+    use super::{
+        adoption_report, canary_gate, canary_verdict, filter_tasks, load_task_set, load_tasks,
+        score_gated, set_label, AgenticRun, ArmResult, ArmSpec, Model, Task, TaskResult, LENS_TOOLS,
+    };
+    use serde_json::json;
+    use std::path::Path;
+
+    fn agentic_run(tools: Vec<&str>) -> AgenticRun {
+        AgenticRun {
+            answer: "{}".to_string(),
+            tools: tools.into_iter().map(str::to_string).collect(),
+            tokens: 10,
+            guide_injections: 1,
+            hit_turn_cap: false,
+            duration_ms: 100,
+        }
+    }
+
+    fn arm(expects_guide: bool) -> ArmSpec<'static> {
+        ArmSpec {
+            allowed_tools: LENS_TOOLS,
+            mcp_config: Path::new("/tmp/mcp.json"),
+            settings: Path::new("/tmp/settings.json"),
+            expects_guide,
+        }
+    }
+
+    fn cell(tools: Vec<&str>, adoption_miss: bool) -> ArmResult {
+        ArmResult {
+            correct: true,
+            tokens: 10,
+            context_bytes: 1,
+            answer: json!({}),
+            rounds: tools.len(),
+            millis: 1,
+            tools: tools.into_iter().map(str::to_string).collect(),
+            adoption_miss,
+        }
+    }
+
+    fn task(id: &str, mech: &str) -> Task {
+        serde_json::from_value(json!({
+            "id": id, "prompt": "p", "fixtures": ["fixtures/repo"],
+            "ground_truth": { "a": "b" }, "check": "contains",
+            "primary_mechanism": mech, "evidence": ["b"],
+            "treatment": { "queries": ["q"] }
+        }))
+        .expect("task spec")
+    }
+
+    fn path_task(id: &str) -> Task {
+        serde_json::from_value(json!({
+            "id": id, "prompt": "reach?", "fixtures": ["fixtures/repo"],
+            "ground_truth": { "reachable": "yes" }, "check": "contains",
+            "primary_mechanism": "discovery", "evidence": ["connect_db"],
+            "treatment": { "graph_op": "path", "from": "handle_request", "to": "connect_db" }
+        }))
+        .expect("task spec")
+    }
+
+    // --- canary verdict per (model, ArmSpec) --------------------------------
+
+    #[test]
+    fn lens_arm_canary_passes_only_when_lens_is_reached() {
+        assert!(canary_verdict(&agentic_run(vec!["mcp__lens__lens_search"]), &arm(true)));
+        assert!(!canary_verdict(&agentic_run(vec!["Read", "Bash"]), &arm(true)));
+    }
+
+    #[test]
+    fn baseline_arm_canary_passes_only_when_lens_is_not_reached() {
+        assert!(canary_verdict(&agentic_run(vec!["Read", "Bash"]), &arm(false)));
+        assert!(!canary_verdict(&agentic_run(vec!["mcp__lens__lens_search"]), &arm(false)));
+    }
+
+    // --- canary gate aborts the suite ---------------------------------------
+
+    #[test]
+    fn canary_gate_aborts_on_fail_and_proceeds_on_pass() {
+        assert!(canary_gate(false).is_err(), "a failed canary must abort the suite");
+        assert!(canary_gate(true).is_ok());
+    }
+
+    /// The core protection: a failed canary yields NO scored cells (the prior run
+    /// silently dropped them; now the whole suite refuses to score). A passing
+    /// canary scores normally.
+    #[tokio::test]
+    async fn canary_fail_produces_no_scored_cells_pass_scores_normally() {
+        let t = path_task("t_gate");
+        let aborted = score_gated(std::slice::from_ref(&t), &Model::Mock, 1, false).await;
+        assert!(aborted.is_err(), "canary fail = abort, no scored cells");
+        let scored = score_gated(std::slice::from_ref(&t), &Model::Mock, 1, true)
+            .await
+            .expect("canary pass scores");
+        assert_eq!(scored.len(), 1, "canary pass scores the task normally");
+    }
+
+    // --- adoption metric ----------------------------------------------------
+
+    /// Canary-pass + a zero-lens lens-arm run scores normally AND flags
+    /// `adoption_miss`, and the per-model `adoption_rate` reflects it.
+    #[test]
+    fn zero_lens_run_scores_as_adoption_miss_and_lowers_the_rate() {
+        // Two single-run treatment cells: one reached lens, one did not.
+        let adopted = TaskResult {
+            id: "a".into(),
+            mechanism: "search".into(),
+            control: cell(vec![], false),
+            treatment: cell(vec!["mcp__lens__lens_search"], false),
+            control_stats: None,
+            treatment_stats: None,
+        };
+        let missed = TaskResult {
+            id: "b".into(),
+            mechanism: "search".into(),
+            control: cell(vec![], false),
+            treatment: cell(vec![], true), // scored, flagged as a miss (not dropped)
+            control_stats: None,
+            treatment_stats: None,
+        };
+        let a = adoption_report(&[adopted, missed]);
+        assert_eq!(a.total_runs, 2, "both cells were scored, neither dropped");
+        assert_eq!(a.lens_runs, 1);
+        assert_eq!(a.adoption_misses, 1);
+        assert!((a.adoption_rate - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn adoption_miss_serializes_only_when_true() {
+        let mut c = cell(vec![], true);
+        assert_eq!(serde_json::to_value(&c).unwrap()["adoption_miss"], json!(true));
+        c.adoption_miss = false;
+        assert!(
+            serde_json::to_value(&c).unwrap().get("adoption_miss").is_none(),
+            "false must be skipped so pre-canary results serialize byte-identically"
+        );
+    }
+
+    // --- frozen set filter + stamp ------------------------------------------
+
+    #[test]
+    fn set_filter_keeps_exactly_the_listed_ids() {
+        let tasks = vec![task("0060_x", "search"), task("0061_y", "discovery"), task("0099_z", "search")];
+        let set = vec!["0060_x".to_string(), "0061_y".to_string()];
+        let ids: Vec<String> = filter_tasks(tasks, Some(&set), None)
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["0060_x".to_string(), "0061_y".to_string()]);
+    }
+
+    #[test]
+    fn set_and_only_compose_as_intersection_not_replacement() {
+        let tasks = vec![task("0060_x", "search"), task("0061_y", "discovery")];
+        let set = vec!["0060_x".to_string(), "0061_y".to_string()];
+        let ids: Vec<String> = filter_tasks(tasks, Some(&set), Some("discovery"))
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["0061_y".to_string()], "both filters apply together");
+    }
+
+    #[test]
+    fn set_label_is_the_stamped_file_stem() {
+        assert_eq!(set_label("sets/0.10.json"), "0.10");
+        assert_eq!(set_label("/abs/0.11-dev.json"), "0.11-dev");
+    }
+
+    /// The committed frozen set loads, is exactly the 22 real_agentic ids, and
+    /// filtering the live task list by it yields those 22 tasks — the stamp
+    /// (`set_label`) and the filter agree on the same set.
+    #[test]
+    fn frozen_010_set_is_the_22_real_agentic_tasks() {
+        let ids = load_task_set("sets/0.10.json").expect("load 0.10 set");
+        assert_eq!(ids.len(), 22, "0.10 is the frozen 22-task set");
+        let kept = filter_tasks(load_tasks().expect("tasks"), Some(&ids), None);
+        assert_eq!(kept.len(), 22, "every set id resolves to a live task");
+        assert!(
+            kept.iter().all(|t| t.id.contains("real_agentic")),
+            "the frozen set is the agentic A/B tasks"
+        );
     }
 }

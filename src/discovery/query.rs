@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::graph::{Direction, Edge, Graph, Node};
+use super::graph::{Direction, Edge, Graph, Node, Origin};
 use crate::tools::{EdgeView, GraphView, NodeView, PathResponse, ResolvedNote};
 
 fn node_view(n: &Node) -> NodeView {
@@ -13,6 +13,23 @@ fn node_view(n: &Node) -> NodeView {
         file: n.file.clone(),
         line: n.line,
         language: n.language.clone(),
+        origin: match n.origin {
+            Origin::Prod => Some("prod".to_string()),
+            Origin::Test => Some("test".to_string()),
+            Origin::Bench => Some("bench".to_string()),
+        },
+    }
+}
+
+/// All-or-none origin labeling per response: an all-prod result drops the
+/// field entirely (byte-identical to the pre-origin output); a result with any
+/// test/bench node keeps it on every node so TOON compaction keys stay
+/// homogeneous. See [`NodeView::origin`].
+fn strip_all_prod_origins(nodes: &mut [NodeView]) {
+    if nodes.iter().all(|n| n.origin.as_deref() == Some("prod")) {
+        for n in nodes {
+            n.origin = None;
+        }
     }
 }
 
@@ -326,8 +343,10 @@ pub fn neighbors_dir(graph: &Graph, node_id: &str, depth: usize, dir: Option<&st
         _ => Direction::Both,
     };
     let (nodes, edges) = graph.neighbors_directed(node_id, depth, direction);
+    let mut nodes: Vec<NodeView> = nodes.iter().map(node_view).collect();
+    strip_all_prod_origins(&mut nodes);
     GraphView {
-        nodes: nodes.iter().map(node_view).collect(),
+        nodes,
         edges: edges.iter().map(edge_view).collect(),
         compact: None,
         truncated: false,
@@ -370,11 +389,12 @@ pub fn path(graph: &Graph, from: &str, to: &str) -> PathResponse {
     };
     match graph.shortest_path(&from_id, &to_id) {
         Some(ids) => {
-            let path: Vec<NodeView> = ids
+            let mut path: Vec<NodeView> = ids
                 .iter()
                 .filter_map(|id| graph.node(id))
                 .map(node_view)
                 .collect();
+            strip_all_prod_origins(&mut path);
             let edges = path_edges(graph, &ids);
             PathResponse {
                 found: true,
@@ -471,11 +491,12 @@ fn subgraph(graph: &Graph, ids: &[String]) -> GraphView {
             seen.push(id.clone());
         }
     }
-    let nodes: Vec<NodeView> = seen
+    let mut nodes: Vec<NodeView> = seen
         .iter()
         .filter_map(|id| graph.node(id))
         .map(node_view)
         .collect();
+    strip_all_prod_origins(&mut nodes);
     let edges: Vec<EdgeView> = graph
         .edges
         .iter()
@@ -1133,5 +1154,54 @@ mod tests {
         assert!(uncut.total_matches.is_none(), "limit=10 fits all 5 matches");
         let cut = find(&g, "config", 2);
         assert_eq!(cut.total_matches, Some(5), "limit=2 cut 3 of the 5 matches");
+    }
+
+    #[test]
+    fn node_views_carry_origin_labels() {
+        // The graph already classifies node provenance (Origin); the tool-facing
+        // NodeView must surface it so "production callers of X" never requires
+        // opening files to sort test callers out. All-or-none per response: a
+        // mixed result labels every node (TOON compaction keys stay homogeneous),
+        // an all-prod result drops the field and serializes byte-identically to
+        // the pre-origin output.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "pub fn target() {}\n\
+             pub fn prod_caller() { target(); }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 #[test]\n\
+                 fn test_caller() { super::target(); }\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("b.rs"),
+            "pub fn clean() {}\npub fn clean_caller() { clean(); }\n",
+        )
+        .unwrap();
+        let g = discover(dir.path(), None).unwrap().graph;
+
+        // Mixed result: every node labeled, test caller distinguishable.
+        let view = query(&g, "target", None, 10, &[]);
+        let origin_of = |name: &str| {
+            view.nodes
+                .iter()
+                .find(|n| n.name == name)
+                .unwrap_or_else(|| panic!("{name} in view"))
+                .origin
+                .clone()
+        };
+        assert_eq!(origin_of("target").as_deref(), Some("prod"));
+        assert_eq!(origin_of("prod_caller").as_deref(), Some("prod"));
+        assert_eq!(origin_of("test_caller").as_deref(), Some("test"));
+
+        // All-prod result: field absent everywhere (and absent from the JSON).
+        let clean = query(&g, "clean", None, 10, &[]);
+        assert!(!clean.nodes.is_empty());
+        assert!(clean.nodes.iter().all(|n| n.origin.is_none()));
+        let js = serde_json::to_string(&clean.nodes).unwrap();
+        assert!(!js.contains("origin"), "all-prod nodes must not serialize origin");
     }
 }

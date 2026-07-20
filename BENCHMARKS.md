@@ -4,6 +4,30 @@ lens is an MCP tool provider that keeps work **out** of the agent's context wind
 
 _Full scale curves, mechanism classifications, and methodology are in [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md)._
 
+## End to end (agentic, tools live)
+
+The primary product claim. Both arms are real Claude Code sessions with tools live and the agent free to work however it wants; the lens arm additionally has the lens MCP server and routing installed. 15 repo-investigation tasks over this repo's `src/`, 3 runs per arm per task, `claude-sonnet-5` at effort `medium`. A validity gate refuses to score any lens-arm run that never reached the lens server, so a misconfigured arm can never masquerade as a result.
+
+| | lens | vanilla | delta |
+| --- | ---: | ---: | ---: |
+| tokens per task | 296k | 460k | **-35.7%** |
+| accuracy | 89±26% | 89±26% | even |
+| time to answer | 24.9s | 27.2s | **-8.5%** |
+
+Per function (mean over K=3, functions with tagged tasks):
+
+| fn | n | tokens (lens/vanilla) | accuracy | time (lens/vanilla) |
+| :- | -: | :- | :- | :- |
+| `lens_search` | 8 | 175k / 336k (**-48%**) | 96% / 96% | 5.9s / 13.5s (**-56%**) |
+| `lens_path` | 1 | 134k / 566k (**-76%**) | 100% / 100% | 6.8s / 29.3s (**-77%**) |
+| `lens_run_file` | 2 | 243k / 378k (**-36%**) | **100% / 83%** | 13.6s / 16.6s (-19%) |
+| `lens_run` | 2 | 570k / 760k (**-25%**) | 33% / 50% | 69.3s / 74.5s (-7%) |
+| `lens_links` | 2 | 639k / 687k (-7%) | 100% / 100% | 76.6s / 43.9s (+74% slower) |
+
+Honest reading of the weak rows: `lens_links` reaches parity accuracy but pays ~2x wall-clock on one "exactly N transitive callers, excluding tests" task, where the model re-verifies every graph answer against source even though nodes carry prod/test/bench labels; and the darkroom (`lens_run`) rows are n=2 with one task both arms score 0 on. `lens_symbol`, `lens_find`, `lens_skeleton`, `lens_overview`, and `lens_grep_ast` have no tagged agentic tasks yet and are absent from this table, not hidden.
+
+Committed record: `benchmarks/accuracy/results/agentic/real-sonnet.json` (this table), `benchmarks/accuracy/results/agentic/real.json` (the haiku K=3 dev-tier record the harness merges into during development).
+
 ## Savings
 
 Headline savings are at **realistic session scale**, not the 1× diagnostic fixtures. Each row stays segmented by the lens mechanism that produced it — never a single blended percentage.
@@ -19,20 +43,22 @@ Code search and issue triage are shown at 10× the committed fixture (code searc
 
 _Codebase exploration has no single honest representative number: discovery saves 17% on the committed fixture, the scaled replication is a known-pessimistic O(N²) lower bound (appendix), and the production case is bounded by `Forge::maybe_compact`. Discovery replaces multi-file reads with a scoped subgraph; we state that bound rather than headline a flattering extreme._
 
-## Accuracy
+## Accuracy (context quality, tools off)
 
-Model: `claude-opus-4-8 (via claude-headless)`
+Given the same question and a fixed context budget, does a model answer better from lens-built context than from raw file slices?
+
+Model: `claude-sonnet-5 (via claude-headless)`
 
 | Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Darkroom tasks | 6 | 67% | 100% | +33pp | 2999 | 111 | -2888 |
-| Discovery tasks | 4 | 75% | 100% | +25pp | 1708 | 2418 | +710 |
-| Search tasks | 3 | 67% | 100% | +33pp | 828 | 1160 | +332 |
-| Skeleton tasks | 2 | 0% | 100% | +100pp | 980 | 920 | -60 |
+| Darkroom tasks | 8 | 12% | 75% | +62pp | 4029 | 497 | -3532 |
+| Discovery tasks | 24 | 38% | 92% | +54pp | 12321 | 29313 | +16992 |
+| Search tasks | 13 | 31% | 69% | +38pp | 5801 | 9149 | +3348 |
+| Skeleton tasks | 8 | 12% | 75% | +62pp | 4045 | 14055 | +10010 |
 
-> Run method: real model via headless `claude -p`, tools disabled, context-only isolation — each arm answers only from its given context, exactly like a direct API call.
+> Run method: real model via headless `claude -p`, tools disabled, context-only isolation — each arm answers only from its given context, exactly like a direct API call. Token columns are the context handed to each arm: lens sometimes spends *more* context (a scoped subgraph vs one truncated file slice) and converts it into +38 to +62pp accuracy; the darkroom row shows the inverse, 8x less context and +62pp. Context quality, not just context size, is what moves accuracy.
 >
-> Samples are small (N = 6 / 4 / 3 / 2) and each task runs once. Directional confirmations, not statistically powered rates.
+> The end-to-end cost story (tools live, agent chooses its own reads) is the agentic section above, where lens is a net -35% tokens.
 
 ## Session recovery
 

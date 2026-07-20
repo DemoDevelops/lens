@@ -1,48 +1,34 @@
 # lens
 
-**Keep raw data out of your agent's context window.** When Claude Code reads a 50k-line log, greps a large repo, or fetches a web page, every byte enters the conversation and keeps re-costing tokens on every later turn. Like the glass it's named for, lens focuses: your script runs in a *darkroom* (a subprocess), and only the developed image comes back, never the raw light.
+*Like the glass it's named for, lens focuses: your script runs in a darkroom, and only the developed image comes back, never the raw light.*
 
-Concretely: counting the log levels in a 50k-line build log costs **7,210 bytes** of context read inline, and **517** through `lens_run`, because the script runs in the darkroom and only the answer comes back. The same move powers full-text search, a code-symbol graph, and lossless recall, with a continuity layer that carries session state across compaction so long runs keep their thread.
+**A context optimizer for Claude Code: same answers, a third fewer tokens, faster.** lens gives your agent a *darkroom* (a subprocess where scripts run and only stdout returns), a local full-text index, and a directed code-symbol graph, so it stops re-paying for raw bytes on every turn and answers structure questions with lookups instead of file piles.
 
-## Results
+Measured end-to-end, tools live, agent free to work however it wants (15 repo-investigation tasks, 3 runs each, `claude-sonnet-5`, vs vanilla out-of-box Claude Code):
 
-Measured savings at realistic session scale. Full methodology and scale curves in [BENCHMARKS.md](BENCHMARKS.md).
+| | with lens | vanilla | delta |
+| --- | ---: | ---: | ---: |
+| **tokens per task** | 296k | 460k | **-36%** |
+| **accuracy** | 89% | 89% | even |
+| **time to answer** | 24.9s | 27.2s | **-8%** |
+
+Where the work is hardest, the gap is widest: full-text search tasks run at **-48% tokens and -56% time** at equal accuracy, and call-path tracing at **-76% tokens and -77% time**. Full methodology, per-function tables, and scale curves in [BENCHMARKS.md](BENCHMARKS.md).
+
+## Why it saves
+
+**Bytes stay out of context.** Mechanism-level savings against a fixed corpus (byte counts, a close proxy for tokens):
 
 | Workload | Mechanism | Before | After | Saved |
 | --- | --- | ---: | ---: | ---: |
-| Code search | full-text index | 160,230 | 10,020 | **94–99%** |
+| Code search | full-text index | 160,230 | 10,020 | **94-99%** |
 | Log debugging | darkroom | 7,210 | 517 | **93%** |
 | Issue triage | compression | 94,195 | 31,323 | **~67%** |
 
-Numbers are byte counts against a fixed corpus, a close proxy for tokens (token savings run a little lower for already-compact outputs). Code search and issue triage are shown at 10× the committed test fixture (code search reaches 99% at 50×); log debugging is size-insensitive, shown at 1×. Read each percentage as "what this mechanism does to a workload of this shape," not a guaranteed figure for your repo.
+Read each percentage as "what this mechanism does to a workload of this shape," not a guaranteed figure for your repo.
 
-Accuracy on small real-model task sets (`claude-opus-4-8`, headless, context-only):
+**Better context beats more context.** Given the same question and a fixed context budget, a model answering from lens-built context beats one answering from raw file slices by 38 to 62 accuracy points, across all four mechanisms (data analysis 75% vs 12%, code structure 92% vs 38%, search 69% vs 31%, file skeletons 75% vs 12%; `claude-sonnet-5`, headless, tools off).
 
-| Task type | N | Without lens | With lens |
-| --- | ---: | ---: | ---: |
-| Darkroom (data analysis) | 6 | 67% | **100%** |
-| Discovery (code structure) | 4 | 75% | 100% |
-| Search | 3 | 67% | 100% |
-| File skeleton (read a file's API) | 2 | 0% | **100%** |
-
-N is tiny (2–6 tasks, each run once), so these are directional, not powered rates. The control answers from one truncated slice of the file, which is part of why skeleton reads go 0%→100% (the answer sits past the cut). The signal points the right way; don't quote these as headline percentages.
-
-Session recovery is the one head-to-head against a real comparator, Context Mode (N=4 per set). lens recovers 100% of post-compaction state vs Context Mode's 75%, at roughly 20× lower token cost:
-
-| Scenario | Context Mode | lens | CM tokens | lens tokens |
-| --- | ---: | ---: | ---: | ---: |
-| File/task recovery | 75% | **100%** | 4,622 | 205 |
-| Error/decision recovery | 75% | **100%** | 4,677 | 291 |
-
-## How it compares
-
-Most tools here either compress data that still lands in context, or pull more data in. lens does neither: the bytes stay in the darkroom and only the result comes back.
-
-- **vs output compressors (RTK, headroom, squeez):** they shrink tool output, but the smaller data still enters the transcript and re-costs on later turns. lens keeps it out entirely, and anything it does surface is recoverable in full by reference. lens bundles RTK and defers Bash to it, so you can run both.
-- **vs code-search / context servers (Serena, Zilliz claude-context, repomix):** these retrieve code *into* context, and several need a vector DB, an embedding API key, or a cloud account. lens answers structure questions from a local tree-sitter graph and returns snippets, not whole files, with zero external dependencies.
-- **vs context-mode:** the closest design. Its `ctx_execute` is the same darkroom idea and it has session continuity too, but no code-symbol graph, no lossless recall, and an ELv2 (source-available) license. lens adds those and is MIT.
-
-Run lens alongside any of them. It is not trying to replace your agent or your search tool, just keep their byte-floods out of context.
+**The agent actually uses it.** lens's routing layer steers organic tool choice: with rails on, agents engage the lens toolchain on 78% of eligible calls vs 60% with rails off, no prompt changes required.
 
 ## Install
 
@@ -74,16 +60,18 @@ Update later with `lens update`: it checks the public GitHub release (no auth), 
 | :- | :- |
 | `lens_run` | Run a script in a darkroom; only stdout returns to context. Best for log parsing, data aggregation, large file analysis. |
 | `lens_run_file` | Same as `lens_run` but receives a file path as its first argument. |
-| `lens_skeleton` | Show a source file's structure: signatures + nesting, bodies elided to `…`. Full text recoverable via `lens_recall`. |
+| `lens_skeleton` | Show a source file's structure: signatures + nesting with line numbers, bodies elided to `…`. Full text recoverable via `lens_recall`. |
 | `lens_index` | Index a directory for full-text search. Run once per repo. |
-| `lens_search` | BM25F search with a proximity rerank: chunks whose query terms sit close together rank higher. Answers "where is X mentioned". |
+| `lens_search` | BM25F search with a proximity rerank. Every hit cites its match line and lists the definitions its chunk contains, so "which function does X" is often answered by the hit itself. |
 | `lens_grep_ast` | Structural search via a tree-sitter query: matches syntax, not text (real `.unwrap()` calls, not comments). |
 | `lens_map` | Parse the repo into a symbol graph (functions, types, modules, relationships). Run once per repo. |
-| `lens_overview` | Token-budgeted map (~2k tokens) of the repo's symbols: a knapsack packs the highest-importance subset that fits the budget, so load-bearing hubs survive. |
-| `lens_symbol` | Find symbols by name and see their immediate connections. |
+| `lens_overview` | Token-budgeted map (~2k tokens) of the repo's symbols: a knapsack packs the highest-importance subset that fits, so load-bearing hubs survive. Optional query focus. |
+| `lens_symbol` | Find symbols by name and see their immediate connections, labeled prod/test/bench so test callers are excludable without opening files. |
 | `lens_find` | Find symbols by natural-language description. |
-| `lens_links` | Expand a symbol's neighborhood N hops out. |
-| `lens_path` | Shortest call/import path between two symbols. |
+| `lens_links` | Expand a symbol's neighborhood N hops out, directed: fan-in (callers), fan-out (callees), or both. |
+| `lens_path` | Shortest call/import path between two symbols over directed edges: answers "does A reach B", not just "are they connected". |
+| `lens_memory_record` | Record durable project memory (decisions, constraints, rules) that survives across sessions. |
+| `lens_memory_query` | Query that memory, ranked by relevance. |
 | `lens_recall` | Recover the full content behind a `retrieve_ref` from any other tool. |
 | `lens_stats` | Show token savings and index/graph sizes for this session. |
 
@@ -124,8 +112,8 @@ lens_search(queries=["where is the routing level parsed",
 lens_map(path=".")                              # once per repo → .lens/graph.json
 lens_symbol(name="install")                     # find a symbol + its callers/callees
 lens_find(query="dedup rtk hooks")              # NL → rtk::install::dedup_rtk_hooks
-lens_path(from="run_cli", to="purge_context_mode")   # shortest call path between two symbols
-lens_links(node_id="<id from a lens_symbol result>", depth=1)   # neighborhood, 1 hop
+lens_path(from="run_cli", to="purge_context_mode")   # does run_cli reach it? (directed)
+lens_links(node_id="<id>", depth=2, direction="callers")   # transitive fan-in
 ```
 
 **Recover & observe.**
@@ -169,13 +157,13 @@ lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio
 
 **Darkroom (`lens_run` / `lens_run_file`).** Your script runs in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly. The subprocess gives you process isolation and a timeout, not an OS sandbox (see [Security](#security)).
 
-**Search (`lens_index` / `lens_search`).** `lens_index` builds a full-text index over the repo. `lens_search` ranks with BM25F, then over-fetches a deeper candidate pool and re-ranks it by term proximity (a chunk where the query terms sit in a tight window outranks one where they are scattered) before returning the top snippets with `path:line`, not whole files. Batch several questions in one call to save round-trips.
+**Search (`lens_index` / `lens_search`).** `lens_index` builds a full-text index over the repo, chunked at tree-sitter AST boundaries so a hit's chunk is a whole function, not a slice through two. `lens_search` ranks with BM25F fused with graph importance, re-ranks by term proximity, and returns snippets anchored on the match line with the chunk's definition names attached. Natural-language queries get their own ranking profile so prose words that collide with symbol names can't hijack the results. Batch several questions in one call to save round-trips.
 
-**Graph (`lens_map` / `lens_symbol` / `lens_find` / `lens_links` / `lens_path`).** `lens_map` parses [supported files](SUPPORTED.md) with tree-sitter and builds a deterministic structural graph (functions, types, modules, and their calls/imports/contains edges) in `.lens/graph.json`. The query tools walk that graph, so "who calls X" or "how does A reach B" is a graph lookup instead of a pile of file reads.
+**Graph (`lens_map` / `lens_symbol` / `lens_find` / `lens_links` / `lens_path`).** `lens_map` parses [supported files](SUPPORTED.md) with tree-sitter and builds a deterministic structural graph (functions, types, modules, and their calls/imports/contains edges) in `.lens/graph.json`. Edges are directed, so "who calls X", "what does X reach", and "how does A get to B" are graph lookups instead of file reads, walkable in either direction. Every node is labeled prod/test/bench, so "production callers of X" never requires opening files to sort test code out.
 
 **Warmup (`lens warmup` / `lens watch`).** The graph and index build lazily on the first tool call that needs them. To pay that cost up front, run `lens warmup [path]` before you start; to keep both fresh as you edit, run `lens watch [path]` (debounced re-index on file changes). Both write into the same `.lens/` dir the server reads, so a running server picks up the changes on its next query with no restart.
 
-**Session continuity.** The lifecycle hooks capture events into a store, each tagged priority 1 (critical) to 4 (low). At `PreCompact`, lens builds a priority-tiered resume snapshot within a small byte budget; at `SessionStart` it re-injects a Session Guide. This survives compaction at a fraction of the Context Mode plugin's token cost.
+**Session continuity.** The lifecycle hooks capture events into a store, each tagged priority 1 (critical) to 4 (low). At `PreCompact`, lens builds a priority-tiered resume snapshot within a small byte budget; at `SessionStart` it re-injects a Session Guide, so long runs keep their thread across compaction. Durable decisions and constraints live in cross-session memory (`lens_memory_record` / `lens_memory_query`).
 
 **Routing.** A PreToolUse policy, gated by `LENS_ROUTING`, decides whether to pass, nudge, rewrite, or deny each tool call:
 
@@ -185,7 +173,9 @@ lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio
 - `wrap`: transparently rewrite a read-only, high-output `Bash` command into `lens wrap -- <cmd>` so its output is offloaded losslessly.
 - `full`: steer and wrap together.
 
-**RTK (optional).** lens ships and installs a pinned RTK binary (the "headroom pattern") and surfaces RTK's own measured shell-command savings. RTK owns Bash rewriting via its own hook; when it is active, lens defers Bash to it so the two never double-wrap.
+Above the levels sit per-pattern rails (broad greps, whole-file reads for structure, aggregation pipelines) that redirect specific wasteful call shapes to the equivalent lens tool. Every rail is individually kill-switchable (`LENS_<RAIL>=0`), and all of them stand down automatically when the lens server is unreachable.
+
+**RTK (optional).** lens ships and installs a pinned RTK binary and surfaces RTK's own measured shell-command savings. RTK owns Bash rewriting via its own hook; when it is active, lens defers Bash to it so the two never double-wrap. lens is additive to whatever else your setup runs: it keeps byte-floods out of context and stays out of the way otherwise.
 
 ## Development
 
@@ -195,11 +185,13 @@ cargo clippy -- -D warnings
 ```
 
 ```sh
-cargo run --bin bench_savings    # savings table (no credentials needed)
-cargo run --bin bench_accuracy   # accuracy harness (LENS_BENCH_BACKEND=claude-pty, ANTHROPIC_API_KEY, or mock)
-cargo run --bin bench_recovery   # session-recovery head-to-head vs Context Mode
+cargo run --bin bench_savings    # mechanism savings table (no credentials needed)
+cargo run --bin bench_accuracy   # accuracy harness (LENS_BENCH_BACKEND=agentic|headless|claude-pty, or mock)
+cargo run --bin bench_toolsel    # organic tool-selection A/B (rails on/off)
 cargo run --bin bench_report     # regenerate BENCHMARKS.md + BENCHMARKS_APPENDIX.md
 ```
+
+The headline numbers come from `bench_accuracy` with `LENS_BENCH_BACKEND=agentic`: both arms are real Claude Code sessions with tools live, and a validity gate refuses to score any lens-arm run that never reached the lens server.
 
 ## Security
 

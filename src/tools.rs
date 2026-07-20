@@ -257,6 +257,14 @@ pub struct NodeView {
     pub file: String,
     pub line: usize,
     pub language: String,
+    /// Provenance: "prod", "test" (#[cfg(test)] / #[test] code), or "bench"
+    /// (benchmark trees). Present on every node when the result contains any
+    /// test/bench node, so callers can exclude them (e.g. "production callers
+    /// of X") without reading the files; absent everywhere when the whole
+    /// result is production code. All-or-none per response keeps TOON row
+    /// compaction keys homogeneous.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

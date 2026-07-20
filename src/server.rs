@@ -687,7 +687,7 @@ impl Forge {
 
     /// Find symbols by name and return their immediate connections.
     #[tool(
-        description = "Look up a declared symbol by name substring (case-insensitive; + optional kind); returns each match's location plus its immediate connections (calls, contains, imports, ...), NOT its source body (to read the code, lens_search the name). `limit` bounds the number of matching root symbols, not the total nodes returned — each root's neighbors come back on top of it. No match returns an empty result, not an error. An exact-name match among several candidates is reported via `resolved` (chosen node + how many others it beat). Large results are compacted with a lens_recall ref. If you know what the symbol does but not its exact name, use lens_find."
+        description = "Look up a declared symbol by name substring (case-insensitive; + optional kind); returns each match's location plus its immediate connections (calls, contains, imports, ...), NOT its source body (to read the code, lens_search the name). When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. `limit` bounds the number of matching root symbols, not the total nodes returned — each root's neighbors come back on top of it. No match returns an empty result, not an error. An exact-name match among several candidates is reported via `resolved` (chosen node + how many others it beat). Large results are compacted with a lens_recall ref. If you know what the symbol does but not its exact name, use lens_find."
     )]
     async fn lens_symbol(
         &self,
@@ -742,7 +742,7 @@ impl Forge {
 
     /// Return the local subgraph around a node.
     #[tool(
-        description = "Return the local subgraph within `depth` hops of a node id or symbol name (from lens_symbol results, or a name resolved the same way lens_path resolves `from`/`to`). For a specific A-to-B connection use lens_path instead; this returns the whole neighborhood around one node. An id/name that resolves to nothing is an explicit error, never an empty graph."
+        description = "Return the local subgraph within `depth` hops of a node id or symbol name (from lens_symbol results, or a name resolved the same way lens_path resolves `from`/`to`). When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. For a specific A-to-B connection use lens_path instead; this returns the whole neighborhood around one node. An id/name that resolves to nothing is an explicit error, never an empty graph."
     )]
     async fn lens_links(
         &self,
@@ -3174,6 +3174,7 @@ mod tests {
                 file: "f.rs".into(),
                 line: 1,
                 language: "rust".into(),
+                origin: None,
             }],
             edges: vec![],
             compact: None,
@@ -3201,6 +3202,7 @@ mod tests {
                 file: "src/discovery/extract.rs".into(),
                 line: i,
                 language: "rust".into(),
+                origin: None,
             })
             .collect();
         let original = serde_json::json!({ "nodes": nodes, "edges": [] });

@@ -1,45 +1,292 @@
 {
+  "bench_binary": null,
   "groups": [
     {
-      "control_acc": 0.6666666666666666,
-      "control_tokens": 2999,
+      "control_acc": 0.125,
+      "control_tokens": 4029,
       "mechanism": "darkroom",
-      "n": 6,
-      "treatment_acc": 1.0,
-      "treatment_tokens": 111
+      "n": 8,
+      "treatment_acc": 0.75,
+      "treatment_tokens": 497
     },
     {
-      "control_acc": 0.75,
-      "control_tokens": 1708,
+      "control_acc": 0.375,
+      "control_tokens": 12321,
       "mechanism": "discovery",
-      "n": 4,
-      "treatment_acc": 1.0,
-      "treatment_tokens": 2418
+      "n": 24,
+      "treatment_acc": 0.9166666666666666,
+      "treatment_tokens": 29313
     },
     {
-      "control_acc": 0.4,
-      "control_tokens": 1682,
+      "control_acc": 0.3076923076923077,
+      "control_tokens": 5801,
       "mechanism": "search",
-      "n": 5,
-      "treatment_acc": 1.0,
-      "treatment_tokens": 2342
+      "n": 13,
+      "treatment_acc": 0.6923076923076923,
+      "treatment_tokens": 9149
     },
     {
-      "control_acc": 0.0,
-      "control_tokens": 980,
+      "control_acc": 0.125,
+      "control_tokens": 4045,
       "mechanism": "skeleton",
-      "n": 2,
-      "treatment_acc": 1.0,
-      "treatment_tokens": 920
+      "n": 8,
+      "treatment_acc": 0.75,
+      "treatment_tokens": 14055
     }
   ],
   "mode": "real",
-  "model": "claude-opus-4-8 (via claude-headless)",
+  "model": "claude-sonnet-5 (via claude-headless)",
+  "overall": [
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "overall",
+      "n": 20,
+      "success_mean": 0.6,
+      "success_std": 0.48989794855663565,
+      "tokens_mean": 1080.1,
+      "tokens_std": 1296.1187021256965
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "overall",
+      "n": 20,
+      "success_mean": 0.3,
+      "success_std": 0.4582575694955839,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    }
+  ],
+  "per_function": [
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_grep_ast",
+      "n": 1,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 2917.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_grep_ast",
+      "n": 1,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_links",
+      "n": 2,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 969.5,
+      "tokens_std": 812.5
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_links",
+      "n": 2,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_map",
+      "n": 1,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 83.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_map",
+      "n": 1,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_overview",
+      "n": 1,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 3551.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_overview",
+      "n": 1,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_path",
+      "n": 1,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 185.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_path",
+      "n": 1,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_run",
+      "n": 2,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 193.0,
+      "tokens_std": 111.0
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_run",
+      "n": 2,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_run_file",
+      "n": 2,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 53.5,
+      "tokens_std": 11.5
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_run_file",
+      "n": 2,
+      "success_mean": 0.5,
+      "success_std": 0.5,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_search",
+      "n": 8,
+      "success_mean": 0.5,
+      "success_std": 0.5,
+      "tokens_mean": 831.125,
+      "tokens_std": 53.66665049171599
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_search",
+      "n": 8,
+      "success_mean": 0.25,
+      "success_std": 0.4330127018922193,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_skeleton",
+      "n": 1,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 5149.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_skeleton",
+      "n": 1,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_symbol",
+      "n": 1,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 636.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_symbol",
+      "n": 1,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 515.0,
+      "tokens_std": 0.0
+    }
+  ],
   "tasks": [
     {
       "control": {
         "answer": {
-          "distinct_error_types": 5,
+          "distinct_error_types": 6,
           "most_frequent": "ConnectionTimeout"
         },
         "context_bytes": 2000,
@@ -61,7 +308,7 @@
     {
       "control": {
         "answer": {
-          "count": 7
+          "count": 8
         },
         "context_bytes": 2000,
         "correct": false,
@@ -101,10 +348,10 @@
     {
       "control": {
         "answer": {
-          "total_requests": 2719
+          "total_requests": 2519
         },
         "context_bytes": 764,
-        "correct": true,
+        "correct": false,
         "tokens": 383
       },
       "id": "0004_total_requests",
@@ -121,10 +368,10 @@
     {
       "control": {
         "answer": {
-          "count": 12
+          "count": 9
         },
         "context_bytes": 1096,
-        "correct": true,
+        "correct": false,
         "tokens": 374
       },
       "id": "0005_count_timeout_events",
@@ -141,10 +388,10 @@
     {
       "control": {
         "answer": {
-          "endpoint": "/healthz"
+          "endpoint": "/api/items"
         },
         "context_bytes": 764,
-        "correct": true,
+        "correct": false,
         "tokens": 383
       },
       "id": "0006_busiest_endpoint",
@@ -193,9 +440,9 @@
         "answer": {
           "reachable": true
         },
-        "context_bytes": 538,
+        "context_bytes": 757,
         "correct": true,
-        "tokens": 183
+        "tokens": 271
       }
     },
     {
@@ -231,11 +478,11 @@
       "mechanism": "search",
       "treatment": {
         "answer": {
-          "file": "crypto.rs"
+          "file": "benchmarks/accuracy/fixtures/repo/crypto.rs"
         },
-        "context_bytes": 1251,
+        "context_bytes": 1317,
         "correct": true,
-        "tokens": 372
+        "tokens": 361
       }
     },
     {
@@ -243,25 +490,25 @@
         "answer": {
           "port": 8080
         },
-        "context_bytes": 412,
+        "context_bytes": 408,
         "correct": true,
-        "tokens": 135
+        "tokens": 134
       },
       "id": "0011_default_port",
       "mechanism": "search",
       "treatment": {
         "answer": {
-          "port": 8080
+          "port": "8080"
         },
-        "context_bytes": 815,
+        "context_bytes": 1012,
         "correct": true,
-        "tokens": 260
+        "tokens": 301
       }
     },
     {
       "control": {
         "answer": {
-          "return_type": null
+          "return_type": "not found in context"
         },
         "context_bytes": 2000,
         "correct": false,
@@ -273,15 +520,15 @@
         "answer": {
           "return_type": "Result<Summary, LedgerError>"
         },
-        "context_bytes": 1982,
+        "context_bytes": 2246,
         "correct": true,
-        "tokens": 460
+        "tokens": 540
       }
     },
     {
       "control": {
         "answer": {
-          "method": null
+          "method": "apply_fees"
         },
         "context_bytes": 2000,
         "correct": false,
@@ -293,9 +540,9 @@
         "answer": {
           "method": "close_period"
         },
-        "context_bytes": 1982,
+        "context_bytes": 2246,
         "correct": true,
-        "tokens": 460
+        "tokens": 540
       }
     },
     {
@@ -337,15 +584,195 @@
         "answer": {
           "marker": "QUORUM_SEAL_4F2A"
         },
-        "context_bytes": 1925,
+        "context_bytes": 2119,
         "correct": true,
-        "tokens": 528
+        "tokens": 544
       }
     },
     {
       "control": {
         "answer": {
-          "marker": null
+          "function": "order_gateway"
+        },
+        "context_bytes": 1008,
+        "correct": true,
+        "tokens": 339
+      },
+      "id": "0016_findloc_maxA",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "order_gateway"
+        },
+        "context_bytes": 4247,
+        "correct": true,
+        "tokens": 1588
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "payment_bus"
+        },
+        "context_bytes": 793,
+        "correct": true,
+        "tokens": 279
+      },
+      "id": "0017_findloc_maxB",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "payment_bus"
+        },
+        "context_bytes": 3884,
+        "correct": true,
+        "tokens": 1442
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "cache_ring"
+        },
+        "context_bytes": 524,
+        "correct": true,
+        "tokens": 192
+      },
+      "id": "0018_findloc_bordA",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "cache_ring"
+        },
+        "context_bytes": 2358,
+        "correct": true,
+        "tokens": 895
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "queue_core"
+        },
+        "context_bytes": 469,
+        "correct": true,
+        "tokens": 171
+      },
+      "id": "0019_findloc_bordB",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "queue_core"
+        },
+        "context_bytes": 1986,
+        "correct": true,
+        "tokens": 720
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "metrics_sink"
+        },
+        "context_bytes": 534,
+        "correct": true,
+        "tokens": 185
+      },
+      "id": "0020_findloc_bordC",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "metrics_sink"
+        },
+        "context_bytes": 3021,
+        "correct": true,
+        "tokens": 1105
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "rotate_keys"
+        },
+        "context_bytes": 466,
+        "correct": true,
+        "tokens": 146
+      },
+      "id": "0021_findloc_nullA",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "rotate_keys"
+        },
+        "context_bytes": 2016,
+        "correct": true,
+        "tokens": 771
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "session_validate"
+        },
+        "context_bytes": 801,
+        "correct": true,
+        "tokens": 264
+      },
+      "id": "0022_findloc_nullB",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "session_validate"
+        },
+        "context_bytes": 3801,
+        "correct": true,
+        "tokens": 1448
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "audit_validate"
+        },
+        "context_bytes": 732,
+        "correct": true,
+        "tokens": 245
+      },
+      "id": "0023_findloc_nullC",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "audit_log"
+        },
+        "context_bytes": 3499,
+        "correct": false,
+        "tokens": 1339
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "stream_pipe"
+        },
+        "context_bytes": 630,
+        "correct": true,
+        "tokens": 199
+      },
+      "id": "0024_findloc_bordD",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "stream_filter_two"
+        },
+        "context_bytes": 1084,
+        "correct": false,
+        "tokens": 387
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "marker": "not found in context"
         },
         "context_bytes": 2000,
         "correct": false,
@@ -357,15 +784,15 @@
         "answer": {
           "marker": "SEALCODE_K9W2Q7"
         },
-        "context_bytes": 2133,
+        "context_bytes": 2453,
         "correct": true,
-        "tokens": 642
+        "tokens": 706
       }
     },
     {
       "control": {
         "answer": {
-          "token": null
+          "token": "none"
         },
         "context_bytes": 2000,
         "correct": false,
@@ -377,9 +804,759 @@
         "answer": {
           "token": "RRFCODE_T4X9Z2"
         },
-        "context_bytes": 1776,
+        "context_bytes": 1943,
         "correct": true,
-        "tokens": 540
+        "tokens": 588
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "field1": "?",
+          "field2": "?",
+          "field3": "?",
+          "line": -1
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 490
+      },
+      "id": "0027_skeleton_struct_fields",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "field1": "posted",
+          "field2": "rejected",
+          "field3": "net_cents",
+          "line": 78
+        },
+        "context_bytes": 2409,
+        "correct": true,
+        "tokens": 639
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "callee": null
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 750
+      },
+      "id": "0028_overview_focus",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "callee": "niche_sink"
+        },
+        "context_bytes": 228,
+        "correct": true,
+        "tokens": 72
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "unknown"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 520
+      },
+      "id": "0034_real_focus_repomap",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "repo_map_block"
+        },
+        "context_bytes": 7148,
+        "correct": true,
+        "tokens": 2000
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "build"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 527
+      },
+      "id": "0035_real_focus_tantivy",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "index_path"
+        },
+        "context_bytes": 6945,
+        "correct": true,
+        "tokens": 1996
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "ensure_loaded"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 523
+      },
+      "id": "0036_real_focus_overviewdue",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "overview_due"
+        },
+        "context_bytes": 6647,
+        "correct": true,
+        "tokens": 1999
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "chunk_by_ast"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 513
+      },
+      "id": "0037_real_focus_skeletonize",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "skeletonize"
+        },
+        "context_bytes": 7391,
+        "correct": true,
+        "tokens": 1996
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "tail_looks_like_version_probe"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 523
+      },
+      "id": "0050_real_focus_is_version_probe",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "is_version_probe"
+        },
+        "context_bytes": 6607,
+        "correct": true,
+        "tokens": 1999
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "bounded_ac"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 523
+      },
+      "id": "0051_real_focus_matches_bounded",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "bounded_ac"
+        },
+        "context_bytes": 6682,
+        "correct": false,
+        "tokens": 1999
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "chunk_by_ast"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 527
+      },
+      "id": "0052_real_focus_chunk_markdown",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "chunk_markdown"
+        },
+        "context_bytes": 6920,
+        "correct": true,
+        "tokens": 1999
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "open"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 527
+      },
+      "id": "0053_real_focus_register_tokenizers",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "register_tokenizers"
+        },
+        "context_bytes": 6913,
+        "correct": true,
+        "tokens": 1997
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "parse_frontmatter"
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 513
+      },
+      "id": "0054_real_focus_parse_frontmatter",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "parse_frontmatter"
+        },
+        "context_bytes": 7306,
+        "correct": true,
+        "tokens": 2000
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "merge_nested_graph"
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 513
+      },
+      "id": "0055_real_focus_merge_nested_graph",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "merge_nested_graph"
+        },
+        "context_bytes": 7265,
+        "correct": true,
+        "tokens": 1999
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "get_resume"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 520
+      },
+      "id": "0056_real_focus_resolve_contradictions",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "resolve_contradictions"
+        },
+        "context_bytes": 7336,
+        "correct": true,
+        "tokens": 1998
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "days_to_civil"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 533
+      },
+      "id": "0057_real_focus_civil_from_days",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "days_from_civil"
+        },
+        "context_bytes": 7063,
+        "correct": false,
+        "tokens": 1997
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "caller": "grep_ast_filtered"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 513
+      },
+      "id": "0058_caller_of_spec_for_extension",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "caller": "any_spec_for_extension"
+        },
+        "context_bytes": 760,
+        "correct": true,
+        "tokens": 242
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "reachable": true
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 513
+      },
+      "id": "0059_reaches_personalized_importance",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "reachable": true
+        },
+        "context_bytes": 785,
+        "correct": true,
+        "tokens": 283
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "caller_1": "any_spec_for_language",
+          "caller_2": "grep_ast",
+          "caller_3": "grep_ast_filtered",
+          "caller_4": "lens_grep_ast"
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 515
+      },
+      "id": "0060_real_agentic_transitive_callers_spec_for_language",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "caller_1": "any_spec_for_language",
+          "caller_2": "grep_ast",
+          "caller_3": "grep_ast_filtered",
+          "caller_4": "lens_grep_ast"
+        },
+        "context_bytes": 5970,
+        "correct": true,
+        "tokens": 1782
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "reach_1": "yes",
+          "reach_2": "yes",
+          "reach_3": "no"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0061_real_agentic_reachability_trio",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "reach_1": true,
+          "reach_2": false,
+          "reach_3": false
+        },
+        "context_bytes": 515,
+        "correct": true,
+        "tokens": 185
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "caller_1": "latest_tag",
+          "caller_2": "main",
+          "caller_3": "run_update_check_cli",
+          "caller_4": "run_update_cli"
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 515
+      },
+      "id": "0062_real_agentic_transitive_callers_tag_from_release_url",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "caller_1": "latest_tag",
+          "caller_2": "main",
+          "caller_3": "run_update_check_cli",
+          "caller_4": "run_update_cli"
+        },
+        "context_bytes": 474,
+        "correct": true,
+        "tokens": 157
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "count": 0
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0063_real_agentic_darkroom_distinct_env_names",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "count": 41
+        },
+        "context_bytes": 828,
+        "correct": false,
+        "tokens": 304
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "count": null
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0064_real_agentic_darkroom_nontest_unwrap_total",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "count": 19
+        },
+        "context_bytes": 222,
+        "correct": false,
+        "tokens": 82
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "count": 1
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 515
+      },
+      "id": "0065_real_agentic_ast_unwraps_index_mod",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "count": 1
+        },
+        "context_bytes": 130,
+        "correct": true,
+        "tokens": 42
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "count": 0
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0066_real_agentic_ast_unwraps_discovery_mod",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "count": 2
+        },
+        "context_bytes": 223,
+        "correct": true,
+        "tokens": 65
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "run_with_args"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0067_real_agentic_search_inner_repo_boundary",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "nested_path_scoped_build_lands_in_nested_lens_only"
+        },
+        "context_bytes": 3293,
+        "correct": false,
+        "tokens": 898
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "steer_if_reachable"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0068_real_agentic_search_deny_requires_server",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "gate_steering_decision_on_mcp_readiness"
+        },
+        "context_bytes": 3294,
+        "correct": false,
+        "tokens": 863
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "first_module": "runtimes",
+          "mod_count": null
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0069_real_agentic_lib_pub_mod_count",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "first_module": "darkroom",
+          "mod_count": 13
+        },
+        "context_bytes": 327,
+        "correct": true,
+        "tokens": 83
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "first_alpha": "overview_seed",
+          "fn_count": 2
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0070_real_agentic_query_pub_fn_survey",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "first_alpha": "find",
+          "fn_count": 6
+        },
+        "context_bytes": 14039,
+        "correct": false,
+        "tokens": 3551
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "param_name": "repo_dir"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0071_real_agentic_warmup_second_param",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "param_name": "data_dir"
+        },
+        "context_bytes": 2451,
+        "correct": true,
+        "tokens": 636
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "count": 0,
+          "method_1": null,
+          "method_2": null
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0072_real_agentic_graph_vec_returning_methods",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "count": 6,
+          "method_1": "find_by_name",
+          "method_2": "neighbors_directed"
+        },
+        "context_bytes": 11458,
+        "correct": false,
+        "tokens": 2917
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "param_type": "&str"
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 515
+      },
+      "id": "0073_real_agentic_extract_spec_for_extension_param",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "param_type": "&str"
+        },
+        "context_bytes": 20153,
+        "correct": true,
+        "tokens": 5149
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "chunk_by_ast"
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 515
+      },
+      "id": "0074_real_agentic_search_ast_chunk_boundaries",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "chunk_by_ast"
+        },
+        "context_bytes": 3026,
+        "correct": true,
+        "tokens": 787
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "remove_paths"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0075_real_agentic_search_prune_deleted_files",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "index_prunes_deleted_files"
+        },
+        "context_bytes": 2927,
+        "correct": false,
+        "tokens": 793
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "query"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0076_real_agentic_search_fold_inner_repo_hits",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "federate_nested_search"
+        },
+        "context_bytes": 3212,
+        "correct": true,
+        "tokens": 818
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "tokenize"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0077_real_agentic_search_compound_name_parts",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "split_subwords"
+        },
+        "context_bytes": 3742,
+        "correct": true,
+        "tokens": 924
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "chunk_span"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 515
+      },
+      "id": "0078_real_agentic_search_tightest_term_window",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "min_cover_span"
+        },
+        "context_bytes": 2966,
+        "correct": true,
+        "tokens": 764
+      }
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "ensure_index"
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 515
+      },
+      "id": "0079_real_agentic_search_index_freshness_gate",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "index_present_true_when_populated"
+        },
+        "context_bytes": 3293,
+        "correct": false,
+        "tokens": 802
       }
     }
   ]

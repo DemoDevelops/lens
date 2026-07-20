@@ -1,0 +1,23 @@
+{
+  "id": "0084_real_agentic_composed_store_pubfn_count",
+  "prompt": "Across src/store (both mod.rs and compress.rs), excluding anything inside a `#[cfg(test)]` block, exactly how many `pub fn` are declared? Count real function declarations (structural AST nodes), not textual occurrences of the substring `pub fn` inside comments or string literals.",
+  "fixtures": [
+    "../../src/store"
+  ],
+  "ground_truth": {
+    "count": 13
+  },
+  "check": "numeric_tolerance",
+  "primary_mechanism": "darkroom",
+  "lens_fn": "lens_run",
+  "evidence": [
+    "13",
+    "AST-matched",
+    "function_item"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import lens\n\nresp = lens.grep_ast(query=\"(function_item (visibility_modifier) name: (identifier) @name)\", lang=\"rust\")\nrows = resp.get(\"matches\", resp) if isinstance(resp, dict) else resp\n\ncount = 0\nfor h in rows:\n    path = h.get(\"path\", \"\")\n    if path.endswith(\".rs\"):\n        count += 1\n\nprint(f\"pub fn count in src/store (AST-matched): {count}\")\n"
+  },
+  "notes": "Derived 2026-07-20 by two independent methods. Method 1: mcp__lens__lens_grep_ast with the raw tree-sitter query `(function_item (visibility_modifier) name: (identifier) @name)` over src/store returns 13 matches: compress.rs — compact_json L61, expand_json L102, drop_nulls L128 (3); mod.rs — open L34, put L72, get L85, record_source L112, source L126, sources_for_path L149, bump_stat L167, set_stat L178, journal_mode L190, get_stat L197 (10). Total 3+10=13. Method 2 (independent manual cross-check): read the lens_skeleton dump of both src/store/mod.rs and src/store/compress.rs directly and hand-counted every `pub fn` signature outside each file's `#[cfg(test)] mod tests` block (mod.rs's test module starts at L209 with only private `#[test]` helpers, zero additional `pub fn`; compress.rs's test module similarly starts well after L480 with only private `#[test]` helpers) — confirms the same 13, and confirms every remaining free function in compress.rs (contains_key, transpose, homogeneous_object_columns, flat_scalar_columns, is_scalar, encode_toon, untranspose, as_table, as_toon, count_strings, encode, rle_encode_array, rle_pairs, decode, decode_str, and the final RLE-pairs-expansion helper) is declared as a private `fn` with no `pub` modifier, so both methods correctly exclude them. `pub mod compress;` in mod.rs is a module declaration, not a function, and is correctly excluded by the AST query's `function_item` node-kind restriction (a plain text grep for `pub ` would have needed a second filter to exclude it)."
+}

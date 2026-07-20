@@ -1,0 +1,24 @@
+{
+  "id": "0085_real_agentic_composed_compress_callees_audit",
+  "prompt": "Within src/store/compress.rs only, and counting only functions reachable within 2 hops of `compact_json`'s own call graph (direct callees, plus their own direct callees — i.e. transitive callees within 2 hops), exactly 9 functions are called that way. Of those 9, exactly 2 return `Option<...>` from their own signature. List those 2 sorted alphabetically: callee_1 is alphabetically first.",
+  "fixtures": [
+    "../../src/store"
+  ],
+  "ground_truth": {
+    "callee_1": "flat_scalar_columns",
+    "callee_2": "homogeneous_object_columns"
+  },
+  "check": "contains",
+  "primary_mechanism": "darkroom",
+  "lens_fn": "lens_run",
+  "evidence": [
+    "compact_json",
+    "flat_scalar_columns",
+    "homogeneous_object_columns"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import lens\n\nTARGET = \"compact_json\"\nDEPTH = 2\n\nresp = lens.callees(TARGET, transitive=True, depth=DEPTH)\nnodes = resp.get(\"nodes\", [])\n\ncandidates = {}\nfor n in nodes:\n    name = n.get(\"name\")\n    file = n.get(\"file\", \"\")\n    if name == TARGET or not file.startswith(\"src/store/\"):\n        continue\n    candidates[name] = file\n\ndef sig_line(text, name):\n    for line in text.splitlines():\n        if f\"fn {name}(\" in line:\n            return line\n    return \"\"\n\nskel_cache = {}\nreturns_option = []\nfor name, file in candidates.items():\n    if file not in skel_cache:\n        sk = lens.skeleton(file)\n        skel_cache[file] = sk.get(\"skeleton\", \"\") if isinstance(sk, dict) else str(sk)\n    if \"-> Option<\" in sig_line(skel_cache[file], name):\n        returns_option.append(name)\n\nreturns_option.sort()\nprint(f\"target=compact_json transitive_callees={len(candidates)} returns_option={len(returns_option)}\")\nprint(\",\".join(returns_option))\n"
+  },
+  "notes": "Derived 2026-07-20 by two independent methods, both against src/store/compress.rs directly (every callee in this closure lives in this same file, so no cross-file ambiguity is possible). Method 1 (script-equivalent, done manually since T3's `lens.callees(transitive=True)` API is concurrently landing in this same wave and is not yet committed): read compact_json's body (compress.rs:61-99) directly, tracing its calls one by one: drop_nulls (L128), contains_key (L146 — called twice, with TABLE_KEY and TOON_KEY, but it is the same function, counted once), transpose (L163), count_strings (L358), encode (L369) — 5 direct callees (hop 1). Then read each of those 5 bodies for hop 2: drop_nulls and contains_key are each purely self-recursive (no new callee); count_strings is purely self-recursive; transpose (L163-201) additionally calls flat_scalar_columns (L233), encode_toon (L264), homogeneous_object_columns (L205) (plus a self-recursive call for nested arrays) — 3 new; encode (L369-390) additionally calls rle_encode_array (L397) (plus self-recursion on the Object arm) — 1 new. Union at depth<=2 = {drop_nulls, contains_key, transpose, count_strings, encode} + {flat_scalar_columns, encode_toon, homogeneous_object_columns, rle_encode_array} = 9 distinct functions, matching the prompt's stated count. Method 2 (independent verification via the graph): ran mcp__lens__lens_symbol('compact_json') and cross-referenced every 'calls' edge originating from compact_json's node id, then repeated for each hop-1 target's node id — the edge set agrees exactly with the manual trace (no additional callee edges exist that the body-reading missed; e.g. `is_scalar`, called by flat_scalar_columns, is a real callee but only at hop 3, correctly excluded by the depth=2 cutoff). For the `Option<...>`-return filter: read each of the 9 signatures directly — `flat_scalar_columns(arr: &[Value]) -> Option<Vec<String>>` (L233) and `homogeneous_object_columns(arr: &[Value]) -> Option<Vec<String>>` (L205) are the only two; the other 7 return `Value`, `bool`, or `()` (count_strings returns unit). Both methods agree on the same 2, sorted alphabetically: flat_scalar_columns, homogeneous_object_columns."
+}

@@ -1,0 +1,26 @@
+{
+  "id": "0082_real_agentic_composed_pricing_callers_audit",
+  "prompt": "Within src/obs only (ignore anything outside that directory), and excluding test code: counting only functions that call `price_for` (defined in src/obs/pricing.rs) either directly, or that call a direct caller of it (i.e. transitive callers within 2 hops, prod origin only), exactly 6 functions call it that way. Of those 6, exactly 3 take a `&Path` parameter in their own signature. List those 3 sorted alphabetically: caller_1 is alphabetically first.",
+  "fixtures": [
+    "../../src/obs"
+  ],
+  "ground_truth": {
+    "caller_1": "route",
+    "caller_2": "snapshot_json",
+    "caller_3": "snapshot_json_since"
+  },
+  "check": "contains",
+  "primary_mechanism": "darkroom",
+  "lens_fn": "lens_run",
+  "evidence": [
+    "price_for",
+    "snapshot_json_since",
+    "route",
+    "snapshot_json"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import lens\n\nTARGET = \"price_for\"\nDEPTH = 2\n\nresp = lens.callers(TARGET, transitive=True, depth=DEPTH, prod_only=True)\nnodes = resp.get(\"nodes\", [])\n\ncandidates = {}\nfor n in nodes:\n    name = n.get(\"name\")\n    file = n.get(\"file\", \"\")\n    if name == TARGET or not file.startswith(\"src/obs/\"):\n        continue\n    candidates[name] = file\n\ndef sig_block(text, name):\n    lines = text.splitlines()\n    for i, line in enumerate(lines):\n        if f\"fn {name}(\" in line or f\"fn {name}<\" in line:\n            block = []\n            for l in lines[i:i + 6]:\n                block.append(l)\n                if \"{\" in l:\n                    break\n            return \"\\n\".join(block)\n    return \"\"\n\nskel_cache = {}\nwith_path = []\nfor name, file in candidates.items():\n    if file not in skel_cache:\n        sk = lens.skeleton(file)\n        skel_cache[file] = sk.get(\"skeleton\", \"\") if isinstance(sk, dict) else str(sk)\n    if \"&Path\" in sig_block(skel_cache[file], name):\n        with_path.append(name)\n\nwith_path.sort()\nprint(f\"target=price_for transitive_callers={len(candidates)} with_path_param={len(with_path)}\")\nprint(\",\".join(with_path))\n"
+  },
+  "notes": "Ground truth derived 2026-07-20 against this checkout's live src/ (post-739f236, wave-1 T1/T2/T5 landed — none touch src/obs; verified via git log --stat since 739f236 touching only benchmarks/common/accuracy.rs, benchmarks/accuracy/sets/0.10.json, src/discovery/{query,graph,extract}.rs, src/discovery/mod.rs, tags_adapter.rs, and src/server.rs's ensure_index/ensure_graph build-lock region). Method 1 (script-equivalent, done manually since T3's `lens.callers(transitive=True)` API is concurrently landing in this same wave and is not yet committed): ran mcp__lens__lens_symbol('price_for') to get its node (src/obs/pricing.rs:71) and its direct 'calls' edges — 3 prod-origin direct callers: run_cli (src/obs/dashboard.rs:27), snapshot_json_since (src/obs/stats.rs:470), price_table (src/obs/pricing.rs:92); the other 3 direct callers are tests (id_and_display_name_agree, tiers_are_distinct_and_correct, price_table_covers_every_model, all in pricing.rs) and are excluded. Then ran mcp__lens__lens_symbol on each of those 3 hop-1 names for hop-2: snapshot_json_since's prod callers are route (dashboard.rs:181), run (tui.rs:984), snapshot_json (stats.rs:462); price_table's only callers are the 2 tests above (zero prod hop-2); run_cli(dashboard.rs)'s only caller, confirmed via mcp__lens__lens_search('dashboard::run_cli('), is src/main.rs:1 — OUTSIDE src/obs, so it contributes zero in-scope hop-2 callers. Union at depth<=2, prod-only, within src/obs = {run_cli, snapshot_json_since, price_table, route, run, snapshot_json} = 6. Method 2 (independent manual verification): read src/obs/dashboard.rs:178-190 directly, confirming `fn route(target: &str, dir: &Path, session: Option<&str>) -> ...` at line 181 takes `&Path`; read src/obs/stats.rs:460-475, confirming both `snapshot_json(dir: &Path, ...)` (line 462) and `snapshot_json_since(dir: &Path, ...)` (line 470) take `&Path`; cross-checked `price_table() -> Vec<PriceEntry>` (pricing.rs:92, zero params) and `run_cli(args: &[String])` (dashboard.rs:27) against the lens_skeleton dumps of pricing.rs/dashboard.rs read earlier this session, confirming neither takes `&Path`. The one subtlety: `run(dir: PathBuf, ...)` (tui.rs:984) takes an OWNED `PathBuf`, not a `&Path` reference — it does NOT count, and a naive text-grep for the substring 'Path' would have over-counted it. Both methods agree: exactly 3 of the 6 (route, snapshot_json, snapshot_json_since) take `&Path`. Caveat mirroring 0080's collision caution: src/obs itself contains THREE distinct functions literally named `run_cli` (dashboard.rs:27, stats.rs:28, verify.rs:20), and a `route`/`run` also exist outside src/obs (routing/mod.rs::route, darkroom/mod.rs::run) — irrelevant here since the fixture is scoped to src/obs only and none of those collide inside the final filtered 3-item answer set."
+}

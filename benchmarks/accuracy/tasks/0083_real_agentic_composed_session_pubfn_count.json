@@ -1,0 +1,23 @@
+{
+  "id": "0083_real_agentic_composed_session_pubfn_count",
+  "prompt": "Across src/session (all 6 files: extract.rs, hook.rs, install.rs, mod.rs, snapshot.rs, store.rs), excluding anything inside a `#[cfg(test)]` block, exactly how many `pub fn` are declared? Count real function declarations (structural AST nodes), not textual occurrences of the substring `pub fn` inside comments or string literals.",
+  "fixtures": [
+    "../../src/session"
+  ],
+  "ground_truth": {
+    "count": 37
+  },
+  "check": "numeric_tolerance",
+  "primary_mechanism": "darkroom",
+  "lens_fn": "lens_run",
+  "evidence": [
+    "37",
+    "AST-matched",
+    "function_item"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import lens\n\nresp = lens.grep_ast(query=\"(function_item (visibility_modifier) name: (identifier) @name)\", lang=\"rust\")\nrows = resp.get(\"matches\", resp) if isinstance(resp, dict) else resp\n\ncount = 0\nfor h in rows:\n    path = h.get(\"path\", \"\")\n    if path.endswith(\".rs\"):\n        count += 1\n\nprint(f\"pub fn count in src/session (AST-matched): {count}\")\n"
+  },
+  "notes": "Derived 2026-07-20 by two independent methods. Method 1: mcp__lens__lens_grep_ast with the raw tree-sitter query `(function_item (visibility_modifier) name: (identifier) @name)` over src/session returns 37 matches spanning all 6 files: extract.rs — extract_tool_events L83, extract_user_events L269 (2); hook.rs — run_cli L213 (1); install.rs — run_cli L39, install L145, uninstall L208, context_mode_present L258, purge_context_mode L298, status L368 (6); mod.rs — new L47, attribute L56, now_ts L71, resolve_data_dir L81, snapshot_budget L92, record_memory L107, query_memory L154 (7); snapshot.rs — build_snapshot L48, render_project_memory L331 (2); store.rs — open L53, ensure_session L125, insert_events L139, events_for_session L182, resolved_events_for_session L200, count_events_for_project L205, clear_project_events L216, upsert_resume L240, increment_compact_count L260, activity L279, activity_range L285, distinct_projects L333, event_buckets L347, compact_count L382, get_resume L395, mark_resume_consumed L413, claim_latest_unconsumed_resume L425, project_memory L457, project_memory_summary L472 (19). Total 2+1+6+7+2+19=37. Method 2 (independent manual cross-check): read the lens_skeleton dump of every file in src/session and hand-counted each `pub fn` line appearing OUTSIDE a `#[cfg(test)] mod ...` block (e.g. mod.rs's `mod memory_tests` starting at L193 contains zero `pub fn`, only private `#[test]` helpers) — the by-file tally matches Method 1 exactly, file for file. The AST query is structurally immune to a real textual false-positive this subsystem contains: hook.rs's own test fixtures embed the literal substring `pub fn` inside string literals used as fixture source (e.g. `\"pub fn one() -> i32 { 2 }\\n\"` written to a temp file at hook.rs:1094 and again at hook.rs:1098) — a plain text grep for `pub fn` would over-count by matching those string contents; the AST query correctly skips them because they are `string_literal` nodes, not `function_item` nodes."
+}

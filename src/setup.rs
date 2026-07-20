@@ -238,6 +238,12 @@ fn install_self(bin_dir: &Path) -> Result<PathBuf> {
 
 /// `claude mcp add lens --scope user -- <bin>`. `Ok(true)` if newly added, `Ok(false)`
 /// if it was already registered, `Err` if `claude` couldn't run at all.
+///
+/// No `--cwd`/`--env` here on purpose: the server self-resolves its repo root at spawn
+/// time (`server::resolve_repo_root`: `$LENS_DIR` > `$CLAUDE_PROJECT_DIR` > nearest
+/// `.git` ancestor > cwd). `$CLAUDE_PROJECT_DIR` is how Claude Code's own env already
+/// flows through to the spawned server at runtime, so no explicit registration is
+/// needed for that branch either.
 fn register_mcp(bin: &Path) -> Result<bool> {
     let out = Command::new("claude")
         .args(["mcp", "add", "lens", "--scope", "user", "--"])

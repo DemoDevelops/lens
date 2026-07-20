@@ -19,12 +19,12 @@ Per function (mean over K=3, functions with tagged tasks):
 | fn | n | tokens (lens/vanilla) | accuracy | time (lens/vanilla) |
 | :- | -: | :- | :- | :- |
 | `lens_search` | 8 | 175k / 336k (**-48%**) | 96% / 96% | 5.9s / 13.5s (**-56%**) |
-| `lens_path` | 1 | 134k / 566k (**-76%**) | 100% / 100% | 6.8s / 29.3s (**-77%**) |
-| `lens_run_file` | 2 | 243k / 378k (**-36%**) | **100% / 83%** | 13.6s / 16.6s (-19%) |
-| `lens_run` | 2 | 570k / 760k (**-25%**) | 33% / 50% | 69.3s / 74.5s (-7%) |
-| `lens_links` | 2 | 639k / 687k (-7%) | 100% / 100% | 76.6s / 43.9s (+74% slower) |
+| `lens_graph` (path) | 1 | 134k / 566k (**-76%**) | 100% / 100% | 6.8s / 29.3s (**-77%**) |
+| `lens_run` (file) | 2 | 243k / 378k (**-36%**) | **100% / 83%** | 13.6s / 16.6s (-19%) |
+| `lens_run` (script) | 2 | 570k / 760k (**-25%**) | 33% / 50% | 69.3s / 74.5s (-7%) |
+| `lens_graph` (neighborhood) | 2 | 639k / 687k (-7%) | 100% / 100% | 76.6s / 43.9s (+74% slower) |
 
-Honest reading of the weak rows: `lens_links` reaches parity accuracy but pays ~2x wall-clock on one "exactly N transitive callers, excluding tests" task, where the model re-verifies every graph answer against source even though nodes carry prod/test/bench labels; and the darkroom (`lens_run`) rows are n=2 with one task both arms score 0 on. `lens_symbol`, `lens_find`, `lens_skeleton`, `lens_overview`, and `lens_grep_ast` have no tagged agentic tasks yet and are absent from this table, not hidden.
+Honest reading of the weak rows: `lens_graph` (neighborhood) reaches parity accuracy but pays ~2x wall-clock on one "exactly N transitive callers, excluding tests" task, where the model re-verifies every graph answer against source even though nodes carry prod/test/bench labels; and the darkroom (`lens_run`) rows are n=2 with one task both arms score 0 on. `lens_skeleton`, `lens_overview`, and `lens_grep_ast` have no tagged agentic tasks yet and are absent from this table, not hidden.
 
 Committed record: `benchmarks/accuracy/results/agentic/real-sonnet.json` (this table), `benchmarks/accuracy/results/agentic/real.json` (the haiku K=3 dev-tier record the harness merges into during development).
 

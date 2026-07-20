@@ -1,8 +1,8 @@
 //! read_overview: Nth hand-Read before any map → lens_overview nudge. Filled by T6.
 
 /// Default Nth-read threshold: after this many code-file Reads in a session with
-/// no intervening `lens_map`/`lens_overview` call, [`nudge`] is due. T8 supplies
-/// the live count from a throttle counter reset by any `lens_map`/`lens_overview`
+/// no intervening `lens_overview` call, [`nudge`] is due. T8 supplies
+/// the live count from a throttle counter reset by any `lens_overview`
 /// call (this rail's prefix is `read_overview` → `rovr`, per the contract in
 /// [`super`]).
 const OVERVIEW_THRESHOLD_DEFAULT: u64 = 5;
@@ -24,12 +24,12 @@ pub fn threshold() -> u64 {
         .unwrap_or(OVERVIEW_THRESHOLD_DEFAULT)
 }
 
-/// Deny reason for the rail's steering arm — the `lens_overview` guidance
-/// (or `lens_map` first if the graph is empty), plus the one-shot promise:
-/// the deny resets the read counters, so the verbatim retry always passes.
+/// Deny reason for the rail's steering arm — the `lens_overview` guidance,
+/// plus the one-shot promise: the deny resets the read counters, so the
+/// verbatim retry always passes.
 pub fn deny_reason(reads_before_map: u64) -> String {
     format!(
-        "You've read {reads_before_map} files this session with no repo map — get the map in one call instead of reading file after file: lens_overview() returns a token-budgeted, PageRank-ranked map of the whole codebase (run lens_map() first if the graph hasn't been built yet). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_overview,lens_map,lens_symbol\"). This fires once per session — the same Read will pass if you re-run it verbatim."
+        "You've read {reads_before_map} files this session with no repo map — get the map in one call instead of reading file after file: lens_overview() returns a token-budgeted, PageRank-ranked map of the whole codebase. If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_overview,lens_symbol\"). This fires once per session — the same Read will pass if you re-run it verbatim."
     )
 }
 

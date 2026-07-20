@@ -38,7 +38,7 @@ One line downloads the binary, registers the MCP server, installs the session ho
 curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh
 ```
 
-Restart Claude Code, then verify with the `lens_stats` tool. Supported: macOS (arm64, x64), Linux (x64, arm64).
+Restart Claude Code. Supported: macOS (arm64, x64), Linux (x64, arm64).
 
 Routing defaults to the aggressive `full` level: WebFetch and noisy commands are redirected into the darkroom, plus RTK shell compression. For nudges-only (encourages the lens tools, never denies WebFetch or rewrites commands), install with `… | LENS_ROUTING=nudge sh`, or change it anytime with `lens setup --routing <off|nudge|steer|wrap|full>`.
 
@@ -56,24 +56,39 @@ Update later with `lens update`: it checks the public GitHub release (no auth), 
 
 ## Tools
 
-| Tool | What it does |
-| :- | :- |
-| `lens_run` | Run a script in a darkroom; only stdout returns to context. Best for log parsing, data aggregation, large file analysis. |
-| `lens_run_file` | Same as `lens_run` but receives a file path as its first argument. |
-| `lens_skeleton` | Show a source file's structure: signatures + nesting with line numbers, bodies elided to `…`. Full text recoverable via `lens_recall`. |
-| `lens_index` | Index a directory for full-text search. Run once per repo. |
-| `lens_search` | BM25F search with a proximity rerank. Every hit cites its match line and lists the definitions its chunk contains, so "which function does X" is often answered by the hit itself. |
-| `lens_grep_ast` | Structural search via a tree-sitter query: matches syntax, not text (real `.unwrap()` calls, not comments). |
-| `lens_map` | Parse the repo into a symbol graph (functions, types, modules, relationships). Run once per repo. |
-| `lens_overview` | Token-budgeted map (~2k tokens) of the repo's symbols: a knapsack packs the highest-importance subset that fits, so load-bearing hubs survive. Optional query focus. |
-| `lens_symbol` | Find symbols by name and see their immediate connections, labeled prod/test/bench so test callers are excludable without opening files. |
-| `lens_find` | Find symbols by natural-language description. |
-| `lens_links` | Expand a symbol's neighborhood N hops out, directed: fan-in (callers), fan-out (callees), or both. |
-| `lens_path` | Shortest call/import path between two symbols over directed edges: answers "does A reach B", not just "are they connected". |
-| `lens_memory_record` | Record durable project memory (decisions, constraints, rules) that survives across sessions. |
-| `lens_memory_query` | Query that memory, ranked by relevance. |
-| `lens_recall` | Recover the full content behind a `retrieve_ref` from any other tool. |
-| `lens_stats` | Show token savings and index/graph sizes for this session. |
+| Tool | Purpose |
+| --- | --- |
+| `lens_run` | Run code in a darkroom; only stdout/stderr returns. Compose with `import lens` (python) or `import('./lens.mjs')` (js) to query the repo. |
+| `lens_skeleton` | Show a file's structure: signatures and nesting with line numbers, bodies elided to `…`. Full text via `lens_recall`. |
+| `lens_recall` | Recover full content behind a `retrieve_ref` (reverses truncation). Optional `offset`, `limit`, `grep` to slice large refs. |
+| `lens_search` | Full-text search with BM25 ranking. Returns snippets at match line with attached definition names. |
+| `lens_symbol` | Find symbols by name substring; returns connections (calls, contains, imports). Falls back to meaning-based match. |
+| `lens_graph` | Graph connections: with `to`, shortest directed path (does A reach B?); without `to`, neighborhood walk within `depth` hops. |
+| `lens_overview` | Token-budgeted repo overview: most structurally important symbols (PageRank-ranked) with callers/callees. |
+| `lens_grep_ast` | Structural search via tree-sitter query: matches syntax, not text (real `.unwrap()` calls, no comment false positives). |
+| `lens_memory_record` | Save durable project memory (decisions, constraints, rules) that outlives the session. |
+| `lens_memory_query` | Query durable memory, ranked by relevance. Omit query for full list. |
+
+### Composing in the darkroom
+
+Inside your darkroom script, compose queries against the live repo without paying for raw bytes:
+
+```python
+import lens
+
+# Transitive callers of a function
+callers = lens.callers("handle_search", depth=2)
+for node in callers["nodes"]:
+    print(f"{node['name']} ({node['file']}:{node['line']})")
+
+# Search + skeleton to find and summarize a concept
+hits = lens.search("retry logic", limit=5)
+for hit in hits["hits"]:
+    skeleton = lens.skeleton(hit["path"])
+    print(f"{hit['path']}: {skeleton['skeleton'][:200]}")
+```
+
+The full API (python/js): `search`, `symbol`, `callers`, `callees`, `path`, `skeleton`, `grep_ast`, `overview`, `recall`. Each returns JSON; stderr on error.
 
 ### Examples
 
@@ -90,7 +105,7 @@ print(dict(c))                      # → {'ERROR': 12, 'WARN': 73, 'INFO': 4120
 ```
 
 ```python
-# lens_run_file: the file path arrives as argv[1]; print only the shape
+# lens_run(path=...): the file path arrives as argv[1]; print only the shape
 import sys, csv
 rows = list(csv.DictReader(open(sys.argv[1])))
 print(len(rows), "rows;", "cols:", list(rows[0])[:5])   # the CSV never enters context
@@ -99,7 +114,6 @@ print(len(rows), "rows;", "cols:", list(rows[0])[:5])   # the CSV never enters c
 **Search.** Full-text over the repo, ranked snippets instead of whole files:
 
 ```text
-lens_index(path=".")                            # once per repo
 lens_search(queries=["where is the routing level parsed",
                      "deny WebFetch under steering"])
 # → src/routing/mod.rs:52    Level::parse(s) { "nudge" => …, "full" => … }
@@ -109,18 +123,13 @@ lens_search(queries=["where is the routing level parsed",
 **Graph.** Structure and relationships without reading files:
 
 ```text
-lens_map(path=".")                              # once per repo → .lens/graph.json
 lens_symbol(name="install")                     # find a symbol + its callers/callees
-lens_find(query="dedup rtk hooks")              # NL → rtk::install::dedup_rtk_hooks
-lens_path(from="run_cli", to="purge_context_mode")   # does run_cli reach it? (directed)
-lens_links(node_id="<id>", depth=2, direction="callers")   # transitive fan-in
 ```
 
 **Recover & observe.**
 
 ```text
 lens_recall(ref="<retrieve_ref from a truncated result>")   # full content, losslessly
-lens_stats()                                    # tokens saved + index/graph sizes this session
 ```
 
 ## Dashboard
@@ -155,11 +164,11 @@ The `$` headline prices the measured tokens-saved at the model input rate (`--ra
 
 lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio server** (the `lens_*` tools, `src/server.rs`) and as **hook handlers** the same binary runs on Claude Code's PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, and SessionStart events. Per-repo state lives in `.lens/` (the symbol graph, the FTS index, and the reversible blob store); the managed RTK binary lives in `~/.lens/bin`.
 
-**Darkroom (`lens_run` / `lens_run_file`).** Your script runs in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly. The subprocess gives you process isolation and a timeout, not an OS sandbox (see [Security](#security)).
+**Darkroom (`lens_run`).** Run your script in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly. The subprocess gives you process isolation and a timeout, not an OS sandbox (see [Security](#security)).
 
-**Search (`lens_index` / `lens_search`).** `lens_index` builds a full-text index over the repo, chunked at tree-sitter AST boundaries so a hit's chunk is a whole function, not a slice through two. `lens_search` ranks with BM25F fused with graph importance, re-ranks by term proximity, and returns snippets anchored on the match line with the chunk's definition names attached. Natural-language queries get their own ranking profile so prose words that collide with symbol names can't hijack the results. Batch several questions in one call to save round-trips.
+**Search (`lens_search`).** Automatic index builds and updates (`lens warmup` runs it once; files are indexed as needed). BM25F ranking with proximity re-rank over AST-bounded chunks returns hits with match line and definition names attached.
 
-**Graph (`lens_map` / `lens_symbol` / `lens_find` / `lens_links` / `lens_path`).** `lens_map` parses [supported files](SUPPORTED.md) with tree-sitter and builds a deterministic structural graph (functions, types, modules, and their calls/imports/contains edges) in `.lens/graph.json`. Edges are directed, so "who calls X", "what does X reach", and "how does A get to B" are graph lookups instead of file reads, walkable in either direction. When a result contains test or bench code, every node in it carries a prod/test/bench label (absent labels mean all-production), so "production callers of X" never requires opening files to sort test code out.
+**Graph (`lens_symbol` / `lens_graph`).** Automatic graph builds and updates. Queries include [supported files](SUPPORTED.md) with tree-sitter finding symbols, their connections, and paths between them without opening files.
 
 **Warmup (`lens warmup` / `lens watch`).** The graph and index build lazily on the first tool call that needs them. To pay that cost up front, run `lens warmup [path]` before you start; to keep both fresh as you edit, run `lens watch [path]` (debounced re-index on file changes). Both write into the same `.lens/` dir the server reads, so a running server picks up the changes on its next query with no restart.
 

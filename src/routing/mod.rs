@@ -210,7 +210,7 @@ pub struct RouteCtx<'a> {
     /// True when RTK owns Bash (see [`crate::rtk::rtk_active`]); makes [`route`]
     /// pass Bash through so RTK's hook and lens's never double-wrap.
     pub rtk_active: bool,
-    /// Code-file Reads this session since the last `lens_map`/`lens_overview`
+    /// Code-file Reads this session since the last `lens_overview`
     /// call — the read-overview (rovr) rail's counter. Fed by the session hook
     /// from the `reads-since-map` throttle counter on Read events; 0 at every
     /// other construction site.
@@ -237,11 +237,11 @@ pub const AGENT_INJECT_REASON: &str = "lens routing: injected the tool-selection
 /// Shown when [`inspect_escalation`] denies a Read or Grep after too many
 /// consecutive manual code lookups with no intervening lens tool call (Serena
 /// `remind` pattern). Factual, maps each intent to its lens tool — naming BOTH
-/// `lens_skeleton` (structure) and `lens_run_file` (analysis) for file reads,
-/// and `lens_path` for reachability (directed since the traversal merge) — and
+/// `lens_skeleton` (structure) and `lens_run` (analysis) for file reads,
+/// and `lens_graph` for reachability (directed since the traversal merge) — and
 /// states that the counter was reset so the caller isn't walled off if it
 /// still needs the plain tool.
-pub const READ_DENY_REASON: &str = "Too many consecutive Read/Grep calls on code without any lens tool. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_links. A file's structure without the bodies: lens_skeleton(path), with include_bodies for the functions you need. Analyzing a file's contents (count, extract, summarize): lens_run_file(path, language, code) — only what you print returns. Or trace reachability with lens_path(from, to) — edges are directed, so it answers whether A actually reaches B. The counter was reset — the same call will pass now if you still need it.";
+pub const READ_DENY_REASON: &str = "Too many consecutive Read/Grep calls on code without any lens tool. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_graph(node). A file's structure without the bodies: lens_skeleton(path), with include_bodies for the functions you need. Analyzing a file's contents (count, extract, summarize): lens_run(path, language, code) — only what you print returns. Or trace reachability with lens_graph(node, to) — edges are directed, so it answers whether A actually reaches B. The counter was reset — the same call will pass now if you still need it.";
 
 /// One-line mapping injected at UserPromptSubmit when the prompt reads as a
 /// find/trace question. First-tool choice is decided by what's in context
@@ -249,7 +249,7 @@ pub const READ_DENY_REASON: &str = "Too many consecutive Read/Grep calls on code
 /// SessionStart block alone doesn't overcome the Grep prior (measured:
 /// find/trace tasks stayed Grep-first with the block in place). This lands at
 /// the decision point itself.
-pub const PROMPT_INTENT_NUDGE: &str = "<lens_hint>\n  Find/trace question — answer it from the index/graph, not by grepping: lens_search(queries: [\"...\"]) or lens_symbol(name) to locate; lens_links for callers/callees; lens_path for how A reaches B; lens_skeleton(path) for one file's shape. Grep's line hits pull a whole-file Read per hit — that chain costs more than one lens call.\n</lens_hint>";
+pub const PROMPT_INTENT_NUDGE: &str = "<lens_hint>\n  Find/trace question — answer it from the index/graph, not by grepping: lens_search(queries: [\"...\"]) or lens_symbol(name) to locate; lens_graph for callers/callees or how A reaches B; lens_skeleton(path) for one file's shape. Grep's line hits pull a whole-file Read per hit — that chain costs more than one lens call.\n</lens_hint>";
 
 /// Shown when the FIRST Grep after a find/trace-shaped prompt is denied (the
 /// `grep-first` marker armed at UserPromptSubmit, consumed here). Measured:
@@ -257,12 +257,12 @@ pub const PROMPT_INTENT_NUDGE: &str = "<lens_hint>\n  Find/trace question — an
 /// every prompt-level hint — this is the Serena FORBIDDEN pattern applied at
 /// the exact decision point. One-shot: the marker is consumed before the deny
 /// returns, so the same Grep passes on retry.
-pub const GREP_FIRST_DENY_REASON: &str = "This prompt is a find/trace question — answer it with one lens call instead of a grep chain. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_links. How does A reach B: lens_path. A file's shape: lens_skeleton(path). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_search,lens_symbol,lens_links,lens_path,lens_skeleton\"). This fires once per prompt — the same Grep will pass if you re-run it, but the lens call answers in one step.";
+pub const GREP_FIRST_DENY_REASON: &str = "This prompt is a find/trace question — answer it with one lens call instead of a grep chain. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). What calls X, what does X call: lens_graph(node). How does A reach B: lens_graph(node, to). A file's shape: lens_skeleton(path). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_search,lens_symbol,lens_graph,lens_skeleton\"). This fires once per prompt — the same Grep will pass if you re-run it, but the lens call answers in one step.";
 /// Shown when a Grep whose `path` spans a directory or the whole repo is denied
 /// under the grep-scope gate (`LENS_GREP_SCOPE_DENY`, default ON — see
 /// [`grep_scope_deny_enabled`]). Same shape as [`GREP_FIRST_DENY_REASON`] but
 /// keyed on the call's scope rather than the prompt's phrasing.
-pub const GREP_SCOPE_DENY_REASON: &str = "This grep spans a directory or the whole repo — one lens call answers it without the grep→Read chain. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name). Only know what it does, not its exact name: lens_find(query=\"...\"). What calls X, what does X call: lens_links. How does A reach B: lens_path. A file's shape: lens_skeleton(path). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_search,lens_symbol,lens_find,lens_links,lens_path,lens_skeleton\"). This fires at most once per prompt — the same Grep will pass if you re-run it.";
+pub const GREP_SCOPE_DENY_REASON: &str = "This grep spans a directory or the whole repo — one lens call answers it without the grep→Read chain. Where is X / where does an idea appear: lens_search(queries: [...]) or lens_symbol(name), which also falls back to a meaning match when nothing matches by name. What calls X, what does X call: lens_graph(node). How does A reach B: lens_graph(node, to). A file's shape: lens_skeleton(path). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_search,lens_symbol,lens_graph,lens_skeleton\"). This fires at most once per prompt — the same Grep will pass if you re-run it.";
 
 /// Whether a user prompt reads as a find/trace question worth the
 /// [`PROMPT_INTENT_NUDGE`]. High-precision substrings only — firing on every
@@ -475,7 +475,7 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             }
             // Reroute rail 1a (gsym) DENY: a Grep whose pattern is itself a
             // symbol lookup — a definition shape (`fn foo`) or a bare identifier
-            // — is denied once per session toward lens_symbol/lens_find.
+            // — is denied once per session toward lens_symbol.
             // Kill-switched by LENS_GREP_SYMBOL_DENY (default ON) with the scope
             // deny's gates, plus `graph_resolves` so a lookup that would come up
             // empty in the graph never gets denied toward it. The `nudge_once`
@@ -547,7 +547,7 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
         }
         // Reroute rail 2a (elink): an Edit that touches a symbol's DECLARATION
         // line in a CODE file, when that symbol has >=K callers in the graph,
-        // is routed toward lens_links so the blast radius is visible before the
+        // is routed toward lens_graph so the blast radius is visible before the
         // signature changes. While steering the deny arm (LENS_EDIT_LINKS_DENY)
         // blocks it AT MOST ONCE PER SYMBOL PER SESSION: the `elink:{sym}`
         // marker is set before the deny returns, so the verbatim retry — and
@@ -598,7 +598,7 @@ pub fn post_route(_tool: &str, _tool_response: &str, _ctx: &RouteCtx) -> Decisio
 /// tools are unreachable inside it) plus a one-line intent→tool map. The full
 /// `session_block` prose stays SessionStart-only — a sub-agent prompt is task
 /// text, not a place for a page of guidance.
-const AGENT_TOOL_BLOCK: &str = "<lens_tools>\n  Load the lens tools once before first use: ToolSearch(query: \"select:lens_run,lens_run_file,lens_search,lens_index,lens_map,lens_symbol,lens_links,lens_path,lens_recall,lens_skeleton,lens_overview,lens_find,lens_grep_ast\")\n  Map: where text/ideas appear — lens_search(queries: [...]); exact symbol — lens_symbol(name); callers/callees — lens_links; does A reach B — lens_path; one file's shape — lens_skeleton(path); repo map — lens_overview; behavior-not-name — lens_find; syntax shape — lens_grep_ast; compute over data or a file — lens_run / lens_run_file; recover offloaded output — lens_recall.\n</lens_tools>";
+const AGENT_TOOL_BLOCK: &str = "<lens_tools>\n  Load the lens tools once before first use: ToolSearch(query: \"select:lens_search,lens_symbol,lens_graph,lens_skeleton,lens_overview,lens_recall,lens_run,lens_grep_ast,lens_memory_query,lens_memory_record\")\n  Map: where text/ideas appear — lens_search(queries: [...]); exact symbol or behavior — lens_symbol(name); callers/callees or neighborhood — lens_graph(node); does A reach B — lens_graph(node, to); one file's shape — lens_skeleton(path); repo map — lens_overview; syntax shape — lens_grep_ast; compute over data or a file — lens_run(code); inside scripts, compose with lens.symbol/callers/path/skeleton/grep_ast/search/overview; recover offloaded output — lens_recall.\n</lens_tools>";
 
 /// Inject the compact lens tool block ([`AGENT_TOOL_BLOCK`]) into a sub-agent's
 /// prompt. No throttle: each sub-agent is a fresh context that needs its own
@@ -696,7 +696,7 @@ pub fn read_overview_deny_enabled() -> bool {
 pub fn bash_grep_deny_enabled() -> bool {
     std::env::var("LENS_BASH_GREP_DENY").map_or(true, |v| v.trim() != "0")
 }
-/// Bounded-Read→lens_run_file deny arm: `LENS_READ_RUNFILE_DENY=0` disables it.
+/// Bounded-Read→lens_run deny arm: `LENS_READ_RUNFILE_DENY=0` disables it.
 pub fn read_runfile_deny_enabled() -> bool {
     std::env::var("LENS_READ_RUNFILE_DENY").map_or(true, |v| v.trim() != "0")
 }
@@ -758,12 +758,12 @@ pub(crate) fn rskel_edit_exempt(data_dir: &Path, session_id: &str) -> bool {
     throttle::armed(data_dir, session_id, "edit-intent")
 }
 
-/// Deny reason for the bounded-Read→`lens_run_file` arm: names the exact call
+/// Deny reason for the bounded-Read→`lens_run` arm: names the exact call
 /// with a ready-to-adapt analysis sketch, and states the per-file one-shot so
 /// the model knows the verbatim retry passes.
 fn read_runfile_reason(path: &str) -> String {
     format!(
-        "This bounded Read pulls a slice of {path} into context to analyze by eye — derive the answer in the darkroom instead: lens_run_file(path: \"{path}\", language: \"python\", code: \"import sys; text = open(sys.argv[1]).read(); print(...)\") — your code gets the file path as argv[1] and only what you print returns. Just need the file's structure? lens_skeleton(path=\"{path}\"). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_run_file,lens_skeleton,lens_recall\"). This fires once per file — the same Read will pass if you re-run it."
+        "This bounded Read pulls a slice of {path} into context to analyze by eye — derive the answer in the darkroom instead: lens_run(path: \"{path}\", language: \"python\", code: \"import sys; text = open(sys.argv[1]).read(); print(...)\") — your code gets the file path as argv[1] and only what you print returns. Just need the file's structure? lens_skeleton(path=\"{path}\"). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_run,lens_skeleton,lens_recall\"). This fires once per file — the same Read will pass if you re-run it."
     )
 }
 
@@ -808,7 +808,7 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
     // Reroute rail 2c (rovr) DENY: while steering, the Nth code Read with no
     // repo map yet is denied once per session toward lens_overview
     // (kill-switch LENS_READ_OVERVIEW_DENY). The count is fed by the hook via
-    // `ctx.reads_since_map`, zeroed by any lens_map/lens_overview call.
+    // `ctx.reads_since_map`, zeroed by any lens_overview call.
     // `nudge_once` runs LAST so a blocked gate never spends the one-shot; on a
     // deny the lookup counter and the reads-since-map counter are reset, and —
     // when this call is also runfile-shaped — the runfile arm's per-file
@@ -831,7 +831,7 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
         }
         return Decision::Deny(reroute::read_overview::deny_reason(ctx.reads_since_map));
     }
-    // Bounded-Read→lens_run_file DENY: an offset/limit Read of a code file is
+    // Bounded-Read→lens_run DENY: an offset/limit Read of a code file is
     // analysis work — its correct target is the darkroom, not a slice-by-eye.
     // Kill-switch LENS_READ_RUNFILE_DENY; per-FILE one-shot
     // (`read-runfile:{path}`), so a second bounded Read of the same file always
@@ -1032,11 +1032,11 @@ fn bash_grep_deny(segs: &[String], ctx: &RouteCtx) -> Option<Decision> {
 
 /// Deny reason for a broad shell grep: the shape of [`GREP_SCOPE_DENY_REASON`]
 /// with the actual pattern substituted into a ready-to-paste `lens_search`
-/// call, plus the `lens_find` secondary for when the term itself is the
-/// unknown.
+/// call, plus `lens_symbol`'s meaning-match fallback for when the term itself
+/// is the unknown.
 fn bash_grep_broad_reason(pattern: &str) -> String {
     format!(
-        "This shell grep spans a directory or the whole repo — one lens call answers it without the grep→Read chain: lens_search(queries: [\"{pattern}\"]) returns ranked snippets (batch several questions into the array). Know the exact symbol name? lens_symbol(name=\"{pattern}\"). Only know what it does, not its name? lens_find(query=\"...\"). If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_search,lens_symbol,lens_find\"). This fires at most once per prompt — the same command will pass if you re-run it."
+        "This shell grep spans a directory or the whole repo — one lens call answers it without the grep→Read chain: lens_search(queries: [\"{pattern}\"]) returns ranked snippets (batch several questions into the array). Know the exact symbol name? lens_symbol(name=\"{pattern}\"), which also falls back to a meaning match when nothing matches by name. If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_search,lens_symbol\"). This fires at most once per prompt — the same command will pass if you re-run it."
     )
 }
 
@@ -1474,18 +1474,18 @@ const BLOCK_HEAD: &str = r##"<context_window_protection>
   </why>
   <loading_lens_tools>
     lens's tools may start out unregistered in this harness — their schemas aren't loaded, so a direct call errors ("tool not found" or a validation error). Register them once, before your first lens_* call:
-    ToolSearch(query: "select:lens_run,lens_run_file,lens_search,lens_index,lens_map,lens_symbol,lens_links,lens_path,lens_recall,lens_skeleton,lens_overview,lens_find,lens_grep_ast")
+    ToolSearch(query: "select:lens_search,lens_symbol,lens_graph,lens_skeleton,lens_overview,lens_recall,lens_run,lens_grep_ast,lens_memory_query,lens_memory_record")
     If a lens_* call later comes back not-found, re-run that ToolSearch and retry instead of falling back to Bash/Read/Grep.
   </loading_lens_tools>
   <which_tool>
-    - How the code fits together (callers, callees, where a symbol is defined, how one part reaches another, imports): run lens_map once, then walk it with lens_symbol / lens_links / lens_path instead of opening file after file. lens_recall expands anything returned compacted.
-    - Where a string or idea appears across the tree: lens_index once, then lens_search(queries: [...]) — batch several questions into the array and get ranked snippets, not whole files.
-    - Turning data into an answer (filter, count, parse, reshape, summarize): lens_run(language, code) or lens_run_file(path, language, code). Only what you print returns; the inputs stay in the darkroom.
+    - How the code fits together (callers, callees, where a symbol is defined, how one part reaches another, imports): lens_graph(node) for neighborhood or lens_graph(node, to) for shortest path; expand from there with lens_symbol for details. lens_recall expands anything returned compacted.
+    - Where a string or idea appears across the tree: lens_search(queries: [...]) — batch several questions into the array and get ranked snippets, not whole files.
+    - You know the symbol's exact name: lens_symbol(name). You only know what it does, not its name: lens_symbol(query="...") for meaning-based fallback.
+    - Turning data into an answer (filter, count, parse, reshape, summarize): lens_run(language, code). Only what you print returns; the inputs stay in the darkroom. Compose in-script: inside Python/JS, import lens and call lens.search/lens.symbol/lens.callers/lens.path/lens.skeleton/lens.grep_ast/lens.overview/lens.recall.
     - Recovering something offloaded or truncated: lens_recall(ref).
-    - You know the symbol's exact name: lens_symbol. You only know what it does, not its name: lens_find. You have a syntax-shape pattern (a call, a signature shape) rather than a name or plain-text idea: lens_grep_ast.
-    - Whole-repo orientation — how the codebase is put together before you've read anything: lens_overview. A digest is already pushed into context at session start; treat that as the first call's answer and expand from it with lens_symbol / lens_links rather than re-running lens_overview.
+    - Whole-repo orientation — how the codebase is put together before you've read anything: lens_overview. A digest is already pushed into context at session start; treat that as the first call's answer and expand from it with lens_symbol / lens_graph rather than re-running lens_overview.
     - One file's shape — signatures and structure without the bodies: lens_skeleton(path); pass include_bodies: ["the_fn"] to get back the full text of just the functions you need, in the same call.
-    - Worked examples: `lens_grep_ast(language="rust", query="(impl_item type: (type_identifier) @t (#eq? @t \"Forge\"))")` finds all impl blocks matching a syntax shape, not text. `lens_find(query="where sessions are persisted")` locates a symbol when you know its behavior but not its name. `lens_links(node_id)` shows all callers and callees before you change a declaration. `lens_path(from="route_inner", to="bump_stat")` traces how one symbol reaches another.
+    - Syntax-shape patterns (a call, a signature shape): lens_grep_ast(language="rust", query="(impl_item type: (type_identifier) @t (#eq? @t \"Forge\"))") finds all matching blocks, not text. Or compose in-script: lens.grep_ast(pattern="...", query="...", lang="...").
   </which_tool>
   <when_plain_tools_win>"##;
 
@@ -1493,7 +1493,7 @@ const BULLET_BASH: &str = "\n    - Bash: keep it for commands that change someth
 
 const BULLET_READ: &str = "\n    - Need to understand a file? lens_skeleton(path) first; then lens_skeleton(path, include_bodies: [\"the_fn\"]) for the one body you need — not a second Read. Read is for when you are about to Edit (Edit must match exact bytes). Already Read the full file this session? Use what you have — do not re-analyse it with lens tools.\n    - Common rationalizations that lead to waste: \"the file is small\", \"I already know the path\", \"one Read beats two lens calls\" — measured across sessions these produce whole-file dumps that tax every later turn.";
 
-const BULLET_SEARCH: &str = "\n    - Finding or tracing something? Map the intent, don't grep: where is X / where does an idea appear — lens_search(queries: [...]) or lens_symbol(name); what calls X / what does X call — lens_links; how does A reach B — lens_path; know the behavior but not the name — lens_find. Grep's line hits pull in a whole-file Read per hit; that chain is the drift these replace. \"A quick grep is lighter\" is the rationalization that starts it — one lens_search is the lighter call.";
+const BULLET_SEARCH: &str = "\n    - Finding or tracing something? Map the intent, don't grep: where is X / where does an idea appear — lens_search(queries: [...]) or lens_symbol(name); what calls X / what does X call — lens_graph(node, direction=\"callees\") / lens_graph(node, direction=\"callers\"); how does A reach B — lens_graph(from, to). Grep's line hits pull in a whole-file Read per hit; that chain is the drift these replace. \"A quick grep is lighter\" is the rationalization that starts it — one lens_search is the lighter call.";
 
 const BULLET_WEBFETCH: &str = "\n    - WebFetch is off here: pull a URL with lens_run (python), keep only the part of the response you need, and print that. The full page stays in the darkroom, retrievable via lens_recall.";
 
@@ -2091,7 +2091,7 @@ mod tests {
             "fix the failing test in throttle.rs",
             "bump the version and tag the release",
             "add a --runs flag",
-            "where is lens_symbol's handler? use lens_links after", // names a lens tool: user is steering
+            "where is lens_symbol's handler? use lens_graph after", // names a lens tool: user is steering
         ] {
             assert!(!prompt_wants_find_trace(p), "should not match: {p}");
         }
@@ -2116,9 +2116,8 @@ mod tests {
         match route("Read", &code, &ctx) {
             Decision::Deny(reason) => assert!(
                 reason.contains("lens_search")
-                    && reason.contains("lens_links")
-                    && reason.contains("lens_run_file")
-                    && reason.contains("lens_path"),
+                    && reason.contains("lens_graph")
+                    && reason.contains("lens_run"),
                 "deny reason maps find/trace intents: {reason}"
             ),
             other => panic!("4th mixed lookup should deny, got {other:?}"),
@@ -2594,7 +2593,7 @@ mod tests {
     #[test]
     fn runfile_deny_fires_once_per_file_then_passes() {
         // H5: an offset/limit Read of a code file denies once toward
-        // lens_run_file; the second bounded Read of the SAME file passes —
+        // lens_run; the second bounded Read of the SAME file passes —
         // never a hard wall.
         let _guard = READ_DENY_ENV_LOCK.lock().unwrap();
         let d = tempdir().unwrap();
@@ -2603,10 +2602,10 @@ mod tests {
         let ti = json!({"file_path": "src/widget.rs", "offset": 10, "limit": 40});
         match route("Read", &ti, &ctx) {
             Decision::Deny(reason) => assert!(
-                reason.contains("lens_run_file(path: \"src/widget.rs\"")
+                reason.contains("lens_run(path: \"src/widget.rs\"")
                     && reason.contains("language")
                     && reason.contains("code"),
-                "runfile deny carries the pre-filled lens_run_file sketch: {reason}"
+                "runfile deny carries the pre-filled lens_run sketch: {reason}"
             ),
             other => panic!("expected the runfile deny, got {other:?}"),
         }
@@ -2696,8 +2695,8 @@ mod tests {
         let edit_foo = json!({"file_path": "f.rs", "old_string": "fn foo(a: i32)", "new_string": "fn foo(a: i64)"});
         match route("Edit", &edit_foo, &ctx) {
             Decision::Deny(reason) => assert!(
-                reason.contains("lens_links(\"foo\")") && reason.contains("re-run it verbatim"),
-                "elink deny names lens_links and promises the retry: {reason}"
+                reason.contains("lens_graph(node=\"foo\")") && reason.contains("re-run it verbatim"),
+                "elink deny names lens_graph and promises the retry: {reason}"
             ),
             other => panic!("expected the elink deny, got {other:?}"),
         }
@@ -2835,23 +2834,35 @@ mod tests {
                     !p.contains("<context_window_protection>"),
                     "the full SessionStart prose stays out of sub-agent prompts"
                 );
-                // The one-line map names every lens tool.
+                // The one-line map names every lens tool (10 current).
                 for tool in [
                     "lens_run",
-                    "lens_run_file",
                     "lens_search",
-                    "lens_index",
-                    "lens_map",
                     "lens_symbol",
-                    "lens_links",
-                    "lens_path",
+                    "lens_graph",
                     "lens_recall",
                     "lens_skeleton",
                     "lens_overview",
-                    "lens_find",
                     "lens_grep_ast",
+                    "lens_memory_query",
+                    "lens_memory_record",
                 ] {
                     assert!(p.contains(tool), "sub-agent block names {tool}");
+                }
+                // Verify removed tools are NOT in the sub-agent block.
+                for removed in [
+                    "lens_run_file",
+                    "lens_index",
+                    "lens_map",
+                    "lens_find",
+                    "lens_links",
+                    "lens_path",
+                    "lens_stats",
+                ] {
+                    assert!(
+                        !p.contains(removed),
+                        "sub-agent block should not name removed tool {removed}"
+                    );
                 }
                 // sibling fields are untouched
                 assert_eq!(updated_input["subagent_type"], json!("Explore"));
@@ -3042,20 +3053,18 @@ mod tests {
         let b = session_block(Level::Full);
         assert!(b.starts_with("<context_window_protection>"));
         assert!(b.contains("</context_window_protection>"));
+        // Current 10-tool surface: check all are mentioned.
         for needle in [
             "lens_run",
-            "lens_index",
             "lens_search",
-            "lens_run_file",
-            "lens_map",
             "lens_symbol",
-            "lens_links",
-            "lens_path",
+            "lens_graph",
             "lens_recall",
             "lens_skeleton",
             "lens_overview",
-            "lens_find",
             "lens_grep_ast",
+            "lens_memory_query",
+            "lens_memory_record",
             "include_bodies",
             "which_tool",
             "WebFetch is off",
@@ -3065,6 +3074,18 @@ mod tests {
             "when_plain_tools_win",      // nuanced credibility
         ] {
             assert!(b.contains(needle), "session_block missing {needle:?}");
+        }
+        // Verify removed tools are NOT mentioned.
+        for removed in [
+            "lens_find",
+            "lens_index",
+            "lens_map",
+            "lens_run_file",
+            "lens_links",
+            "lens_path",
+            "lens_stats",
+        ] {
+            assert!(!b.contains(removed), "session_block still mentions removed tool {removed:?}");
         }
     }
 }

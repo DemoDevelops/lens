@@ -72,10 +72,16 @@ const MATRIX: &[(&str, Classification)] = &[
     ("lens_symbol", Classification::Covered), // def/bare-ident Grep deny (gsym)
     ("lens_grep_ast", Classification::Covered), // syntax-shaped Grep deny (gast)
     ("lens_skeleton", Classification::Covered), // whole unedited code-file Read deny (rskel)
-    ("lens_run_file", Classification::Covered), // offset/limit code-file Read deny (runfile)
     ("lens_overview", Classification::Covered), // Nth mapless Read deny (rovr)
-    ("lens_run", Classification::Covered),    // data-aggregate Bash pipeline deny (bagg)
-    ("lens_links", Classification::Covered),  // decl Edit w/ >=K callers deny (elink)
+    // 0.10.0 fold: lens_run absorbed lens_run_file, so it hosts both the
+    // data-aggregate Bash pipeline deny (bagg) and the offset/limit code-file
+    // Read deny (runfile).
+    ("lens_run", Classification::Covered),
+    // 0.10.0 fold: lens_graph absorbed lens_links + lens_path, so it hosts the
+    // decl-Edit >=K-callers deny (elink) and the consecutive-lookup escalation
+    // deny (the rails' messages are renamed by the T6 sweep; the proofs below
+    // accept either spelling so the two wave-2 tasks can land in any order).
+    ("lens_graph", Classification::Covered),
     (
         "lens_recall",
         Classification::ByConstruction(
@@ -86,15 +92,15 @@ const MATRIX: &[(&str, Classification)] = &[
     (
         "lens_index",
         Classification::ByConstruction(
-            "building the index is a one-time setup action, not a response to a misrouted \
-             Read/Grep/Bash call",
+            "no longer an MCP tool (0.10.0 fold): the literal is ensure_index's auto-build \
+             op label; building the index is inherent to the query path",
         ),
     ),
     (
-        "lens_stats",
+        "lens_map",
         Classification::ByConstruction(
-            "savings telemetry is opt-in introspection, not a target any deny rail redirects \
-             a stray tool call toward",
+            "no longer an MCP tool (0.10.0 fold): the literal is ensure_graph's auto-build \
+             op label; building the graph is inherent to the query path",
         ),
     ),
     (
@@ -109,27 +115,6 @@ const MATRIX: &[(&str, Classification)] = &[
         Classification::SessionSurface(
             "surfaced via the SessionStart guide only; standing decision bans new nudge rails \
              for the memory tools",
-        ),
-    ),
-    (
-        "lens_find",
-        Classification::SecondaryMention(
-            "named inside the broad-grep deny reason (bash-grep/grep-scope broad deny) as the \
-             fallback when the term itself is the unknown",
-        ),
-    ),
-    (
-        "lens_path",
-        Classification::SecondaryMention(
-            "named inside the consecutive-lookup escalation deny (READ_DENY_REASON) as the \
-             reachability call — directed per T4's DIRECTED verdict",
-        ),
-    ),
-    (
-        "lens_map",
-        Classification::SecondaryMention(
-            "named inside the read-overview (rovr) deny reason as the prerequisite when the \
-             graph hasn't been built yet; no rail targets lens_map on its own",
         ),
     ),
 ];
@@ -215,9 +200,12 @@ fn tool_coverage_matrix_is_exhaustive_and_proven() {
         lens::routing::throttle::bump(d.path(), "cov-search", "grep-scope");
         let input = json!({"command": "grep -rn foo src/"});
         let reason = assert_deny_or_modify_containing("Bash", &input, &ctx, "lens_search");
+        // T6 landed: the secondary suggestion is lens_symbol (whose fallback
+        // absorbed lens_find). Pinned to the folded name only, so a revert to
+        // the removed tool name fails here.
         assert!(
-            reason.contains("lens_find"),
-            "broad-grep deny (lens_search's host rail) must also mention lens_find: {reason}"
+            reason.contains("lens_symbol"),
+            "broad-grep deny must also mention the by-meaning fallback: {reason}"
         );
     }
 
@@ -260,14 +248,16 @@ fn tool_coverage_matrix_is_exhaustive_and_proven() {
         assert_deny_or_modify_containing("Read", &input, &ctx, "lens_skeleton");
     }
 
-    // ── lens_run_file: a bounded (offset/limit) code-file Read denies toward
-    //    lens_run_file (runfile) ──
+    // ── lens_run (runfile rail): a bounded (offset/limit) code-file Read denies
+    //    toward the darkroom file-analysis verb. WAVE-2 SEAM: "lens_run" is a
+    //    prefix of the pre-T6 "lens_run_file" spelling, so this needle passes
+    //    before and after the T6 rename sweep. ──
     {
         let d = tempfile::tempdir().unwrap();
         seed_index(d.path());
         let ctx = full_ctx(d.path(), "cov-runfile", 0);
         let input = json!({"file_path": "src/whatever.rs", "offset": 10, "limit": 50});
-        assert_deny_or_modify_containing("Read", &input, &ctx, "lens_run_file");
+        assert_deny_or_modify_containing("Read", &input, &ctx, "lens_run");
     }
 
     // ── lens_overview: the Nth Read this session with no lens_map/lens_overview
@@ -280,11 +270,10 @@ fn tool_coverage_matrix_is_exhaustive_and_proven() {
         seed_index(d.path());
         let ctx = full_ctx(d.path(), "cov-overview", 5); // at the default rovr threshold
         let input = json!({"file_path": "README.md"});
-        let reason = assert_deny_or_modify_containing("Read", &input, &ctx, "lens_overview");
-        assert!(
-            reason.contains("lens_map"),
-            "rovr deny (lens_overview's host rail) must also mention lens_map: {reason}"
-        );
+        // WAVE-2 SEAM: the pre-T6 rovr message also names lens_map as the
+        // prerequisite; post-fold the graph auto-builds and the T6 sweep drops
+        // that mention, so only the primary lens_overview needle is pinned here.
+        assert_deny_or_modify_containing("Read", &input, &ctx, "lens_overview");
     }
 
     // ── lens_run: a data-aggregate Bash pipeline denies toward lens_run (bagg) ──
@@ -323,12 +312,19 @@ fn tool_coverage_matrix_is_exhaustive_and_proven() {
             "old_string": "fn alpha(a: i32)",
             "new_string": "fn alpha(a: i64)",
         });
-        assert_deny_or_modify_containing("Edit", &input, &ctx, "lens_links");
+        // T6 landed: the elink rail names lens_graph. Pinned to the folded
+        // name only, so a revert to the removed tool name fails here.
+        let reason = assert_deny_or_modify_containing("Edit", &input, &ctx, "lens_");
+        assert!(
+            reason.contains("lens_graph"),
+            "elink deny must name the neighborhood verb: {reason}"
+        );
     }
 
-    // ── lens_path (SecondaryMention): the consecutive-lookup escalation deny
+    // ── lens_graph (escalation rail): the consecutive-lookup escalation deny
     //    fires on the 4th consecutive plain-text Grep with no lens tool call
-    //    in between, and names lens_path as the reachability call ──
+    //    in between, and names the reachability verb. WAVE-2 SEAM: pre-T6 that
+    //    is lens_path; the T6 sweep retargets it to lens_graph. ──
     {
         let d = tempfile::tempdir().unwrap();
         let ctx = full_ctx(d.path(), "cov-escalation", 0);
@@ -342,8 +338,8 @@ fn tool_coverage_matrix_is_exhaustive_and_proven() {
         }
         match route("Grep", &input, &ctx) {
             Decision::Deny(reason) => assert!(
-                reason.contains("lens_path"),
-                "the escalation deny (lens_path's host rail) must mention lens_path: {reason}"
+                reason.contains("lens_graph"),
+                "the escalation deny must mention the reachability verb: {reason}"
             ),
             other => panic!("expected the escalation deny on the 4th consecutive lookup, got {other:?}"),
         }

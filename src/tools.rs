@@ -25,20 +25,12 @@ pub struct ExecuteRequest {
     /// Optional data piped to the script's stdin.
     #[serde(default)]
     pub stdin: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ExecuteFileRequest {
-    /// Path to the file to analyze (relative to repo root, or absolute).
-    pub path: String,
-    /// Language to run the analysis code in: python | javascript | typescript | bash | ruby | go.
-    pub language: String,
-    /// Analysis code. It receives the file path as its first CLI argument
-    /// (python sys.argv[1] / node process.argv[2] / bash $1); only what it prints returns to context.
-    pub code: String,
-    /// Wall-clock timeout in seconds (default 30).
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
+    /// Optional file to analyze (relative to repo root, or absolute): injected as
+    /// the script's first CLI argument (python sys.argv[1] / node process.argv[2] /
+    /// bash $1), so the code can open/analyze it while only its printed output
+    /// returns — the file's contents never enter context.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -147,26 +139,16 @@ pub struct SkeletonResponse {
 }
 
 // ---------------------------------------------------------------------------
-// lens_index / lens_search (full-text)
+// lens_search (full-text; the index itself is auto-ensured per query)
 // ---------------------------------------------------------------------------
-
-fn default_true() -> bool {
-    true
-}
 
 fn default_limit_per_query() -> usize {
     5
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct IndexRequest {
-    /// File or directory to index.
-    pub path: String,
-    /// Recurse into directories (default true). Ignored for single files.
-    #[serde(default = "default_true")]
-    pub recursive: bool,
-}
-
+/// Summary of an index build. No MCP tool takes an index request anymore
+/// (`ensure_index` auto-builds per query); this is the engine-level response
+/// shape `index::Index::index_path` still returns.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct IndexResponse {
     pub files_indexed: usize,
@@ -214,7 +196,7 @@ pub struct SearchResponse {
 }
 
 // ---------------------------------------------------------------------------
-// lens_map + graph_* (structural graph)
+// Structural graph (lens_symbol / lens_graph; the graph is auto-ensured per query)
 // ---------------------------------------------------------------------------
 
 fn default_dot() -> String {
@@ -229,16 +211,9 @@ fn default_graph_limit() -> usize {
     20
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct DiscoverRequest {
-    /// Repo root to scan (default ".").
-    #[serde(default = "default_dot")]
-    pub path: String,
-    /// Optional filter to a subset of languages (rust, python, javascript, typescript, go).
-    #[serde(default)]
-    pub languages: Option<Vec<String>>,
-}
-
+/// Summary of a graph build. No MCP tool takes a discover request anymore
+/// (`ensure_graph` auto-builds per query); this is the engine-level response
+/// shape `discovery::discover` still returns.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscoverResponse {
     pub nodes: usize,
@@ -311,13 +286,20 @@ pub struct GraphView {
     /// returned), so existing outputs stay byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_matches: Option<usize>,
-    /// Present only when `lens_links` had to shrink `depth` and/or truncate the
-    /// node/edge lists to fit the response budget: a short description of what
-    /// was cut. The full requested-depth subgraph is still recoverable via
-    /// `retrieve_ref`. Omitted (and absent from other tools' output) when no
-    /// trimming was needed, so unaffected outputs stay byte-identical.
+    /// Present only when `lens_graph`'s neighborhood form had to shrink `depth`
+    /// and/or truncate the node/edge lists to fit the response budget: a short
+    /// description of what was cut. The full requested-depth subgraph is still
+    /// recoverable via `retrieve_ref`. Omitted (and absent from other tools'
+    /// output) when no trimming was needed, so unaffected outputs stay
+    /// byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trim_note: Option<String>,
+    /// How `lens_symbol` resolved the query: `"name"` (substring match) or
+    /// `"meaning"` (zero substring matches, blend-ranked lexical fallback).
+    /// Only `lens_symbol` sets it; omitted from every other `GraphView`
+    /// producer's output, so those stay byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_via: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -333,37 +315,23 @@ pub struct GraphQueryRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct GraphFindRequest {
-    /// Natural-language description of the symbol you're looking for.
-    pub query: String,
-    /// Max matching symbols to return (default 20).
-    #[serde(default = "default_graph_limit")]
-    pub limit: usize,
-    /// Optional kind filter (function, struct, class, method, interface, mod, ...):
-    /// candidates whose kind differs are excluded before ranking.
+pub struct GraphRequest {
+    /// Node id or symbol name to start from.
+    pub node: String,
+    /// Optional destination node id or symbol name. Present: return the shortest
+    /// directed path from `node` to `to`. Absent: return the local subgraph
+    /// around `node`.
     #[serde(default)]
-    pub kind: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct GraphNeighborsRequest {
-    /// Node id to expand around.
-    pub node_id: String,
-    /// Hops outward (default 1).
+    pub to: Option<String>,
+    /// Hops outward for the neighborhood walk (default 1). Ignored when `to`
+    /// is given.
     #[serde(default = "default_depth")]
     pub depth: usize,
-    /// Which way to walk edges: "callers" (fan-in), "callees" (fan-out), or "both"
-    /// (undirected, the default). Unknown or absent falls back to "both".
+    /// Which way the neighborhood walk follows edges: "callers" (fan-in),
+    /// "callees" (fan-out), or "both" (undirected, the default). Unknown or
+    /// absent falls back to "both". Ignored when `to` is given.
     #[serde(default)]
     pub direction: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct GraphPathRequest {
-    /// Source node id or symbol name.
-    pub from: String,
-    /// Destination node id or symbol name.
-    pub to: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -384,6 +352,40 @@ pub struct PathResponse {
     /// unambiguously, so unambiguous outputs stay byte-identical.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resolved: Vec<ResolvedNote>,
+}
+
+/// `lens_graph`'s response: the natural shape of whichever form ran. Untagged, so
+/// each variant serializes as exactly its inner type's JSON with no wrapper —
+/// the `to`-form stays byte-identical to the old `lens_path` output and the
+/// no-`to` form byte-identical to the old `lens_links` output.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum GraphResponse {
+    /// `to` given: the shortest directed path between the two symbols.
+    Path(PathResponse),
+    /// `to` absent: the local subgraph around `node`.
+    Neighbors(GraphView),
+}
+
+/// Hand-written schema because the derive renders an untagged enum as a bare
+/// `anyOf` with no root `type`, which rmcp rejects (the MCP spec requires an
+/// `outputSchema` rooted at `"type": "object"`). Both variants serialize as
+/// objects, so rooting the union at `type: object` is truthful and keeps the
+/// untagged (wrapper-free) serialization untouched.
+impl JsonSchema for GraphResponse {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "GraphResponse".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "anyOf": [
+                generator.subschema_for::<PathResponse>(),
+                generator.subschema_for::<GraphView>(),
+            ],
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -465,10 +467,6 @@ pub struct GrepAstResponse {
     pub truncated: bool,
 }
 
-/// Empty input for tools that take no parameters.
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct EmptyRequest {}
-
 // ---------------------------------------------------------------------------
 // lens_memory_record / lens_memory_query (durable project memory)
 // ---------------------------------------------------------------------------
@@ -511,19 +509,4 @@ pub struct MemoryItem {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct MemoryQueryResponse {
     pub items: Vec<MemoryItem>,
-}
-
-// ---------------------------------------------------------------------------
-// lens_stats
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StatsResponse {
-    pub darkroom_calls: i64,
-    pub raw_bytes_processed: i64,
-    pub bytes_returned_to_context: i64,
-    pub estimated_tokens_saved: i64,
-    pub index_chunks: i64,
-    pub graph_nodes: i64,
-    pub graph_edges: i64,
 }

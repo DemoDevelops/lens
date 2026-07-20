@@ -89,7 +89,7 @@ pub struct Treatment {
     #[serde(default)]
     pub overview_budget: Option<usize>,
     /// Neighbors: hops outward from the resolved node. Defaults to 1, the
-    /// `lens_links` default.
+    /// `lens_graph` default.
     pub depth: Option<usize>,
 }
 
@@ -406,6 +406,7 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
         let data = tempfile::tempdir()?;
         let store = Store::open(&data.path().join(".lens"))?;
         let req = ExecuteRequest {
+            path: None,
             language: t.language.clone().unwrap_or_else(|| "bash".to_string()),
             code: script.clone(),
             timeout_secs: 30,
@@ -518,7 +519,7 @@ pub async fn build_treatment_context(task: &Task) -> anyhow::Result<String> {
                 );
                 serde_json::to_string_pretty(&view)?
             }
-            // Who-calls-X / what-does-X-call, the `lens_links` path. `lens_links`
+            // Who-calls-X / what-does-X-call, the `lens_graph` path. `lens_graph`
             // takes the node id a prior `lens_symbol` call handed the model, so
             // the name -> id resolution a task spec needs happens here.
             "neighbors" => {
@@ -561,7 +562,7 @@ fn resolve_node_id(graph: &Graph, token: &str, kind: Option<&str>) -> Option<Str
         .map(|n| n.id.clone())
 }
 
-/// `lens_links`'s neighborhood, joined into named callers and callees. The raw
+/// `lens_graph`'s neighborhood, joined into named callers and callees. The raw
 /// view's edges carry opaque blake3 ids, so who-calls-X is unanswerable from it
 /// without this join. `via` keeps the edge kind visible, so a containing module
 /// (a `contains` edge) is never mistaken for a caller.
@@ -949,14 +950,21 @@ impl ArmIsolation {
 /// `--mcp-config` always points at `lens_release_bin` (this run's own build),
 /// not whatever binary a prior `lens session install` happened to register
 /// globally. `--settings` merges onto the ambient config rather than
-/// replacing it, so it cannot redirect an already-registered hook's command
-/// to a different binary; that means the AMBIENT hooks must independently
-/// already point at this same binary for a lens-arm run to be valid, which
-/// the caller is responsible for arranging before running the bench (e.g. by
-/// temporarily repointing the real, installed session hooks at
-/// `lens_release_bin` for the run's duration, then restoring them). A
-/// mismatch here is exactly what voided the 560e862 acceptance run (hooks and
-/// MCP disagreeing on the tool set produced "No matching deferred tools
+/// replacing it (confirmed against anthropics/claude-code#11392: a hook
+/// array from `--settings` is additive, not a replacement), so it cannot
+/// *un*-register an already-installed hook. `lens_settings_json` does not
+/// need it to: it carries its own copy of the five lifecycle hooks, pointed
+/// at `lens_release_bin` directly, so the lens arm is self-consistent (MCP
+/// server and hooks both on this run's fresh build) with no dependence on
+/// whatever is or isn't installed globally. Any stale ambient lens hooks
+/// merge in and fire too, but harmlessly: `route_inner`'s tool match has no
+/// `mcp__lens__*` arm (old binary or new), so an MCP tool call is already an
+/// unconditional `Decision::Passthrough` regardless of whether the hook
+/// recognizes the name, and a stale SessionStart guide just adds a second,
+/// superseded copy of the injected text alongside the correct one (Claude
+/// Code runs every matching hook and concatenates their `additionalContext`).
+/// A mismatch here is exactly what voided the 560e862 acceptance run (hooks
+/// and MCP disagreeing on the tool set produced "No matching deferred tools
 /// found" and zero organic `mcp__lens__*` calls, yet the validity gate at the
 /// time only checked that the guide fired); `validate_arm_run` is the
 /// backstop that now catches a recurrence instead of scoring it as a loss.
@@ -1004,13 +1012,34 @@ fn baseline_settings_json() -> Value {
     json!({ "env": env })
 }
 
+/// The five lifecycle hook events `lens session install` registers. Keep in
+/// sync with `src/session/install.rs`'s `EVENTS`.
+const HOOK_EVENTS: [&str; 5] =
+    ["PreToolUse", "PostToolUse", "UserPromptSubmit", "PreCompact", "SessionStart"];
+
 /// lens arm = lens exactly as `lens setup` installs it: routing at its shipping
 /// default. `full` is nudge + steer + wrap, which is what injects the SessionStart
 /// guide and arms the deny rails. The 13 rails are deliberately left unset: they
 /// are default-ON kill-switches, so unset IS the shipping default and pinning them
 /// to "0" would disable the adoption layer under test.
+///
+/// Also carries its own copy of the five lifecycle hooks, the same shape
+/// `install()` in `src/session/install.rs` writes, pointed at `lens_release_bin`
+/// instead of whatever is installed globally, so the arm's hooks and its
+/// `--mcp-config` server agree on the tool set (see `arm_isolation`).
 fn lens_settings_json() -> Value {
-    json!({ "env": { "LENS_ROUTING": "full" } })
+    let bin = lens_release_bin().to_string_lossy().to_string();
+    let hooks: Map<String, Value> = HOOK_EVENTS
+        .iter()
+        .map(|event| {
+            let group = json!([{
+                "matcher": "",
+                "hooks": [{ "type": "command", "command": format!("\"{bin}\" hook claude {event}") }]
+            }]);
+            (event.to_string(), group)
+        })
+        .collect();
+    json!({ "env": { "LENS_ROUTING": "full" }, "hooks": hooks })
 }
 
 pub fn lens_release_bin() -> PathBuf {
@@ -1123,7 +1152,7 @@ impl AgenticRun {
     }
 }
 
-/// The validity gate. Two failure modes, both fatal rather than silently
+/// The validity gate. Three failure modes, all fatal rather than silently
 /// scored: the SessionStart guide didn't fire the way this arm expects (its
 /// routing config didn't take), and — the exact bug that voided the 560e862
 /// acceptance run — the guide fired but the arm made ZERO organic
@@ -1131,6 +1160,9 @@ impl AgenticRun {
 /// `--mcp-config` binary disagree on the tool set ("No matching deferred
 /// tools found"). `resolve_bench_binary` fixes the root cause; this is the
 /// backstop that catches a future recurrence instead of scoring it as a loss.
+/// Third: a run whose transcript carried no usage anywhere parses as tokens=0
+/// (task 0079's lens cell did, across all three runs) and would silently
+/// flatter the arm's token mean if scored.
 fn validate_arm_run(run: &AgenticRun, arm: &ArmSpec) -> Result<(), String> {
     if (run.guide_injections > 0) != arm.expects_guide {
         return Err(format!(
@@ -1144,6 +1176,14 @@ fn validate_arm_run(run: &AgenticRun, arm: &ArmSpec) -> Result<(), String> {
             "arm [{}] guide fired but made ZERO mcp__lens__* tool calls: the hooks \
              shell-out and --mcp-config binaries likely disagree on the tool set \
              (the 560e862 bug); refusing to score this run",
+            arm.allowed_tools
+        ));
+    }
+    if run.tokens == 0 {
+        return Err(format!(
+            "arm [{}] transcript carried no usage anywhere (result envelope or \
+             assistant messages): tokens=0 is a measurement failure, not a free \
+             session; refusing to score it",
             arm.allowed_tools
         ));
     }
@@ -1250,7 +1290,7 @@ fn parse_agentic_stream(stream: &str) -> Result<AgenticRun, String> {
         return Ok(AgenticRun {
             answer: String::new(),
             tools: tool_use_names(&lines),
-            tokens: result.get("usage").map(usage_tokens).unwrap_or(0),
+            tokens: stream_tokens(result, &lines),
             guide_injections,
             hit_turn_cap,
             duration_ms,
@@ -1270,7 +1310,7 @@ fn parse_agentic_stream(stream: &str) -> Result<AgenticRun, String> {
     Ok(AgenticRun {
         answer,
         tools: tool_use_names(&lines),
-        tokens: result.get("usage").map(usage_tokens).unwrap_or(0),
+        tokens: stream_tokens(result, &lines),
         guide_injections,
         hit_turn_cap,
         duration_ms,
@@ -1312,6 +1352,35 @@ fn usage_tokens(usage: &Value) -> usize {
     .iter()
     .filter_map(|k| usage.get(*k).and_then(Value::as_u64))
     .sum::<u64>() as usize
+}
+
+/// Session tokens: the `result` envelope's cumulative usage when it carries one,
+/// else the assistant messages' own usages summed, deduped by message id (one
+/// message streams as several lines; the last emission per id wins). The
+/// fallback exists because a real cell (task 0079's lens arm) produced result
+/// lines with no usage in all three runs, and the old `unwrap_or(0)` silently
+/// scored it as a zero-token session.
+fn stream_tokens(result: &Value, lines: &[Value]) -> usize {
+    let from_result = result.get("usage").map(usage_tokens).unwrap_or(0);
+    if from_result > 0 {
+        return from_result;
+    }
+    let mut per_msg = std::collections::HashMap::new();
+    for (i, o) in lines.iter().enumerate() {
+        if o.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(u) = o.pointer("/message/usage") else {
+            continue;
+        };
+        let key = o
+            .pointer("/message/id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("line-{i}"));
+        per_msg.insert(key, usage_tokens(u));
+    }
+    per_msg.values().sum()
 }
 
 /// Extract the last balanced `{...}` object from `s` by scanning back from the
@@ -2008,6 +2077,25 @@ mod agentic_isolation_tests {
         }
     }
 
+    /// The lens arm carries its own hooks, pointed at `lens_release_bin`, so it
+    /// does not depend on whatever hooks happen to be installed globally (the
+    /// 560e862 bug: hooks and `--mcp-config` disagreeing on the tool set).
+    #[test]
+    fn lens_settings_hooks_point_at_the_release_binary() {
+        let s = lens_settings_json();
+        let bin = super::lens_release_bin().to_string_lossy().to_string();
+        for event in super::HOOK_EVENTS {
+            let cmd = s["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} hook missing: {s}"));
+            assert!(cmd.contains(&bin), "{event} hook does not point at the release binary: {cmd}");
+            assert!(
+                cmd.contains(&format!("hook claude {event}")),
+                "{event} hook command malformed: {cmd}"
+            );
+        }
+    }
+
     /// The validity gate. Two earlier builds passed every compile-time check and
     /// were still invalid (the baseline reached lens via `ToolSearch`; then both
     /// arms had routing amputated). Only a live session can prove the arms are the
@@ -2105,6 +2193,17 @@ mod validity_gate_tests {
         let r = run(0, vec!["mcp__lens__lens_search"]);
         let err = validate_arm_run(&r, &arm(true)).expect_err("must be invalid");
         assert!(err.contains("expected lens guide"), "{err}");
+    }
+
+    /// The 0079 failure mode: every usage source in the transcript was empty,
+    /// the run parsed with tokens=0, and the old gate scored it — silently
+    /// flattering the arm's token mean. Must be REJECTED, not scored.
+    #[test]
+    fn zero_token_run_is_rejected() {
+        let mut r = run(1, vec!["mcp__lens__lens_search"]);
+        r.tokens = 0;
+        let err = validate_arm_run(&r, &arm(true)).expect_err("must be invalid");
+        assert!(err.contains("tokens=0"), "{err}");
     }
 }
 
@@ -2308,6 +2407,20 @@ not even json
 {"type":"result","subtype":"success","is_error":false,"result":"{}","usage":{"input_tokens":1,"output_tokens":1}}"#;
         let run = parse_agentic_stream(stream).expect("parse");
         assert_eq!(run.guide_injections, 1, "system line counts, tool_result does not");
+    }
+
+    /// A result envelope with no usage must not score as a zero-token session:
+    /// fall back to the assistant messages' own usage, deduping the multi-line
+    /// emissions of a single message by id (last emission wins).
+    #[test]
+    fn missing_result_usage_falls_back_to_assistant_usage() {
+        let stream = r#"
+{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"mcp__lens__lens_search","input":{}}],"usage":{"input_tokens":100,"output_tokens":10}}}
+{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"partial"}],"usage":{"input_tokens":100,"output_tokens":12}}}
+{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":200,"cache_read_input_tokens":50,"output_tokens":5}}}
+{"type":"result","subtype":"success","is_error":false,"result":"{\"function\":\"ensure_index\"}","duration_ms":100}"#;
+        let run = parse_agentic_stream(stream).unwrap();
+        assert_eq!(run.tokens, 112 + 255, "m1 deduped to last emission, plus m2");
     }
 
     #[test]

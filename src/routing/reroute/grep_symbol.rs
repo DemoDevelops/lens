@@ -1,4 +1,4 @@
-//! grep_symbol: Grep(symbol) → lens_symbol/lens_find classifier.
+//! grep_symbol: Grep(symbol) → lens_symbol classifier.
 //!
 //! Rail 1a of the reroute family (see [`super`] for the counter-key/env-flag
 //! contract). [`symbol_grep`] recognizes a Grep `pattern` that is really a
@@ -90,9 +90,9 @@ pub fn symbol_grep(pattern: &str) -> Option<SymbolKind> {
 }
 
 /// Best-effort identifier to embed as `lens_symbol(name="...")`, and whether
-/// it is a clean identifier (so `lens_symbol` alone suffices) or a fallback
-/// (so [`deny_reason`] also offers `lens_find`, which takes a free-text query
-/// instead of a name).
+/// it is a clean identifier (so an exact name match is likely) or a fallback
+/// (so [`deny_reason`] notes that `lens_symbol` still works via its
+/// meaning-match fallback when the text isn't a clean name).
 fn extract_identifier(trimmed: &str) -> (String, bool) {
     if let Some(name) = def_re().captures(trimmed).and_then(|c| c.get(1)) {
         return (name.as_str().to_string(), true);
@@ -155,10 +155,9 @@ fn name_value_contains(raw: &str, ident: &str) -> bool {
 
 /// Deny reason for a Grep `pattern` [`symbol_grep`] identified as a symbol
 /// lookup: names the exact `lens_symbol` call (with the extracted identifier
-/// as its arg), also offers `lens_find` when `pattern` isn't a clean
-/// identifier (`lens_symbol` needs a name; `lens_find` takes a free-text query
-/// instead), and includes the `ToolSearch` bootstrap line in case the lens
-/// tools aren't loaded yet.
+/// as its arg), notes `lens_symbol`'s own meaning-match fallback when
+/// `pattern` isn't a clean identifier, and includes the `ToolSearch`
+/// bootstrap line in case the lens tools aren't loaded yet.
 pub fn deny_reason(pattern: &str) -> String {
     let trimmed = pattern.trim();
     let (ident, is_clean) = extract_identifier(trimmed);
@@ -167,11 +166,11 @@ pub fn deny_reason(pattern: &str) -> String {
     );
     if !is_clean {
         out.push_str(&format!(
-            " \"{trimmed}\" isn't a clean identifier and lens_symbol needs a name — try lens_find(query=\"{trimmed}\") instead."
+            " \"{trimmed}\" isn't a clean identifier, but lens_symbol still resolves it: it falls back to a meaning match when nothing matches by name."
         ));
     }
     out.push_str(
-        " If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_symbol,lens_find,lens_links\"). This fires once per prompt — the same grep will pass if you re-run it.",
+        " If the lens tools aren't loaded yet, load them first: ToolSearch(query: \"select:lens_symbol\"). This fires once per prompt — the same grep will pass if you re-run it.",
     );
     out
 }

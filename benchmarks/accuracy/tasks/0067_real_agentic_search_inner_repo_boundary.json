@@ -1,11 +1,12 @@
 {
   "id": "0067_real_agentic_search_inner_repo_boundary",
-  "prompt": "A user opens lens in a folder that happens to contain a separate project's git checkout inside it. One function detects that a requested path belongs to that inner repository, so its index is built into that repository's own .lens directory instead of the parent's. Which function is it? Answer with just the function name.",
+  "prompt": "A user runs lens over a folder that happens to contain a separate project's git checkout inside it. One function walks the tree and reports every such inner-repository boundary, so discovery stops descending into it and that inner repo gets indexed into its own .lens directory instead of being folded into the parent's. Which function is it? Answer with just the function name.",
   "fixtures": ["../../src"],
-  "ground_truth": { "function": "enclosing_nested_repo" },
+  "ground_truth": { "function": "nested_repo_roots" },
   "check": "contains",
   "primary_mechanism": "search",
   "lens_fn": "lens_search",
-  "evidence": ["enclosing_nested_repo"],
-  "treatment": { "queries": ["path belongs to inner git repository build index into its own lens directory not parent"] }
+  "evidence": ["nested_repo_roots"],
+  "treatment": { "queries": ["nested repo boundary stop descending own lens directory not parent"] },
+  "notes": "REPLACES the original ground_truth `enclosing_nested_repo`: that function was legitimately deleted by T3 (0.10.0 two-layer-surface plan) as orphaned code when the explicit lens_map/lens_index tools it served were folded away (verified via direct grep against the live worktree src/, zero hits). It specifically routed an EXPLICIT per-request scoped build (`lens_map <path>`) to a nested repo's own data dir -- that whole feature is gone, not just renamed. What survives and is still exercised on every normal index/discover call is `nested_repo_roots(root)` (src/discovery/mod.rs) -- the AUTOMATIC boundary-pruning discovery already does, used both to keep a nested repo's files out of the parent's own graph and to drive lens_search's federation across nested repos (federate_nested_search). Rewrote the prompt to describe this current, real, still-exercised capability rather than the deleted per-request routing one. Observed impact before this fix, in T10's post-fold agentic verification run: sonnet lens-arm success dropped 1.00->0.33 and tokens grew 8.7x (136k->1.18M) on this task alone, consistent with the model searching harder and harder for a function that no longer exists -- not a real search-quality regression."
 }

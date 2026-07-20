@@ -1,7 +1,7 @@
 //! T4 gate: a tool call stuck on a locked index must not freeze the server. While one
 //! `lens_search` is blocked on the index write lock (and will return an is_error
-//! fallback after the busy ceiling), a second quick call (`lens_stats`, which does not
-//! touch index.db) must still complete promptly.
+//! fallback after the busy ceiling), a second quick call (`lens_memory_query`, which
+//! does not touch index.db) must still complete promptly.
 
 use rmcp::model::CallToolRequestParams;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
@@ -51,13 +51,15 @@ async fn call_returns_under_contention() {
         (r, t.elapsed())
     });
 
-    // Give the search time to get stuck on the lock, then issue a quick call.
+    // Give the search time to get stuck on the lock, then issue a quick call
+    // against a DIFFERENT db (session.db, not the held index.db) — the cheap
+    // probe the folded-out lens_stats used to provide.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let t = Instant::now();
-    let mut sp = CallToolRequestParams::new("lens_stats");
+    let mut sp = CallToolRequestParams::new("lens_memory_query");
     sp.arguments = json!({}).as_object().cloned();
-    let stats_res = client.call_tool(sp).await;
-    let stats_dur = t.elapsed();
+    let probe_res = client.call_tool(sp).await;
+    let probe_dur = t.elapsed();
 
     let (search_res, search_dur) = search_task.await.unwrap();
 
@@ -67,10 +69,10 @@ async fn call_returns_under_contention() {
     // dispatch or a single-threaded runtime, where the quick call would wait out the
     // stuck one. (The multi-thread `#[tokio::main]` runtime already provides this; an
     // explicit spawn_blocking of the cold-start work was therefore not needed.)
-    stats_res.expect("the quick lens_stats call must complete while a search is blocked");
+    probe_res.expect("the quick lens_memory_query call must complete while a search is blocked");
     assert!(
-        stats_dur < Duration::from_millis(900),
-        "lens_stats was blocked by the stuck search ({stats_dur:?}); the runtime froze"
+        probe_dur < Duration::from_millis(900),
+        "lens_memory_query was blocked by the stuck search ({probe_dur:?}); the runtime froze"
     );
 
     // The stuck search came back as a readable is_error fallback within bounded time.

@@ -26,32 +26,23 @@ const DEFAULT_MAX_INLINE: usize = 8 * 1024;
 /// pre-approves them in the permission allowlist. Shared with [`crate::setup`] so the
 /// two never drift. The write tools live in [`WRITE_TOOLS`] and are intentionally
 /// absent here so they never get a `readOnlyHint`.
-pub const READ_ONLY_TOOLS: [&str; 11] = [
+pub const READ_ONLY_TOOLS: [&str; 8] = [
     "lens_search",
     "lens_overview",
     "lens_recall",
     "lens_symbol",
-    "lens_links",
-    "lens_path",
+    "lens_graph",
     "lens_skeleton",
-    "lens_stats",
-    "lens_find",
     "lens_grep_ast",
     "lens_memory_query",
 ];
 
-/// The lens tools that execute code (in the darkroom subprocess) or write the
-/// index/graph. No `readOnlyHint` — but `lens setup` still pre-approves them in the
+/// The lens tools that execute code (in the darkroom subprocess) or write durable
+/// state. No `readOnlyHint` — but `lens setup` still pre-approves them in the
 /// permission allowlist: modes that honor allow rules while prompting for everything
-/// else (notably plan mode) would otherwise stall a session on every lens_run/lens_map
+/// else (notably plan mode) would otherwise stall a session on every lens_run
 /// call. Shared with [`crate::setup`] so the two never drift.
-pub const WRITE_TOOLS: [&str; 5] = [
-    "lens_run",
-    "lens_run_file",
-    "lens_index",
-    "lens_map",
-    "lens_memory_record",
-];
+pub const WRITE_TOOLS: [&str; 2] = ["lens_run", "lens_memory_record"];
 
 /// Appended to the `lens_search`/`lens_overview` descriptions so the model knows the
 /// recovery path before it ever hits a transient index/graph lock (Bug B).
@@ -202,10 +193,208 @@ pub struct Forge {
     graph_walk: WalkDebounce,
 }
 
+/// Resolve the repo root the server indexes and graphs against, independent of the
+/// process cwd at MCP-server-spawn time. `setup::register_mcp` runs `claude mcp add`
+/// without pinning a cwd, so the server previously inherited whatever directory the
+/// spawning process happened to be in -- verified in practice to sometimes land on an
+/// unrelated parent workspace (e.g. one that also contains other, unrelated repos).
+///
+/// Thin wrapper over [`resolve_repo_root_from`], which owns the actual resolution
+/// order and doc; split out so that function is unit-testable without mutating
+/// process-global env vars or cwd (see its doc for why that split exists).
+fn resolve_repo_root() -> PathBuf {
+    let lens_dir = std::env::var_os("LENS_DIR").map(PathBuf::from);
+    let claude_project_dir = std::env::var_os("CLAUDE_PROJECT_DIR").map(PathBuf::from);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_repo_root_from(lens_dir.as_deref(), claude_project_dir.as_deref(), &cwd)
+}
+
+/// Resolution order for [`resolve_repo_root`], first match wins:
+///
+/// 1. `lens_dir` (`$LENS_DIR`) present AND shaped like `<repo_root>/.lens` (its last
+///    component is literally `.lens`) -> the PARENT directory. Interpretation call:
+///    the locked plan orders `$LENS_DIR` ahead of `$CLAUDE_PROJECT_DIR` but doesn't say
+///    what to DO with its value once present. Taking the parent matches the one
+///    existing convention for `$LENS_DIR`'s shape (`crate::obs::data_dir` and
+///    `session::resolve_data_dir` both build it as `<repo_root>/.lens`), so an explicit
+///    data-dir override that follows the convention is the strongest available signal
+///    of the intended repo root.
+///
+///    The `.lens`-suffix gate itself is a REVISION of the first cut of this
+///    interpretation (unconditional parent-of-`$LENS_DIR`), made after that version
+///    broke `tests/e2e_tests.rs` (confirmed by reverting this change and re-running:
+///    all 4 e2e tests pass on `main`, 3 fail with the unconditional version). Those
+///    tests -- unowned by any task in this plan, so out of scope to edit -- spawn the
+///    real server with `$LENS_DIR` pointed at an arbitrary tempdir used purely to
+///    isolate index/graph state, entirely unrelated to the separately-pinned repo
+///    directory (`Command::current_dir`). Taking that arbitrary dir's parent as
+///    "the repo root" is wrong; gating on the `.lens` convention makes the two uses
+///    (a real `<repo>/.lens` override vs. an arbitrary isolated data dir) distinguishable,
+///    and falls through to the next signal for the latter instead of guessing.
+/// 2. Else `claude_project_dir` (`$CLAUDE_PROJECT_DIR`) present AND names a directory
+///    that exists on disk -> used directly. This is how Claude Code's own env
+///    naturally flows through at runtime; `setup::register_mcp` needs no explicit
+///    `--cwd`/`--env` registration for it.
+/// 3. Else walk up from `cwd` toward the filesystem root; the nearest ancestor
+///    (including `cwd` itself) that owns a `.git` entry wins. Checked via `.exists()`,
+///    not `.is_dir()`: a git worktree's `.git` is a FILE (a gitdir pointer), not a
+///    directory.
+/// 4. Else (no `.git` found above `cwd`) -> `cwd` as-is (pre-fix behavior).
+///
+/// Takes its inputs as parameters (rather than reading the environment/cwd itself) so
+/// the decision logic is exercisable with fabricated `tempfile::tempdir()` trees under
+/// `cargo test`'s parallel runner: mutating the real `$LENS_DIR` in-process is known
+/// unsafe in this codebase specifically (`session::resolve_data_dir` is read unguarded
+/// by `session::hook`'s own unit tests), and mutating the real process cwd would be a
+/// process-global race against every other concurrently running test, guarded or not.
+fn resolve_repo_root_from(
+    lens_dir: Option<&Path>,
+    claude_project_dir: Option<&Path>,
+    cwd: &Path,
+) -> PathBuf {
+    let conventional_lens_dir = lens_dir.filter(|d| d.ends_with(".lens"));
+    if let Some(root) = conventional_lens_dir.and_then(Path::parent) {
+        return root.to_path_buf();
+    }
+    if let Some(dir) = claude_project_dir {
+        if dir.is_dir() {
+            return dir.to_path_buf();
+        }
+    }
+    for dir in cwd.ancestors() {
+        if dir.join(".git").exists() {
+            return dir.to_path_buf();
+        }
+    }
+    cwd.to_path_buf()
+}
+
+// Kept as its own `#[cfg(test)] mod` (rather than folded into the big `mod tests`
+// below) so this T4 change stays a self-contained diff next to the code it tests,
+// touching nothing in the existing test module.
+#[cfg(test)]
+mod resolve_repo_root_tests {
+    use super::*;
+
+    /// (a) `$LENS_DIR` present -> its parent directory wins, even over a
+    /// simultaneously-present `$CLAUDE_PROJECT_DIR`.
+    #[test]
+    fn lens_dir_parent_wins_over_everything_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lens_dir = tmp.path().join(".lens");
+        let got =
+            resolve_repo_root_from(Some(&lens_dir), Some(tmp.path()), Path::new("/unused"));
+        assert_eq!(got, tmp.path());
+    }
+
+    /// Regression: an `$LENS_DIR` that ISN'T shaped like `<repo_root>/.lens` (an
+    /// arbitrary data-dir override, unrelated to repo location -- exactly how
+    /// `tests/e2e_tests.rs` uses it to isolate index/graph state per test) must fall
+    /// through to the next signal, not have its parent used as a bogus repo root. This
+    /// is the exact case that broke those e2e tests under the first cut of this
+    /// function (unconditional parent-of-`$LENS_DIR`); see the doc comment above.
+    #[test]
+    fn lens_dir_not_shaped_like_dot_lens_falls_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        // An arbitrary tempdir, deliberately NOT named `.lens` and NOT a child of `repo`
+        // -- mirrors `tests/e2e_tests.rs`'s independent `repo`/`data` tempdir pair.
+        let arbitrary_data_dir = tmp.path().join("some-random-tempdir-name");
+
+        let got = resolve_repo_root_from(Some(&arbitrary_data_dir), None, &repo);
+        assert_eq!(
+            got, repo,
+            "non-`.lens`-shaped LENS_DIR must not be treated as a repo-root signal"
+        );
+    }
+
+    /// (b) `$CLAUDE_PROJECT_DIR` present and names a real directory -> used directly.
+    #[test]
+    fn claude_project_dir_used_when_it_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = resolve_repo_root_from(None, Some(tmp.path()), Path::new("/unused"));
+        assert_eq!(got, tmp.path());
+    }
+
+    /// (c) `$CLAUDE_PROJECT_DIR` set but pointing at nothing, and separately unset,
+    /// both fall through to the `.git` walk rather than being used as-is.
+    #[test]
+    fn claude_project_dir_falls_through_when_nonexistent_or_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+        let missing = tmp.path().join("does-not-exist");
+        let got = resolve_repo_root_from(None, Some(&missing), &repo);
+        assert_eq!(got, repo, "nonexistent CLAUDE_PROJECT_DIR must not be used as-is");
+
+        let got_unset = resolve_repo_root_from(None, None, &repo);
+        assert_eq!(got_unset, repo, "unset CLAUDE_PROJECT_DIR falls through the same way");
+    }
+
+    /// (d) Neither env var present: walk up from a deep cwd to the nearest ancestor
+    /// owning a `.git` ENTRY. Uses a `.git` FILE (worktree-style gitdir pointer, not a
+    /// directory) to prove the check is `.exists()`, not `.is_dir()`.
+    #[test]
+    fn walks_up_to_nearest_git_ancestor_file_or_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(".git"), "gitdir: ../elsewhere/.git/worktrees/x\n").unwrap();
+        let deep_cwd = repo.join("src").join("nested").join("deep");
+        std::fs::create_dir_all(&deep_cwd).unwrap();
+
+        let got = resolve_repo_root_from(None, None, &deep_cwd);
+        assert_eq!(got, repo);
+    }
+
+    /// (e) Neither env var present and no `.git` anywhere above cwd: fall back to cwd
+    /// as-is (pre-fix behavior). Relies on the OS temp root's own ancestry not
+    /// containing a stray `.git`, true of any normal dev/CI machine.
+    #[test]
+    fn falls_back_to_cwd_when_no_git_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("no").join("git").join("here");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let got = resolve_repo_root_from(None, None, &cwd);
+        assert_eq!(got, cwd);
+    }
+
+    /// Wiring smoke test: the zero-arg `resolve_repo_root()` (what `Forge::new` calls)
+    /// actually reads the real `$CLAUDE_PROJECT_DIR` and delegates, not just the pure
+    /// core above. Deliberately does NOT exercise `$LENS_DIR` here: mutating it
+    /// in-process is known unsafe in this codebase (`session::resolve_data_dir` is read
+    /// unguarded by `session::hook`'s own unit tests, per the convention documented on
+    /// `rtk::gain`'s `sync_child` test), so that branch is proven by the pure-function
+    /// test above only. Guarded anyway for hygiene against any future test that also
+    /// touches `$CLAUDE_PROJECT_DIR`.
+    static REPO_ROOT_WRAPPER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn wrapper_reads_real_claude_project_dir() {
+        let _guard = REPO_ROOT_WRAPPER_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("CLAUDE_PROJECT_DIR");
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("CLAUDE_PROJECT_DIR", tmp.path());
+
+        let got = resolve_repo_root();
+
+        match prior {
+            Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
+            None => std::env::remove_var("CLAUDE_PROJECT_DIR"),
+        }
+        assert_eq!(got, tmp.path());
+    }
+}
+
 impl Forge {
     /// Build the handler, resolving paths from the environment.
     pub fn new() -> anyhow::Result<Self> {
-        let repo_dir = std::env::current_dir()?;
+        let repo_dir = resolve_repo_root();
         let data_dir = match std::env::var_os("LENS_DIR") {
             Some(d) => PathBuf::from(d),
             None => repo_dir.join(".lens"),
@@ -255,10 +444,12 @@ impl Forge {
 #[tool_router]
 impl Forge {
     /// Run code in a darkroom subprocess and capture only its stdout/stderr.
-    /// The raw data the script reads never enters context. Large output is
-    /// offloaded to the reversible store and replaced with a preview + ref.
+    /// The raw data the script reads never enters context. With `path`, the file
+    /// is injected as the script's first CLI argument (the old `lens_run_file`).
+    /// Large output is offloaded to the reversible store and replaced with a
+    /// preview + ref.
     #[tool(
-        description = "Run code (python|javascript|typescript|bash|ruby|go) in a darkroom; only the script's stdout/stderr returns to context, not the data it processed. Large output is offloaded and retrievable via lens_recall."
+        description = "Run code (python|javascript|typescript|bash|ruby|go) in a darkroom; only the script's stdout/stderr returns to context, not the data it processed. Pass `path` to analyze a file: it arrives as the script's first CLI argument (python sys.argv[1] / node process.argv[2] / bash $1), so the file's contents never enter context either. Large output is offloaded and retrievable via lens_recall. Compose against the live repo: inside your script, `import lens` (python) or `import('./lens.mjs')` (js) exposes search/symbol/callers/callees/path/skeleton/grep_ast/overview/recall against this repo's live index and graph; compose and print only the answer."
     )]
     async fn lens_run(
         &self,
@@ -266,7 +457,7 @@ impl Forge {
     ) -> Result<Json<ExecuteResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_run",
-            serde_json::json!({ "language": req.language, "code_bytes": req.code.len() }),
+            serde_json::json!({ "language": req.language, "path": req.path, "code_bytes": req.code.len() }),
         );
         // Piped stdin never enters context either (the whole point of `lens_run`
         // over pasting data inline); credit it like a volunteered op, capped at
@@ -277,86 +468,24 @@ impl Forge {
             .stdin
             .as_ref()
             .map_or(0u64, |s| (s.len() as u64).min(obs::credit::vol_floor()));
-        match darkroom::run(req, &self.repo_dir, &self.store, self.max_inline).await {
-            Ok(resp) => {
-                let raw_in = resp.stdout_bytes as u64 + stdin_credit;
-                let returned = (resp.stdout.len() + resp.stderr.len()) as u64;
-                let outcome = if resp.timed_out { "timed_out" } else { "ok" };
-                let note = if resp.timed_out {
-                    "process killed on timeout"
-                } else if resp.truncated {
-                    "large stdout stored, head+tail returned"
-                } else {
-                    ""
-                };
-                let explain = self.ops.explain(|| {
-                    let branch = if resp.truncated {
-                        format!(
-                            "stdout {} > inline cap {} → stored ref {}, returned head+tail",
-                            resp.stdout_bytes,
-                            self.max_inline,
-                            resp.retrieve_ref.as_deref().unwrap_or("?")
-                        )
-                    } else {
-                        format!("stdout {} ≤ inline cap {} → returned inline", resp.stdout_bytes, self.max_inline)
-                    };
-                    format!(
-                        "{branch}; exit_code={} timed_out={}; returned {} bytes (stdout {} + stderr {})",
-                        resp.exit_code,
-                        resp.timed_out,
-                        returned,
-                        resp.stdout.len(),
-                        resp.stderr.len()
-                    )
-                });
-                op.finish(
-                    raw_in,
-                    returned,
-                    resp.retrieve_ref.clone(),
-                    outcome,
-                    note,
-                    explain,
-                );
-                Ok(Json(resp))
-            }
-            Err(e) => {
-                op.finish(0, 0, None, "error", e.clone(), None);
-                Err(ToolFailure::recoverable(e))
-            }
-        }
-    }
-
-    /// Analyze a file in the darkroom: the code receives the file path as its
-    /// first CLI argument and only its printed output returns to context. Large
-    /// output is offloaded to the reversible store and replaced with a preview + ref.
-    #[tool(
-        description = "Analyze a file in the darkroom: your `code` receives the file path as its first CLI argument (python sys.argv[1] / node process.argv[2] / bash $1); only what it prints returns to context, not the file contents. Large output is offloaded and retrievable via lens_recall."
-    )]
-    async fn lens_run_file(
-        &self,
-        Parameters(req): Parameters<ExecuteFileRequest>,
-    ) -> Result<Json<ExecuteResponse>, ToolFailure> {
-        let op = self.ops.start(
-            "lens_run_file",
-            serde_json::json!({ "language": req.language, "path": req.path, "code_bytes": req.code.len() }),
-        );
-        let p = self.resolve_unescaped(&req.path);
-        // The file's bytes never enter context (the whole point of this tool over
-        // Read), so they count as processed-but-saved: raw_in = file size + the
-        // script's stdout. Without this a file analysis that prints a small answer
-        // records raw == returned and zero savings.
-        let file_size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-        let exec = crate::tools::ExecuteRequest {
-            language: req.language.clone(),
-            code: req.code.clone(),
-            timeout_secs: req.timeout_secs,
-            stdin: None,
+        // With `path`, the analyzed file's bytes never enter context either (the
+        // whole point over Read), so they count as processed-but-saved: raw_in =
+        // file size + the script's stdout. Without this a file analysis that
+        // prints a small answer records raw == returned and zero savings.
+        let file = req.path.as_ref().map(|p| self.resolve_unescaped(p));
+        let file_size = file
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map_or(0, |m| m.len());
+        let result = match &file {
+            Some(p) => darkroom::run_file(p, req, &self.repo_dir, &self.store, self.max_inline).await,
+            None => darkroom::run(req, &self.repo_dir, &self.store, self.max_inline).await,
         };
-        match darkroom::run_file(&p, exec, &self.repo_dir, &self.store, self.max_inline).await {
+        match result {
             Ok(resp) => {
-                let raw_in = resp.stdout_bytes as u64 + file_size;
-                // Mirror the credit into the persistent counter lens_stats reads
-                // (the darkroom already counted stdout; add the file bytes).
+                let raw_in = resp.stdout_bytes as u64 + stdin_credit + file_size;
+                // Mirror the file credit into the persistent savings counter (the
+                // darkroom already counted stdout; add the file bytes).
                 if file_size > 0 {
                     let _ = self
                         .store
@@ -480,7 +609,7 @@ impl Forge {
         };
         let returned = skeleton.len() as u64;
         // The file bytes were processed but kept out of context; credit the savings
-        // counter lens_stats reads (mirrors lens_run_file's file-size credit).
+        // counter the stats CLI reads (mirrors lens_run's path-form file-size credit).
         let _ = self.store.bump_stat("raw_bytes_processed", raw_in as i64);
         let explain = self.ops.explain(|| {
             format!(
@@ -565,58 +694,11 @@ impl Forge {
         }
     }
 
-    /// Index files into the full-text search index.
+    /// Search the full-text index with one or more queries. The index itself is
+    /// auto-built and kept fresh per query (`ensure_index`); there is no explicit
+    /// index tool.
     #[tool(
-        description = "Index a file or directory (respecting .gitignore) into a full-text index for fast snippet search via lens_search."
-    )]
-    async fn lens_index(
-        &self,
-        Parameters(req): Parameters<IndexRequest>,
-    ) -> Result<Json<IndexResponse>, ToolFailure> {
-        let op = self.ops.start(
-            "lens_index",
-            serde_json::json!({ "path": req.path, "recursive": req.recursive }),
-        );
-        let root = self.resolve_unescaped(&req.path);
-        // A path that lives inside a nested git repo (not our own) is indexed into
-        // that repo's own `.lens`, never folded into the parent's index.
-        if let Some(nested_root) = self.enclosing_nested_repo(&root) {
-            return self.index_into_nested(op, &nested_root, &root, req.recursive);
-        }
-        match self.index.index_path(&root, req.recursive) {
-            Ok(resp) => {
-                if let Ok(total) = self.index.chunk_count() {
-                    let _ = self.store.set_stat("index_chunks", total);
-                }
-                // A full-repo index refreshes the staleness manifest so a later
-                // lens_search (ensure_index) serves from cache instead of reindexing.
-                // Subpath/single-file indexes don't represent the whole repo, so they
-                // leave the manifest alone (ensure_index will refresh as needed).
-                if self.same_repo_root(&root) {
-                    write_manifest(
-                        &self.index_manifest_file(),
-                        &crate::index::file_manifest(&self.repo_dir),
-                    );
-                }
-                let returned = obs::json_len(&resp);
-                let note = format!(
-                    "indexed {} files, {} chunks",
-                    resp.files_indexed, resp.chunks
-                );
-                let explain = self.ops.explain(|| note.clone());
-                op.finish(returned, returned, None, "ok", note, explain);
-                Ok(Json(resp))
-            }
-            Err(e) => {
-                op.finish(0, 0, None, "error", e.to_string(), None);
-                Err(ToolFailure::recoverable(e.to_string()))
-            }
-        }
-    }
-
-    /// Search the full-text index with one or more queries.
-    #[tool(
-        description = "Full-text search across all indexed content (BM25-ranked): finds where a string, idea, or usage appears anywhere, including inside function bodies, comments, strings, and config; returns ranked snippets per query, each with path, match line, and the definition names the hit's chunk carries (`symbols` — often the answer to a which-function-does-X question). When the query names a symbol, its full definition is returned as the top hit (resolved via the graph), answering a symbol lookup in one call. The only tool that sees inside bodies and finds call-sites/usages. For a named symbol's callers/callees use lens_symbol; for a ranked list of candidate symbols by meaning use lens_find."
+        description = "Full-text search across all indexed content (BM25-ranked; the index is auto-built and kept fresh, no setup call needed): finds where a string, idea, or usage appears anywhere, including inside function bodies, comments, strings, and config; returns ranked snippets per query, each with path, match line, and the definition names the hit's chunk carries (`symbols` — often the answer to a which-function-does-X question). When the query names a symbol, its full definition is returned as the top hit (resolved via the graph), answering a symbol lookup in one call. The only tool that sees inside bodies and finds call-sites/usages. For a named symbol's connections use lens_symbol (it also resolves by meaning when you don't know the exact name)."
     )]
     async fn lens_search(
         &self,
@@ -653,41 +735,12 @@ impl Forge {
         }
     }
 
-    /// Build the structural code graph for the repo.
+    /// Find symbols by name and return their immediate connections. On zero
+    /// substring matches, falls back to the blend-ranked lexical find (the old
+    /// `lens_find` engine); `matched_via` reports which path produced the result.
+    /// The graph is auto-built and kept fresh per query (`ensure_graph`).
     #[tool(
-        description = "Parse the repo with tree-sitter into a graph of symbols (functions, types, modules) and relationships (calls, contains, and imports for a subset of languages). Import edges currently come only from the 6 hand-written languages (rust, python, javascript, typescript, go, swift); every tags-adapter language (c, cpp, csharp, java, kotlin, scala, ruby, php, lua, bash) produces calls/contains but zero import edges. Run once per repo; then query with lens_symbol/lens_links/lens_path — do not re-run per question. A path inside a nested git repo builds into THAT repo's own `.lens`; this session's lens_symbol/lens_links/lens_path will not see it (see the response note)."
-    )]
-    async fn lens_map(
-        &self,
-        Parameters(req): Parameters<DiscoverRequest>,
-    ) -> Result<Json<DiscoverResponse>, ToolFailure> {
-        let op = self.ops.start(
-            "lens_map",
-            serde_json::json!({ "path": req.path, "languages": req.languages }),
-        );
-        let root = self.discover_root(&req.path);
-        let langs = req.languages.as_deref();
-        // A path inside a nested git repo (not our own) builds into that repo's own
-        // `.lens/graph.json`, never touching the parent's graph or manifest.
-        if let Some(nested_root) = self.enclosing_nested_repo(&root) {
-            return self.map_into_nested(op, &nested_root, &root, langs);
-        }
-        let outcome = match discovery::discover(&root, langs) {
-            Ok(o) => o,
-            Err(e) => {
-                op.finish(0, 0, None, "error", e.to_string(), None);
-                return Err(ToolFailure::recoverable(e.to_string()));
-            }
-        };
-        // The graph is persisted to graph.json, not returned to context; only the
-        // summary counts come back. Shared with the lazy `ensure_graph` path.
-        let resp = self.finish_discovery(op, outcome, false, &root)?;
-        Ok(Json(resp))
-    }
-
-    /// Find symbols by name and return their immediate connections.
-    #[tool(
-        description = "Look up a declared symbol by name substring (case-insensitive; + optional kind); returns each match's location plus its immediate connections (calls, contains, imports, ...), NOT its source body (to read the code, lens_search the name). When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. `limit` bounds the number of matching root symbols, not the total nodes returned — each root's neighbors come back on top of it. No match returns an empty result, not an error. An exact-name match among several candidates is reported via `resolved` (chosen node + how many others it beat). Large results are compacted with a lens_recall ref. If you know what the symbol does but not its exact name, use lens_find."
+        description = "Look up a declared symbol by name substring (case-insensitive; + optional kind); returns each match's location plus its immediate connections (calls, contains, imports, ...), NOT its source body (to read the code, lens_search the name). Zero substring matches fall back to a blend-ranked match by meaning over symbol names (no embeddings; exact > prefix > word-boundary token, plus a multi-word bonus), so a natural-language description still resolves; `matched_via` in the response says which path won (\"name\" | \"meaning\"). When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. `limit` bounds the number of matching root symbols, not the total nodes returned — each root's neighbors come back on top of it. No match on either path returns an empty result, not an error. An exact-name match among several candidates is reported via `resolved` (chosen node + how many others it beat). Large results are compacted with a lens_recall ref."
     )]
     async fn lens_symbol(
         &self,
@@ -707,24 +760,41 @@ impl Forge {
         // Session-proximity boost: symbols defined in files the user recently
         // touched sort first. Best-effort — an empty list leaves ranking unchanged.
         let recent = self.recent_touched_files();
-        let view = gquery::query(&graph, &req.name, req.kind.as_deref(), req.limit, &recent);
+        let mut view = gquery::query(&graph, &req.name, req.kind.as_deref(), req.limit, &recent);
+        // Zero root matches (nodes always include every matched root, so an empty
+        // list is exactly "no substring match"): fall through to the L36
+        // blend-ranked find path, so a meaning-shaped query still resolves.
+        // `kind` stays applied on the fallback via `find_kind`, the same seam the
+        // absorbed `lens_find` threaded it through; dropping it would let a
+        // wrong-kind symbol satisfy a kind-constrained query.
+        let matched_via = if view.nodes.is_empty() {
+            view = gquery::find_kind(&graph, &req.name, req.limit, req.kind.as_deref());
+            "meaning"
+        } else {
+            "name"
+        };
+        view.matched_via = Some(matched_via.to_string());
         let raw_payload = view_payload_len(&view);
         let compacted = self.maybe_compact(view);
         self.record_graph_op(op, raw_payload, &compacted);
         Ok(Json(compacted))
     }
 
-    /// Find symbols by natural-language meaning, ranked lexically (no embeddings).
+    /// Graph connections for a symbol: with `to`, the shortest directed path
+    /// between the two (the old `lens_path`); without, the local subgraph around
+    /// `node` (the old `lens_links`). Natural-signature dispatch, no mode enum;
+    /// each form returns its natural shape unchanged. The graph is auto-built
+    /// and kept fresh per query (`ensure_graph`).
     #[tool(
-        description = "Find candidate symbols by natural-language meaning, ranked lexically over symbol names (no embeddings; exact > prefix > substring-at-a-word-boundary, plus a multi-word bonus): returns a ranked shortlist of symbols with their connections (calls, contains, imports, ...) to disambiguate which one you mean, NOT the code. Optional `kind` filters candidates before ranking. `limit` bounds the number of matching root symbols, not the total nodes returned. No match returns an empty result, not an error. Know the exact name? use lens_symbol. Want actual code, text, or usages? use lens_search."
+        description = "Graph connections for a symbol (by node id or name; the graph is auto-built and kept fresh, no setup call needed). With `to`: the shortest directed path from `node` to `to` via BFS over calls/imports edges — no path (or an unresolvable end) returns `found: false`, not an error, and an ambiguous name is reported via `resolved` (chosen node + how many others it beat). Without `to`: the local subgraph within `depth` hops of `node`, walking `direction` \"callers\" (fan-in), \"callees\" (fan-out), or \"both\" (undirected, the default) — a `node` that resolves to nothing is an explicit error, never an empty graph. When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. Large neighborhoods are budget-trimmed and compacted, with the full subgraph recoverable via the lens_recall ref."
     )]
-    async fn lens_find(
+    async fn lens_graph(
         &self,
-        Parameters(req): Parameters<GraphFindRequest>,
-    ) -> Result<Json<GraphView>, ToolFailure> {
+        Parameters(req): Parameters<GraphRequest>,
+    ) -> Result<Json<GraphResponse>, ToolFailure> {
         let op = self.ops.start(
-            "lens_find",
-            serde_json::json!({ "query": req.query, "limit": req.limit }),
+            "lens_graph",
+            serde_json::json!({ "node": req.node, "to": req.to, "depth": req.depth, "direction": req.direction }),
         );
         let graph = match self.load_graph() {
             Ok(g) => g,
@@ -733,40 +803,24 @@ impl Forge {
                 return Err(e.into());
             }
         };
-        let view = gquery::find_kind(&graph, &req.query, req.limit, req.kind.as_deref());
-        let raw_payload = view_payload_len(&view);
-        let compacted = self.maybe_compact(view);
-        self.record_graph_op(op, raw_payload, &compacted);
-        Ok(Json(compacted))
-    }
-
-    /// Return the local subgraph around a node.
-    #[tool(
-        description = "Return the local subgraph within `depth` hops of a node id or symbol name (from lens_symbol results, or a name resolved the same way lens_path resolves `from`/`to`). When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. For a specific A-to-B connection use lens_path instead; this returns the whole neighborhood around one node. An id/name that resolves to nothing is an explicit error, never an empty graph."
-    )]
-    async fn lens_links(
-        &self,
-        Parameters(req): Parameters<GraphNeighborsRequest>,
-    ) -> Result<Json<GraphView>, ToolFailure> {
-        let op = self.ops.start(
-            "lens_links",
-            serde_json::json!({ "node_id": req.node_id, "depth": req.depth, "direction": req.direction }),
-        );
-        let graph = match self.load_graph() {
-            Ok(g) => g,
-            Err(e) => {
-                op.finish(0, 0, None, "error", "graph build failed", None);
-                return Err(e.into());
-            }
-        };
-        // Resolve a symbol NAME the same way `lens_path` resolves `from`/`to`,
-        // before falling back to treating `node_id` as a raw graph id. Neither
+        // `to` present: shortest directed path, exactly the old `lens_path`.
+        if let Some(to) = req.to.as_deref() {
+            let resp = gquery::path(&graph, &req.node, to);
+            let returned = obs::json_len(&resp);
+            let note = format!("found={}, hops={}", resp.found, resp.path.len());
+            let explain = self.ops.explain(|| note.clone());
+            op.finish(returned, returned, None, "ok", note, explain);
+            return Ok(Json(GraphResponse::Path(resp)));
+        }
+        // `to` absent: neighborhood walk, exactly the old `lens_links`.
+        // Resolve a symbol NAME the same way the path form resolves its ends,
+        // before falling back to treating `node` as a raw graph id. Neither
         // resolving is an explicit error, never a silent empty graph (the
         // measured defect: an unknown raw id used to yield an empty subgraph).
-        let Some(id) = gquery::resolve(&graph, &req.node_id) else {
+        let Some(id) = gquery::resolve(&graph, &req.node) else {
             let msg = format!(
                 "no node found for '{}': not a known node id and no symbol matches that name",
-                req.node_id
+                req.node
             );
             op.finish(0, 0, None, "error", msg.clone(), None);
             return Err(ToolFailure::plain(msg));
@@ -824,34 +878,7 @@ impl Forge {
             }
         }
         self.record_graph_op(op, raw_payload, &compacted);
-        Ok(Json(compacted))
-    }
-
-    /// Shortest path between two symbols.
-    #[tool(
-        description = "Find the shortest path between two symbols (by node id or name) via BFS over directed calls/imports edges. No path (or an unresolvable from/to) returns `found: false`, not an error. An ambiguous from/to name is reported via `resolved` (chosen node + how many others it beat). For a symbol's whole neighborhood rather than one target, use lens_links instead."
-    )]
-    async fn lens_path(
-        &self,
-        Parameters(req): Parameters<GraphPathRequest>,
-    ) -> Result<Json<PathResponse>, ToolFailure> {
-        let op = self.ops.start(
-            "lens_path",
-            serde_json::json!({ "from": req.from, "to": req.to }),
-        );
-        let graph = match self.load_graph() {
-            Ok(g) => g,
-            Err(e) => {
-                op.finish(0, 0, None, "error", "graph build failed", None);
-                return Err(e.into());
-            }
-        };
-        let resp = gquery::path(&graph, &req.from, &req.to);
-        let returned = obs::json_len(&resp);
-        let note = format!("found={}, hops={}", resp.found, resp.path.len());
-        let explain = self.ops.explain(|| note.clone());
-        op.finish(returned, returned, None, "ok", note, explain);
-        Ok(Json(resp))
+        Ok(Json(GraphResponse::Neighbors(compacted)))
     }
 
     /// A token-budgeted map of the repo's most important symbols.
@@ -970,41 +997,6 @@ impl Forge {
         }
     }
 
-    /// Report token-savings counters and index/graph sizes.
-    #[tool(
-        description = "Report darkroom usage, estimated tokens saved, and index/graph sizes for this repo's lens state."
-    )]
-    async fn lens_stats(
-        &self,
-        Parameters(_): Parameters<EmptyRequest>,
-    ) -> Result<Json<StatsResponse>, ToolFailure> {
-        let op = self.ops.start("lens_stats", serde_json::json!({}));
-        let s = &self.store;
-        let read = |k: &str| s.get_stat(k).unwrap_or(0);
-        let raw = read("raw_bytes_processed");
-        let returned = read("bytes_returned_to_context");
-        let saved = ((raw - returned).max(0)) / 4;
-        let resp = StatsResponse {
-            darkroom_calls: read("darkroom_calls"),
-            raw_bytes_processed: raw,
-            bytes_returned_to_context: returned,
-            estimated_tokens_saved: saved,
-            index_chunks: read("index_chunks"),
-            graph_nodes: read("graph_nodes"),
-            graph_edges: read("graph_edges"),
-        };
-        let returned_bytes = obs::json_len(&resp);
-        op.finish(
-            returned_bytes,
-            returned_bytes,
-            None,
-            "ok",
-            "counters read",
-            None,
-        );
-        Ok(Json(resp))
-    }
-
     /// Record a durable project-memory item (decision/constraint/rejected-approach/
     /// rule), carried across sessions unlike the live per-session event log.
     #[tool(
@@ -1103,20 +1095,24 @@ impl ServerHandler for Forge {
              WRITE A SCRIPT INSTEAD OF READING THE DATA: to count, filter, search, parse, \
              reshape, or summarize anything, do it inside lens_run(language, code) and print \
              just the answer rather than pulling the raw input into context. One lens_run \
-             usually stands in for a pile of Read/Grep/Bash calls.\n\
+             usually stands in for a pile of Read/Grep/Bash calls. Inside the script, \
+             `import lens` (python) or `import('./lens.mjs')` (js) exposes search/symbol/\
+             callers/callees/path/skeleton/grep_ast/overview/recall against this repo's live \
+             index and graph, so multi-step questions compose in one run.\n\
              PICKING A TOOL: (1) code structure (who calls what, imports, where a symbol is \
-             defined, how A reaches B) → lens_map once, then lens_symbol / lens_links / \
-             lens_path over the subgraph. (2) where X appears → lens_index, then \
-             lens_search(queries). (3) an answer derived from data or a file → lens_run / \
-             lens_run_file. (4) a file's structure/API without the bodies → lens_skeleton \
-             (full text via lens_recall). (5) getting back something offloaded → lens_recall. \
-             (6) savings so far → lens_stats.\n\
-             WHEN PLAIN TOOLS ARE STILL RIGHT: use lens_run_file rather than Read to analyze a \
-             file (Read is for when you'll Edit it); use lens_run rather than Grep/Bash when \
-             you'll count or aggregate; fetch URLs through lens_run, not WebFetch. If a lens_* \
-             tool reports not-found its schema isn't loaded — register it with ToolSearch and \
-             retry. Plain Bash and Read stay correct for short output you just want to see, or \
-             for changing state."
+             defined, how A reaches B) → lens_symbol for a name, lens_graph for its \
+             neighborhood (no `to`) or the shortest directed path (`to`); the graph builds \
+             itself on first use. (2) where X appears → lens_search(queries); the index \
+             builds itself on first use. (3) an answer derived from data or a file → \
+             lens_run (pass `path` to analyze a file). (4) a file's structure/API without \
+             the bodies → lens_skeleton (full text via lens_recall). (5) getting back \
+             something offloaded → lens_recall.\n\
+             WHEN PLAIN TOOLS ARE STILL RIGHT: use lens_run with `path` rather than Read to \
+             analyze a file (Read is for when you'll Edit it); use lens_run rather than \
+             Grep/Bash when you'll count or aggregate; fetch URLs through lens_run, not \
+             WebFetch. If a lens_* tool reports not-found its schema isn't loaded — register \
+             it with ToolSearch and retry. Plain Bash and Read stay correct for short output \
+             you just want to see, or for changing state."
                 .into(),
         );
         info
@@ -1183,9 +1179,9 @@ impl Forge {
     /// Resolve a model-supplied path, tolerant of the *shell-escaped* form the
     /// model often hands back for paths with spaces (e.g.
     /// `/Users/me/AI\ Stuff/repo`): strip the common `\<space>` escape, then
-    /// resolve. Shared by `lens_map` and `lens_index` so the two never diverge
-    /// in how they accept a path — that divergence is what let escaped `lens_index`
-    /// calls silently index zero files while `lens_map` succeeded.
+    /// resolve. Shared by `lens_run`, `lens_skeleton`, and `lens_grep_ast` so
+    /// path-taking tools never diverge in how they accept a path — that
+    /// divergence is what once let escaped calls silently resolve zero files.
     fn resolve_unescaped(&self, p: &str) -> PathBuf {
         self.resolve(&p.replace("\\ ", " "))
     }
@@ -1216,18 +1212,6 @@ impl Forge {
                  snapshot.",
                 src.path
             )),
-        }
-    }
-
-    /// Resolve the root for `lens_map`. The model's path is un-escaped by
-    /// [`Self::resolve_unescaped`]; if it still doesn't exist, fall back to
-    /// `repo_dir` (the repo root is what `lens_map` almost always means).
-    fn discover_root(&self, p: &str) -> PathBuf {
-        let candidate = self.resolve_unescaped(p);
-        if candidate.exists() {
-            candidate
-        } else {
-            self.repo_dir.clone()
         }
     }
 
@@ -1378,110 +1362,6 @@ impl Forge {
         ) {
             (Some(a), Some(b)) => a == b,
             _ => root == self.repo_dir.as_path(),
-        }
-    }
-
-    /// If `root` sits inside a git repo that is NOT this server's own `repo_dir`,
-    /// return that nested repo's root — the nearest ancestor of `root` (inclusive)
-    /// that owns a `.git`. Walks up to the filesystem root, stopping at the first
-    /// `.git` owner; returns `None` when the enclosing repo is our own `repo_dir`
-    /// (the normal case) or when no `.git` is found. A path-scoped `lens_map`/
-    /// `lens_index` that lands here builds into the nested repo's own `.lens`, never
-    /// the parent's. Deliberately a small local "walk up to `.git`", not
-    /// `session::hook::repo_root` (different module, different purpose).
-    fn enclosing_nested_repo(&self, root: &Path) -> Option<PathBuf> {
-        let repo_dir =
-            std::fs::canonicalize(&self.repo_dir).unwrap_or_else(|_| self.repo_dir.clone());
-        let start = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        let mut cur: &Path = &start;
-        loop {
-            if cur == repo_dir {
-                return None; // reached our own repo root first: not a nested repo
-            }
-            if cur.join(".git").exists() {
-                return Some(cur.to_path_buf());
-            }
-            cur = cur.parent()?;
-        }
-    }
-
-    /// Build the graph for `root` (inside `nested_root`) and persist it straight to
-    /// the nested repo's own `.lens/graph.json`, never touching the parent's
-    /// `data_dir`/graph manifest — stats and staleness are the nested repo's concern,
-    /// so the full `finish_discovery` machinery is intentionally skipped here.
-    fn map_into_nested(
-        &self,
-        op: obs::OpHandle,
-        nested_root: &Path,
-        root: &Path,
-        langs: Option<&[String]>,
-    ) -> Result<Json<DiscoverResponse>, ToolFailure> {
-        let mut outcome = match discovery::discover(root, langs) {
-            Ok(o) => o,
-            Err(e) => {
-                op.finish(0, 0, None, "error", e.to_string(), None);
-                return Err(ToolFailure::recoverable(e.to_string()));
-            }
-        };
-        let graph_path = nested_root.join(".lens").join("graph.json");
-        if let Err(e) = outcome.graph.save(&graph_path) {
-            op.finish(0, 0, None, "error", e.to_string(), None);
-            return Err(ToolFailure::recoverable(e.to_string()));
-        }
-        // Federation is out of scope: this graph lives only in the nested repo's
-        // own `.lens`, so lens_symbol/lens_links/lens_path in THIS session (whose
-        // graph_cache and graph.json are the parent's) will never see it.
-        outcome.response.warnings.push(format!(
-            "built into {}/.lens; lens_symbol/lens_links/lens_path in THIS session will not see it",
-            nested_root.display()
-        ));
-        let returned = obs::json_len(&outcome.response);
-        let note = format!(
-            "{} nodes, {} edges, {} files parsed (nested repo {})",
-            outcome.response.nodes,
-            outcome.response.edges,
-            outcome.response.files_parsed,
-            nested_root.display()
-        );
-        let explain = self.ops.explain(|| note.clone());
-        op.finish(returned, returned, None, "ok", note, explain);
-        Ok(Json(outcome.response))
-    }
-
-    /// Index `root` (inside `nested_root`) through a throwaway index scoped to the
-    /// nested repo's own `.lens`, so its content never enters the parent's index and
-    /// the parent's stats/manifest are left untouched.
-    fn index_into_nested(
-        &self,
-        op: obs::OpHandle,
-        nested_root: &Path,
-        root: &Path,
-        recursive: bool,
-    ) -> Result<Json<IndexResponse>, ToolFailure> {
-        let nested_index = match Index::open(&nested_root.join(".lens")) {
-            Ok(i) => i.with_repo_root(nested_root),
-            Err(e) => {
-                op.finish(0, 0, None, "error", e.to_string(), None);
-                return Err(ToolFailure::recoverable(e.to_string()));
-            }
-        };
-        match nested_index.index_path(root, recursive) {
-            Ok(resp) => {
-                let returned = obs::json_len(&resp);
-                let note = format!(
-                    "indexed {} files, {} chunks (nested repo {})",
-                    resp.files_indexed,
-                    resp.chunks,
-                    nested_root.display()
-                );
-                let explain = self.ops.explain(|| note.clone());
-                op.finish(returned, returned, None, "ok", note, explain);
-                Ok(Json(resp))
-            }
-            Err(e) => {
-                op.finish(0, 0, None, "error", e.to_string(), None);
-                Err(ToolFailure::recoverable(e.to_string()))
-            }
         }
     }
 
@@ -1673,8 +1553,9 @@ impl Forge {
     }
 
     /// Persist a freshly-built graph and its node/edge stats, then finalize `op`
-    /// with a summary. Shared by `lens_map` (explicit, `root` may be a subpath)
-    /// and `ensure_graph` (lazy, `root` == repo root); `auto` only adjusts the note.
+    /// with a summary. Called by `ensure_graph` (lazy, `root` == repo root); the
+    /// subpath guards below are kept defensively for any future non-root caller.
+    /// `auto` only adjusts the note.
     fn finish_discovery(
         &self,
         op: obs::OpHandle,
@@ -1703,7 +1584,7 @@ impl Forge {
                 if !existing.nodes.is_empty() && outcome.response.nodes < existing.nodes.len() {
                     let note = format!(
                         "refused: discovering a subpath would shrink the graph {}→{} nodes; \
-                         run lens_map with no path to rebuild the full repo",
+                         rebuild from the repo root instead",
                         existing.nodes.len(),
                         outcome.response.nodes
                     );
@@ -1877,6 +1758,7 @@ impl Forge {
             resolved: view.resolved,
             total_matches: view.total_matches,
             trim_note: view.trim_note,
+            matched_via: view.matched_via,
         }
     }
 
@@ -1922,8 +1804,8 @@ fn view_payload_len(view: &GraphView) -> u64 {
 /// Serialized size of `view`'s dictionary-compacted form (the same transform
 /// `maybe_compact` applies, computed here without storing anything). Dictionary
 /// compaction can under-compress a subgraph with little name repetition, so
-/// `lens_links` uses this — not `view_payload_len`'s raw size — as its real budget
-/// check when deciding whether depth/breadth need trimming further.
+/// `lens_graph`'s neighborhood form uses this — not `view_payload_len`'s raw size —
+/// as its real budget check when deciding whether depth/breadth need trimming further.
 fn compacted_len(view: &GraphView) -> usize {
     let original = serde_json::json!({ "nodes": view.nodes, "edges": view.edges });
     crate::store::compress::compact_json(&original).to_string().len()
@@ -2024,6 +1906,38 @@ mod tests {
         );
     }
 
+    /// The 0.10.0 locked surface: `list_tools` advertises EXACTLY these 10 tools —
+    /// no removed tool lingers, no accidental addition rides along. `list_tools`
+    /// derives its set from `tool_router().list_all()`, enumerated here the same
+    /// way as the allowlist test above.
+    #[test]
+    fn list_tools_is_exactly_the_ten_tool_surface() {
+        let registered: std::collections::BTreeSet<String> = Forge::tool_router()
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            "lens_search",
+            "lens_symbol",
+            "lens_graph",
+            "lens_skeleton",
+            "lens_overview",
+            "lens_recall",
+            "lens_run",
+            "lens_grep_ast",
+            "lens_memory_query",
+            "lens_memory_record",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            registered, expected,
+            "the MCP surface must be exactly the 10 locked tools"
+        );
+    }
+
     fn forge(max_inline: usize) -> (Forge, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let data = dir.path().join(".lens");
@@ -2095,33 +2009,6 @@ mod tests {
             out.results[0].hits.iter().any(|h| h.path.ends_with("lib.rs")),
             "post-migration search must find real code, not just session noise"
         );
-    }
-
-    #[tokio::test]
-    async fn escaped_path_discover_falls_back_and_does_not_clobber() {
-        let (f, dir) = forge_with_source();
-        // Good graph via the explicit tool (default path ".").
-        let good = f
-            .lens_map(Parameters(DiscoverRequest {
-                path: ".".into(),
-                languages: None,
-            }))
-            .await
-            .unwrap();
-        let before = good.0.nodes;
-        assert!(before > 0, "baseline graph should be non-empty");
-
-        // A shell-escaped / nonexistent absolute path must fall back to repo_dir
-        // (rebuilding the same graph) rather than walking nothing and clobbering it.
-        let escaped = format!("{}\\ nonexistent", dir.path().display());
-        let _ = f
-            .lens_map(Parameters(DiscoverRequest {
-                path: escaped,
-                languages: None,
-            }))
-            .await;
-        let after = Graph::load(&f.graph_file()).unwrap().nodes.len();
-        assert_eq!(after, before, "graph must not be clobbered by a bad path");
     }
 
     fn grep_ast_req(
@@ -2213,34 +2100,48 @@ mod tests {
         assert_eq!(resp.0.matches.len(), 1, "{:?}", resp.0.matches);
     }
 
-    /// T8: `lens_links` resolves a symbol NAME the same way `lens_path` resolves
-    /// `from`/`to`, not just a raw node id; an unresolvable input is an explicit
-    /// error naming it, never a silent empty graph.
+    /// Unwrap `lens_graph`'s no-`to` form to its `GraphView` (the old `lens_links`
+    /// shape); panics if the path variant came back for a neighborhood request.
+    fn neighbors_of(resp: Json<crate::tools::GraphResponse>) -> GraphView {
+        match resp.0 {
+            crate::tools::GraphResponse::Neighbors(v) => v,
+            crate::tools::GraphResponse::Path(p) => {
+                panic!("no-`to` lens_graph must return the neighborhood shape, got path {p:?}")
+            }
+        }
+    }
+
+    /// Ported from the removed `lens_links`: `lens_graph` without `to` resolves a
+    /// symbol NAME the same way the path form resolves its ends, not just a raw
+    /// node id; an unresolvable input is an explicit error naming it, never a
+    /// silent empty graph.
     #[tokio::test]
-    async fn lens_links_resolves_name_and_errors_on_unresolvable_input() {
+    async fn lens_graph_resolves_name_and_errors_on_unresolvable_input() {
         let (f, _dir) = forge_with_source();
         let ok = f
-            .lens_links(Parameters(GraphNeighborsRequest {
-                node_id: "helper".into(),
+            .lens_graph(Parameters(GraphRequest {
+                node: "helper".into(),
+                to: None,
                 depth: 1,
                 direction: None,
             }))
             .await
             .unwrap();
         assert!(
-            !ok.0.nodes.is_empty(),
+            !neighbors_of(ok).nodes.is_empty(),
             "name-form lookup must return a non-empty neighborhood"
         );
 
         let Err(err) = f
-            .lens_links(Parameters(GraphNeighborsRequest {
-                node_id: "totally_unresolvable_xyz_123".into(),
+            .lens_graph(Parameters(GraphRequest {
+                node: "totally_unresolvable_xyz_123".into(),
+                to: None,
                 depth: 1,
                 direction: None,
             }))
             .await
         else {
-            panic!("an unresolvable node_id must error, not return an empty graph")
+            panic!("an unresolvable node must error, not return an empty graph")
         };
         assert!(
             err.message.contains("totally_unresolvable_xyz_123"),
@@ -2249,13 +2150,148 @@ mod tests {
         );
     }
 
-    /// T14: a `lens_links` call whose requested depth (10) pulls in a subgraph that
-    /// still overflows the response budget even after `maybe_compact`'s dictionary
-    /// compaction (mined defect: uniquely-named nodes compress poorly) must be
-    /// trimmed — depth and/or breadth — to actually fit, note what was cut, and keep
-    /// the full requested-depth subgraph recoverable via `retrieve_ref`.
+    /// T3 parity, `to`-form: `lens_graph {node, to}` serializes byte-identically to
+    /// the engine result the removed `lens_path` handler returned unchanged
+    /// (`gquery::path`), the untagged enum adding no wrapper.
     #[tokio::test]
-    async fn links_depth_ten_fits_the_response_budget_via_trim() {
+    async fn lens_graph_to_form_byte_equals_the_old_path_output() {
+        let (f, _dir) = forge_with_source();
+        let got = f
+            .lens_graph(Parameters(GraphRequest {
+                node: "main".into(),
+                to: Some("helper".into()),
+                depth: 1,
+                direction: None,
+            }))
+            .await
+            .unwrap();
+        // Same graph the handler used (cache hit after the call above).
+        let graph = f.load_graph().unwrap();
+        let expected = gquery::path(&graph, "main", "helper");
+        assert!(expected.found, "fixture must contain a main -> helper path");
+        assert_eq!(
+            serde_json::to_string(&got.0).unwrap(),
+            serde_json::to_string(&expected).unwrap(),
+            "to-form JSON must byte-equal the old lens_path handler's output"
+        );
+    }
+
+    /// T3 parity, no-`to` form: `lens_graph {node}` serializes byte-identically to
+    /// the removed `lens_links` handler's output on the same input — the same
+    /// resolve + directed-neighborhood engine, through the same `maybe_compact`,
+    /// with no enum wrapper and no `matched_via` (that field is lens_symbol-only).
+    #[tokio::test]
+    async fn lens_graph_no_to_form_byte_equals_the_old_links_output() {
+        let (f, _dir) = forge_with_source();
+        let got = f
+            .lens_graph(Parameters(GraphRequest {
+                node: "helper".into(),
+                to: None,
+                depth: 1,
+                direction: Some("callers".into()),
+            }))
+            .await
+            .unwrap();
+        let graph = f.load_graph().unwrap();
+        let id = gquery::resolve(&graph, "helper").expect("helper resolves");
+        // The old handler was: resolve -> neighbors_dir -> (no trim needed on this
+        // small fixture) -> maybe_compact (a no-op below the inline cap).
+        let expected = f.maybe_compact(gquery::neighbors_dir(&graph, &id, 1, Some("callers")));
+        let got_json = serde_json::to_string(&got.0).unwrap();
+        assert_eq!(
+            got_json,
+            serde_json::to_string(&expected).unwrap(),
+            "no-to-form JSON must byte-equal the old lens_links handler's output"
+        );
+        assert!(
+            !got_json.contains("matched_via"),
+            "matched_via is lens_symbol-only and must not appear here: {got_json}"
+        );
+    }
+
+    /// `lens_symbol` fallback: a substring hit reports `matched_via: "name"`; a
+    /// query with zero substring matches resolves via the blend-ranked find path
+    /// and reports `matched_via: "meaning"`.
+    #[tokio::test]
+    async fn lens_symbol_falls_back_to_blend_find_and_reports_matched_via() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "struct TotalPriceRule;\nfn compute_total_price() -> i32 { 1 }\nfn main() { let _ = compute_total_price(); }\n",
+        )
+        .unwrap();
+        let data = dir.path().join(".lens");
+        let f = Forge::with_paths(dir.path().to_path_buf(), data, 8192).unwrap();
+
+        // Substring hit: matched via "name".
+        let by_name = f
+            .lens_symbol(Parameters(GraphQueryRequest {
+                name: "compute_total".into(),
+                kind: None,
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert!(by_name.0.nodes.iter().any(|n| n.name == "compute_total_price"));
+        assert_eq!(by_name.0.matched_via.as_deref(), Some("name"));
+
+        // "total price" is no substring of any symbol name (the space), so the
+        // substring pass finds zero roots and the blend fallback must resolve it.
+        let by_meaning = f
+            .lens_symbol(Parameters(GraphQueryRequest {
+                name: "total price".into(),
+                kind: None,
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            by_meaning
+                .0
+                .nodes
+                .iter()
+                .any(|n| n.name == "compute_total_price"),
+            "blend fallback must resolve the meaning-shaped query, got {:?}",
+            by_meaning.0.nodes
+        );
+        assert_eq!(by_meaning.0.matched_via.as_deref(), Some("meaning"));
+
+        // The serialized field is present exactly when set — and spelled as pinned.
+        let json = serde_json::to_string(&by_meaning.0).unwrap();
+        assert!(json.contains(r#""matched_via":"meaning""#), "{json}");
+
+        // The fallback must keep threading `kind` (the absorbed `lens_find`
+        // contract): the same meaning-shaped query constrained to structs must
+        // resolve the struct and never the same-tokens function.
+        let by_kind = f
+            .lens_symbol(Parameters(GraphQueryRequest {
+                name: "total price".into(),
+                kind: Some("struct".into()),
+                limit: 20,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(by_kind.0.matched_via.as_deref(), Some("meaning"));
+        assert!(
+            by_kind.0.nodes.iter().any(|n| n.name == "TotalPriceRule"),
+            "kind-filtered fallback must resolve the struct, got {:?}",
+            by_kind.0.nodes
+        );
+        assert!(
+            !by_kind.0.nodes.iter().any(|n| n.name == "compute_total_price"),
+            "wrong-kind symbol must not survive the kind filter: {:?}",
+            by_kind.0.nodes
+        );
+    }
+
+    /// Ported from the removed `lens_links` (T14): a `lens_graph` neighborhood whose
+    /// requested depth (10) pulls in a subgraph that still overflows the response
+    /// budget even after `maybe_compact`'s dictionary compaction (mined defect:
+    /// uniquely-named nodes compress poorly) must be trimmed — depth and/or breadth
+    /// — to actually fit, note what was cut, and keep the full requested-depth
+    /// subgraph recoverable via `retrieve_ref`.
+    #[tokio::test]
+    async fn graph_depth_ten_fits_the_response_budget_via_trim() {
         let base = tempdir().unwrap();
         let repo = base.path().to_path_buf();
         // A long linear call chain with long, largely-unique names (little repetition
@@ -2273,15 +2309,16 @@ mod tests {
 
         // Tiny inline budget so even a modest subgraph must be trimmed to fit.
         let f = Forge::with_paths(repo.clone(), base.path().join(".lens"), 64).unwrap();
-        let resp = f
-            .lens_links(Parameters(GraphNeighborsRequest {
-                node_id: "node_alpha_chain_member_000".into(),
+        let resp = neighbors_of(
+            f.lens_graph(Parameters(GraphRequest {
+                node: "node_alpha_chain_member_000".into(),
+                to: None,
                 depth: 10,
                 direction: Some("callees".into()),
             }))
             .await
-            .unwrap()
-            .0;
+            .unwrap(),
+        );
 
         assert!(
             resp.truncated,
@@ -2325,6 +2362,7 @@ mod tests {
             code: "echo hi".into(),
             timeout_secs: 30,
             stdin: Some(stdin),
+            path: None,
         }))
         .await
         .unwrap();
@@ -2356,6 +2394,7 @@ mod tests {
             code: "echo hi".into(),
             timeout_secs: 30,
             stdin: None,
+            path: None,
         }))
         .await
         .unwrap();
@@ -2372,33 +2411,37 @@ mod tests {
         serde_json::from_str(last).unwrap()
     }
 
+    /// Adapted from the removed `lens_map`'s zero-file test: the guard now
+    /// protects the auto-ensure path. Deleting every source file makes the next
+    /// rebuild parse 0 files; `finish_discovery` must error and keep the existing
+    /// graph rather than persisting an empty one.
     #[tokio::test]
-    async fn zero_file_discover_errors_and_keeps_graph() {
-        let (f, _dir) = forge_with_source();
-        let good = f
-            .lens_map(Parameters(DiscoverRequest {
-                path: ".".into(),
-                languages: None,
-            }))
-            .await
-            .unwrap();
-        let before = good.0.nodes;
+    async fn zero_file_rebuild_errors_and_keeps_graph() {
+        let (f, dir) = forge_with_source();
+        // First query auto-builds the graph.
+        f.lens_symbol(Parameters(GraphQueryRequest {
+            name: "helper".into(),
+            kind: None,
+            limit: 20,
+        }))
+        .await
+        .unwrap();
+        let before = Graph::load(&f.graph_file()).unwrap().nodes.len();
         assert!(before > 0);
 
-        // An unsupported `languages` filter matches nothing → 0 files parsed. That
-        // must error and leave the existing graph untouched (never persist empty).
+        // All source gone → the stale-manifest rebuild parses 0 files. That must
+        // error and leave the existing graph untouched (never persist empty).
+        std::fs::remove_file(dir.path().join("lib.rs")).unwrap();
         let res = f
-            .lens_map(Parameters(DiscoverRequest {
-                path: ".".into(),
-                languages: Some(vec!["swift".into()]),
+            .lens_symbol(Parameters(GraphQueryRequest {
+                name: "helper".into(),
+                kind: None,
+                limit: 20,
             }))
             .await;
-        assert!(res.is_err(), "0-file discover should error, not succeed");
+        assert!(res.is_err(), "0-file rebuild should error, not succeed");
         let after = Graph::load(&f.graph_file()).unwrap().nodes.len();
-        assert_eq!(
-            after, before,
-            "graph must be preserved on a 0-file discover"
-        );
+        assert_eq!(after, before, "graph must be preserved on a 0-file rebuild");
     }
 
     #[tokio::test]
@@ -2428,11 +2471,12 @@ mod tests {
     async fn graph_refreshes_when_a_file_is_added() {
         // Every-project freshness: after a full build, adding a source file must make
         // the next lens_symbol auto-rebuild (manifest goes stale) — no explicit
-        // lens_map, no restart.
+        // build call, no restart.
         let (f, dir) = forge_with_source();
-        f.lens_map(Parameters(DiscoverRequest {
-            path: ".".into(),
-            languages: None,
+        f.lens_symbol(Parameters(GraphQueryRequest {
+            name: "helper".into(),
+            kind: None,
+            limit: 20,
         }))
         .await
         .unwrap();
@@ -2458,40 +2502,6 @@ mod tests {
         assert!(
             Graph::load(&f.graph_file()).unwrap().nodes.len() > before,
             "graph should grow after a file is added"
-        );
-    }
-
-    #[tokio::test]
-    async fn subpath_discover_refused_when_it_would_shrink() {
-        // The shrink guard: a narrower subpath discover must not clobber a bigger
-        // full-repo graph (the "bouncing" bug). Full-repo builds are unaffected.
-        let (f, dir) = forge_with_source();
-        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
-        std::fs::write(dir.path().join("sub/only.rs"), "fn lonely() {}\n").unwrap();
-        std::fs::write(dir.path().join("more.rs"), "fn a(){}\nfn b(){}\nfn c(){}\n").unwrap();
-
-        f.lens_map(Parameters(DiscoverRequest {
-            path: ".".into(),
-            languages: None,
-        }))
-        .await
-        .unwrap();
-        let full = Graph::load(&f.graph_file()).unwrap().nodes.len();
-
-        let res = f
-            .lens_map(Parameters(DiscoverRequest {
-                path: "sub".into(),
-                languages: None,
-            }))
-            .await;
-        assert!(
-            res.is_err(),
-            "subpath discover that shrinks must be refused"
-        );
-        assert_eq!(
-            Graph::load(&f.graph_file()).unwrap().nodes.len(),
-            full,
-            "graph must be preserved when a shrink is refused"
         );
     }
 
@@ -2568,64 +2578,7 @@ mod tests {
         );
     }
 
-    // ── T4: nested-repo build redirection + search federation ──────────────
-
-    /// A path-scoped `lens_map`/`lens_index` that lands inside a nested git repo
-    /// (its own `.git`, no `.lens` yet) builds into THAT repo's own `.lens`, leaving
-    /// the parent's graph and index untouched.
-    #[tokio::test]
-    async fn nested_path_scoped_build_lands_in_nested_lens_only() {
-        let parent = tempdir().unwrap();
-        let data = parent.path().join(".lens");
-        let f = Forge::with_paths(parent.path().to_path_buf(), data.clone(), 8192).unwrap();
-
-        // A nested git repo with source but no `.lens` yet.
-        let nested = parent.path().join("vendor");
-        std::fs::create_dir_all(nested.join(".git")).unwrap();
-        std::fs::write(nested.join("inner.rs"), "fn nested_gadget() -> i32 { 7 }\n").unwrap();
-
-        // lens_map on the nested path builds the nested repo's own graph.
-        let map = f
-            .lens_map(Parameters(DiscoverRequest {
-                path: nested.to_string_lossy().to_string(),
-                languages: None,
-            }))
-            .await
-            .unwrap();
-        assert!(map.0.nodes > 0, "nested map must produce a graph");
-        assert!(
-            nested.join(".lens").join("graph.json").exists(),
-            "graph must land in the nested repo's own .lens"
-        );
-
-        // lens_index on the nested path builds the nested repo's own index.
-        f.lens_index(Parameters(IndexRequest {
-            path: nested.to_string_lossy().to_string(),
-            recursive: true,
-        }))
-        .await
-        .unwrap();
-        assert!(
-            nested.join(".lens").join("index.db").exists(),
-            "index.db must land in the nested repo's own .lens"
-        );
-        assert!(
-            nested.join(".lens").join("fts").exists(),
-            "fts dir must land in the nested repo's own .lens"
-        );
-
-        // The parent's own graph was never written, and its index holds zero chunks:
-        // neither nested call touched parent state.
-        assert!(
-            !data.join("graph.json").exists(),
-            "parent graph.json must be untouched by a nested-path build"
-        );
-        assert_eq!(
-            f.index.chunk_count().unwrap(),
-            0,
-            "parent index must hold no chunks after nested-path builds"
-        );
-    }
+    // ── T4: nested-repo search federation ──────────────────────────────────
 
     /// `lens_search` from a parent folder federates each nested repo's own
     /// `.lens/fts`, so hits from both nested repos surface alongside the parent's own,
@@ -3110,37 +3063,13 @@ mod tests {
         assert!(!full.sliced);
     }
 
+    /// The folded `lens_run{path}` keeps the removed `lens_run_file`'s argv
+    /// behavior: the (possibly shell-escaped) path resolves, lands as the script's
+    /// first CLI argument (`$1`), and the analyzed file's bytes are credited to
+    /// the op record exactly as the old tool credited them — the MCP-layer mirror
+    /// of darkroom's own `run_file_passes_path_as_argv`.
     #[tokio::test]
-    async fn escaped_path_index_unescapes_and_indexes() {
-        // The meridian case: a repo whose path contains a space, where the model
-        // hands lens_index a shell-escaped absolute path (`AI\ Stuff`). Index must
-        // un-escape it and actually index the files — not report 0, not error.
-        let base = tempdir().unwrap();
-        let spaced = base.path().join("AI Stuff");
-        std::fs::create_dir_all(&spaced).unwrap();
-        std::fs::write(spaced.join("lib.rs"), "fn helper() -> i32 { 1 }\n").unwrap();
-        let f = Forge::with_paths(spaced.clone(), base.path().join(".lens"), 8192).unwrap();
-
-        let escaped = spaced.display().to_string().replace(' ', "\\ ");
-        let resp = f
-            .lens_index(Parameters(IndexRequest {
-                path: escaped,
-                recursive: true,
-            }))
-            .await
-            .unwrap();
-        assert!(
-            resp.0.files_indexed >= 1,
-            "escaped path must un-escape and index files, got {}",
-            resp.0.files_indexed
-        );
-        assert!(resp.0.chunks >= 1);
-    }
-
-    #[tokio::test]
-    async fn escaped_path_execute_file_unescapes() {
-        // Same root cause as discover/index: a shell-escaped path to a real file in
-        // a spaced dir must resolve so the darkroom script actually reads the file.
+    async fn lens_run_with_path_passes_argv_and_credits_file_bytes() {
         let base = tempdir().unwrap();
         let spaced = base.path().join("AI Stuff");
         std::fs::create_dir_all(&spaced).unwrap();
@@ -3150,17 +3079,28 @@ mod tests {
 
         let escaped = file.display().to_string().replace(' ', "\\ ");
         let resp = f
-            .lens_run_file(Parameters(crate::tools::ExecuteFileRequest {
-                path: escaped,
+            .lens_run(Parameters(ExecuteRequest {
                 language: "bash".into(),
                 code: "wc -c < \"$1\"".into(),
                 timeout_secs: 30,
+                stdin: None,
+                path: Some(escaped),
             }))
             .await
             .unwrap();
         // 6 bytes ("hello\n"): proves the script read the real file via the
-        // un-escaped path (a broken path would leave stdout empty).
+        // un-escaped path injected as argv (a broken path would leave stdout empty).
         assert_eq!(resp.0.stdout.trim(), "6", "stdout: {:?}", resp.0.stdout);
+
+        // The file's 6 bytes never entered context, so the op credits them on top
+        // of stdout — the old lens_run_file's raw_in = stdout_bytes + file_size.
+        let rec = last_op_record(&f);
+        assert_eq!(rec.tool, "lens_run");
+        assert_eq!(
+            rec.raw_bytes_in,
+            resp.0.stdout_bytes as u64 + 6,
+            "path-form lens_run must credit the analyzed file's bytes"
+        );
     }
 
     #[test]
@@ -3183,6 +3123,7 @@ mod tests {
             resolved: vec![],
             total_matches: None,
             trim_note: None,
+            matched_via: None,
         };
         let out = f.maybe_compact(view);
         assert!(!out.truncated);
@@ -3215,6 +3156,7 @@ mod tests {
             resolved: vec![],
             total_matches: None,
             trim_note: None,
+            matched_via: None,
         };
         let out = f.maybe_compact(view);
         assert!(out.truncated);

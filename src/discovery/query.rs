@@ -142,7 +142,7 @@ pub fn find(graph: &Graph, query: &str, limit: usize) -> GraphView {
 /// Like [`find`] but restricting the lexical candidate set to nodes of `kind`
 /// (function | struct | class | method | ...) before ranking, so a wrong-kind
 /// same-name symbol can't survive the budget. `None` = no filter (identical to
-/// [`find`]). The `kind`-threaded seam consumed by `lens_find`.
+/// [`find`]). The `kind`-threaded seam consumed by `lens_symbol`'s meaning fallback.
 pub fn find_kind(graph: &Graph, query: &str, limit: usize, kind: Option<&str>) -> GraphView {
     find_ranked_filtered(graph, query, limit, kind, FindRank::Blend)
 }
@@ -354,6 +354,7 @@ pub fn neighbors_dir(graph: &Graph, node_id: &str, depth: usize, dir: Option<&st
         resolved: Vec::new(),
         total_matches: None,
         trim_note: None,
+        matched_via: None,
     }
 }
 
@@ -512,6 +513,7 @@ fn subgraph(graph: &Graph, ids: &[String]) -> GraphView {
         resolved: Vec::new(),
         total_matches: None,
         trim_note: None,
+        matched_via: None,
     }
 }
 

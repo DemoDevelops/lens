@@ -15,6 +15,7 @@ async fn reads_big_file_returns_only_printed_line() {
     std::fs::write(repo.path().join("data.txt"), &big).unwrap();
 
     let req = ExecuteRequest {
+        path: None,
         language: "python".into(),
         code: "print(len(open('data.txt').read()))".into(),
         timeout_secs: 30,
@@ -32,6 +33,7 @@ async fn large_output_offloaded_and_retrievable() {
     let repo = tempdir().unwrap();
     let store = Store::open(&repo.path().join(".lens")).unwrap();
     let req = ExecuteRequest {
+        path: None,
         language: "bash".into(),
         code: "yes ABCDEFGH | head -c 40000".into(),
         timeout_secs: 30,

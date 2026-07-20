@@ -1,9 +1,9 @@
 {
-  "overall_token_savings_pct": 51.81286549707602,
+  "overall_token_savings_pct": 50.89278752436647,
   "per_workload": [
     {
       "workload": "Code search (results across files)",
-      "token_savings_pct": 40.42379788101059
+      "token_savings_pct": 37.21814724259712
     },
     {
       "workload": "Codebase exploration (subtree)",
@@ -22,23 +22,17 @@
       "token_savings_pct": 93.65580091132142
     }
   ],
-  "dep_count": 40,
+  "dep_count": 41,
   "tools": [
-    "lens_find",
+    "lens_graph",
     "lens_grep_ast",
-    "lens_index",
-    "lens_links",
-    "lens_map",
     "lens_memory_query",
     "lens_memory_record",
     "lens_overview",
-    "lens_path",
     "lens_recall",
     "lens_run",
-    "lens_run_file",
     "lens_search",
     "lens_skeleton",
-    "lens_stats",
     "lens_symbol"
   ]
 }

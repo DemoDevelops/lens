@@ -76,27 +76,36 @@ fn dep_count() -> anyhow::Result<usize> {
     Ok(n)
 }
 
-/// Public MCP tool names, scraped from the `async fn lens_*` tool methods in
-/// src/server.rs. Reads the source (robust against internal-visibility changes)
-/// and relies on the project's `lens_*` tool-naming convention. Stops at the
-/// `#[cfg(test)]` module so async test fns named `lens_*` are not counted as
-/// part of the public tool surface.
+/// Public MCP tool names, scraped from the `#[tool(...)]`-decorated `async fn
+/// lens_*` handler methods in src/server.rs. Reads the source (robust against
+/// internal-visibility changes) and relies on the project's `lens_*`
+/// tool-naming convention. Keys on the rmcp `#[tool(` attribute every real tool
+/// carries — NOT source position — so a `#[tokio::test]` fn named `lens_*` is
+/// never counted no matter where its `#[cfg(test)]` module sits, including one
+/// placed *before* the handlers (the T4 `resolve_repo_root_tests` mod, which the
+/// old "stop at the first `#[cfg(test)]`" heuristic mistook for the end of the
+/// tool surface, scraping zero tools).
 fn tool_names() -> anyhow::Result<Vec<String>> {
     let src = std::fs::read_to_string(repo_root().join("src/server.rs"))?;
     let mut names = BTreeSet::new();
+    let mut saw_tool_attr = false;
     for line in src.lines() {
-        // Real MCP tools are defined above the test module; stop there so test
-        // fns named `lens_*` do not inflate the surface (see G3 false positive).
-        if line.trim_start().starts_with("#[cfg(test)]") {
-            break;
+        // A real MCP tool is an `async fn lens_*` carrying the rmcp `#[tool(...)]`
+        // attribute a few lines above it; a test fn carries `#[tokio::test]`.
+        if line.trim_start().starts_with("#[tool(") {
+            saw_tool_attr = true;
+            continue;
         }
         if let Some(idx) = line.find("async fn lens_") {
-            let rest = &line[idx + "async fn ".len()..];
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            names.insert(name);
+            if saw_tool_attr {
+                let rest = &line[idx + "async fn ".len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                names.insert(name);
+            }
+            saw_tool_attr = false;
         }
     }
     Ok(names.into_iter().collect())

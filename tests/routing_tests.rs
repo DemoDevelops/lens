@@ -6,7 +6,7 @@
 //!     no-op — the safety contract);
 //!   * `lens wrap` → offload large stdout, then `verify --roundtrip` (PASS)
 //!     and `stats` (the op surfaces with real savings);
-//!   * `lens_run_file` end-to-end through the rmcp client.
+//!   * `lens_run` with `path` end-to-end through the rmcp client.
 
 use std::io::Write;
 use std::path::Path;
@@ -315,20 +315,31 @@ fn sessionstart_injects_routing_block_when_steering() {
     );
     for tool in [
         "lens_run",
-        "lens_run_file",
         "lens_search",
-        "lens_index",
-        "lens_map",
         "lens_symbol",
-        "lens_links",
-        "lens_path",
+        "lens_graph",
         "lens_recall",
         "lens_skeleton",
         "lens_overview",
-        "lens_find",
         "lens_grep_ast",
+        "lens_memory_query",
+        "lens_memory_record",
     ] {
         assert!(ctx.contains(tool), "bootstrap select list names {tool}: {ctx}");
+    }
+    for removed in [
+        "lens_run_file",
+        "lens_index",
+        "lens_map",
+        "lens_find",
+        "lens_links",
+        "lens_path",
+        "lens_stats",
+    ] {
+        assert!(
+            !ctx.contains(removed),
+            "bootstrap select list should not name removed tool {removed}: {ctx}"
+        );
     }
     assert!(
         ctx.contains("include_bodies"),
@@ -452,11 +463,11 @@ fn wrap_offloads_roundtrips_and_shows_on_stats() {
 }
 
 // ---------------------------------------------------------------------------
-// T3 §: lens_run_file end-to-end via the rmcp client
+// T3 §: lens_run with `path` (the folded lens_run_file) end-to-end via rmcp
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn lens_run_file_e2e() {
+async fn lens_run_with_path_e2e() {
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
     use rmcp::ServiceExt;
@@ -478,14 +489,18 @@ async fn lens_run_file_e2e() {
     .unwrap();
     let client = ().serve(transport).await.expect("handshake");
 
-    // The new tool is advertised.
+    // The folded tool is advertised; the removed one is gone.
     let tools = client.list_tools(Default::default()).await.unwrap();
     assert!(
-        tools
+        tools.tools.iter().any(|t| t.name.as_ref() == "lens_run"),
+        "lens_run must be advertised"
+    );
+    assert!(
+        !tools
             .tools
             .iter()
             .any(|t| t.name.as_ref() == "lens_run_file"),
-        "lens_run_file must be advertised"
+        "lens_run_file was folded into lens_run{{path}} and must not be advertised"
     );
 
     let call = |name: &'static str, args: Value| {
@@ -505,7 +520,7 @@ async fn lens_run_file_e2e() {
     // 1) The file path is injected as argv[1]; only the printed length returns,
     //    never the 40 KB of contents.
     let r = call(
-        "lens_run_file",
+        "lens_run",
         json!({
             "path": "data.txt",
             "language": "python",
@@ -521,7 +536,7 @@ async fn lens_run_file_e2e() {
 
     // 2) Large derived output is offloaded with a working retrieve_ref.
     let big = call(
-        "lens_run_file",
+        "lens_run",
         json!({
             "path": "data.txt",
             "language": "python",
@@ -705,7 +720,7 @@ fn find_trace_prompts_get_the_intent_nudge_at_prompt_submit() {
         .as_str()
         .unwrap_or("");
     assert!(
-        ctx.contains("lens_search") && ctx.contains("lens_links"),
+        ctx.contains("lens_search") && ctx.contains("lens_graph"),
         "find/trace prompt must inject the tool mapping: {v}"
     );
 
@@ -1311,7 +1326,7 @@ fn edit_links_deny_covers_multiedit_and_stays_quiet_without_graph() {
         multi["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .unwrap()
-            .contains("lens_links(\"alpha\")"),
+            .contains("lens_graph(node=\"alpha\")"),
         "deny names the symbol: {multi}"
     );
 
@@ -1621,7 +1636,7 @@ fn edit_links_deny_fires_once_per_symbol_at_full_and_never_touches_content() {
     .unwrap();
     let envs = rail_envs(&FULL_UP, &[("LENS_EDIT_LINKS_DENY", "1")]);
 
-    // A decl-touching Edit of a 3-caller symbol denies toward lens_links, once.
+    // A decl-touching Edit of a 3-caller symbol denies toward lens_graph, once.
     let p = edit_payload(d.path(), "elinkdeny1", "fn alpha() {", "fn alpha(x: u32) {");
     let (_, first) = run_hook("PreToolUse", &p, &envs, d.path());
     assert!(
@@ -1632,7 +1647,7 @@ fn edit_links_deny_fires_once_per_symbol_at_full_and_never_touches_content() {
         .as_str()
         .unwrap();
     assert!(
-        reason.contains("lens_links(\"alpha\")") && reason.contains("3 callers"),
+        reason.contains("lens_graph(node=\"alpha\")") && reason.contains("3 callers"),
         "deny reason names the symbol and caller count: {reason}"
     );
     // A deny never carries updatedInput — Claude Code never applies the edit,

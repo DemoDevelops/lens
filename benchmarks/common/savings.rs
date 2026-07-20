@@ -583,6 +583,7 @@ async fn log_debug() -> anyhow::Result<SavingsRow> {
     let data = tempfile::tempdir()?;
     let store = Store::open(&data.path().join(".lens"))?;
     let req = ExecuteRequest {
+        path: None,
         language: "bash".into(),
         code: "grep -n -B2 -A2 -E 'FATAL|panic|Traceback' app.log".into(),
         timeout_secs: 30,

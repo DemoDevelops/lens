@@ -34,22 +34,28 @@ async fn full_mcp_session() {
     // serve() performs the MCP initialize handshake.
     let client = ().serve(transport).await.expect("handshake");
 
-    // Tools are advertised.
+    // Exactly the 10-tool 0.10.0 surface is advertised — nothing missing, no
+    // removed tool lingering.
     let tools = client.list_tools(Default::default()).await.unwrap();
-    let names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
-    for expected in [
+    let mut names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
+    names.sort();
+    let mut expected: Vec<String> = [
         "lens_run",
-        "lens_index",
         "lens_search",
-        "lens_map",
         "lens_symbol",
-        "lens_links",
-        "lens_path",
+        "lens_graph",
+        "lens_skeleton",
+        "lens_overview",
         "lens_recall",
-        "lens_stats",
-    ] {
-        assert!(names.contains(&expected.to_string()), "missing {expected}");
-    }
+        "lens_grep_ast",
+        "lens_memory_query",
+        "lens_memory_record",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    expected.sort();
+    assert_eq!(names, expected, "advertised tools must be exactly the 10");
 
     // Every tool is stamped `anthropic/alwaysLoad` so Claude Code never defers them.
     for t in &tools.tools {
@@ -97,9 +103,7 @@ async fn full_mcp_session() {
         .unwrap()
         .contains(&"A".repeat(50000)));
 
-    // --- lens_index + lens_search ---
-    let indexed = call("lens_index", json!({ "path": "." })).await;
-    assert!(indexed["files_indexed"].as_u64().unwrap() >= 1);
+    // --- lens_search (the index auto-builds; no explicit index tool) ---
     let searched = call("lens_search", json!({ "queries": ["helper"] })).await;
     let hits = &searched["results"][0]["hits"];
     assert!(hits
@@ -108,22 +112,22 @@ async fn full_mcp_session() {
         .iter()
         .any(|h| h["path"].as_str().unwrap().ends_with("lib.rs")));
 
-    // --- lens_map + lens_symbol ---
-    let discovered = call("lens_map", json!({ "path": "." })).await;
-    assert!(discovered["nodes"].as_u64().unwrap() >= 3);
+    // --- lens_symbol (the graph auto-builds; no explicit map tool) ---
     let queried = call("lens_symbol", json!({ "name": "helper" })).await;
     let found_nodes = queried["nodes"].as_array().unwrap();
     assert!(found_nodes.iter().any(|n| n["name"] == json!("helper")));
+    assert_eq!(queried["matched_via"], json!("name"));
 
-    // lens_path between two connected symbols
-    let pathed = call("lens_path", json!({ "from": "main", "to": "helper" })).await;
+    // lens_graph with `to`: the shortest path between two connected symbols
+    // (the old lens_path shape, unwrapped).
+    let pathed = call("lens_graph", json!({ "node": "main", "to": "helper" })).await;
     assert_eq!(pathed["found"], json!(true));
 
-    // --- lens_stats: non-zero savings after the large darkroom run ---
-    let stats = call("lens_stats", json!({})).await;
-    assert!(stats["darkroom_calls"].as_i64().unwrap() >= 1);
-    assert!(stats["estimated_tokens_saved"].as_i64().unwrap() > 0);
-    assert!(stats["graph_nodes"].as_i64().unwrap() >= 3);
+    // lens_graph without `to`: the neighborhood (the old lens_links shape),
+    // carrying no lens_symbol-only `matched_via` field.
+    let hood = call("lens_graph", json!({ "node": "helper" })).await;
+    assert!(!hood["nodes"].as_array().unwrap().is_empty());
+    assert!(hood.get("matched_via").is_none());
 
     client.cancel().await.ok();
 }
@@ -187,22 +191,21 @@ async fn lazy_autobuild_on_first_query() {
         "lens_symbol should auto-build the graph and find helper"
     );
 
-    // The graph was persisted and the stats reflect the auto-build.
+    // The graph was persisted by the lazy build.
     assert!(
         data.path().join("graph.json").exists(),
         "graph.json should be persisted by the lazy build"
     );
-    let stats = call("lens_stats", json!({})).await;
-    assert!(stats["graph_nodes"].as_i64().unwrap() >= 3);
-    assert!(stats["index_chunks"].as_i64().unwrap() >= 1);
 
     client.cancel().await.ok();
 }
 
-/// `lens_run_file` must credit the analyzed file's bytes as savings — they
-/// never entered context — even when the script prints a small, un-offloaded result.
+/// `lens_run` with `path` (the folded `lens_run_file`) must credit the analyzed
+/// file's bytes as savings — they never entered context — even when the script
+/// prints a small, un-offloaded result. With the stats tool folded out of the MCP
+/// surface, the proof reads the op ledger in the data dir directly.
 #[tokio::test]
-async fn lens_run_file_credits_the_file_bytes() {
+async fn lens_run_with_path_credits_the_file_bytes() {
     let repo = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
     // A 40 KB file; analyzing it via the darkroom must not cost ~40 KB of context.
@@ -235,7 +238,7 @@ async fn lens_run_file_credits_the_file_bytes() {
 
     // Analyze the 40 KB file but print only a tiny summary (no offload).
     let res = call(
-        "lens_run_file",
+        "lens_run",
         json!({
             "path": "big.log",
             "language": "python",
@@ -243,22 +246,36 @@ async fn lens_run_file_credits_the_file_bytes() {
         }),
     )
     .await;
+    assert_eq!(res["stdout"].as_str().unwrap().trim(), "40000");
     assert_eq!(
         res["truncated"],
         json!(false),
         "small output, nothing offloaded"
     );
 
-    // Savings must reflect the ~40 KB file that stayed out of context (≈10k tokens),
-    // not the handful of bytes actually printed.
-    let stats = call("lens_stats", json!({})).await;
-    let saved = stats["estimated_tokens_saved"].as_i64().unwrap();
+    client.cancel().await.ok();
+
+    // The op record must credit the ~40 KB file as raw input that stayed out of
+    // context, not just the handful of bytes actually printed.
+    let ops = std::fs::read_to_string(data.path().join("ops.log")).expect("ops.log written");
+    let rec: Value = ops
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|r| r["tool"] == json!("lens_run"))
+        .expect("a lens_run op record");
     assert!(
-        saved >= 9000,
-        "file bytes credited as savings; got {saved} tokens"
+        rec["raw_bytes_in"].as_u64().unwrap() >= 40_000,
+        "file bytes must be credited as raw input: {rec}"
     );
 
-    client.cancel().await.ok();
+    // And the persistent savings counter (what the old lens_stats read) must
+    // carry the full uncapped file size — ≈10k tokens' worth of bytes.
+    let store = lens::store::Store::open(data.path()).expect("open store");
+    let raw = store.get_stat("raw_bytes_processed").unwrap_or(0);
+    assert!(
+        raw >= 40_000,
+        "file bytes credited to the persistent savings counter; got {raw}"
+    );
 }
 
 /// T3 (Bug B, permission stall): read-only tools must declare `readOnlyHint=true` in
@@ -282,17 +299,14 @@ async fn read_only_tools_declare_annotation() {
 
     let tools = client.list_tools(Default::default()).await.unwrap();
 
-    // The read-only tools (no code execution, no index/graph writes).
-    const READ_ONLY: [&str; 11] = [
+    // The read-only tools (no code execution, no durable writes).
+    const READ_ONLY: [&str; 8] = [
         "lens_search",
         "lens_overview",
         "lens_recall",
         "lens_symbol",
-        "lens_links",
-        "lens_path",
+        "lens_graph",
         "lens_skeleton",
-        "lens_stats",
-        "lens_find",
         "lens_grep_ast",
         "lens_memory_query",
     ];

@@ -54,6 +54,7 @@ fn main() -> Result<()> {
         Some("wrap") => return lens::wrap::run_cli(&args[2..]),
         Some("rtk") => return lens::rtk::run_cli(&args[2..]),
         Some("warmup") => return lens::warmup::run_cli(&args[2..]),
+        Some("q") => return lens::qcli::run_cli(&args[2..]),
         Some("watch") => return lens::warmup::run_watch_cli(&args[2..]),
         Some("--version") | Some("-V") => {
             println!("lens {}", env!("CARGO_PKG_VERSION"));
@@ -83,6 +84,7 @@ fn print_usage() {
     println!("    lens update");
     println!("    lens warmup [path]");
     println!("    lens watch [path]");
+    println!("    lens q <verb> [args]        read-only queries over an existing .lens/");
     println!("    lens dashboard [--port <n>] [--tui ...]");
     println!("    lens top                    alias for `dashboard --tui`");
     println!("    lens stats [...]");

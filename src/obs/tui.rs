@@ -25,16 +25,16 @@ use super::stats::{human_bytes, human_count, snapshot_json_since};
 /// dormant tool reads as unused, not absent. Mirrors `ADOPTION_TOOLS` in the web
 /// `INDEX_HTML`; the `tool_table_lists_canonical_tools` test keeps the two in step.
 pub(crate) const ADOPTION_TOOLS: &[&str] = &[
-    "lens_run",
-    "lens_run_file",
     "lens_search",
-    "lens_index",
-    "lens_map",
-    "lens_recall",
     "lens_symbol",
-    "lens_links",
-    "lens_path",
-    "lens_find",
+    "lens_graph",
+    "lens_skeleton",
+    "lens_overview",
+    "lens_recall",
+    "lens_run",
+    "lens_grep_ast",
+    "lens_memory_query",
+    "lens_memory_record",
 ];
 
 /// Width below which the layout collapses to the single-column mini view (mirrors
@@ -1299,19 +1299,19 @@ mod tests {
 
     #[test]
     fn tool_table_lists_canonical_tools() {
-        // Parity with the web ADOPTION_TOOLS list: same ten names.
+        // Parity with the web ADOPTION_TOOLS list: exactly the 10 new tools.
         assert_eq!(ADOPTION_TOOLS.len(), 10);
         for t in [
-            "lens_run",
-            "lens_run_file",
             "lens_search",
-            "lens_index",
-            "lens_map",
-            "lens_recall",
             "lens_symbol",
-            "lens_links",
-            "lens_path",
-            "lens_find",
+            "lens_graph",
+            "lens_skeleton",
+            "lens_overview",
+            "lens_recall",
+            "lens_run",
+            "lens_grep_ast",
+            "lens_memory_query",
+            "lens_memory_record",
         ] {
             assert!(ADOPTION_TOOLS.contains(&t), "{t} missing");
         }

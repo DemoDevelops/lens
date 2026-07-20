@@ -46,7 +46,7 @@ pub(crate) fn rskel_key(path: &str) -> String {
 /// Is this Read's `tool_input` a bounded (`offset`/`limit`) read of a code
 /// file? This is the shape [`read_is_skeletonizable`] exempts from the
 /// whole-file skeleton deny — its correct target isn't `lens_skeleton` (it's
-/// already bounded) but `lens_run_file`, so routing can point it there
+/// already bounded) but `lens_run`, so routing can point it there
 /// instead of silently passing it through.
 pub(crate) fn read_is_analysis_shaped(tool_input: &Value) -> bool {
     let path = tool_input["file_path"].as_str().unwrap_or("");

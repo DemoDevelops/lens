@@ -5,6 +5,7 @@ pub mod darkroom;
 pub mod discovery;
 pub mod index;
 pub mod obs;
+pub mod qcli;
 pub mod routing;
 pub mod rtk;
 pub mod server;

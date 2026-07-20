@@ -1,9 +1,9 @@
-//! edit_callers — Rail 2a: Edit(symbol with >=K callers) -> lens_links deny.
+//! edit_callers — Rail 2a: Edit(symbol with >=K callers) -> lens_graph deny.
 //!
 //! When an Edit touches a *declaration* line — a `fn`/`def`/`func`/`class`/
 //! `struct` signature — changing that signature can break every caller. We look
 //! the symbol up in the structural graph and, if it has at least K incoming
-//! `calls` edges (callers), route the editor at `lens_links` so the blast
+//! `calls` edges (callers), route the editor at `lens_graph` so the blast
 //! radius is visible before committing: [`deny_reason`] is the one-shot deny
 //! arm (blocked at most once per symbol per session; the verbatim retry always
 //! passes). Pure and graph-backed; the once-per-(session, symbol) `elink:{sym}`
@@ -73,9 +73,9 @@ pub fn caller_count(graph: &Graph, sym: &str) -> Option<usize> {
 pub fn deny_reason(sym: &str, callers: usize) -> String {
     format!(
         "`{sym}` has {callers} callers — its declaration is about to change, so see the \
-         blast radius first: lens_links(\"{sym}\") lists every caller in one call. If the \
+         blast radius first: lens_graph(node=\"{sym}\") lists every caller in one call. If the \
          lens tools aren't loaded yet, load them first: \
-         ToolSearch(query: \"select:lens_links,lens_path\"). This fires at most once per \
+         ToolSearch(query: \"select:lens_graph\"). This fires at most once per \
          symbol per session — the same Edit will pass if you re-run it verbatim."
     )
 }
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(caller_count(&g, "foo"), Some(4));
         let r = deny_reason("foo", 4);
         assert!(r.contains('4'), "must embed the real caller count: {r}");
-        assert!(r.contains("lens_links"), "must name lens_links: {r}");
+        assert!(r.contains("lens_graph"), "must name lens_graph: {r}");
         assert!(r.contains("foo"), "must name the symbol: {r}");
     }
 
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn deny_reason_names_symbol_count_and_retry_promise() {
         let r = deny_reason("foo", 4);
-        assert!(r.contains("lens_links(\"foo\")"), "{r}");
+        assert!(r.contains("lens_graph(node=\"foo\")"), "{r}");
         assert!(r.contains("4 callers"), "{r}");
         assert!(r.contains("once per symbol per session"), "{r}");
         assert!(r.contains("will pass if you re-run it verbatim"), "{r}");

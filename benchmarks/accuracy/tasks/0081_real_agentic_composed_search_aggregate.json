@@ -1,0 +1,22 @@
+{
+  "id": "0081_real_agentic_composed_search_aggregate",
+  "prompt": "Across all of src/, excluding test code (anything gated by #[cfg(test)]), exactly how many `.expect(...)` method calls are there? Count real structural call sites (genuine method-call AST nodes) only, not textual occurrences inside string literals or comments.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "count": 31
+  },
+  "check": "numeric_tolerance",
+  "primary_mechanism": "darkroom",
+  "lens_fn": "lens_run",
+  "evidence": [
+    "31",
+    "AST-matched"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import lens, os, re\n\nhits = lens.grep_ast(pattern=\"$X.expect($MSG)\", lang=\"rust\")\nrows = hits.get(\"hits\", hits) if isinstance(hits, dict) else hits\n\ndef excluded_line_ranges(lines):\n    # Brace-range exclusion for every #[cfg(test)] mod/fn block (1-based line\n    # numbers), not a first-occurrence line-cut -- a file can have more than\n    # one such block.\n    ranges = []\n    i, n = 0, len(lines)\n    while i < n:\n        if re.match(r'^\\s*#\\[cfg\\(test\\)\\]\\s*$', lines[i]):\n            j = i + 1\n            while j < n and re.match(r'^\\s*#\\[', lines[j]):\n                j += 1\n            if j < n and re.search(r'\\b(mod|fn)\\b', lines[j]):\n                depth, started, k = 0, False, j\n                while k < n:\n                    depth += lines[k].count('{') - lines[k].count('}')\n                    if '{' in lines[k]:\n                        started = True\n                    if started and depth <= 0:\n                        break\n                    k += 1\n                ranges.append((i + 1, k + 1))\n                i = k + 1\n                continue\n        i += 1\n    return ranges\n\nranges_cache = {}\ndef ranges_for(path):\n    if path not in ranges_cache:\n        lines = open(os.path.join(\"../..\", path), encoding=\"utf-8\").read().split(\"\\n\")\n        ranges_cache[path] = excluded_line_ranges(lines)\n    return ranges_cache[path]\n\ndef in_ranges(line, ranges):\n    return any(s <= line <= e for s, e in ranges)\n\ncount = 0\nfor h in rows:\n    path = h.get(\"path\", \"\")\n    line = h.get(\"line\", 0)\n    if not path.startswith(\"src/\"):\n        continue\n    if in_ranges(line, ranges_for(path)):\n        continue\n    count += 1\n\nprint(f\"non-test .expect() call sites in src/ (AST-matched): {count}\")\n"
+  },
+  "notes": "SUPERSEDES ground_truth=30: re-verified 2026-07-20 during T10's post-fold agentic run, which showed this task failing on BOTH arms for sonnet (0/3 baseline, not just lens -- a signal the ground truth itself was suspect, not a lens-specific problem). Re-derived 31 two independent ways, both agreeing: (1) a brace-range-aware Python re-scan of src/ (proper #[cfg(test)] exclusion, not first-line-cut); (2) lens's own authoritative discovery::extract::collect_cfg_test_spans + byte_in_spans (tree-sitter-AST-based) via a temporary #[ignore]'d Rust test in src/discovery/extract.rs, run once then removed (git diff on that file confirmed empty afterward). Root cause of the original 30: a genuinely missed .expect() at src/obs/mod.rs:421 (`tiktoken_rs::o200k_base().expect(\"load o200k_base BPE\")`, pre-existing BPE-tokenizer init code, unrelated to any T1-T9 change) -- an oversight in the original derivation's file coverage, not codebase drift and not a cfg(test)-placement bug like 0063/0064 (obs/mod.rs has no early test module). Also hardened treatment.script itself to brace-range cfg(test) exclusion (matching 0063/0064's fix) instead of the fragile first-'#[cfg(test)]'-line cut it previously used, so this task doesn't silently break the same way those did if a multi-cfg-test-block file is ever matched by this pattern in the future. Per-file breakdown unchanged from the original 13 files (see prior note) plus the newly-counted obs/mod.rs=1, summing to 31."
+}

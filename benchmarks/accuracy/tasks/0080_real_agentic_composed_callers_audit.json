@@ -1,0 +1,25 @@
+{
+  "id": "0080_real_agentic_composed_callers_audit",
+  "prompt": "Excluding test and bench code, and counting only callers reachable within 2 hops (direct callers of `adjacency_dir`, plus their own direct callers), exactly 6 functions call `adjacency_dir` (defined in src/discovery/graph.rs) that way. Of those 6, exactly 3 take a `depth` parameter in their own signature. List those 3 sorted alphabetically: caller_1 is alphabetically first.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "caller_1": "neighbors",
+    "caller_2": "neighbors_dir",
+    "caller_3": "neighbors_directed"
+  },
+  "check": "contains",
+  "primary_mechanism": "darkroom",
+  "lens_fn": "lens_run",
+  "evidence": [
+    "adjacency_dir",
+    "neighbors_directed",
+    "neighbors_dir"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import lens\n\nTARGET = \"adjacency_dir\"\nDEPTH = 2\n\nresp = lens.callers(TARGET, depth=DEPTH)\nnodes = resp.get(\"nodes\", [])\n\ncandidates = {}\nfor n in nodes:\n    name = n.get(\"name\")\n    file = n.get(\"file\", \"\")\n    if name == TARGET or not file.startswith(\"src/\"):\n        continue\n    if n.get(\"origin\", \"prod\") != \"prod\":\n        continue\n    candidates[name] = file\n\ndef sig_block(text, name):\n    lines = text.splitlines()\n    for i, line in enumerate(lines):\n        if f\"fn {name}(\" in line or f\"fn {name}<\" in line:\n            block = []\n            for l in lines[i:i + 8]:\n                block.append(l)\n                if \"{\" in l:\n                    break\n            return \"\\n\".join(block)\n    return \"\"\n\nskel_cache = {}\nwith_depth = []\nfor name, file in candidates.items():\n    if file not in skel_cache:\n        sk = lens.skeleton(file)\n        skel_cache[file] = sk.get(\"skeleton\", \"\") if isinstance(sk, dict) else str(sk)\n    if \"depth\" in sig_block(skel_cache[file], name):\n        with_depth.append(name)\n\nwith_depth.sort()\nprint(f\"target=adjacency_dir transitive_callers={len(candidates)} with_depth_param={len(with_depth)}\")\nprint(\",\".join(with_depth))\n"
+  },
+  "notes": "Ground truth derived 2026-07-19 against this worktree's live src/ (lens-worktrees/lens-0.10-two-layer-surface). Method: mcp__lens__lens_links(node_id='adjacency_dir', depth=3, direction='callers') run against the main lens repo's bound graph, restricted by hand to depth<=2; validity of using the main-repo graph as a proxy was confirmed via `diff -q` showing src/discovery/graph.rs and src/discovery/query.rs byte-identical between the main repo and this worktree both before and immediately after the traversal (neither file is in T1/T2/T4's disjoint scope this wave: T1=src/qcli.rs, T2=src/darkroom/**, T4=server.rs Forge::new region + setup.rs register region). Backward BFS from adjacency_dir (graph.rs:373) within 2 hops, origin=prod, file under src/, excluding the target itself, yields exactly 6: adjacency (graph.rs:400), adjacency_directed (graph.rs:407), neighbors (graph.rs:419), neighbors_directed (graph.rs:432), shortest_path (graph.rs:482), neighbors_dir (query.rs:339). (A 3rd-hop expansion would additionally reach `path` (query.rs:363) and `lens_links` (server.rs:747) plus a second, differently-located `neighbors` (query.rs:331) that collides by name with graph.rs:419 -- depth=2 was chosen specifically to keep the caller-name set collision-free for an alphabetical-list answer key.) The `depth`-parameter property was confirmed by reading each candidate's signature via mcp__lens__lens_skeleton(include_bodies=[...]) on graph.rs and query.rs: neighbors/neighbors_directed/neighbors_dir take `depth: usize`; adjacency/adjacency_directed/shortest_path do not."
+}

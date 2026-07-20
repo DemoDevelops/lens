@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::session::resolve_data_dir;
 use crate::store::Store;
 use crate::tools::{ExecuteRequest, ExecuteResponse};
 
@@ -104,7 +105,7 @@ pub async fn run(
     store: &Store,
     max_inline: usize,
 ) -> Result<ExecuteResponse, String> {
-    run_with_args(req, repo_dir, store, max_inline, &[]).await
+    run_with_args(req, repo_dir, store, max_inline, None).await
 }
 
 /// Like [`run`], but injects `file_path` as the script's first CLI argument so
@@ -118,25 +119,23 @@ pub async fn run_file(
     store: &Store,
     max_inline: usize,
 ) -> Result<ExecuteResponse, String> {
-    run_with_args(
-        req,
-        repo_dir,
-        store,
-        max_inline,
-        &[file_path.as_os_str().to_owned()],
-    )
-    .await
+    run_with_args(req, repo_dir, store, max_inline, Some(file_path)).await
 }
 
 /// Shared darkroom runner. Spawns `runtime.program pre_args <script_path>`
-/// followed by `extra_args`, captures stdout/stderr, offloads oversized stdout
-/// to `store`, and bumps the savings counters.
+/// followed by `file_arg` (if present), captures stdout/stderr, offloads
+/// oversized stdout to `store`, and bumps the savings counters.
+///
+/// Also writes the `lens.py`/`lens.mjs` composition preludes next to the temp
+/// script and sets `LENS_BIN`/`LENS_DIR` on the child, so in-script code can
+/// call back into `lens q` (this repo's live index/graph) without another
+/// MCP round-trip.
 async fn run_with_args(
     req: ExecuteRequest,
     repo_dir: &std::path::Path,
     store: &Store,
     max_inline: usize,
-    extra_args: &[std::ffi::OsString],
+    file_arg: Option<&std::path::Path>,
 ) -> Result<ExecuteResponse, String> {
     let runtime = runtimes::runtime_for(&req.language).ok_or_else(|| {
         format!(
@@ -145,9 +144,11 @@ async fn run_with_args(
         )
     })?;
 
+    let data_dir = resolve_data_dir(repo_dir);
+
     // Go: compile once per unique source (keyed by blake3), exec the cached binary.
     if runtime.extension == "go" {
-        return run_go_cached(req, repo_dir, store, max_inline, extra_args).await;
+        return run_go_cached(req, repo_dir, &data_dir, store, max_inline, file_arg).await;
     }
 
     // Write the script to a temp file next to the repo so relative paths in the
@@ -163,15 +164,33 @@ async fn run_with_args(
         .map_err(|e| format!("flushing temp script: {e}"))?;
     let script_path = tmp.path().to_path_buf();
 
+    // Inject the composition preludes alongside the script: Python's `import
+    // lens` and Node's `import('./lens.mjs')` both resolve same-directory
+    // modules relative to the executing script's own path, independent of
+    // the child's cwd (which is `repo_dir`, for filesystem operations).
+    if let Some(script_dir) = script_path.parent() {
+        std::fs::write(script_dir.join("lens.py"), include_str!("preludes/lens.py"))
+            .map_err(|e| format!("writing lens.py prelude: {e}"))?;
+        std::fs::write(script_dir.join("lens.mjs"), include_str!("preludes/lens.mjs"))
+            .map_err(|e| format!("writing lens.mjs prelude: {e}"))?;
+    }
+
     let mut cmd = tokio::process::Command::new(&runtime.program);
     cmd.args(&runtime.pre_args)
         .arg(&script_path)
-        .args(extra_args)
+        .args(file_arg)
         .current_dir(repo_dir)
+        .env("LENS_DIR", &data_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    match std::env::current_exe() {
+        Ok(exe) => {
+            cmd.env("LENS_BIN", exe);
+        }
+        Err(e) => eprintln!("lens: darkroom could not resolve current_exe for LENS_BIN: {e}"),
+    }
     // Own process group so a timeout kills the whole tree, not just the shell.
     #[cfg(unix)]
     cmd.process_group(0);
@@ -261,9 +280,10 @@ async fn run_with_args(
 async fn run_go_cached(
     req: ExecuteRequest,
     repo_dir: &std::path::Path,
+    data_dir: &std::path::Path,
     store: &Store,
     max_inline: usize,
-    extra_args: &[std::ffi::OsString],
+    file_arg: Option<&std::path::Path>,
 ) -> Result<ExecuteResponse, String> {
     let key = runtimes::source_key(req.code.as_bytes());
     let bin_path = go_cache_dir().join(&key);
@@ -321,14 +341,22 @@ async fn run_go_cached(
             .map_err(|e| format!("caching Go binary: {e}"))?;
     }
 
-    // Execute the cached binary as a fresh sandboxed subprocess.
+    // Execute the cached binary as a fresh sandboxed subprocess. Go scripts call
+    // `lens q` directly (no wrapper module), but still need these to find it.
     let mut cmd = tokio::process::Command::new(&bin_path);
-    cmd.args(extra_args)
+    cmd.args(file_arg)
         .current_dir(repo_dir)
+        .env("LENS_DIR", data_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    match std::env::current_exe() {
+        Ok(exe) => {
+            cmd.env("LENS_BIN", exe);
+        }
+        Err(e) => eprintln!("lens: darkroom could not resolve current_exe for LENS_BIN: {e}"),
+    }
     // Own process group so a timeout kills the whole tree, not just the binary.
     #[cfg(unix)]
     cmd.process_group(0);
@@ -447,6 +475,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_in(dir.path());
         let req = ExecuteRequest {
+            path: None,
             language: "bash".into(),
             code: "echo hello; echo oops 1>&2".into(),
             timeout_secs: 30,
@@ -467,6 +496,7 @@ mod tests {
         let big = "x".repeat(500_000);
         std::fs::write(dir.path().join("big.txt"), &big).unwrap();
         let req = ExecuteRequest {
+            path: None,
             language: "python".into(),
             code: "data = open('big.txt').read(); print(len(data))".into(),
             timeout_secs: 30,
@@ -484,6 +514,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_in(dir.path());
         let req = ExecuteRequest {
+            path: None,
             language: "bash".into(),
             code: "sleep 10; echo done".into(),
             timeout_secs: 1,
@@ -507,6 +538,7 @@ mod tests {
         let store = store_in(dir.path());
         let pid_file = dir.path().join("bg.pid");
         let req = ExecuteRequest {
+            path: None,
             language: "bash".into(),
             code: format!("sleep 60 & echo $! > \"{}\"\nsleep 60", pid_file.display()),
             timeout_secs: 1,
@@ -543,6 +575,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_in(dir.path());
         let req = ExecuteRequest {
+            path: None,
             language: "ruby".into(),
             code: "puts 1".into(),
             timeout_secs: 5,
@@ -550,6 +583,7 @@ mod tests {
         };
         // ruby exists on this machine, so instead test an unsupported language path.
         let bad = ExecuteRequest {
+            path: None,
             language: "cobol".into(),
             code: "x".into(),
             timeout_secs: 5,
@@ -566,6 +600,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_in(dir.path());
         let req = ExecuteRequest {
+            path: None,
             language: "python".into(),
             code: "print('A' * 50000)".into(),
             timeout_secs: 30,
@@ -584,6 +619,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_in(dir.path());
         let req = ExecuteRequest {
+            path: None,
             language: "python".into(),
             code: "import sys; print(sys.stdin.read().strip().upper())".into(),
             timeout_secs: 30,
@@ -591,6 +627,55 @@ mod tests {
         };
         let r = run(req, dir.path(), &store, 8192).await.unwrap();
         assert_eq!(r.stdout.trim(), "HELLO");
+    }
+
+    // T2 invariant: the composition preludes land next to the script and the
+    // child sees LENS_BIN/LENS_DIR, so `import lens` / `lens q` calls resolve.
+    #[tokio::test]
+    async fn injects_lens_preludes_and_env_vars() {
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+        let req = ExecuteRequest {
+            path: None,
+            language: "python".into(),
+            code: "\
+import os
+script_dir = os.path.dirname(os.path.abspath(__file__))
+print(os.path.exists(os.path.join(script_dir, 'lens.py')))
+print(os.path.exists(os.path.join(script_dir, 'lens.mjs')))
+print(os.environ.get('LENS_BIN', ''))
+print(os.environ.get('LENS_DIR', ''))
+"
+            .into(),
+            timeout_secs: 30,
+            stdin: None,
+        };
+        let r = run(req, dir.path(), &store, 8192).await.unwrap();
+        let mut lines = r.stdout.trim().lines();
+        assert_eq!(
+            lines.next(),
+            Some("True"),
+            "lens.py should exist next to the script: {:?}",
+            r.stdout
+        );
+        assert_eq!(
+            lines.next(),
+            Some("True"),
+            "lens.mjs should exist next to the script: {:?}",
+            r.stdout
+        );
+        let expected_bin = std::env::current_exe().unwrap().display().to_string();
+        assert_eq!(
+            lines.next(),
+            Some(expected_bin.as_str()),
+            "LENS_BIN should be the running lens binary"
+        );
+        let expected_dir = dir.path().join(".lens").display().to_string();
+        assert_eq!(
+            lines.next(),
+            Some(expected_dir.as_str()),
+            "LENS_DIR should be the darkroom's data dir"
+        );
     }
 
     #[tokio::test]
@@ -603,6 +688,7 @@ mod tests {
         let file = dir.path().join("data.txt");
         std::fs::write(&file, &body).unwrap();
         let req = ExecuteRequest {
+            path: None,
             language: "python".into(),
             code: "import sys; print(len(open(sys.argv[1]).read()))".into(),
             timeout_secs: 30,
@@ -623,6 +709,7 @@ mod tests {
         let file = dir.path().join("data.bin");
         std::fs::write(&file, vec![b'q'; 4096]).unwrap();
         let req = ExecuteRequest {
+            path: None,
             language: "bash".into(),
             code: "wc -c < \"$1\"".into(),
             timeout_secs: 30,
@@ -641,6 +728,7 @@ mod tests {
         let file = dir.path().join("any.txt");
         std::fs::write(&file, "hello").unwrap();
         let req = ExecuteRequest {
+            path: None,
             language: "python".into(),
             code: "print('A' * 50000)".into(),
             timeout_secs: 30,
@@ -698,12 +786,14 @@ mod tests {
         let src = "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"cached\") }";
 
         let req1 = ExecuteRequest {
+            path: None,
             language: "go".into(),
             code: src.into(),
             timeout_secs: 30,
             stdin: None,
         };
         let req2 = ExecuteRequest {
+            path: None,
             language: "go".into(),
             code: src.into(),
             timeout_secs: 30,
@@ -721,6 +811,7 @@ mod tests {
 
         // Changed source produces a different output (different key => rebuild).
         let req3 = ExecuteRequest {
+            path: None,
             language: "go".into(),
             code: "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"rebuilt\") }".into(),
             timeout_secs: 30,

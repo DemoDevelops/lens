@@ -511,25 +511,19 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <footer id="footer">—</footer>
 <script>
 // Canonical lens MCP tools, shown in the merged tool table even at 0 calls.
-const ADOPTION_TOOLS=['lens_run','lens_run_file','lens_search','lens_index','lens_map','lens_recall','lens_symbol','lens_links','lens_path','lens_find'];
+const ADOPTION_TOOLS=['lens_search','lens_symbol','lens_graph','lens_skeleton','lens_overview','lens_recall','lens_run','lens_grep_ast','lens_memory_query','lens_memory_record'];
 // Hover description per tool, shown as a native title tooltip on the tool name.
 const TOOL_DESC={
-  lens_run:"Run code (python/js/ts/bash/ruby/go) in a darkroom subprocess; only stdout/stderr returns to context, not the data the script read. Large output is offloaded with a recall ref.",
-  lens_run_file:"Analyze one file in the darkroom; your code gets the file path as its first CLI arg (sys.argv[1] / process.argv[2] / $1). Only what it prints returns; the file's bytes stay out of context.",
-  lens_index:"Build a full-text index over a file or directory (respects .gitignore). Returns files indexed and chunk count; prerequisite for lens_search.",
-  lens_search:"Run one or more BM25-ranked full-text queries in a single call. Returns the top snippets per query with path and relevance score; answers 'where is X mentioned'. For symbol defs/relationships use lens_symbol instead.",
-  lens_map:"Parse the whole repo with tree-sitter into a symbol graph (functions, types, modules) and their relationships (calls, imports, contains). Run once per repo, then query with lens_symbol/lens_links/lens_path.",
-  lens_symbol:"Find graph symbols by name substring (+ optional kind) and return each with its immediate connections: where a symbol lives and what directly touches it. Don't know the name? Use lens_find instead.",
-  lens_find:"Find symbols by a natural-language query, ranked lexically by word overlap with symbol names. Use when you know what a symbol does but not its exact name; know the name? Use lens_symbol.",
-  lens_links:"Return the local subgraph within N hops of a node id: a symbol's neighborhood or blast radius at a chosen depth. For one specific A-to-B connection use lens_path instead.",
-  lens_path:"Find the shortest path between two symbols via BFS over graph edges: how A reaches B through the call/import chain. For a symbol's whole neighborhood use lens_links instead.",
-  lens_recall:"Recover the full blob behind a retrieve_ref returned by another tool, reversing any truncation or offloading.",
-  lens_skeleton:"Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to '...'. Far fewer tokens than reading the whole file; full text is one lens_recall away. Use this instead of Read to see a file's shape; include_bodies returns chosen bodies inline.",
-  lens_grep_ast:"Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds real calls without the false positives grep hits in comments or strings. Returns path:line matches. For plain-text search use lens_search instead.",
-  lens_overview:"Token-budgeted repo overview: the most structurally important symbols (PageRank-ranked) with their callers and callees, as much as fits a token budget. A high-signal map of a codebase at fixed cost. For one file's structure use lens_skeleton instead.",
-  lens_stats:"Report darkroom usage, estimated tokens saved, and current index/graph sizes for this repo.",
-  lens_memory_record:"Save one durable note (a decision, constraint, rejected approach, or rule) that outlives the session and comes back on the next SessionStart; also lands in the search index.",
-  lens_memory_query:"Pull back durable notes saved earlier: the whole running list, or the closest matches to a query when one is given."
+  lens_run:"Run code in a darkroom; only stdout/stderr returns to context, not the raw data. Compose with `import lens` (python) or `import('./lens.mjs')` (js) to query the live repo.",
+  lens_skeleton:"Show a file's structure: signatures, types, and nesting with line numbers, bodies elided to '…'. Full text recoverable via lens_recall.",
+  lens_recall:"Recover full content behind a retrieve_ref, reversing truncation. Optional offset, limit, and grep to slice large refs.",
+  lens_search:"Full-text search with BM25 ranking. Returns snippets at match line with attached definition names.",
+  lens_symbol:"Find symbols by name substring; returns connections (calls, contains, imports). Falls back to meaning-based match.",
+  lens_graph:"Graph connections: with `to`, shortest directed path (does A reach B?); without `to`, neighborhood walk within `depth` hops (fan-in/fan-out).",
+  lens_overview:"Token-budgeted repo overview: most structurally important symbols (PageRank-ranked) with callers/callees.",
+  lens_grep_ast:"Structural search via tree-sitter query (S-expression): matches syntax, not text. Returns path:line matches.",
+  lens_memory_record:"Save durable project memory (decisions, constraints, rules) that outlives the session.",
+  lens_memory_query:"Query durable memory, ranked by relevance. Omit query for full list.",
 };
 let rtkBase=null;
 // Custom dropdown: a styled button + listbox. Native <select> option menus are drawn by
@@ -1094,7 +1088,7 @@ mod tests {
         // The tool-adoption panel and its canonical tool list are baked into the page.
         assert!(body2.contains("tool adoption"));
         assert!(body2.contains("ADOPTION_TOOLS"));
-        assert!(body2.contains("lens_links"));
+        assert!(body2.contains("lens_graph"));
         // The applied-value panel + its data binding are baked into the page.
         assert!(body2.contains("applied value"));
         assert!(body2.contains("d.applied_value"));

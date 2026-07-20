@@ -80,17 +80,16 @@ async fn every_tool_call_logs_one_correct_record() {
         exec["stdout"].as_str().unwrap().len() + exec["stderr"].as_str().unwrap().len();
 
     call("lens_recall", json!({ "ref": exec_ref })).await;
-    call("lens_index", json!({ "path": "." })).await;
     call("lens_search", json!({ "queries": ["helper"] })).await;
-    call("lens_map", json!({ "path": "." })).await;
     call("lens_symbol", json!({ "name": "helper" })).await;
-    call("lens_path", json!({ "from": "main", "to": "helper" })).await;
-    call("lens_stats", json!({})).await;
+    call("lens_graph", json!({ "node": "main", "to": "helper" })).await;
     client.cancel().await.ok();
 
-    // 8 successful tool calls -> exactly 8 records, all well-formed.
+    // 5 successful tool calls plus the two auto-ensure ops they trigger (the
+    // first search auto-indexes, the first graph query auto-builds) -> exactly
+    // 7 records, all well-formed.
     let records = ops_lines(data.path());
-    assert_eq!(records.len(), 8, "one record per tool call");
+    assert_eq!(records.len(), 7, "one record per tool call + 2 auto-ensures");
     for r in &records {
         assert!(r["ts"].as_str().unwrap().ends_with('Z'));
         assert!(r["tool"].is_string());
@@ -213,6 +212,7 @@ async fn concurrent_workers_no_corruption_all_roundtrip() {
             let marker = format!("L{i:03}");
             let code = format!("print('{marker}' * 20000)");
             let req = ExecuteRequest {
+                path: None,
                 language: "python".into(),
                 code,
                 timeout_secs: 30,

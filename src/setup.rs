@@ -11,6 +11,7 @@
 //! A separate process from the MCP server — its stdout is its own response channel,
 //! never the JSON-RPC stream.
 
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -125,6 +126,10 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         "Uninstall: lens session uninstall && lens rtk uninstall && claude mcp remove lens && rm {}",
         bin.display()
     );
+
+    // 8. Offer the same lens-tool sync for the user's own custom subagents.
+    offer_agent_sync();
+
     Ok(())
 }
 
@@ -329,6 +334,170 @@ fn allow_lens_tools(settings: &Path) -> Result<()> {
         }
     }
     write_json(settings, &root)
+}
+
+// ── custom-agent lens tool sync ─────────────────────────────────────────────
+//
+// A subagent whose frontmatter omits `tools:` (or sets it to a bare `*`) reads as
+// "all tools," but Claude Code's wildcard grant does not reliably wire MCP tools
+// into a subagent running inside an isolated git worktree, while naming
+// `mcp__lens__<tool>` explicitly in `tools:` does. Converting an implicit
+// "everything" grant into an explicit list is a real narrowing (any tool added
+// later needs a manual re-edit), so this only ever appends to an agent that
+// ALREADY has an explicit `tools:` list; it never invents one.
+
+/// An agent file whose explicit `tools:` frontmatter line is missing lens tools.
+/// `line_start`/`line_end` bound that line (no trailing newline) in the file's text,
+/// re-validated at patch time in case the file changed between scan and patch.
+struct AgentGap {
+    path: PathBuf,
+    name: String,
+    line_start: usize,
+    line_end: usize,
+    missing: Vec<String>,
+}
+
+/// `$CLAUDE_CONFIG_DIR/agents` (may be a symlinked directory, e.g. to
+/// `~/.claude-personal/agents`; reading/writing files inside it follows the
+/// symlink like any other directory, so no special-casing is needed).
+fn agents_dir() -> Option<PathBuf> {
+    rtk::claude_config_dir().map(|d| d.join("agents"))
+}
+
+/// Every `*.md` file directly under `dir` with an explicit, non-wildcard `tools:`
+/// frontmatter line missing at least one lens tool. Agents with no `tools:` line,
+/// or `tools: "*"`, are skipped — see the module-level note above.
+fn scan_agent_gaps(dir: &Path) -> Result<Vec<AgentGap>> {
+    let all_tools: Vec<String> = READ_ONLY_TOOLS
+        .iter()
+        .chain(WRITE_TOOLS.iter())
+        .map(|t| format!("mcp__lens__{t}"))
+        .collect();
+
+    let mut gaps = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if !text.starts_with("---\n") {
+            continue; // no frontmatter: not an agent definition
+        }
+
+        let mut offset = 4; // past the opening "---\n"
+        let mut name = None;
+        let mut tools_span = None;
+        for line in text[4..].split_inclusive('\n') {
+            let trimmed = line.trim_end_matches('\n');
+            if trimmed == "---" {
+                break; // end of frontmatter
+            }
+            if let Some(rest) = trimmed.strip_prefix("name:") {
+                name = Some(rest.trim().to_string());
+            } else if let Some(rest) = trimmed.strip_prefix("tools:") {
+                tools_span = Some((offset, offset + trimmed.len(), rest.trim().to_string()));
+            }
+            offset += line.len();
+        }
+
+        let Some((line_start, line_end, value)) = tools_span else {
+            continue; // no explicit tools: line: implicit "all tools", leave it alone
+        };
+        if matches!(value.as_str(), "*" | "\"*\"" | "'*'") {
+            continue; // explicit wildcard: same as no list, leave it alone
+        }
+        let present: Vec<&str> = value.split(',').map(str::trim).collect();
+        let missing: Vec<String> = all_tools
+            .iter()
+            .filter(|t| !present.contains(&t.as_str()))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        gaps.push(AgentGap {
+            name: name.unwrap_or_else(|| path.file_stem().unwrap().to_string_lossy().to_string()),
+            path,
+            line_start,
+            line_end,
+            missing,
+        });
+    }
+    gaps.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(gaps)
+}
+
+/// Append `gap`'s missing lens tools to its `tools:` line in place.
+fn patch_agent_gap(gap: &AgentGap) -> Result<()> {
+    let text = std::fs::read_to_string(&gap.path)
+        .with_context(|| format!("reading {}", gap.path.display()))?;
+    let still_valid = text
+        .get(gap.line_start..gap.line_end)
+        .is_some_and(|s| s.trim_start().starts_with("tools:"));
+    if !still_valid {
+        bail!(
+            "{}: tools: line moved since scanning, skipping (re-run to retry)",
+            gap.path.display()
+        );
+    }
+    let mut patched = String::with_capacity(text.len() + 16 * gap.missing.len());
+    patched.push_str(&text[..gap.line_end]);
+    patched.push_str(", ");
+    patched.push_str(&gap.missing.join(", "));
+    patched.push_str(&text[gap.line_end..]);
+    std::fs::write(&gap.path, patched).with_context(|| format!("writing {}", gap.path.display()))
+}
+
+/// Interactively offer to patch each gap under `agents_dir()`, one agent at a time —
+/// some agents (e.g. a deliberately lens-free A/B control arm) may be missing lens
+/// tools on purpose, so this asks per agent rather than one blanket yes/no that could
+/// patch an agent the user never meant to change. No-op if the directory doesn't
+/// exist, nothing is missing, or stdin isn't a terminal (an unattended install must
+/// never block waiting for input).
+fn offer_agent_sync() {
+    let Some(dir) = agents_dir() else { return };
+    if !dir.is_dir() {
+        return;
+    }
+    let gaps = match scan_agent_gaps(&dir) {
+        Ok(g) => g,
+        Err(e) => {
+            warn(&format!("could not scan agents in {}: {e:#}", dir.display()));
+            return;
+        }
+    };
+    if gaps.is_empty() || !std::io::stdin().is_terminal() {
+        return;
+    }
+
+    println!();
+    println!(
+        "Found {} custom agent(s) in {} without full lens tool access.",
+        gaps.len(),
+        dir.display()
+    );
+    for gap in &gaps {
+        print!(
+            "  - {} is missing {} lens tool{}. Add them? [y/N] ",
+            gap.name,
+            gap.missing.len(),
+            if gap.missing.len() == 1 { "" } else { "s" }
+        );
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() {
+            return;
+        }
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            continue;
+        }
+        match patch_agent_gap(gap) {
+            Ok(()) => say(&format!("Updated {}", gap.path.display())),
+            Err(e) => warn(&format!("{e:#}")),
+        }
+    }
 }
 
 /// Append `<bin_dir>` to the user's shell profile if it isn't already on PATH.
@@ -837,6 +1006,77 @@ mod tests {
             .filter(|v| *v == "mcp__lens__*")
             .count();
         assert_eq!(wildcard_count, 1, "re-run must not duplicate the wildcard entry");
+    }
+
+    #[test]
+    fn scan_agent_gaps_flags_partial_lists_and_skips_wildcards() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("partial.md"),
+            "---\nname: partial\ntools: Read, Grep, mcp__lens__lens_search\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("complete.md"),
+            format!(
+                "---\nname: complete\ntools: Read, {}\n---\nbody\n",
+                READ_ONLY_TOOLS
+                    .iter()
+                    .chain(WRITE_TOOLS.iter())
+                    .map(|t| format!("mcp__lens__{t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("implicit.md"),
+            "---\nname: implicit\ncolor: red\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("wildcard.md"),
+            "---\nname: wildcard\ntools: \"*\"\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("README.md"), "not an agent\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "tools: nope\n").unwrap();
+
+        let gaps = scan_agent_gaps(dir.path()).unwrap();
+        let names: Vec<&str> = gaps.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["partial"],
+            "no tools: line, a wildcard, and an already-complete list are all left alone"
+        );
+        assert!(gaps[0].missing.contains(&"mcp__lens__lens_symbol".to_string()));
+        assert!(!gaps[0].missing.contains(&"mcp__lens__lens_search".to_string()));
+    }
+
+    #[test]
+    fn patch_agent_gap_appends_missing_tools_and_preserves_rest() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("partial.md");
+        std::fs::write(
+            &path,
+            "---\nname: partial\ntools: Read, Grep\ncolor: blue\n---\n\n# body\ntext\n",
+        )
+        .unwrap();
+
+        let gaps = scan_agent_gaps(dir.path()).unwrap();
+        assert_eq!(gaps.len(), 1);
+        patch_agent_gap(&gaps[0]).unwrap();
+
+        let patched = std::fs::read_to_string(&path).unwrap();
+        assert!(patched.contains("tools: Read, Grep, mcp__lens__lens_search"));
+        assert!(
+            patched.contains("color: blue"),
+            "later frontmatter keys preserved"
+        );
+        assert!(patched.contains("# body\ntext"), "body preserved");
+
+        // Re-scanning the patched file finds no remaining gap.
+        assert!(scan_agent_gaps(dir.path()).unwrap().is_empty());
     }
 
     #[test]

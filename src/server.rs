@@ -1650,6 +1650,53 @@ impl Forge {
         })
     }
 
+    /// Run `build` under the cross-process single-flight lock (`<data_dir>/build.pid`),
+    /// but skip it entirely if `is_fresh()` becomes true first. The normal multi-session
+    /// case is that one cold session builds and every other finds the artifact already
+    /// fresh, so `build` runs at most once per staleness epoch across all processes.
+    ///
+    /// Contract:
+    /// - `build` is only ever called while we hold the exclusive lock AND have just
+    ///   re-confirmed `!is_fresh()`, so at most one process builds concurrently.
+    /// - The lock file is removed on `build`'s success, its error (`?`), or a panic,
+    ///   via [`BuildLockGuard`]'s `Drop` — a crash mid-build can't leak the lock.
+    /// - A holder that crashed (its recorded pid is dead) has its stale lock reclaimed
+    ///   and acquisition retried; a live holder is waited out with capped backoff.
+    fn build_locked(
+        &self,
+        is_fresh: impl Fn() -> bool,
+        build: impl FnOnce() -> Result<(), ErrorData>,
+    ) -> Result<(), ErrorData> {
+        let lock_path = self.data_dir.join(BUILD_LOCK_FILE);
+        let deadline = std::time::Instant::now() + BUILD_LOCK_MAX_WAIT;
+        let mut build = Some(build);
+        loop {
+            // Fast path: a concurrent winner may already have built it (cross-process
+            // visible — the manifest is a plain file, the index reader reloads).
+            if is_fresh() {
+                return Ok(());
+            }
+            match BuildLockGuard::try_acquire(&lock_path) {
+                Ok(Some(_guard)) => {
+                    // We hold the lock. Re-check under it: a winner may have finished
+                    // between the freshness probe above and this acquisition, in which
+                    // case building again would be wasted work.
+                    if is_fresh() {
+                        return Ok(()); // `_guard` drops -> lock removed
+                    }
+                    let build = build.take().expect("build lock builds at most once");
+                    // `_guard` drops on Ok AND Err (and on a panic) -> lock removed.
+                    return build();
+                }
+                // Held by another builder: wait for it to clear (or reclaim it if the
+                // holder is dead), then loop back to re-probe freshness — the winner
+                // almost always built it, so the next `is_fresh()` returns early.
+                Ok(None) => wait_for_lock_clear(&lock_path, deadline),
+                Err(e) => return Err(ErrorData::internal_error(e.to_string(), None)),
+            }
+        }
+    }
+
     /// Ensure `graph.json` is present AND current before a query. Rebuilds the
     /// whole-repo graph when it is missing, empty (a poisoned prior build), or
     /// **stale** — i.e. any source file was added, edited, or removed since the last
@@ -1657,34 +1704,39 @@ impl Forge {
     /// itself fresh as the user adds/removes files, with no explicit `lens_map`
     /// and no server restart. Works for every project (it is in the query path).
     fn ensure_graph(&self) -> Result<(), ErrorData> {
-        let current = discovery::source_manifest(&self.repo_dir);
-        if let Ok(g) = Graph::load(&self.graph_file()) {
-            if !g.nodes.is_empty()
-                && read_manifest(&self.graph_manifest_file()).as_ref() == Some(&current)
-            {
-                return Ok(()); // present and up to date
-            }
-        }
-        let op = self
-            .ops
-            .start("lens_map", serde_json::json!({ "auto": true }));
-        // Incremental rediscovery: re-parse only changed files, reuse cached extracts
-        // for the rest, then assemble the graph by the SAME path `discover` uses — so
-        // the result is byte-identical to a full rebuild. The repo-root + no-language
-        // build here is exactly what the parse cache is keyed for. Any error (e.g. a
-        // poisoned lock) falls back to a full from-scratch `discover`.
-        let outcome = match self.reparse_incremental() {
-            Ok(o) => o,
-            Err(_) => match discovery::discover(&self.repo_dir, None) {
-                Ok(o) => o,
-                Err(e) => {
-                    op.finish(0, 0, None, "error", e.to_string(), None);
-                    return Err(ErrorData::internal_error(e.to_string(), None));
-                }
-            },
+        // Freshness probe: the persisted graph is present, non-empty, and its manifest
+        // matches the current source mtimes. Recomputed on each call so a waiter
+        // re-checks the winner's just-written manifest before deciding to build.
+        let is_fresh = || {
+            let current = discovery::source_manifest(&self.repo_dir);
+            matches!(
+                Graph::load(&self.graph_file()),
+                Ok(g) if !g.nodes.is_empty()
+                    && read_manifest(&self.graph_manifest_file()).as_ref() == Some(&current)
+            )
         };
-        self.finish_discovery(op, outcome, true, &self.repo_dir)?;
-        Ok(())
+        self.build_locked(is_fresh, || {
+            let op = self
+                .ops
+                .start("lens_map", serde_json::json!({ "auto": true }));
+            // Incremental rediscovery: re-parse only changed files, reuse cached extracts
+            // for the rest, then assemble the graph by the SAME path `discover` uses — so
+            // the result is byte-identical to a full rebuild. The repo-root + no-language
+            // build here is exactly what the parse cache is keyed for. Any error (e.g. a
+            // poisoned lock) falls back to a full from-scratch `discover`.
+            let outcome = match self.reparse_incremental() {
+                Ok(o) => o,
+                Err(_) => match discovery::discover(&self.repo_dir, None) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        op.finish(0, 0, None, "error", e.to_string(), None);
+                        return Err(ErrorData::internal_error(e.to_string(), None));
+                    }
+                },
+            };
+            self.finish_discovery(op, outcome, true, &self.repo_dir)?;
+            Ok(())
+        })
     }
 
     /// Ensure the FTS index is present AND current before a search. Reindexes the
@@ -1700,40 +1752,46 @@ impl Forge {
         if self.index_walk.fresh() {
             return Ok(());
         }
-        let current = crate::index::file_manifest(&self.repo_dir);
+        // Freshness probe: a live (reloaded) chunk count > 0 AND a matching manifest.
         // Gate on the live chunk count, not the cached `index_chunks` stat: a schema/
         // path migration can wipe the index while the stat (in a separate db) still
-        // reads non-zero, which would wrongly skip the rebuild.
-        if self.index.chunk_count().unwrap_or(0) > 0
-            && read_manifest(&self.index_manifest_file()).as_ref() == Some(&current)
-        {
-            self.index_walk.mark();
-            return Ok(());
-        }
-        let op = self
-            .ops
-            .start("lens_index", serde_json::json!({ "auto": true }));
-        match self.index.index_path(&self.repo_dir, true) {
-            Ok(resp) => {
-                if let Ok(total) = self.index.chunk_count() {
-                    let _ = self.store.set_stat("index_chunks", total);
+        // reads non-zero, which would wrongly skip the rebuild. Recomputed on each call
+        // so a waiter re-checks the winner's committed index before deciding to build.
+        let is_fresh = || {
+            let current = crate::index::file_manifest(&self.repo_dir);
+            self.index.chunk_count().unwrap_or(0) > 0
+                && read_manifest(&self.index_manifest_file()).as_ref() == Some(&current)
+        };
+        self.build_locked(is_fresh, || {
+            let current = crate::index::file_manifest(&self.repo_dir);
+            let op = self
+                .ops
+                .start("lens_index", serde_json::json!({ "auto": true }));
+            match self.index.index_path(&self.repo_dir, true) {
+                Ok(resp) => {
+                    if let Ok(total) = self.index.chunk_count() {
+                        let _ = self.store.set_stat("index_chunks", total);
+                    }
+                    write_manifest(&self.index_manifest_file(), &current);
+                    let returned = obs::json_len(&resp);
+                    let note = format!(
+                        "auto-indexed {} files, {} chunks",
+                        resp.files_indexed, resp.chunks
+                    );
+                    let explain = self.ops.explain(|| note.clone());
+                    op.finish(returned, returned, None, "ok", note, explain);
+                    Ok(())
                 }
-                write_manifest(&self.index_manifest_file(), &current);
-                self.index_walk.mark();
-                let returned = obs::json_len(&resp);
-                let note = format!(
-                    "auto-indexed {} files, {} chunks",
-                    resp.files_indexed, resp.chunks
-                );
-                let explain = self.ops.explain(|| note.clone());
-                op.finish(returned, returned, None, "ok", note, explain);
-                Ok(())
+                Err(e) => {
+                    op.finish(0, 0, None, "error", e.to_string(), None);
+                    Err(ErrorData::internal_error(e.to_string(), None))
+                }
             }
-            Err(e) => {
-                op.finish(0, 0, None, "error", e.to_string(), None);
-                Err(ErrorData::internal_error(e.to_string(), None))
-            }
-        }
+        })?;
+        // Fresh now (built here, or a concurrent winner built it): start the debounce
+        // window so the next burst of queries skips the walk, matching prior behavior.
+        self.index_walk.mark();
+        Ok(())
     }
 
     /// If a subgraph serializes larger than the inline limit, store the full
@@ -1861,6 +1919,124 @@ fn slice_content(
         None => filtered.len(),
     };
     (filtered[start..end].join("\n"), true)
+}
+
+/// Cross-process single-flight lock file for the index/graph build. Lives in the
+/// data dir; its content is the holder's pid so a crashed holder's lock can be
+/// detected (via `kill(pid, 0)`) and reclaimed.
+const BUILD_LOCK_FILE: &str = "build.pid";
+/// Poll backoff bounds while a waiter watches a live lock holder finish.
+const BUILD_LOCK_POLL_MIN: std::time::Duration = std::time::Duration::from_millis(5);
+const BUILD_LOCK_POLL_MAX: std::time::Duration = std::time::Duration::from_millis(100);
+/// Safety cap: a *live* holder that keeps the lock past this is assumed wedged and
+/// force-reclaimed. Generous vs. any real index/graph build so it never trips in
+/// normal operation; it only guarantees a session can never hang forever on a
+/// stuck peer.
+const BUILD_LOCK_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// RAII holder of the cross-process build lock (`<data_dir>/build.pid`). Created by
+/// [`BuildLockGuard::try_acquire`]; its `Drop` removes the file, so the lock is
+/// released on the build's success path, any early return / `?`, and a panic — a
+/// crash mid-build can never leak the lock and stall every later session.
+struct BuildLockGuard {
+    path: PathBuf,
+}
+
+impl BuildLockGuard {
+    /// Try to take the lock by creating the file with `O_CREAT | O_EXCL` (`create_new`
+    /// maps to exactly that on unix). `Ok(Some)` = we own it (our pid is written into
+    /// it); `Ok(None)` = another builder already holds it; `Err` = a real IO failure.
+    fn try_acquire(path: &Path) -> std::io::Result<Option<Self>> {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                // Best-effort pid write: a reader that sees an empty/short file treats
+                // the pid as unknown and waits, rather than reclaiming a just-created
+                // lock whose owner has not finished stamping it yet.
+                let _ = write!(f, "{}", std::process::id());
+                let _ = f.flush();
+                Ok(Some(BuildLockGuard {
+                    path: path.to_path_buf(),
+                }))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl Drop for BuildLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The pid recorded in a lock file, or `None` if absent / empty / not yet stamped.
+fn read_lock_pid(path: &Path) -> Option<i32> {
+    std::fs::read_to_string(path).ok()?.trim().parse::<i32>().ok()
+}
+
+/// True if `pid` names a live process. `kill(pid, 0)` sends no signal, only probes:
+/// rc 0 => alive; `ESRCH` => dead; `EPERM` (exists but unsignalable) still counts as
+/// alive. A non-positive pid never names a real process (0/-1 address process groups),
+/// so it is treated as dead and its lock is reclaimable.
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// No portable liveness probe off unix: assume alive so a waiter never clobbers a live
+/// holder's lock (correctness over crash-recovery on non-unix platforms).
+#[cfg(not(unix))]
+fn pid_alive(_pid: i32) -> bool {
+    true
+}
+
+/// Block until the build lock at `path` is released, i.e. its file no longer exists.
+/// Polls the file's existence (cheap) with capped exponential backoff — the expensive
+/// freshness re-probe is left to the caller, which loops back after this returns. If
+/// the recorded pid is dead the stale lock is reclaimed (removed) so acquisition can
+/// proceed. Bounded by `deadline`: a live holder that overruns the safety cap is
+/// force-reclaimed so a wedged peer can never hang the session forever.
+fn wait_for_lock_clear(path: &Path, deadline: std::time::Instant) {
+    let mut backoff = BUILD_LOCK_POLL_MIN;
+    loop {
+        // Cleared: the holder finished and its RAII guard removed the file.
+        if !path.exists() {
+            return;
+        }
+        match read_lock_pid(path) {
+            // Crashed holder: reclaim the stale lock. Re-read the pid immediately
+            // before removing to narrow the classic reclaim race — a live builder that
+            // just re-acquired (writing a different pid) must not have its lock deleted.
+            Some(pid) if !pid_alive(pid) => {
+                if read_lock_pid(path) == Some(pid) {
+                    let _ = std::fs::remove_file(path);
+                }
+                return;
+            }
+            // Live (or not-yet-stamped) holder: back off and re-poll. Past the safety
+            // cap, assume it wedged and force-reclaim so the caller can build.
+            _ => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = std::fs::remove_file(path);
+                    return;
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(BUILD_LOCK_POLL_MAX);
+            }
+        }
+    }
 }
 
 /// Load a saved staleness manifest, or `None` if absent/unreadable (which forces

@@ -40,12 +40,22 @@ def symbol(name, kind=None):
     return _q(args)
 
 
-def callers(name, depth=1):
-    return _q(["callers", name, "--depth", str(depth)])
+def callers(name, transitive=False, depth=2, prod_only=False):
+    args = ["callers", name, "--depth", str(depth)]
+    if transitive:
+        args.append("--transitive")
+    if prod_only:
+        args.append("--prod-only")
+    return _q(args)
 
 
-def callees(name, depth=1):
-    return _q(["callees", name, "--depth", str(depth)])
+def callees(name, transitive=False, depth=2, prod_only=False):
+    args = ["callees", name, "--depth", str(depth)]
+    if transitive:
+        args.append("--transitive")
+    if prod_only:
+        args.append("--prod-only")
+    return _q(args)
 
 
 def path(frm, to):

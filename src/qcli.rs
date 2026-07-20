@@ -26,7 +26,7 @@ use std::sync::Mutex;
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::discovery::graph::Graph;
+use crate::discovery::graph::{Direction, Graph};
 use crate::discovery::query as gquery;
 use crate::discovery::{self, extract, pattern, skeleton, structural, tags_adapter};
 use crate::index::{self, Index};
@@ -86,8 +86,8 @@ const USAGE: &str = "usage: lens q <verb> [args] - read-only queries over an exi
 \n\
 search  <query...> [--limit N]                      ranked hits, each with its FULL chunk\n\
 symbol  <name> [--kind K] [--limit N]               declared symbols by name substring\n\
-callers <name> [--depth N]                          directed fan-in subgraph\n\
-callees <name> [--depth N]                          directed fan-out subgraph\n\
+callers <name> [--depth N] [--transitive] [--prod-only]  directed fan-in subgraph (or full closure with witnesses)\n\
+callees <name> [--depth N] [--transitive] [--prod-only]  directed fan-out subgraph (or full closure with witnesses)\n\
 path    <from> <to>                                 shortest directed path\n\
 skeleton <file> [--bodies a,b]                      full skeleton text + per-def lines\n\
 grep-ast [--path P] [--pattern PAT | --query Q] [--lang L] [--limit N]\n\
@@ -305,16 +305,57 @@ fn symbol(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
     with_stale(serde_json::to_value(&view), ctx.graph_stale())
 }
 
-/// `callers|callees <name> [--depth N]` - the directed neighborhood subgraph. Resolves
-/// `<name>` to a node id the way `lens_links` does (`gquery::resolve`), then walks the
-/// requested direction (`gquery::neighbors_dir`).
+/// `callers|callees <name> [--depth N] [--transitive] [--prod-only]` - the directed
+/// neighborhood subgraph, or (with `--transitive`) the complete directed closure with
+/// witnesses (T3). Resolves `<name>` to a node id the way `lens_links` does
+/// (`gquery::resolve`), then walks the requested direction (`gquery::neighbors_dir`);
+/// `--transitive` instead calls `gquery::transitive_closure`, which resolves the root
+/// itself.
 fn neighbors(ctx: &QCli, args: &[String], dir: &str) -> Result<Value, QError> {
-    let (positionals, flags) = parse_flags(args);
+    // `--transitive`/`--prod-only` are presence-only flags (no value), unlike every
+    // other `--flag` in this file's `parse_flags` convention (which always consumes
+    // the next token as a value) - strip them out before the shared parser sees them.
+    let transitive = args.iter().any(|a| a == "--transitive");
+    let prod_only = args.iter().any(|a| a == "--prod-only");
+    let rest: Vec<String> = args
+        .iter()
+        .filter(|a| a.as_str() != "--transitive" && a.as_str() != "--prod-only")
+        .cloned()
+        .collect();
+    let (positionals, flags) = parse_flags(&rest);
     let Some(name) = positionals.first() else {
-        return Err(QError::bad(format!("usage: lens q {dir} <name> [--depth N]")));
+        return Err(QError::bad(format!(
+            "usage: lens q {dir} <name> [--depth N] [--transitive] [--prod-only]"
+        )));
     };
     let depth = usize_flag(&flags, "depth").unwrap_or(1);
     let graph = ctx.require_graph()?;
+    if transitive {
+        let direction = if dir == "callers" {
+            Direction::Callers
+        } else {
+            Direction::Callees
+        };
+        let closure = gquery::transitive_closure(&graph, name, direction, depth, prod_only)
+            .map_err(|e| QError::bad(e.to_string()))?;
+        let serialized = serde_json::to_value(&closure).map_err(|e| QError::bad(e.to_string()))?;
+        let Value::Object(fields) = serialized else {
+            return Err(QError::bad("expected a JSON object payload"));
+        };
+        // Count-first convention: the total/prod reach up front, so a scan of the
+        // compact line answers "how many" before "which ones".
+        let mut ordered = serde_json::Map::new();
+        for key in ["count_total", "count_prod"] {
+            if let Some(v) = fields.get(key) {
+                ordered.insert(key.to_string(), v.clone());
+            }
+        }
+        for (k, v) in fields {
+            ordered.entry(k).or_insert(v);
+        }
+        ordered.insert("stale".to_string(), json!(ctx.graph_stale()));
+        return Ok(Value::Object(ordered));
+    }
     let Some(id) = gquery::resolve(&graph, name) else {
         return Err(QError::bad(format!(
             "no node found for '{name}': not a known node id and no symbol matches that name"

@@ -782,11 +782,12 @@ impl Forge {
 
     /// Graph connections for a symbol: with `to`, the shortest directed path
     /// between the two (the old `lens_path`); without, the local subgraph around
-    /// `node` (the old `lens_links`). Natural-signature dispatch, no mode enum;
-    /// each form returns its natural shape unchanged. The graph is auto-built
-    /// and kept fresh per query (`ensure_graph`).
+    /// `node` (the old `lens_links`), or — with `transitive: true` — the
+    /// complete directed closure with per-node witnesses (T3). Natural-signature
+    /// dispatch, no mode enum; each form returns its natural shape unchanged.
+    /// The graph is auto-built and kept fresh per query (`ensure_graph`).
     #[tool(
-        description = "Graph connections for a symbol (by node id or name; the graph is auto-built and kept fresh, no setup call needed). With `to`: the shortest directed path from `node` to `to` via BFS over calls/imports edges — no path (or an unresolvable end) returns `found: false`, not an error, and an ambiguous name is reported via `resolved` (chosen node + how many others it beat). Without `to`: the local subgraph within `depth` hops of `node`, walking `direction` \"callers\" (fan-in), \"callees\" (fan-out), or \"both\" (undirected, the default) — a `node` that resolves to nothing is an explicit error, never an empty graph. When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. Large neighborhoods are budget-trimmed and compacted, with the full subgraph recoverable via the lens_recall ref."
+        description = "Graph connections for a symbol (by node id or name; the graph is auto-built and kept fresh, no setup call needed). With `to`: the shortest directed path from `node` to `to` via BFS over calls/imports edges — no path (or an unresolvable end) returns `found: false`, not an error, and an ambiguous name is reported via `resolved` (chosen node + how many others it beat). Without `to`: the local subgraph within `depth` hops of `node`, walking `direction` \"callers\" (fan-in), \"callees\" (fan-out), or \"both\" (undirected, the default) — a `node` that resolves to nothing is an explicit error, never an empty graph. Set `transitive: true` (no `to`) for the COMPLETE directed closure instead of a one-hop-at-a-time neighborhood: every node reachable within `depth` hops strictly following `direction` (\"callers\" or \"callees\" only — \"both\" is rejected, a closure has no undirected sense), each carrying a `witness` (the call-site `file:line` proving the edge on its shortest path back to `node`, so the edge is provable, not just asserted) and the response asserting `complete: true` for the given `depth` plus `count_total`/`count_prod` — one call answers a multi-hop reachability question with proof instead of chaining atomic calls. `prod_only` filters the reported node list to production-origin nodes (the counts always report both). `transitive: true` together with `to` is rejected: a closure has no destination. When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. Large neighborhoods are budget-trimmed and compacted, with the full subgraph recoverable via the lens_recall ref."
     )]
     async fn lens_graph(
         &self,
@@ -794,7 +795,14 @@ impl Forge {
     ) -> Result<Json<GraphResponse>, ToolFailure> {
         let op = self.ops.start(
             "lens_graph",
-            serde_json::json!({ "node": req.node, "to": req.to, "depth": req.depth, "direction": req.direction }),
+            serde_json::json!({
+                "node": req.node,
+                "to": req.to,
+                "depth": req.depth,
+                "direction": req.direction,
+                "transitive": req.transitive,
+                "prod_only": req.prod_only,
+            }),
         );
         let graph = match self.load_graph() {
             Ok(g) => g,
@@ -803,6 +811,42 @@ impl Forge {
                 return Err(e.into());
             }
         };
+        // `transitive` and `to` are mutually exclusive request shapes: a closure
+        // claims the complete reach with no destination, `to` asks for the
+        // shortest path between two specific nodes.
+        if req.transitive && req.to.is_some() {
+            let msg = "lens_graph: `transitive` and `to` are mutually exclusive -- a \
+                       transitive closure has no destination, `to` asks for a shortest \
+                       path between two specific nodes"
+                .to_string();
+            op.finish(0, 0, None, "error", msg.clone(), None);
+            return Err(ToolFailure::plain(msg));
+        }
+        // `transitive: true`, no `to`: the complete directed closure with witnesses.
+        if req.transitive {
+            let direction = match req.direction.as_deref() {
+                Some("callers") => crate::discovery::graph::Direction::Callers,
+                Some("callees") => crate::discovery::graph::Direction::Callees,
+                _ => crate::discovery::graph::Direction::Both,
+            };
+            return match gquery::transitive_closure(&graph, &req.node, direction, req.depth, req.prod_only)
+            {
+                Ok(closure) => {
+                    let returned = obs::json_len(&closure);
+                    let note = format!(
+                        "complete={}, count_total={}, count_prod={}",
+                        closure.complete, closure.count_total, closure.count_prod
+                    );
+                    let explain = self.ops.explain(|| note.clone());
+                    op.finish(returned, returned, None, "ok", note, explain);
+                    Ok(Json(GraphResponse::Closure(closure)))
+                }
+                Err(e) => {
+                    op.finish(0, 0, None, "error", e.to_string(), None);
+                    Err(ToolFailure::plain(e.to_string()))
+                }
+            };
+        }
         // `to` present: shortest directed path, exactly the old `lens_path`.
         if let Some(to) = req.to.as_deref() {
             let resp = gquery::path(&graph, &req.node, to);
@@ -2284,6 +2328,9 @@ mod tests {
             crate::tools::GraphResponse::Path(p) => {
                 panic!("no-`to` lens_graph must return the neighborhood shape, got path {p:?}")
             }
+            crate::tools::GraphResponse::Closure(c) => {
+                panic!("no-`to` lens_graph must return the neighborhood shape, got closure {c:?}")
+            }
         }
     }
 
@@ -2300,6 +2347,8 @@ mod tests {
                 to: None,
                 depth: 1,
                 direction: None,
+                transitive: false,
+                prod_only: false,
             }))
             .await
             .unwrap();
@@ -2314,6 +2363,8 @@ mod tests {
                 to: None,
                 depth: 1,
                 direction: None,
+                transitive: false,
+                prod_only: false,
             }))
             .await
         else {
@@ -2338,6 +2389,8 @@ mod tests {
                 to: Some("helper".into()),
                 depth: 1,
                 direction: None,
+                transitive: false,
+                prod_only: false,
             }))
             .await
             .unwrap();
@@ -2365,6 +2418,8 @@ mod tests {
                 to: None,
                 depth: 1,
                 direction: Some("callers".into()),
+                transitive: false,
+                prod_only: false,
             }))
             .await
             .unwrap();
@@ -2491,6 +2546,8 @@ mod tests {
                 to: None,
                 depth: 10,
                 direction: Some("callees".into()),
+                transitive: false,
+                prod_only: false,
             }))
             .await
             .unwrap(),

@@ -36,12 +36,18 @@ export function symbol(name, kind = null) {
   return q(args);
 }
 
-export function callers(name, depth = 1) {
-  return q(["callers", name, "--depth", String(depth)]);
+export function callers(name, transitive = false, depth = 2, prodOnly = false) {
+  const args = ["callers", name, "--depth", String(depth)];
+  if (transitive) args.push("--transitive");
+  if (prodOnly) args.push("--prod-only");
+  return q(args);
 }
 
-export function callees(name, depth = 1) {
-  return q(["callees", name, "--depth", String(depth)]);
+export function callees(name, transitive = false, depth = 2, prodOnly = false) {
+  const args = ["callees", name, "--depth", String(depth)];
+  if (transitive) args.push("--transitive");
+  if (prodOnly) args.push("--prod-only");
+  return q(args);
 }
 
 export function path(frm, to) {

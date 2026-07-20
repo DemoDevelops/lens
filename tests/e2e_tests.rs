@@ -331,3 +331,162 @@ async fn read_only_tools_declare_annotation() {
 
     client.cancel().await.ok();
 }
+
+/// T3: `lens_graph` with `transitive: true` returns the COMPLETE directed
+/// closure instead of a one-hop-at-a-time neighborhood: every reached node
+/// carries a real witness call-site, and the response asserts `complete: true`.
+#[tokio::test]
+async fn lens_graph_transitive_returns_closure_with_witnesses() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+
+    // top -> mid -> target: a two-hop directed caller chain.
+    std::fs::write(
+        repo.path().join("lib.rs"),
+        "fn target() {}\nfn mid() { target(); }\nfn top() { mid(); }\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_lens");
+    let repo_path = repo.path().to_path_buf();
+    let data_path = data.path().to_path_buf();
+    let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
+        cmd.current_dir(&repo_path)
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192");
+    }))
+    .unwrap();
+    let client = ().serve(transport).await.expect("handshake");
+
+    let call = |name: &'static str, args: Value| {
+        let client = &client;
+        async move {
+            let mut params = CallToolRequestParams::new(name);
+            params.arguments = args.as_object().cloned();
+            let res = client.call_tool(params).await.unwrap();
+            res.structured_content
+                .expect("structured content for tool result")
+        }
+    };
+
+    let closure = call(
+        "lens_graph",
+        json!({ "node": "target", "direction": "callers", "transitive": true, "depth": 2 }),
+    )
+    .await;
+
+    assert_eq!(closure["complete"], json!(true), "closure must claim completeness");
+    assert_eq!(closure["count_total"], json!(2), "mid and top both reach target");
+    let nodes = closure["nodes"].as_array().unwrap();
+    for name in ["mid", "top"] {
+        let node = nodes
+            .iter()
+            .find(|n| n["name"] == json!(name))
+            .unwrap_or_else(|| panic!("{name} missing from closure"));
+        assert!(
+            node["witness"].as_str().is_some(),
+            "{name} must carry a witness call-site"
+        );
+    }
+
+    client.cancel().await.ok();
+}
+
+/// T3: `lens q callers <name> --transitive --depth N --prod-only` runs as a
+/// bare subprocess (`lens q` is the read-only CLI family, no MCP handshake)
+/// and exits 0 with the closure JSON, `count_total`/`count_prod` first.
+#[test]
+fn qcli_callers_transitive_exits_zero_with_count_prod() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(
+        repo.path().join("lib.rs"),
+        "fn target() {}\nfn mid() { target(); }\nfn top() { mid(); }\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_lens");
+    let warm = std::process::Command::new(bin)
+        .current_dir(repo.path())
+        .env("LENS_DIR", data.path())
+        .arg("warmup")
+        .output()
+        .expect("spawn lens warmup");
+    assert!(warm.status.success(), "warmup failed: {warm:?}");
+
+    let out = std::process::Command::new(bin)
+        .current_dir(repo.path())
+        .env("LENS_DIR", data.path())
+        .args(["q", "callers", "target", "--transitive", "--depth", "2", "--prod-only"])
+        .output()
+        .expect("spawn lens q callers --transitive");
+    assert!(
+        out.status.success(),
+        "lens q callers --transitive exited nonzero: {out:?}"
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("single-line JSON on stdout");
+    assert!(
+        v.get("count_prod").is_some(),
+        "closure output must carry count_prod: {stdout}"
+    );
+    assert_eq!(v["complete"], json!(true));
+}
+
+/// T3: `lens.callers(..., transitive=True)` works end-to-end from a Python
+/// darkroom script through the real `lens.py` prelude (subprocess to `lens q`),
+/// not just through the qcli/MCP layers directly.
+#[tokio::test]
+async fn darkroom_python_callers_transitive_via_prelude() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(
+        repo.path().join("lib.rs"),
+        "fn target() {}\nfn mid() { target(); }\nfn top() { mid(); }\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_lens");
+    let repo_path = repo.path().to_path_buf();
+    let data_path = data.path().to_path_buf();
+    let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
+        cmd.current_dir(&repo_path)
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192");
+    }))
+    .unwrap();
+    let client = ().serve(transport).await.expect("handshake");
+
+    let call = |name: &'static str, args: Value| {
+        let client = &client;
+        async move {
+            let mut params = CallToolRequestParams::new(name);
+            params.arguments = args.as_object().cloned();
+            let res = client.call_tool(params).await.unwrap();
+            res.structured_content
+                .expect("structured content for tool result")
+        }
+    };
+
+    // Force the graph to build + persist before the script shells out to
+    // `lens q` (which is read-only and never triggers a build itself).
+    let _ = call("lens_symbol", json!({ "name": "target" })).await;
+
+    let exec = call(
+        "lens_run",
+        json!({
+            "language": "python",
+            "code": "import lens, json\n\
+                     result = lens.callers('target', transitive=True, depth=2)\n\
+                     print(json.dumps({'complete': result['complete'], 'count_total': result['count_total']}))"
+        }),
+    )
+    .await;
+
+    let stdout = exec["stdout"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("script prints valid JSON");
+    assert_eq!(parsed["complete"], json!(true));
+    assert_eq!(parsed["count_total"], json!(2));
+
+    client.cancel().await.ok();
+}

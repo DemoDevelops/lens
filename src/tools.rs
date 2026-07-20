@@ -5,6 +5,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::discovery::query::{ClosureNode, TransitiveClosure};
+
 fn default_timeout() -> u64 {
     30
 }
@@ -320,18 +322,33 @@ pub struct GraphRequest {
     pub node: String,
     /// Optional destination node id or symbol name. Present: return the shortest
     /// directed path from `node` to `to`. Absent: return the local subgraph
-    /// around `node`.
+    /// around `node` (or, with `transitive: true`, the full directed closure).
     #[serde(default)]
     pub to: Option<String>,
-    /// Hops outward for the neighborhood walk (default 1). Ignored when `to`
-    /// is given.
+    /// Hops outward for the neighborhood walk, or the hop bound for the
+    /// transitive closure when `transitive: true` (default 1). Ignored when
+    /// `to` is given.
     #[serde(default = "default_depth")]
     pub depth: usize,
-    /// Which way the neighborhood walk follows edges: "callers" (fan-in),
-    /// "callees" (fan-out), or "both" (undirected, the default). Unknown or
-    /// absent falls back to "both". Ignored when `to` is given.
+    /// Which way the walk follows edges: "callers" (fan-in), "callees"
+    /// (fan-out), or "both" (undirected, the default). Unknown or absent
+    /// falls back to "both". Ignored when `to` is given. With
+    /// `transitive: true`, "both" is rejected (a closure has no undirected
+    /// sense) instead of silently falling back.
     #[serde(default)]
     pub direction: Option<String>,
+    /// Return the COMPLETE directed closure within `depth` hops instead of a
+    /// one-hop neighborhood: every node reachable strictly following
+    /// `direction`, each carrying a `witness` (the call-site `file:line`
+    /// proving the edge) plus a `complete: true` claim. Mutually exclusive
+    /// with `to` (a closure has no destination).
+    #[serde(default)]
+    pub transitive: bool,
+    /// With `transitive: true`, filter the reported node list to
+    /// production-origin nodes only (`count_total`/`count_prod` always report
+    /// both regardless of this flag). Ignored otherwise.
+    #[serde(default)]
+    pub prod_only: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -363,15 +380,18 @@ pub struct PathResponse {
 pub enum GraphResponse {
     /// `to` given: the shortest directed path between the two symbols.
     Path(PathResponse),
-    /// `to` absent: the local subgraph around `node`.
+    /// `to` absent, `transitive` false: the local subgraph around `node`.
     Neighbors(GraphView),
+    /// `transitive: true`, `to` absent: the complete directed closure, with
+    /// per-node witnesses and a completeness claim (T3).
+    Closure(TransitiveClosure),
 }
 
 /// Hand-written schema because the derive renders an untagged enum as a bare
 /// `anyOf` with no root `type`, which rmcp rejects (the MCP spec requires an
-/// `outputSchema` rooted at `"type": "object"`). Both variants serialize as
-/// objects, so rooting the union at `type: object` is truthful and keeps the
-/// untagged (wrapper-free) serialization untouched.
+/// `outputSchema` rooted at `"type": "object"`). All three variants serialize
+/// as objects, so rooting the union at `type: object` is truthful and keeps
+/// the untagged (wrapper-free) serialization untouched.
 impl JsonSchema for GraphResponse {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "GraphResponse".into()
@@ -383,7 +403,63 @@ impl JsonSchema for GraphResponse {
             "anyOf": [
                 generator.subschema_for::<PathResponse>(),
                 generator.subschema_for::<GraphView>(),
+                generator.subschema_for::<TransitiveClosure>(),
             ],
+        })
+    }
+}
+
+/// Manual schemas for the two `discovery::query` types `GraphResponse::Closure`
+/// carries. Kept here (not derived in `discovery::query`) so T3 stays scoped to
+/// the surface layer without touching the T2-owned engine file.
+impl JsonSchema for ClosureNode {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ClosureNode".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "kind": { "type": "string" },
+                "file": { "type": "string" },
+                "line": { "type": "integer" },
+                "hops": { "type": "integer" },
+                "origin": { "type": ["string", "null"] },
+                "witness": { "type": ["string", "null"] }
+            },
+            "required": ["id", "name", "kind", "file", "line", "hops"]
+        })
+    }
+}
+
+impl JsonSchema for TransitiveClosure {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "TransitiveClosure".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "root": { "type": "string" },
+                "root_name": { "type": "string" },
+                "root_file": { "type": "string" },
+                "root_line": { "type": "integer" },
+                "direction": { "type": "string" },
+                "depth": { "type": "integer" },
+                "complete": { "type": "boolean" },
+                "count_total": { "type": "integer" },
+                "count_prod": { "type": "integer" },
+                "nodes": { "type": "array", "items": generator.subschema_for::<ClosureNode>() },
+                "resolved": { "type": "array", "items": generator.subschema_for::<ResolvedNote>() }
+            },
+            "required": [
+                "root", "root_name", "root_file", "root_line", "direction",
+                "depth", "complete", "count_total", "count_prod", "nodes"
+            ]
         })
     }
 }

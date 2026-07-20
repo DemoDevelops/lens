@@ -185,16 +185,16 @@ Re-running the tool-selection tasks above with the "full" arm driven through a r
 
 ## Accuracy (full)
 
-Model: `claude-opus-4-8 (via claude-headless)`
+Model: `claude-sonnet-5 (via claude-headless)`
 
 | Task set | N | Control acc | lens acc | Δ acc | Control tokens | lens tokens | Token Δ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Darkroom tasks | 6 | 67% | 100% | +33pp | 2999 | 111 | -2888 |
-| Discovery tasks | 4 | 75% | 100% | +25pp | 1708 | 2418 | +710 |
-| Search tasks | 3 | 67% | 100% | +33pp | 828 | 1160 | +332 |
-| Skeleton tasks | 2 | 0% | 100% | +100pp | 980 | 920 | -60 |
+| Darkroom tasks | 8 | 12% | 75% | +62pp | 4029 | 497 | -3532 |
+| Discovery tasks | 24 | 38% | 92% | +54pp | 12321 | 29313 | +16992 |
+| Search tasks | 13 | 31% | 69% | +38pp | 5801 | 9149 | +3348 |
+| Skeleton tasks | 8 | 12% | 75% | +62pp | 4045 | 14055 | +10010 |
 
 > **Real run via headless `claude -p`** (Claude Code, plan quota — no API credit), tools disabled so each arm answers only from its given context, same isolation as a direct API call.
 >
-> Every mechanism is **≥ control** on `claude-opus-4-8 (via claude-headless)` — no negative accuracy delta this run. The token reductions are the savings; accuracy is preserved.
+> Every mechanism is **≥ control** on `claude-sonnet-5 (via claude-headless)` — no negative accuracy delta this run. Token columns are context handed to each arm, not end-to-end cost; the end-to-end cost story (tools live) is the agentic section in BENCHMARKS.md, a net -35.7% tokens.
 

@@ -515,9 +515,11 @@ pub struct GrepAstRequest {
     pub query: Option<String>,
     /// A code pattern with `$UPPERCASE` metavariables, compiled to a tree-sitter
     /// query in-server: write the shape as real code, e.g. `$X.unwrap()` (rust),
-    /// `print($X)` (python), `$A.map($F)` (typescript). A repeated metavariable
-    /// must match equal text. Requires `language`. Set exactly one of `query` or
-    /// `pattern`.
+    /// `print($X)` (python), `$A.map($F)` (typescript). `$$$` / `$$$NAME` match
+    /// zero or more sibling nodes (any arity, including empty) — e.g. `f($$$)`
+    /// or `fn $NAME($$$) -> Result<$$$> $BODY`. A repeated single metavariable
+    /// must match equal text; repeated variadic names do not. Requires
+    /// `language`. Set exactly one of `query` or `pattern`.
     #[serde(default)]
     pub pattern: Option<String>,
     /// Language the query targets: any graph-supported language (the 6 hand-written

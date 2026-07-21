@@ -2415,6 +2415,37 @@ mod tests {
         assert_eq!(resp.0.matches.len(), 1, "{:?}", resp.0.matches);
     }
 
+    /// Variadic `$$$` matches a real multi-arg call once (arity is unconstrained;
+    /// the server-side path/line/text dedupe still collapses any residual
+    /// multi-captures to a single site).
+    #[tokio::test]
+    async fn grep_ast_variadic_pattern_matches_multi_arg_call_once() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("call.py"), "x = object()\nx.append(1, 2, 3)\nx.append()\n")
+            .unwrap();
+        let data = dir.path().join(".lens");
+        let f = Forge::with_paths(dir.path().to_path_buf(), data, 8192).unwrap();
+        let resp = f
+            .lens_grep_ast(Parameters(grep_ast_req(
+                None,
+                Some("x.append($$$)"),
+                Some("python"),
+            )))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.0.matches.len(),
+            2,
+            "one hit per call site (3-arg and 0-arg): {:?}",
+            resp.0.matches
+        );
+        assert!(
+            resp.0.matches.iter().any(|m| m.text.contains("1, 2, 3")),
+            "{:?}",
+            resp.0.matches
+        );
+    }
+
     /// Unwrap `lens_graph`'s no-`to` form to its `GraphView` (the old `lens_links`
     /// shape); panics if the path variant came back for a neighborhood request.
     fn neighbors_of(resp: Json<crate::tools::GraphResponse>) -> GraphView {

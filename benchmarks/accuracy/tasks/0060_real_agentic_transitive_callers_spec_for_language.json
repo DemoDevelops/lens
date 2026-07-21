@@ -10,7 +10,8 @@
   },
   "check": "contains",
   "primary_mechanism": "discovery",
-  "lens_fn": "lens_links",
+  "lens_fn": "lens_graph",
   "evidence": ["any_spec_for_language", "grep_ast_filtered", "lens_grep_ast"],
+  "notes": "Retagged legacy lens_links to current lens_graph per 10-tool surface (links/path -> lens_graph).",
   "treatment": { "graph_op": "neighbors", "name": "spec_for_language", "depth": 3 }
 }

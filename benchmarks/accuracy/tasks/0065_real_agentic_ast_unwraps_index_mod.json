@@ -5,8 +5,9 @@
   "ground_truth": { "count": 1 },
   "check": "numeric_tolerance",
   "primary_mechanism": "discovery",
-  "lens_fn": "lens_run_file",
+  "lens_fn": "lens_run",
   "evidence": ["1"],
+  "notes": "Retagged legacy lens_run_file to current lens_run per 10-tool surface (run_file -> lens_run).",
   "treatment": {
     "language": "python",
     "script": "p='../../src/index/mod.rs'\ncut=None\nfor i,l in enumerate(open(p),1):\n    if '#[cfg(test)]' in l: cut=i; break\nn=0\nfor i,l in enumerate(open(p),1):\n    if cut and i>=cut: break\n    if '.unwrap()' in l and not l.strip().startswith('//'):\n        n+=l.count('.unwrap()'); print('site:', i, l.strip()[:90])\nprint('non-test .unwrap() calls in src/index/mod.rs:', n)"

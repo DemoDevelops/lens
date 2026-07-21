@@ -1,12 +1,22 @@
 {
   "id": "0069_real_agentic_lib_pub_mod_count",
   "prompt": "How many top-level `pub mod` declarations exist directly in src/lib.rs, and which one is alphabetically first? Answer with keys `mod_count` and `first_module`.",
-  "fixtures": ["../../src"],
-  "ground_truth": { "mod_count": 14, "first_module": "darkroom" },
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "mod_count": 14,
+    "first_module": "darkroom"
+  },
   "check": "contains",
   "primary_mechanism": "skeleton",
-  "lens_fn": "lens_map",
-  "evidence": ["darkroom", "wrap"],
-  "treatment": { "skeleton": "../../src/lib.rs" },
-  "notes": "Ground truth went stale the moment T3 (this same 0.10.0-plan run) added `pub mod qcli;` to src/lib.rs, lifting the top-level pub mod count from 13 to 14. The T10 A/B graded against the stale 13 while both arms answered the correct 14 in every run, scoring 0/0/0 on both sides. Same bug class as the 0063/0064/0081 staleness fixed in that sweep; this task was missed. Re-derived 2026-07-20: 14 `^pub mod` lines in src/lib.rs, alphabetically first is darkroom."
+  "lens_fn": "lens_overview",
+  "evidence": [
+    "darkroom",
+    "wrap"
+  ],
+  "treatment": {
+    "skeleton": "../../src/lib.rs"
+  },
+  "notes": "Retagged legacy lens_map to current lens_overview per 10-tool surface (map -> lens_overview). Ground truth went stale the moment T3 (this same 0.10.0-plan run) added `pub mod qcli;` to src/lib.rs, lifting the top-level pub mod count from 13 to 14. The T10 A/B graded against the stale 13 while both arms answered the correct 14 in every run, scoring 0/0/0 on both sides. Same bug class as the 0063/0064/0081 staleness fixed in that sweep; this task was missed. Re-derived 2026-07-20: 14 `^pub mod` lines in src/lib.rs, alphabetically first is darkroom."
 }

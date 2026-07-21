@@ -10,7 +10,8 @@
   },
   "check": "contains",
   "primary_mechanism": "discovery",
-  "lens_fn": "lens_links",
+  "lens_fn": "lens_graph",
   "evidence": ["latest_tag", "run_update_check_cli", "run_update_cli"],
+  "notes": "Retagged legacy lens_links to current lens_graph per 10-tool surface (links/path -> lens_graph).",
   "treatment": { "graph_op": "neighbors", "name": "tag_from_release_url", "depth": 3 }
 }

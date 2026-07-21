@@ -9,7 +9,8 @@
   },
   "check": "contains",
   "primary_mechanism": "discovery",
-  "lens_fn": "lens_path",
+  "lens_fn": "lens_graph",
   "evidence": ["build_snapshot", "grep_scope_deny_enabled", "inspect_escalation"],
+  "notes": "Retagged legacy lens_path to current lens_graph per 10-tool surface (links/path -> lens_graph).",
   "treatment": { "graph_op": "path", "from": "session_start", "to": "build_snapshot" }
 }

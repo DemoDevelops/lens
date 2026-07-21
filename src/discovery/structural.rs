@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use std::collections::BTreeSet;
+
+use anyhow::{bail, Context, Result};
 use ignore::WalkBuilder;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -47,8 +49,19 @@ pub fn grep_ast_filtered(
     if let Some(lang) = language {
         let spec = any_spec_for_language(lang)
             .with_context(|| format!("unsupported language '{lang}'"))?;
-        Query::new(&spec.language(), query)
-            .map_err(|e| anyhow::anyhow!("invalid query for {lang}: {e}"))?;
+        Query::new(&spec.language(), query).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("Impossible pattern") {
+                anyhow::anyhow!(
+                    "invalid query for {lang}: {e}. lens hint: predicates like `#eq?` \
+                     must sit at the pattern's top level, not nested inside a capture. \
+                     Hoist them — wrong: `((identifier) @a (#eq? @a \"foo\"))`; \
+                     right: `((identifier) @a) (#eq? @a \"foo\")`."
+                )
+            } else {
+                anyhow::anyhow!("invalid query for {lang}: {e}")
+            }
+        })?;
     }
     let want = language.map(|l| l.to_ascii_lowercase());
 
@@ -74,6 +87,12 @@ pub fn grep_ast_filtered(
     files.sort();
 
     let mut out: Vec<AstMatch> = Vec::new();
+    // When no language is named, track per-grammar compile failures so a query
+    // that fails under every encountered grammar errors instead of silently
+    // returning `[]`.
+    let mut any_compile_ok = false;
+    let mut saw_grammar = false;
+    let mut compile_errs: BTreeSet<String> = BTreeSet::new();
     for file in files {
         let ext = match file.extension().and_then(|e| e.to_str()) {
             Some(e) => e,
@@ -96,11 +115,18 @@ pub fn grep_ast_filtered(
             Err(_) => continue,
         };
         let lang = spec.language();
+        saw_grammar = true;
         // Skip files whose grammar can't compile this query (only happens when no
         // language was named and the query is grammar-specific).
         let q = match Query::new(&lang, query) {
-            Ok(q) => q,
-            Err(_) => continue,
+            Ok(q) => {
+                any_compile_ok = true;
+                q
+            }
+            Err(e) => {
+                compile_errs.insert(format!("{}: {e}", spec.name()));
+                continue;
+            }
         };
         let mut parser = Parser::new();
         if parser.set_language(&lang).is_err() {
@@ -139,6 +165,10 @@ pub fn grep_ast_filtered(
             }
         }
     }
+    if language.is_none() && saw_grammar && !any_compile_ok && !compile_errs.is_empty() {
+        let joined = compile_errs.into_iter().collect::<Vec<_>>().join("; ");
+        bail!("query failed to compile for every encountered grammar: {joined}");
+    }
     Ok(out)
 }
 
@@ -169,6 +199,43 @@ mod tests {
         fs::write(dir.path().join("a.rs"), "fn f() {}\n").unwrap();
         let res = grep_ast(dir.path(), "(not_a_real_node) @x", Some("rust"), 100);
         assert!(res.is_err(), "an invalid query must error when a language is named");
+    }
+
+    /// Nested `#eq?` (mined GA-SEXPR shape) triggers tree-sitter's
+    /// "Impossible pattern"; the error must tell the user to hoist the
+    /// predicate to the top level.
+    #[test]
+    fn nested_eq_predicate_is_a_clear_error() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn f() {}\n").unwrap();
+        // Nested predicate inside a fielded capture — the shape models write.
+        let q = r#"(function_item return_type: (generic_type type: (type_identifier) @r (#eq? @r "Result")) name: (identifier) @name)"#;
+        let err = grep_ast(dir.path(), q, Some("rust"), 100)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Impossible pattern") || err.to_lowercase().contains("impossible"),
+            "tree-sitter should reject nested predicates: {err}"
+        );
+        assert!(
+            err.contains("hoist") || err.contains("top level"),
+            "must mention hoisting predicates to top level: {err}"
+        );
+    }
+
+    /// With no language named, a query that fails under every encountered
+    /// grammar must error (not silently return `[]`).
+    #[test]
+    fn no_language_bogus_query_is_a_clear_error() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn f() {}\n").unwrap();
+        let err = grep_ast(dir.path(), "(not_a_real_node_zzzz) @x", None, 100)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("every encountered grammar") || err.contains("failed to compile"),
+            "must aggregate compile failures, not return empty: {err}"
+        );
     }
 
     #[test]

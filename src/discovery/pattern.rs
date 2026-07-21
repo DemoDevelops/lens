@@ -324,7 +324,46 @@ fn parse_with_candidates(
             whole_node_metas: cand.whole_node_metas,
         });
     }
-    bail!("pattern does not parse as {lang_name}: `{pat}`");
+    bail!("{}", diagnose_parse_failure(pat, lang_name));
+}
+
+/// Shape-specific diagnosis when no fragment wrapper produced an ERROR-free parse.
+fn diagnose_parse_failure(pat: &str, lang_name: &str) -> String {
+    let mut shapes: Vec<&str> = Vec::new();
+    let opens = pat
+        .chars()
+        .filter(|c| matches!(c, '{' | '(' | '['))
+        .count();
+    let closes = pat
+        .chars()
+        .filter(|c| matches!(c, '}' | ')' | ']'))
+        .count();
+    if opens != closes {
+        shapes.push("unbalanced braces/parens");
+    }
+    if pat.contains("=>") && !pat.contains("match") {
+        shapes.push("`=>` arm outside match");
+    }
+    let codeish = pat.contains('(')
+        || pat.contains('{')
+        || pat.contains("fn ")
+        || pat.contains('$')
+        || pat.contains("impl ")
+        || pat.contains("def ")
+        || pat.contains("function ");
+    if !codeish || pat.split_whitespace().count() > 12 {
+        shapes.push("non-code prose");
+    }
+    let shape = if shapes.is_empty() {
+        "unrecognized fragment".to_string()
+    } else {
+        shapes.join(" / ")
+    };
+    format!(
+        "pattern does not parse as {lang_name} (likely {shape}): `{pat}`. \
+         Try a code-shaped fragment, e.g. `fn $NAME($$$) {{ $$$BODY }}` or \
+         `Some($X) => $X` (match arms are auto-wrapped)."
+    )
 }
 
 /// `has_error` is fine when every ERROR node is solely a placeholder (e.g.
@@ -683,10 +722,19 @@ impl Emitter<'_> {
             return self.emit_placeholder(text);
         }
         if text.contains(PLACEHOLDER) {
-            bail!(
-                "a $METAVAR must stand alone as a whole token, not inside `{}`",
-                text.replace(PLACEHOLDER, "$")
-            );
+            // Show the original `$NAME` / `$$$NAME`, not the `lens_meta_<i>` /
+            // `$0`-style placeholder index the emitter uses internally.
+            let mut shown = text.to_string();
+            for (i, kind) in self.metavars.iter().enumerate() {
+                let ph = format!("{PLACEHOLDER}{i}");
+                let name = match kind {
+                    MetaKind::Single(n) => format!("${n}"),
+                    MetaKind::Variadic(n) if n.is_empty() => "$$$".to_string(),
+                    MetaKind::Variadic(n) => format!("$$${n}"),
+                };
+                shown = shown.replace(&ph, &name);
+            }
+            bail!("a $METAVAR must stand alone as a whole token, not inside `{shown}`");
         }
         if text.is_empty() {
             return Ok(format!("({})", node.kind()));
@@ -840,10 +888,39 @@ mod tests {
 
     /// A metavariable glued to other identifier characters cannot survive the
     /// lexer as its own token; that must be an error, not a silent mismatch.
+    /// The message names the original `$X`, not a `$0` placeholder index.
     #[test]
     fn embedded_metavar_is_a_clear_error() {
         let err = compile("foo_$X()", "python").unwrap_err().to_string();
         assert!(err.contains("whole token"), "{err}");
+        assert!(
+            err.contains("$X"),
+            "must name the original metavar, not a placeholder index: {err}"
+        );
+        assert!(
+            !err.contains("$0") && !err.contains("lens_meta_"),
+            "must not leak internal placeholder spelling: {err}"
+        );
+    }
+
+    /// Post-wrapper parse failure diagnoses the likely shape and gives an example.
+    #[test]
+    fn unparseable_prose_is_a_clear_error() {
+        let err = compile(
+            "please find every function that returns a result type somehow",
+            "rust",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("does not parse as rust"), "{err}");
+        assert!(
+            err.contains("non-code prose") || err.contains("unrecognized fragment"),
+            "must diagnose shape: {err}"
+        );
+        assert!(
+            err.contains("fn $NAME") || err.contains("Try a code-shaped"),
+            "must include a corrected example: {err}"
+        );
     }
 
     /// T4: a bare metavariable pins nothing concrete and would match nearly

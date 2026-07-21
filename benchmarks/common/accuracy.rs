@@ -1018,11 +1018,44 @@ fn agentic_arms(
     host: AgenticHost,
 ) -> anyhow::Result<(Vec<ArmResult>, Vec<ArmResult>)> {
     let iso = arm_isolation(host)?;
+    collect_arm_runs(runs, || {
+        let c = run_agentic_arm(task, model, &iso.baseline(), host)?;
+        let t = run_agentic_arm(task, model, &iso.lens_arm(), host)?;
+        Ok((c, t))
+    })
+}
+
+/// Collect up to `runs` (control, treatment) pairs, committing them as pairs so
+/// the arms stay length-matched. A failed FIRST pair is fatal (nothing to
+/// score), but a failure after a completed pair keeps what completed instead of
+/// discarding it: mean-over-fewer-runs is a real measurement, while erroring
+/// the whole task after N good runs is data loss (the 0.12 gate lost completed
+/// runs to one final-attempt SIGALRM this way).
+fn collect_arm_runs<F>(
+    runs: usize,
+    mut pair: F,
+) -> anyhow::Result<(Vec<ArmResult>, Vec<ArmResult>)>
+where
+    F: FnMut() -> anyhow::Result<(ArmResult, ArmResult)>,
+{
     let mut control = Vec::new();
     let mut treatment = Vec::new();
-    for _ in 0..runs {
-        control.push(run_agentic_arm(task, model, &iso.baseline(), host)?);
-        treatment.push(run_agentic_arm(task, model, &iso.lens_arm(), host)?);
+    for i in 0..runs {
+        match pair() {
+            Ok((c, t)) => {
+                control.push(c);
+                treatment.push(t);
+            }
+            Err(e) if control.is_empty() => return Err(e),
+            Err(e) => {
+                eprintln!(
+                    "  run {}/{runs} failed; keeping the {} completed run(s): {e}",
+                    i + 1,
+                    control.len()
+                );
+                break;
+            }
+        }
     }
     Ok((control, treatment))
 }
@@ -1455,6 +1488,48 @@ fn canary_gate(canary_ok: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Cache key for a canary PASS: everything the canary actually proves. Keyed on
+/// the CONTENTS of the arm's config/settings files plus the lens binary's
+/// size+mtime (not paths — `write_temp_json` mints fresh paths per process), so
+/// a rebuild or config change misses naturally; the TTL is only a backstop.
+/// FAIL is never cached: a failing arm aborts the suite and must re-prove.
+fn canary_cache_path(host: AgenticHost, model: &str, label: &str, arm: &ArmSpec) -> PathBuf {
+    let bin = lens_release_bin();
+    let bin_id = std::fs::metadata(&bin)
+        .map(|m| format!("{}-{:?}", m.len(), m.modified().ok()))
+        .unwrap_or_default();
+    let mut key = format!("{host:?}|{model}|{label}|{}|{bin_id}|", arm.allowed_tools);
+    for p in [arm.mcp_config, arm.settings] {
+        key.push_str(&std::fs::read_to_string(p).unwrap_or_default());
+        key.push('|');
+    }
+    std::env::temp_dir().join(format!("lens-bench-canary-{:016x}", fnv1a(key.as_bytes())))
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+const CANARY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+fn canary_cached_pass(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|age| age < CANARY_CACHE_TTL)
+        .unwrap_or(false)
+}
+
+fn record_canary_pass(path: &Path) {
+    let _ = std::fs::write(path, b"PASS\n");
+}
+
 /// Score the whole task list behind the canary gate: abort with NO results when
 /// the canary failed, else run every task. Kept separate from the live canary so
 /// the gate is testable with an injected verdict (a real canary needs a session).
@@ -1507,11 +1582,24 @@ async fn run_agentic_suite_on(
     let iso = arm_isolation(host)?;
     let mut canary_ok = true;
     for (label, arm) in [("baseline", iso.baseline()), ("lens", iso.lens_arm())] {
-        let pass = run_canary(model, &arm, host)?;
-        eprintln!(
-            "canary [{label} arm, host={host:?}, model={model}]: {}",
-            if pass { "PASS" } else { "FAIL" }
-        );
+        // Per-task worker processes (LENS_BENCH_ONLY isolation) each re-proved
+        // the same (binary, config) plumbing, ~20min of canary overhead per
+        // worker; a content-keyed cached PASS skips the live session instead.
+        let cache = canary_cache_path(host, model, label, &arm);
+        let pass = if canary_cached_pass(&cache) {
+            eprintln!("canary [{label} arm, host={host:?}, model={model}]: cached PASS");
+            true
+        } else {
+            let pass = run_canary(model, &arm, host)?;
+            eprintln!(
+                "canary [{label} arm, host={host:?}, model={model}]: {}",
+                if pass { "PASS" } else { "FAIL" }
+            );
+            if pass {
+                record_canary_pass(&cache);
+            }
+            pass
+        };
         canary_ok &= pass;
     }
     let model_enum = match host {
@@ -1520,6 +1608,18 @@ async fn run_agentic_suite_on(
     };
     score_gated(tasks, &model_enum, runs, canary_ok).await
 }
+
+/// Wall-clock cap for one agentic attempt (headless `claude` has no timeout
+/// flag, macOS has no `timeout(1)`). Forks under `setpgrp` so the surviving
+/// perl parent can SIGKILL its whole process group on alarm: the previous bare
+/// `alarm shift; exec @ARGV` delivered SIGALRM to the CLI leader only,
+/// orphaning its MCP servers and tool subprocesses to run (and bill)
+/// unsupervised. A normal exit passes the child's status through; a
+/// signal-killed child maps to 128+signo.
+const ALARM_GROUP_EXEC: &str = "setpgrp 0,0; my $t = shift; my $pid = fork; \
+    unless ($pid) { exec @ARGV or exit 127 } \
+    $SIG{ALRM} = sub { kill 'KILL', -$$ }; alarm $t; waitpid $pid, 0; \
+    my $s = $?; exit(($s & 127) ? 128 + ($s & 127) : $s >> 8);";
 
 /// One live `claude -p` seeing exactly the MCP servers in `arm.mcp_config` and the
 /// tools permitted by `arm.allowed_tools`. Wall-clock bounded by `perl alarm`
@@ -1533,7 +1633,7 @@ fn claude_agentic_attempt(
     let effort = std::env::var("LENS_BENCH_EFFORT").unwrap_or_else(|_| "low".to_string());
     let mut cmd = Command::new("perl");
     cmd.current_dir(workdir)
-        .args(["-e", "alarm shift; exec @ARGV", "600"])
+        .args(["-e", ALARM_GROUP_EXEC, "600"])
         .arg("claude")
         .arg("-p")
         .arg(prompt)
@@ -1621,7 +1721,7 @@ fn opencode_agentic_attempt(
 
     let mut cmd = Command::new("perl");
     cmd.current_dir(workdir)
-        .args(["-e", "alarm shift; exec @ARGV", "600"])
+        .args(["-e", ALARM_GROUP_EXEC, "600"])
         .arg("opencode")
         .arg("run")
         .args(["-m", &model_id])
@@ -3105,8 +3205,10 @@ not even json
 #[cfg(test)]
 mod canary_set_adoption_tests {
     use super::{
-        adoption_report, canary_gate, canary_verdict, filter_tasks, load_task_set, load_tasks,
-        score_gated, set_label, AgenticRun, ArmResult, ArmSpec, Model, Task, TaskResult, LENS_TOOLS,
+        adoption_report, canary_cache_path, canary_cached_pass, canary_gate, canary_verdict,
+        collect_arm_runs, filter_tasks, load_task_set, load_tasks, record_canary_pass, score_gated,
+        set_label, AgenticRun, ArmResult, ArmSpec, Model, Task, TaskResult, ALARM_GROUP_EXEC,
+        LENS_TOOLS,
     };
     use serde_json::json;
     use std::path::Path;
@@ -3163,6 +3265,86 @@ mod canary_set_adoption_tests {
             "treatment": { "graph_op": "path", "from": "handle_request", "to": "connect_db" }
         }))
         .expect("task spec")
+    }
+
+    // --- run collection / alarm wrapper / canary cache ----------------------
+
+    #[test]
+    fn later_pair_failure_keeps_completed_runs() {
+        let mut n = 0;
+        let (c, t) = collect_arm_runs(3, || {
+            n += 1;
+            if n == 3 {
+                anyhow::bail!("boom");
+            }
+            Ok((cell(vec![], false), cell(vec![], false)))
+        })
+        .unwrap();
+        assert_eq!((c.len(), t.len()), (2, 2), "completed pairs must survive a later failure");
+    }
+
+    #[test]
+    fn first_pair_failure_is_fatal() {
+        let res = collect_arm_runs(2, || anyhow::bail!("boom"));
+        assert!(res.is_err(), "no completed pair -> nothing to score -> error");
+    }
+
+    #[test]
+    fn alarm_wrapper_passes_child_exit_status_through() {
+        let st = std::process::Command::new("perl")
+            .args(["-e", ALARM_GROUP_EXEC, "5", "sh", "-c", "exit 7"])
+            .status()
+            .unwrap();
+        assert_eq!(st.code(), Some(7));
+    }
+
+    #[test]
+    fn alarm_wrapper_kills_the_whole_process_group_on_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("leaked");
+        // The grandchild would create `marker` after the 1s alarm fires; the
+        // group kill must reach it, not just the immediate child.
+        let script = format!("(sleep 2; touch '{}') & sleep 30", marker.display());
+        let start = std::time::Instant::now();
+        let st = std::process::Command::new("perl")
+            .args(["-e", ALARM_GROUP_EXEC, "1", "sh", "-c", &script])
+            .status()
+            .unwrap();
+        assert!(!st.success(), "a timed-out attempt must not read as success");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "the wrapper must die at the alarm, not wait out the child"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        assert!(!marker.exists(), "grandchild survived the group kill");
+    }
+
+    #[test]
+    fn canary_cache_pass_roundtrip_and_content_keyed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = dir.path().join("mcp.json");
+        let settings = dir.path().join("settings.json");
+        std::fs::write(&mcp, "{\"a\":1}").unwrap();
+        std::fs::write(&settings, "{}").unwrap();
+        let spec = ArmSpec {
+            allowed_tools: LENS_TOOLS,
+            mcp_config: &mcp,
+            settings: &settings,
+            expects_guide: true,
+        };
+        let p1 = canary_cache_path(super::AgenticHost::Claude, "m", "lens", &spec);
+        // The key is machine-stable by design; clear any marker a previous
+        // test run left in temp_dir.
+        let _ = std::fs::remove_file(&p1);
+        assert!(!canary_cached_pass(&p1), "no marker yet");
+        record_canary_pass(&p1);
+        assert!(canary_cached_pass(&p1), "a recorded PASS is fresh");
+        // Same spec -> same path (cross-process stability); changed config
+        // CONTENT -> different path even at the same file path.
+        assert_eq!(p1, canary_cache_path(super::AgenticHost::Claude, "m", "lens", &spec));
+        std::fs::write(&mcp, "{\"a\":2}").unwrap();
+        let p2 = canary_cache_path(super::AgenticHost::Claude, "m", "lens", &spec);
+        assert_ne!(p1, p2, "config content must key the cache");
     }
 
     // --- canary verdict per (model, ArmSpec) --------------------------------

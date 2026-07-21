@@ -177,9 +177,16 @@ async fn main() -> anyhow::Result<()> {
         "{}",
         render_accuracy_markdown(&groups, &model.label(), pending)
     );
-    // Per-model lens adoption: agentic-only (tools-off treatment arms call
-    // nothing by construction), computed from the canary-scored zero-lens misses.
-    let adoption = (backend == "agentic").then(|| adoption_report(&results));
+    // Per-model lens adoption: agentic backends only (tools-off treatment arms
+    // call nothing by construction), computed from the canary-scored zero-lens
+    // misses. Keyed on the resolved model, not the raw backend string: the
+    // opencode aliases (`opencode-agentic`/`grok-agentic`/`opencode`) are just
+    // as agentic and were silently losing their adoption section.
+    let agentic = matches!(
+        model,
+        Model::ClaudeAgentic(_) | Model::OpenCodeAgentic(_)
+    );
+    let adoption = agentic.then(|| adoption_report(&results));
     if let Some(a) = &adoption {
         print!("{}", render_adoption_markdown(a, &model.label()));
     }
@@ -190,8 +197,8 @@ async fn main() -> anyhow::Result<()> {
     // `--mcp-config` both resolved to, so a future hooks/mcp mismatch shows up
     // in the results header instead of silently voiding the run.
     let (overall, per_function) = function_report(&all_tasks, &results);
-    let bench_binary =
-        (backend == "agentic").then(|| lens_release_bin().to_string_lossy().to_string());
+    // Both agentic hosts pin this run's release binary (see `arm_isolation`).
+    let bench_binary = agentic.then(|| lens_release_bin().to_string_lossy().to_string());
 
     let payload = serde_json::json!({
         "mode": mode,

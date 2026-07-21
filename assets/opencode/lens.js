@@ -54,6 +54,12 @@ export const LensPlugin = async ({ directory }) => {
     cwd: directory,
   });
   const toolName = (t) => TOOL_NAMES[t] ?? t;
+  // opencode's after-callback carries no tool args, but lens's PostToolUse
+  // handlers key on them (file_path/command/... drive continuity events and
+  // editpath marking). Stash args per callID in before, replay in after.
+  // Capped: a denied or errored call never reaches after, so entries would
+  // otherwise accumulate for the life of the session.
+  const pendingArgs = new Map();
 
   return {
     "tool.execute.before": async (input, output) => {
@@ -63,21 +69,30 @@ export const LensPlugin = async ({ directory }) => {
         tool_input: output.args ?? {},
       });
       const out = res && res.hookSpecificOutput;
-      if (!out) return;
-      if (out.permissionDecision === "deny") {
-        throw new Error(out.permissionDecisionReason || "denied by lens routing");
+      if (out) {
+        if (out.permissionDecision === "deny") {
+          throw new Error(out.permissionDecisionReason || "denied by lens routing");
+        }
+        if (out.permissionDecision === "allow" && out.updatedInput && output.args) {
+          Object.assign(output.args, out.updatedInput);
+        }
+        // additionalContext has no injection channel here; dropped.
       }
-      if (out.permissionDecision === "allow" && out.updatedInput && output.args) {
-        Object.assign(output.args, out.updatedInput);
+      if (input.callID != null) {
+        pendingArgs.set(input.callID, output.args ?? {});
+        if (pendingArgs.size > 256) {
+          pendingArgs.delete(pendingArgs.keys().next().value);
+        }
       }
-      // additionalContext has no injection channel here; dropped.
     },
 
     "tool.execute.after": async (input, output) => {
+      const args = input.callID != null ? pendingArgs.get(input.callID) : undefined;
+      if (input.callID != null) pendingArgs.delete(input.callID);
       runHook("PostToolUse", {
         ...base(input.sessionID),
         tool_name: toolName(input.tool),
-        tool_input: {},
+        tool_input: args ?? {},
         tool_response: output && output.output != null ? output.output : null,
       });
     },

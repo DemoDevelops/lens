@@ -607,18 +607,38 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             throttle::mark(ctx.data_dir, ctx.session_id, &key);
             Decision::Deny(reroute::edit_callers::deny_reason(&sym, n))
         }
-        // Reroute rail (achain): the 3rd CONSECUTIVE atomic lens exploration
-        // call (graph/skeleton/symbol/recall/overview, with nothing but
-        // ToolSearch between) is denied toward one composed call — the
-        // measured 0.11-dev loop shapes are lens_graph hop-by-hop instead of
-        // `transitive: true`, lens_recall body-chasing instead of
-        // `include_bodies`, and per-file skeletons instead of one lens_run
-        // program. Denies per drift episode (`inspect_escalation`'s pattern):
-        // the counter resets on fire, so the verbatim retry passes and a later
-        // chain can be denied again. Kill-switched by LENS_ATOMIC_CHAIN_DENY
-        // (default ON); the bump only runs while the deny can fire, so a
-        // kill-switched or non-steering session never writes the counter.
+        // Reroute rail (ovrb) BEFORE achain: an unfocused lens_overview after
+        // SessionStart already injected the <repo_map> digest is a re-buy of
+        // the same map. Once per session (elink pattern: mark ovrb:done BEFORE
+        // Deny so the verbatim retry always passes). Stands down when rovr
+        // already pushed toward overview this session, and when the call is
+        // focused (`query` set). Kill-switched by LENS_OVERVIEW_REBUY_DENY.
+        // Runs before the achain bump so a denied call does not advance the
+        // consecutive-atomic counter.
         t if t.starts_with("mcp__lens__") => {
+            if t == "mcp__lens__lens_overview"
+                && overview_rebuy_deny_enabled()
+                && ctx.level.steers()
+                && ctx.mcp_ready
+                && throttle::armed(ctx.data_dir, ctx.session_id, "ovrb:digest")
+                && reroute::overview_rebuy::is_rebuy(tool_input)
+                && !throttle::fired(ctx.data_dir, ctx.session_id, "read-overview")
+                && !throttle::fired(ctx.data_dir, ctx.session_id, "ovrb:done")
+            {
+                throttle::mark(ctx.data_dir, ctx.session_id, "ovrb:done");
+                return Decision::Deny(reroute::overview_rebuy::deny_reason().to_string());
+            }
+            // Reroute rail (achain): the 3rd CONSECUTIVE atomic lens exploration
+            // call (graph/skeleton/symbol/recall/overview, with nothing but
+            // ToolSearch between) is denied toward one composed call — the
+            // measured 0.11-dev loop shapes are lens_graph hop-by-hop instead of
+            // `transitive: true`, lens_recall body-chasing instead of
+            // `include_bodies`, and per-file skeletons instead of one lens_run
+            // program. Denies per drift episode (`inspect_escalation`'s pattern):
+            // the counter resets on fire, so the verbatim retry passes and a later
+            // chain can be denied again. Kill-switched by LENS_ATOMIC_CHAIN_DENY
+            // (default ON); the bump only runs while the deny can fire, so a
+            // kill-switched or non-steering session never writes the counter.
             if atomic_lens && atomic_chain_deny_enabled() && ctx.level.steers() && ctx.mcp_ready {
                 let n = throttle::bump(ctx.data_dir, ctx.session_id, "achain-run");
                 if n >= ATOMIC_CHAIN_THRESHOLD {
@@ -746,6 +766,10 @@ pub fn edit_links_deny_enabled() -> bool {
 /// Atomic-chain deny arm (`achain`): `LENS_ATOMIC_CHAIN_DENY=0` disables it.
 pub fn atomic_chain_deny_enabled() -> bool {
     std::env::var("LENS_ATOMIC_CHAIN_DENY").map_or(true, |v| v.trim() != "0")
+}
+/// Overview-rebuy deny arm (`ovrb`): `LENS_OVERVIEW_REBUY_DENY=0` disables it.
+pub fn overview_rebuy_deny_enabled() -> bool {
+    std::env::var("LENS_OVERVIEW_REBUY_DENY").map_or(true, |v| v.trim() != "0")
 }
 
 /// The achain deny threshold: the Nth consecutive atomic lens call is denied.
@@ -3058,6 +3082,142 @@ mod tests {
         assert!(!atomic_chain_deny_enabled());
         std::env::remove_var("LENS_ATOMIC_CHAIN_DENY");
         assert!(atomic_chain_deny_enabled(), "on by default");
+    }
+
+    // ── route(): overview-rebuy (ovrb) unfocused re-buy deny ────────────────
+
+    #[test]
+    fn ovrb_fires_only_with_digest_marker() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let ti = json!({});
+        // No digest marker → passthrough.
+        assert_eq!(
+            route("mcp__lens__lens_overview", &ti, &ctx),
+            Decision::Passthrough
+        );
+        // Digest armed → deny, naming the digest + expand path + retry.
+        throttle::mark(ctx.data_dir, ctx.session_id, "ovrb:digest");
+        match route("mcp__lens__lens_overview", &ti, &ctx) {
+            Decision::Deny(r) => {
+                assert!(
+                    r.contains("session start") || r.contains("<repo_map>"),
+                    "names the digest: {r}"
+                );
+                assert!(r.contains("lens_symbol"), "expand via symbol: {r}");
+                assert!(r.contains("lens_graph"), "expand via graph: {r}");
+                assert!(r.contains("verbatim"), "retry promise: {r}");
+            }
+            other => panic!("unfocused overview with digest must deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ovrb_verbatim_retry_passes() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let ti = json!({});
+        throttle::mark(ctx.data_dir, ctx.session_id, "ovrb:digest");
+        assert!(
+            matches!(
+                route("mcp__lens__lens_overview", &ti, &ctx),
+                Decision::Deny(_)
+            ),
+            "first unfocused re-buy must deny"
+        );
+        // ovrb:done marked before Deny → verbatim retry always passes.
+        assert_eq!(
+            route("mcp__lens__lens_overview", &ti, &ctx),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn ovrb_query_arg_call_passes() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        throttle::mark(ctx.data_dir, ctx.session_id, "ovrb:digest");
+        // Focused overview is a different map, not a digest re-buy.
+        assert_eq!(
+            route(
+                "mcp__lens__lens_overview",
+                &json!({"query": "auth"}),
+                &ctx
+            ),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn ovrb_stands_down_when_rovr_fired() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        throttle::mark(ctx.data_dir, ctx.session_id, "ovrb:digest");
+        // rovr's one-shot key (nudge_once("read-overview")) already spent —
+        // that rail pushed TOWARD lens_overview; do not fight it.
+        throttle::mark(ctx.data_dir, ctx.session_id, "read-overview");
+        assert_eq!(
+            route("mcp__lens__lens_overview", &json!({}), &ctx),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn ovrb_never_fires_at_nudge_level_or_before_mcp_ready() {
+        let d = tempdir().unwrap();
+        let ti = json!({});
+        let ctx = rc(Level::Nudge, true, d.path());
+        throttle::mark(ctx.data_dir, ctx.session_id, "ovrb:digest");
+        assert_eq!(
+            route("mcp__lens__lens_overview", &ti, &ctx),
+            Decision::Passthrough
+        );
+        let ctx = rc(Level::Full, false, d.path());
+        throttle::mark(ctx.data_dir, ctx.session_id, "ovrb:digest");
+        assert_eq!(
+            route("mcp__lens__lens_overview", &ti, &ctx),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn ovrb_kill_switch_polarity() {
+        // Route-level kill-switch runs would race other tests on the
+        // process-global env, so only the flag parse is asserted here.
+        std::env::set_var("LENS_OVERVIEW_REBUY_DENY", "0");
+        assert!(!overview_rebuy_deny_enabled());
+        std::env::remove_var("LENS_OVERVIEW_REBUY_DENY");
+        assert!(overview_rebuy_deny_enabled(), "on by default");
+    }
+
+    #[test]
+    fn ovrb_denied_call_does_not_advance_achain() {
+        // A denied ovrb call must not bump achain-run — otherwise the next
+        // two atomic hops would trip achain early.
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        throttle::mark(ctx.data_dir, ctx.session_id, "ovrb:digest");
+        assert!(matches!(
+            route("mcp__lens__lens_overview", &json!({}), &ctx),
+            Decision::Deny(_)
+        ));
+        // Two atomic hops after the denied overview must still pass (count=2).
+        assert_eq!(
+            route("mcp__lens__lens_skeleton", &json!({}), &ctx),
+            Decision::Passthrough
+        );
+        assert_eq!(
+            route("mcp__lens__lens_symbol", &json!({}), &ctx),
+            Decision::Passthrough
+        );
+        // Third atomic is the first achain deny.
+        assert!(
+            matches!(
+                route("mcp__lens__lens_graph", &json!({}), &ctx),
+                Decision::Deny(_)
+            ),
+            "achain must still trip on the 3rd consecutive atomic, not earlier"
+        );
     }
 
     #[test]

@@ -356,15 +356,17 @@ pub fn grep_scope_aggregate(dirs: &[PathBuf]) -> serde_json::Value {
     })
 }
 
-/// The eight lens tool-routing rail prefixes (contract: `routing/reroute/mod.rs`
+/// The nine lens tool-routing rail prefixes (contract: `routing/reroute/mod.rs`
 /// `PREFIX_*` consts). Kept as our own literal list rather than importing those
 /// consts — this module only reads the store keys they name, not the classifiers.
-/// `grevf` (T4) and `achain` are enumerated here so their slots in the `reroute`
-/// snapshot block exist from day one; `session::hook`'s shadow-counter plane does
-/// not yet populate their `would_fire`/`next`/`shadow_next` keys (a deferred
-/// follow-up), so until then they aggregate to all-zero like an unused dir.
-pub const REROUTE_PREFIXES: [&str; 8] =
-    ["gsym", "rskel", "bagg", "elink", "gast", "rovr", "grevf", "achain"];
+/// `grevf`, `achain`, and `ovrb` are enumerated here so their slots in the
+/// `reroute` snapshot block exist from day one; `session::hook`'s shadow-counter
+/// plane does not yet populate their `would_fire`/`next`/`shadow_next` keys (a
+/// deferred follow-up), so until then they aggregate to all-zero like an unused
+/// dir.
+pub const REROUTE_PREFIXES: [&str; 9] = [
+    "gsym", "rskel", "bagg", "elink", "gast", "rovr", "grevf", "achain", "ovrb",
+];
 
 /// Classes a rail's follower counter can land in: `{p}_next_{class}` /
 /// `{p}_shadow_next_{class}`, per the shared counter-key contract.

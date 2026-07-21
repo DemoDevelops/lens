@@ -806,6 +806,10 @@ fn session_start(
 ) -> anyhow::Result<String> {
     match source {
         "compact" => {
+            // Post-compact the SessionStart digest may be summarized away;
+            // clearing ovrb:digest so the re-buy rail does not deny a map the
+            // model no longer has.
+            routing::throttle::reset(data_dir, session_id, "ovrb:digest");
             // Mark the stored resume consumed, emit the guide, index events.
             if let Some(r) = store.get_resume(session_id, project_str)? {
                 if !r.consumed {
@@ -828,6 +832,8 @@ fn session_start(
             Ok(guide)
         }
         "resume" => {
+            // Same as compact: a resumed session may lack the original digest.
+            routing::throttle::reset(data_dir, session_id, "ovrb:digest");
             let events = store.resolved_events_for_session(session_id)?;
             if !events.is_empty() {
                 index_events(data_dir, session_id, &events);
@@ -863,7 +869,11 @@ fn session_start(
             let (mem_count, mem_latest) = store.project_memory_summary(project_str)?;
             let hint = memory_tools_hint(mem_count, mem_latest, ts);
             Ok(match repo_map_block(data_dir) {
-                Some(block) => format!("{block}\n\n{hint}"),
+                Some(block) => {
+                    // Digest actually injected → arm the ovrb re-buy rail.
+                    routing::throttle::mark(data_dir, session_id, "ovrb:digest");
+                    format!("{block}\n\n{hint}")
+                }
                 None => hint,
             })
         }

@@ -559,6 +559,9 @@ pub struct AstMatch {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GrepAstResponse {
+    /// Number of matches returned (`matches.len()`). Read this for counting
+    /// questions instead of counting list items.
+    pub count: usize,
     pub matches: Vec<AstMatch>,
     /// True if the result hit the `limit` cap.
     pub truncated: bool,

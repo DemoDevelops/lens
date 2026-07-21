@@ -957,7 +957,7 @@ impl Forge {
 
     /// Structural (tree-sitter) search: run an AST query, get path:line matches.
     #[tool(
-        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns one deduplicated path:line match per distinct call/pattern site (a call matched more than once internally, e.g. once per extra argument, still surfaces once). `limit` caps the underlying scan of raw captures before dedup, so `truncated: true` can still return fewer than `limit` matches. No match returns an empty result, not an error. When a result contains test/bench code, every match carries `origin` (prod/test/bench: `#[cfg(test)]` spans and bench/fixture paths, the graph's own provenance rules); no `origin` fields = all production code. `prod_only: true` drops non-prod matches before they count toward `limit` — use it for any 'excluding tests' count. For plain-text/idea search use lens_search; this is for syntax-shape matches."
+        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns one deduplicated path:line match per distinct call/pattern site (a call matched more than once internally, e.g. once per extra argument, still surfaces once), plus `count`, the authoritative match total: read it for counting questions, don't count list items. `limit` caps the underlying scan of raw captures before dedup, so `truncated: true` can still return fewer than `limit` matches. No match returns an empty result, not an error. When a result contains test/bench code, every match carries `origin` (prod/test/bench: `#[cfg(test)]` spans and bench/fixture paths, the graph's own provenance rules); no `origin` fields = all production code. `prod_only: true` drops non-prod matches before they count toward `limit` — use it for any 'excluding tests' count. For plain-text/idea search use lens_search; this is for syntax-shape matches."
     )]
     async fn lens_grep_ast(
         &self,
@@ -1021,7 +1021,7 @@ impl Forge {
                 // `truncated: true` can no longer be an artifact of duplicate
                 // captures crowding out real sites.
                 let truncated = matches.len() >= req.limit;
-                let resp = GrepAstResponse { matches, truncated };
+                let resp = GrepAstResponse { count: matches.len(), matches, truncated };
                 let returned = obs::json_len(&resp);
                 let note = format!("{} matches", resp.matches.len());
                 let explain = self.ops.explain(|| note.clone());

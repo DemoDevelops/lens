@@ -448,7 +448,7 @@ fn grep_ast(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
             None => json!({ "path": m.path, "line": m.line, "text": m.text }),
         })
         .collect();
-    Ok(json!({ "matches": arr, "stale": ctx.graph_stale() }))
+    Ok(json!({ "count": arr.len(), "matches": arr, "stale": ctx.graph_stale() }))
 }
 
 /// `overview [--budget N] [--query Q]` - the importance-ranked repo map. Accepts an

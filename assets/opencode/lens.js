@@ -54,9 +54,19 @@ export const LensPlugin = async ({ directory }) => {
     cwd: directory,
   });
   const toolName = (t) => TOOL_NAMES[t] ?? t;
+  // The additionalContext a hook returns, or "" (routing nudges, supersession
+  // notices, prompt-intent steers all arrive through this field).
+  const hookCtx = (res) =>
+    (res &&
+      res.hookSpecificOutput &&
+      typeof res.hookSpecificOutput.additionalContext === "string" &&
+      res.hookSpecificOutput.additionalContext) ||
+    "";
   // opencode's after-callback carries no tool args, but lens's PostToolUse
   // handlers key on them (file_path/command/... drive continuity events and
-  // editpath marking). Stash args per callID in before, replay in after.
+  // editpath marking). Stash {args, ctx} per callID in before, replay in
+  // after: `ctx` is PreToolUse additionalContext, which has no pre-call
+  // injection channel in opencode and is delivered via the tool result below.
   // Capped: a denied or errored call never reaches after, so entries would
   // otherwise accumulate for the life of the session.
   const pendingArgs = new Map();
@@ -76,10 +86,9 @@ export const LensPlugin = async ({ directory }) => {
         if (out.permissionDecision === "allow" && out.updatedInput && output.args) {
           Object.assign(output.args, out.updatedInput);
         }
-        // additionalContext has no injection channel here; dropped.
       }
       if (input.callID != null) {
-        pendingArgs.set(input.callID, output.args ?? {});
+        pendingArgs.set(input.callID, { args: output.args ?? {}, ctx: hookCtx(res) });
         if (pendingArgs.size > 256) {
           pendingArgs.delete(pendingArgs.keys().next().value);
         }
@@ -87,14 +96,22 @@ export const LensPlugin = async ({ directory }) => {
     },
 
     "tool.execute.after": async (input, output) => {
-      const args = input.callID != null ? pendingArgs.get(input.callID) : undefined;
+      const pending = input.callID != null ? pendingArgs.get(input.callID) : undefined;
       if (input.callID != null) pendingArgs.delete(input.callID);
-      runHook("PostToolUse", {
+      const res = runHook("PostToolUse", {
         ...base(input.sessionID),
         tool_name: toolName(input.tool),
-        tool_input: args ?? {},
+        tool_input: (pending && pending.args) ?? input.args ?? {},
         tool_response: output && output.output != null ? output.output : null,
       });
+      // The tool result string is opencode's only injection channel for tool
+      // context: append the stashed PreToolUse nudge (the model sees it one
+      // step later than on Claude Code, but it lands) and any PostToolUse
+      // notice, labeled so the model can tell them from real tool output.
+      const notes = [(pending && pending.ctx) || "", hookCtx(res)].filter(Boolean);
+      if (notes.length && output && typeof output.output === "string") {
+        output.output += "\n\n[lens] " + notes.join("\n[lens] ");
+      }
     },
 
     "chat.message": async (_input, output) => {
@@ -107,16 +124,31 @@ export const LensPlugin = async ({ directory }) => {
             .map((p) => p.text)
             .join("\n")) ||
         "";
-      runHook("UserPromptSubmit", {
+      const res = runHook("UserPromptSubmit", {
         ...base(msg && msg.sessionID),
         prompt: text,
       });
+      // Deliver UserPromptSubmit additionalContext (e.g. the find/trace
+      // tool-mapping nudge) as an extra text part on the outgoing message.
+      // Best-effort and fail-open: never let injection break the message.
+      const ctx = hookCtx(res);
+      if (ctx && output && Array.isArray(output.parts)) {
+        try {
+          output.parts.push({ type: "text", text: ctx, synthetic: true });
+        } catch {
+          // fail-open
+        }
+      }
     },
 
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return;
       if (event.type === "session.created") {
         const info = event.properties && event.properties.info;
+        // `event` has no output channel, so SessionStart additionalContext
+        // (the routing guide) cannot be delivered here; the call still runs
+        // for its side effects (session row, counters). Guide delivery for
+        // opencode is the bench's prompt-stamp / a future system-transform.
         runHook("SessionStart", {
           ...base(info && info.id),
           source: "startup",

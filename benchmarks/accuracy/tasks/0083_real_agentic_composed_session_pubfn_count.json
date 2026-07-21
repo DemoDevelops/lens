@@ -5,7 +5,7 @@
     "../../src/session"
   ],
   "ground_truth": {
-    "count": 37
+    "count": 39
   },
   "check": "numeric_tolerance",
   "primary_mechanism": "darkroom",

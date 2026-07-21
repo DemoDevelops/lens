@@ -2,7 +2,7 @@
   "id": "0063_real_agentic_darkroom_distinct_env_names",
   "prompt": "Non-test code under src/ reads configuration from LENS_-prefixed environment variables via std::env::var or std::env::var_os with a string-literal name. Excluding test code (anything gated by #[cfg(test)]), exactly how many DISTINCT LENS_* variable names are read that way? Count distinct names, not read sites.",
   "fixtures": ["../../src"],
-  "ground_truth": { "count": 47 },
+  "ground_truth": { "count": 51 },
   "check": "numeric_tolerance",
   "primary_mechanism": "darkroom",
   "lens_fn": "lens_run",

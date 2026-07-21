@@ -5,7 +5,7 @@
     "../../src"
   ],
   "ground_truth": {
-    "count": 31
+    "count": 33
   },
   "check": "numeric_tolerance",
   "primary_mechanism": "darkroom",

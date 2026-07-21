@@ -2,7 +2,7 @@
   "id": "0064_real_agentic_darkroom_nontest_unwrap_total",
   "prompt": "Across all of src/, excluding test code (anything gated by #[cfg(test)], including test-only helper functions), exactly how many .unwrap() method calls are there? Count real calls only, not occurrences inside string literals or comments.",
   "fixtures": ["../../src"],
-  "ground_truth": { "count": 22 },
+  "ground_truth": { "count": 28 },
   "check": "numeric_tolerance",
   "primary_mechanism": "darkroom",
   "lens_fn": "lens_run",

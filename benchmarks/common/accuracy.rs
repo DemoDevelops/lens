@@ -412,7 +412,7 @@ fn fold_arm(runs: &[ArmResult]) -> Option<ArmStats> {
         stddev_millis: stddev(&millis),
         lens_runs: runs
             .iter()
-            .filter(|r| r.tools.iter().any(|t| t.starts_with("mcp__lens__")))
+            .filter(|r| r.tools.iter().any(|t| is_lens_tool_name(t)))
             .count(),
     })
 }
@@ -2740,7 +2740,7 @@ mod agentic_isolation_tests {
         let leaked: Vec<&String> = baseline
             .tools
             .iter()
-            .filter(|t| t.starts_with("mcp__lens__"))
+            .filter(|t| is_lens_tool_name(t))
             .collect();
         assert!(leaked.is_empty(), "baseline reached lens: {leaked:?}");
         assert_eq!(
@@ -2779,7 +2779,7 @@ mod validity_gate_tests {
     fn run(guide_injections: usize, tools: Vec<&str>) -> AgenticRun {
         AgenticRun {
             answer: "{}".to_string(),
-            lens_call_succeeded: tools.iter().any(|t| t.starts_with("mcp__lens__")),
+            lens_call_succeeded: tools.iter().any(|t| super::is_lens_tool_name(t)),
             tools: tools.into_iter().map(str::to_string).collect(),
             tokens: 10,
             guide_injections,
@@ -3114,7 +3114,7 @@ mod canary_set_adoption_tests {
     fn agentic_run(tools: Vec<&str>) -> AgenticRun {
         AgenticRun {
             answer: "{}".to_string(),
-            lens_call_succeeded: tools.iter().any(|t| t.starts_with("mcp__lens__")),
+            lens_call_succeeded: tools.iter().any(|t| super::is_lens_tool_name(t)),
             tools: tools.into_iter().map(str::to_string).collect(),
             tokens: 10,
             guide_injections: 1,

@@ -70,9 +70,10 @@ tasks.
 | darkroom (composed) | 8 | 6,981,604 | 5,988,872 | -14.2% | (not gated) | context |
 
 - **graph** clears its bar (lens is 17.6% cheaper than control).
-- **skeleton** is 39.7% *more* expensive on lens, driven by `lens_overview`
-  (+58%, and a real accuracy loss 0% vs 33%) and `lens_grep_ast` (+88%); only
-  `lens_map` (-7%) beats control.
+- **skeleton** is 39.7% *more* expensive on lens, driven by `lens_skeleton` on
+  0070 (+58%; retagged from overview, and a stale-GT accuracy artifact — see
+  Post-run corrections) and `lens_grep_ast` (+88%); only `lens_map` (-7%) beats
+  control.
 - **search** is cheaper (-26.7%) but misses the -40% bar.
 
 **Verdict FAIL** (graph passes; skeleton and search miss their targets).

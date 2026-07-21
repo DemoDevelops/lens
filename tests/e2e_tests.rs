@@ -490,3 +490,201 @@ async fn darkroom_python_callers_transitive_via_prelude() {
 
     client.cancel().await.ok();
 }
+
+/// T6: a nested git repo with no pre-built `.lens` is auto-built on the first
+/// federated `lens_search` instead of silently skipped: the response's new
+/// `notes` field records the build, and re-querying afterward proves the built
+/// index is real (the nested repo's own content is actually searchable), not
+/// just a note with no effect.
+#[tokio::test]
+async fn nested_repo_auto_builds_on_federation_miss() {
+    let parent = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(parent.path().join("top.rs"), "fn top_widget() {}\n").unwrap();
+
+    // A nested git repo (its own `.git`), no `.lens` built yet.
+    let nested = parent.path().join("nested");
+    std::fs::create_dir_all(nested.join(".git")).unwrap();
+    std::fs::write(
+        nested.join("inner.rs"),
+        "fn nested_federation_marker() {}\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_lens");
+    let repo_path = parent.path().to_path_buf();
+    let data_path = data.path().to_path_buf();
+    let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
+        cmd.current_dir(&repo_path)
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192");
+    }))
+    .unwrap();
+    let client = ().serve(transport).await.expect("handshake");
+
+    let call = |name: &'static str, args: Value| {
+        let client = &client;
+        async move {
+            let mut params = CallToolRequestParams::new(name);
+            params.arguments = args.as_object().cloned();
+            let res = client.call_tool(params).await.unwrap();
+            res.structured_content
+                .expect("structured content for tool result")
+        }
+    };
+
+    // First federated search: the nested repo has no `.lens/fts` yet, so it must
+    // auto-build (index only) instead of silently skipping, and the response
+    // must note the build.
+    let first = call(
+        "lens_search",
+        json!({ "queries": ["nested_federation_marker"] }),
+    )
+    .await;
+    let notes: Vec<String> = first["notes"]
+        .as_array()
+        .expect("notes field present")
+        .iter()
+        .map(|n| n.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        notes.iter().any(|n| n.contains("built")),
+        "first federated search must note the nested autobuild, got {notes:?}"
+    );
+
+    // Second query: the built index must be REAL, not just a note -- the
+    // nested repo's own content must actually be searchable.
+    let second = call(
+        "lens_search",
+        json!({ "queries": ["nested_federation_marker"] }),
+    )
+    .await;
+    let hits = &second["results"][0]["hits"];
+    assert!(
+        hits.as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["path"].as_str().unwrap().ends_with("nested/inner.rs")),
+        "second query must return hits from the auto-built nested repo, got {hits:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
+/// T6: `LENS_NESTED_AUTOBUILD=0` disables the auto-build, keeping the old
+/// silent-skip behavior except the response still notes WHY nothing was built.
+#[tokio::test]
+async fn nested_autobuild_off_skips_with_note() {
+    let parent = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(parent.path().join("top.rs"), "fn top_widget() {}\n").unwrap();
+
+    let nested = parent.path().join("nested");
+    std::fs::create_dir_all(nested.join(".git")).unwrap();
+    std::fs::write(
+        nested.join("inner.rs"),
+        "fn nested_federation_marker() {}\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_lens");
+    let repo_path = parent.path().to_path_buf();
+    let data_path = data.path().to_path_buf();
+    let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
+        cmd.current_dir(&repo_path)
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192")
+            .env("LENS_NESTED_AUTOBUILD", "0");
+    }))
+    .unwrap();
+    let client = ().serve(transport).await.expect("handshake");
+
+    let call = |name: &'static str, args: Value| {
+        let client = &client;
+        async move {
+            let mut params = CallToolRequestParams::new(name);
+            params.arguments = args.as_object().cloned();
+            let res = client.call_tool(params).await.unwrap();
+            res.structured_content
+                .expect("structured content for tool result")
+        }
+    };
+
+    let out = call(
+        "lens_search",
+        json!({ "queries": ["nested_federation_marker"] }),
+    )
+    .await;
+    let notes: Vec<String> = out["notes"]
+        .as_array()
+        .expect("notes field present")
+        .iter()
+        .map(|n| n.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        notes.iter().any(|n| n.contains("skipped: autobuild off")),
+        "LENS_NESTED_AUTOBUILD=0 must note the skip, got {notes:?}"
+    );
+    let hits = &out["results"][0]["hits"];
+    assert!(
+        !hits
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["path"].as_str().unwrap().ends_with("nested/inner.rs")),
+        "with autobuild off, the nested repo's content must not surface, got {hits:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
+/// T6: a nested repo over the file-count cap is skipped (with a note) instead
+/// of auto-built, even with the kill-switch on.
+#[tokio::test]
+async fn nested_autobuild_max_files_skips_oversized_nested_repo() {
+    let parent = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(parent.path().join("top.rs"), "fn top_widget() {}\n").unwrap();
+
+    let nested = parent.path().join("nested");
+    std::fs::create_dir_all(nested.join(".git")).unwrap();
+    std::fs::write(nested.join("a.rs"), "fn a_widget() {}\n").unwrap();
+    std::fs::write(nested.join("b.rs"), "fn b_widget() {}\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_lens");
+    let repo_path = parent.path().to_path_buf();
+    let data_path = data.path().to_path_buf();
+    let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
+        cmd.current_dir(&repo_path)
+            .env("LENS_DIR", &data_path)
+            .env("LENS_MAX_INLINE", "8192")
+            .env("LENS_NESTED_AUTOBUILD_MAX_FILES", "1");
+    }))
+    .unwrap();
+    let client = ().serve(transport).await.expect("handshake");
+
+    let call = |name: &'static str, args: Value| {
+        let client = &client;
+        async move {
+            let mut params = CallToolRequestParams::new(name);
+            params.arguments = args.as_object().cloned();
+            let res = client.call_tool(params).await.unwrap();
+            res.structured_content
+                .expect("structured content for tool result")
+        }
+    };
+
+    let out = call("lens_search", json!({ "queries": ["a_widget"] })).await;
+    let notes: Vec<String> = out["notes"]
+        .as_array()
+        .expect("notes field present")
+        .iter()
+        .map(|n| n.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        notes.iter().any(|n| n.contains("skipped: too large")),
+        "over the file-count cap must skip with a note, got {notes:?}"
+    );
+
+    client.cancel().await.ok();
+}

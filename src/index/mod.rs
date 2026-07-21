@@ -341,7 +341,10 @@ impl Index {
                 hits,
             });
         }
-        Ok(SearchResponse { results })
+        Ok(SearchResponse {
+            results,
+            notes: Vec::new(),
+        })
     }
 }
 

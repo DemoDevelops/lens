@@ -1415,8 +1415,16 @@ impl Forge {
     /// (its paths are its own), so it searches with an empty rank map. Each nested
     /// hit's `path` is prefixed with the nested repo's parent-relative path so a reader
     /// can tell which repo it came from (matching how the graph merge prefixes node
-    /// files). A missing/unreadable nested index is a silent no-op, preserving the
-    /// "a search never triggers an index build" invariant.
+    /// files).
+    ///
+    /// A nested repo with no `.lens/fts` yet is auto-built (index only — federation
+    /// never reads the graph) instead of silently skipped, behind
+    /// `LENS_NESTED_AUTOBUILD` (default on) and a file-count cap
+    /// (`LENS_NESTED_AUTOBUILD_MAX_FILES`). Every outcome that isn't "already built"
+    /// (built / skipped-too-large / skipped-autobuild-off / build failure) appends a
+    /// one-line note to `resp.notes`, so an absent nested repo is never silent. A
+    /// still-unreadable index after a build attempt is a no-op for that repo's
+    /// federation, same as before.
     fn federate_nested_search(
         &self,
         resp: &mut SearchResponse,
@@ -1425,8 +1433,37 @@ impl Forge {
     ) {
         for nested_root in discovery::nested_repo_roots(&self.repo_dir) {
             let data_dir = nested_root.join(".lens");
+            let prefix = nested_root
+                .strip_prefix(&self.repo_dir)
+                .unwrap_or(&nested_root)
+                .to_string_lossy()
+                .to_string();
             if !data_dir.join("fts").exists() {
-                continue;
+                if !nested_autobuild_enabled() {
+                    resp.notes
+                        .push(format!("nested repo {prefix}: skipped: autobuild off"));
+                    continue;
+                }
+                let file_count = crate::index::file_manifest(&nested_root).len();
+                let cap = nested_autobuild_max_files();
+                if file_count > cap {
+                    resp.notes.push(format!(
+                        "nested repo {prefix}: skipped: too large ({file_count} files > {cap})"
+                    ));
+                    continue;
+                }
+                match self.build_nested_index(&nested_root, &data_dir) {
+                    Ok(files_indexed) => {
+                        resp.notes.push(format!(
+                            "nested repo {prefix}: built ({files_indexed} files)"
+                        ));
+                    }
+                    Err(e) => {
+                        resp.notes
+                            .push(format!("nested repo {prefix}: skipped: build failed ({e})"));
+                        continue;
+                    }
+                }
             }
             let nested_index = match Index::open(&data_dir) {
                 Ok(i) => i.with_repo_root(&nested_root),
@@ -1436,11 +1473,6 @@ impl Forge {
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let prefix = nested_root
-                .strip_prefix(&self.repo_dir)
-                .unwrap_or(&nested_root)
-                .to_string_lossy()
-                .to_string();
             for (i, qr) in nested.results.into_iter().enumerate() {
                 let Some(target) = resp.results.get_mut(i) else {
                     continue;
@@ -1462,6 +1494,42 @@ impl Forge {
             });
             qr.hits.truncate(limit_per_query);
         }
+    }
+
+    /// Build the FTS index only (never the graph — federation only ever reads the
+    /// FTS index) for a nested repo whose `.lens/fts` does not exist yet, mirroring
+    /// `ensure_index`'s build path but rooted at `nested_root`/`nested_data_dir` and
+    /// writing the same manifest shape `ensure_index` writes, so a later session that
+    /// opens the nested repo directly also sees it as fresh. Locked on the NESTED
+    /// repo's own data dir (via `build_locked`'s explicit `data_dir` param), not the
+    /// parent's. Returns the file count `index_path` saw, for the response note.
+    fn build_nested_index(
+        &self,
+        nested_root: &Path,
+        nested_data_dir: &Path,
+    ) -> Result<usize, ErrorData> {
+        let nested_index = Index::open(nested_data_dir)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            .with_repo_root(nested_root);
+        let manifest_file = nested_data_dir.join("index.manifest.json");
+        let is_fresh = || {
+            let current = crate::index::file_manifest(nested_root);
+            nested_index.chunk_count().unwrap_or(0) > 0
+                && read_manifest(&manifest_file).as_ref() == Some(&current)
+        };
+        let mut files_indexed = 0usize;
+        self.build_locked(nested_data_dir, is_fresh, || {
+            let current = crate::index::file_manifest(nested_root);
+            match nested_index.index_path(nested_root, true) {
+                Ok(resp) => {
+                    write_manifest(&manifest_file, &current);
+                    files_indexed = resp.files_indexed;
+                    Ok(())
+                }
+                Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
+            }
+        })?;
+        Ok(files_indexed)
     }
 
     /// Load the structural graph, building it on first use if discovery hasn't run
@@ -1699,6 +1767,11 @@ impl Forge {
     /// case is that one cold session builds and every other finds the artifact already
     /// fresh, so `build` runs at most once per staleness epoch across all processes.
     ///
+    /// `data_dir` is an explicit parameter (rather than always `self.data_dir`) so a
+    /// nested-repo build can lock on the NESTED repo's own data dir instead of the
+    /// parent Forge's: an unrelated parent build and two different nested-repo builds
+    /// must never serialize on the same lock file.
+    ///
     /// Contract:
     /// - `build` is only ever called while we hold the exclusive lock AND have just
     ///   re-confirmed `!is_fresh()`, so at most one process builds concurrently.
@@ -1708,10 +1781,11 @@ impl Forge {
     ///   and acquisition retried; a live holder is waited out with capped backoff.
     fn build_locked(
         &self,
+        data_dir: &Path,
         is_fresh: impl Fn() -> bool,
         build: impl FnOnce() -> Result<(), ErrorData>,
     ) -> Result<(), ErrorData> {
-        let lock_path = self.data_dir.join(BUILD_LOCK_FILE);
+        let lock_path = data_dir.join(BUILD_LOCK_FILE);
         let deadline = std::time::Instant::now() + BUILD_LOCK_MAX_WAIT;
         let mut build = Some(build);
         loop {
@@ -1759,7 +1833,7 @@ impl Forge {
                     && read_manifest(&self.graph_manifest_file()).as_ref() == Some(&current)
             )
         };
-        self.build_locked(is_fresh, || {
+        self.build_locked(&self.data_dir, is_fresh, || {
             let op = self
                 .ops
                 .start("lens_map", serde_json::json!({ "auto": true }));
@@ -1806,7 +1880,7 @@ impl Forge {
             self.index.chunk_count().unwrap_or(0) > 0
                 && read_manifest(&self.index_manifest_file()).as_ref() == Some(&current)
         };
-        self.build_locked(is_fresh, || {
+        self.build_locked(&self.data_dir, is_fresh, || {
             let current = crate::index::file_manifest(&self.repo_dir);
             let op = self
                 .ops
@@ -1963,6 +2037,27 @@ fn slice_content(
         None => filtered.len(),
     };
     (filtered[start..end].join("\n"), true)
+}
+
+/// Nested-repo auto-build kill-switch: `LENS_NESTED_AUTOBUILD=0` disables it,
+/// falling back to the old silent-skip-on-miss behavior. On by default.
+fn nested_autobuild_enabled() -> bool {
+    std::env::var("LENS_NESTED_AUTOBUILD").map_or(true, |v| v.trim() != "0")
+}
+
+/// Default cap on a nested repo's file count before auto-build is skipped as too
+/// large (`LENS_NESTED_AUTOBUILD_MAX_FILES` overrides). Generous relative to this
+/// repo's own scale so it only guards against a genuinely oversized nested tree.
+const NESTED_AUTOBUILD_MAX_FILES_DEFAULT: usize = 5000;
+
+/// Size cap on a nested repo's file count before auto-build is skipped as too
+/// large. Falls back to [`NESTED_AUTOBUILD_MAX_FILES_DEFAULT`] when unset or
+/// unparseable.
+fn nested_autobuild_max_files() -> usize {
+    std::env::var("LENS_NESTED_AUTOBUILD_MAX_FILES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(NESTED_AUTOBUILD_MAX_FILES_DEFAULT)
 }
 
 /// Cross-process single-flight lock file for the index/graph build. Lives in the

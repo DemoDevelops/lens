@@ -195,6 +195,15 @@ pub struct QueryResult {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SearchResponse {
     pub results: Vec<QueryResult>,
+    /// One line per nested-repo federation outcome worth surfacing: an autobuild
+    /// that ran (`"nested repo X: built (N files)"`), one skipped for size
+    /// (`"...: skipped: too large (...)"`), one skipped because the kill-switch is
+    /// off (`"...: skipped: autobuild off"`), or a build failure. Empty (and
+    /// omitted from JSON) when there are no nested repos or every nested repo
+    /// already had a built index -- the common case stays a silent no-op exactly
+    /// as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

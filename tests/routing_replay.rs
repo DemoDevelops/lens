@@ -233,24 +233,17 @@ fn mined_corpus_replay_matches_routing_verdicts() {
     let quarantined: Vec<&MinedCase> = cases.iter().filter(|c| c.quarantine).collect();
     assert_eq!(
         quarantined.len(),
-        12,
-        "quarantine count must be exactly 12 (all grep_ast DSL GA-FOLLOWUP cases): {:?}",
+        0,
+        "quarantine count must be exactly 0 (all GA-FOLLOWUP cases de-quarantined): {:?}",
         quarantined.iter().map(|c| &c.meta_pattern).collect::<Vec<_>>()
-    );
-    assert!(
-        quarantined.iter().all(|c| c.meta_pattern.as_deref() == Some("GA-FOLLOWUP")),
-        "every quarantined case must be the named out-of-scope grep_ast DSL class"
     );
 
     let mut asserted = 0;
     for (i, case) in cases.iter().enumerate() {
-        if case.quarantine {
-            continue;
-        }
         let expect = case
             .expect
             .as_deref()
-            .unwrap_or_else(|| panic!("line {i}: non-quarantined case must carry an expect grade"));
+            .unwrap_or_else(|| panic!("line {i}: case must carry an expect grade"));
         let grade = replay(
             &case.tool,
             &case.tool_input,
@@ -264,5 +257,5 @@ fn mined_corpus_replay_matches_routing_verdicts() {
         );
         asserted += 1;
     }
-    assert_eq!(asserted, 98 - 12, "every non-quarantined case must be verdict-asserted");
+    assert_eq!(asserted, 98, "every case must be verdict-asserted");
 }

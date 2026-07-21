@@ -98,11 +98,14 @@ pub fn compile_pattern(pattern: &str, spec: &AnySpec) -> Result<String> {
     } else {
         format!("({body} @{MATCH_CAPTURE} {})", predicates.join(" "))
     };
-    // The emission is grammar-driven, so this only fails on an emitter bug;
-    // validating here keeps that failure clear instead of surfacing later as a
-    // confusing "invalid query" from the grep engine.
-    Query::new(&lang, &query)
-        .map_err(|e| anyhow::anyhow!("internal: compiled pattern query invalid ({e}): {query}"))?;
+    // The emission is grammar-driven, so a failure here is either an emitter bug
+    // or a malformed pattern that slipped through parsing: a kind-mismatched
+    // bracket like `foo($X}` can parse as a placeholder-only ERROR yet emit an
+    // impossible query. Diagnose the latter for the user; keep the former loud.
+    Query::new(&lang, &query).map_err(|e| match bracket_mismatch(pat) {
+        Some(m) => anyhow::anyhow!("pattern has mismatched brackets ({m}): `{pat}`"),
+        None => anyhow::anyhow!("internal: compiled pattern query invalid ({e}): {query}"),
+    })?;
     Ok(query)
 }
 
@@ -329,20 +332,26 @@ fn parse_with_candidates(
 
 /// Shape-specific diagnosis when no fragment wrapper produced an ERROR-free parse.
 fn diagnose_parse_failure(pat: &str, lang_name: &str) -> String {
-    let mut shapes: Vec<&str> = Vec::new();
-    let opens = pat
-        .chars()
-        .filter(|c| matches!(c, '{' | '(' | '['))
-        .count();
-    let closes = pat
-        .chars()
-        .filter(|c| matches!(c, '}' | ')' | ']'))
-        .count();
-    if opens != closes {
-        shapes.push("unbalanced braces/parens");
+    let mut shapes: Vec<String> = Vec::new();
+    if let Some(mismatch) = bracket_mismatch(pat) {
+        shapes.push(format!("mismatched brackets: {mismatch}"));
     }
-    if pat.contains("=>") && !pat.contains("match") {
-        shapes.push("`=>` arm outside match");
+    // `=>` means different things per grammar; a wrong claim here sends the
+    // user chasing the wrong fix, so only assert language-true shapes. Rust
+    // match arms compile standalone (auto-wrapped), so a failing `=>` fragment
+    // means the arm ITSELF is malformed, not that it lacks a `match` wrapper.
+    if pat.contains("=>") {
+        match lang_name {
+            "rust" if !pat.contains("match") => shapes.push(
+                "malformed `=>` match arm (bare arms auto-wrap; the arm itself must be \
+                 `PAT => EXPR`)"
+                    .into(),
+            ),
+            "javascript" | "typescript" => {
+                shapes.push("malformed `=>` arrow function".into())
+            }
+            _ => {}
+        }
     }
     let codeish = pat.contains('(')
         || pat.contains('{')
@@ -352,7 +361,7 @@ fn diagnose_parse_failure(pat: &str, lang_name: &str) -> String {
         || pat.contains("def ")
         || pat.contains("function ");
     if !codeish || pat.split_whitespace().count() > 12 {
-        shapes.push("non-code prose");
+        shapes.push("non-code prose".into());
     }
     let shape = if shapes.is_empty() {
         "unrecognized fragment".to_string()
@@ -364,6 +373,34 @@ fn diagnose_parse_failure(pat: &str, lang_name: &str) -> String {
          Try a code-shaped fragment, e.g. `fn $NAME($$$) {{ $$$BODY }}` or \
          `Some($X) => $X` (match arms are auto-wrapped)."
     )
+}
+
+/// First bracket-kind error in `pat`, if any: a closer of the wrong kind
+/// (`(` closed by `}`), an unmatched closer, or an unclosed opener. Kind-aware,
+/// unlike a raw open/close count, which reads `foo($X}` as balanced. Blind to
+/// brackets inside string/char literals, like the count it replaces — the hint
+/// is prefixed "likely" for a reason.
+fn bracket_mismatch(pat: &str) -> Option<String> {
+    let mut stack: Vec<char> = Vec::new();
+    for c in pat.chars() {
+        match c {
+            '(' | '{' | '[' => stack.push(c),
+            ')' | '}' | ']' => {
+                let want = match c {
+                    ')' => '(',
+                    '}' => '{',
+                    _ => '[',
+                };
+                match stack.pop() {
+                    Some(o) if o == want => {}
+                    Some(o) => return Some(format!("`{o}` closed by `{c}`")),
+                    None => return Some(format!("unmatched `{c}`")),
+                }
+            }
+            _ => {}
+        }
+    }
+    stack.pop().map(|o| format!("unclosed `{o}`"))
 }
 
 /// `has_error` is fine when every ERROR node is solely a placeholder (e.g.
@@ -872,6 +909,34 @@ mod tests {
     fn syntax_error_pattern_is_a_clear_error() {
         let err = compile("fn (", "rust").unwrap_err().to_string();
         assert!(err.contains("does not parse as rust"), "{err}");
+    }
+
+    /// `foo($X}` counts as balanced by open/close totals; the hint must name
+    /// the kind mismatch instead of falling back to "unrecognized fragment".
+    #[test]
+    fn bracket_kind_mismatch_is_named() {
+        let err = compile("foo($X}", "rust").unwrap_err().to_string();
+        assert!(err.contains("`(` closed by `}`"), "{err}");
+    }
+
+    /// A failing TS arrow contains `=>` but has nothing to do with match arms;
+    /// the old hint claimed "`=>` arm outside match" for it.
+    #[test]
+    fn ts_arrow_failure_is_not_called_a_match_arm() {
+        let err = compile("($X) =>", "typescript").unwrap_err().to_string();
+        assert!(err.contains("arrow function"), "{err}");
+        assert!(
+            !err.contains("malformed `=>` match arm"),
+            "must not claim a match-arm shape: {err}"
+        );
+    }
+
+    /// Rust arms auto-wrap, so a failing `=>` fragment is a malformed arm, not
+    /// an arm missing its `match` wrapper.
+    #[test]
+    fn rust_bad_arm_hint_mentions_autowrap() {
+        let err = compile("Some($X) => 1 2", "rust").unwrap_err().to_string();
+        assert!(err.contains("auto-wrap"), "{err}");
     }
 
     #[test]

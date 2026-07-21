@@ -62,19 +62,28 @@ def path(frm, to):
     return _q(["path", frm, to])
 
 
-def skeleton(path, bodies=None):
+def skeleton(path, bodies=None, include_bodies=None, with_lines=None):
+    # `include_bodies`/`with_lines` mirror the MCP tool's parameter names, the
+    # ones models reuse in scripts (19/28 mined script errors were kwarg
+    # mismatches against this shim).
     args = ["skeleton", path]
+    bodies = bodies if bodies is not None else include_bodies
     if bodies:
         args += ["--bodies", ",".join(bodies)]
+    if with_lines is False:
+        args.append("--no-lines")
     return _q(args)
 
 
-def grep_ast(pattern=None, query=None, lang=None, path=None, limit=None, prod_only=False):
+def grep_ast(
+    pattern=None, query=None, lang=None, path=None, limit=None, prod_only=False, language=None
+):
     args = ["grep-ast"]
     if pattern is not None:
         args += ["--pattern", pattern]
     if query is not None:
         args += ["--query", query]
+    lang = lang if lang is not None else language
     if lang is not None:
         args += ["--lang", lang]
     if path is not None:

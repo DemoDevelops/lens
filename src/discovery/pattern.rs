@@ -696,6 +696,16 @@ impl Emitter<'_> {
                     let tok = child.utf8_text(self.src).unwrap_or("");
                     self.has_concrete_token = true;
                     let _ = write!(out, " {f}: \"{}\"", escape(tok));
+                } else {
+                    // An unfielded KEYWORD (`fn`, `pub`, `impl`, ...) pins the
+                    // pattern through its parent's node kind: `pub fn $NAME($$$)
+                    // $BODY` matches exactly the function items, which is a
+                    // legitimate counting shape (mined 0081/0083 failures), not
+                    // a match-everything wildcard. Punctuation still does not pin.
+                    let tok = child.utf8_text(self.src).unwrap_or("");
+                    if tok.chars().any(|c| c.is_alphabetic()) {
+                        self.has_concrete_token = true;
+                    }
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -978,6 +988,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("$$$"), "must point at `$$$`: {err}");
+    }
+
+    /// Keywords pin a pattern: `pub fn $NAME($$$) $BODY` is the natural
+    /// "count/list the functions" shape (mined 0081/0083 failures) and its
+    /// node kind constrains the match. Bare wildcards stay rejected.
+    #[test]
+    fn keyword_pinned_function_pattern_compiles() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "pub fn alpha(x: i32) -> i32 { x }\nfn beta() {}\npub fn gamma() {}\n",
+        )
+        .unwrap();
+        for p in ["pub fn $NAME", "pub fn $NAME($$$) $BODY"] {
+            let hits = matches(dir.path(), p, "rust");
+            assert_eq!(hits.len(), 2, "`{p}` must match the two pub fns: {hits:?}");
+        }
+        for p in ["$X", "$$$"] {
+            let err = compile(p, "rust").unwrap_err().to_string();
+            assert!(err.contains("concrete token"), "`{p}` must stay rejected: {err}");
+        }
     }
 
     #[test]

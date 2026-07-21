@@ -15,10 +15,11 @@
 //! `lens_search`, `lens_grep_ast` and the memory tools BREAK the chain (each
 //! is a complete answer, not a hop); every non-lens tool except the
 //! `ToolSearch` schema bootstrap breaks it too. The `achain-run` counter,
-//! threshold, and per-episode deny (reset on fire, so the verbatim retry
-//! passes and a later chain can be denied again — `inspect_escalation`'s
-//! "once per drift episode" pattern) plus the `LENS_ATOMIC_CHAIN_DENY` gate
-//! live in `route_inner` (`src/routing/mod.rs`), matching the module-boundary
+//! threshold, and once-per-session deny (`achain:done`; the counter still
+//! resets on fire so the verbatim retry passes, but later chains pass rather
+//! than burn a round each - the 2026-07-21 bad-set audit measured repeat
+//! denies not converting) plus the `LENS_ATOMIC_CHAIN_DENY` gate live in
+//! `route_inner` (`src/routing/mod.rs`), matching the module-boundary
 //! convention: pure classification/reason-building here, throttle/gate wiring
 //! there.
 

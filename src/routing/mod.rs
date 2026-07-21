@@ -634,14 +634,20 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             // measured 0.11-dev loop shapes are lens_graph hop-by-hop instead of
             // `transitive: true`, lens_recall body-chasing instead of
             // `include_bodies`, and per-file skeletons instead of one lens_run
-            // program. Denies per drift episode (`inspect_escalation`'s pattern):
-            // the counter resets on fire, so the verbatim retry passes and a later
-            // chain can be denied again. Kill-switched by LENS_ATOMIC_CHAIN_DENY
-            // (default ON); the bump only runs while the deny can fire, so a
-            // kill-switched or non-steering session never writes the counter.
+            // program. Denies ONCE PER SESSION (`achain:done`): the first deny
+            // teaches composition; the 2026-07-21 bad-set transcript audit
+            // measured repeat denies burning a full round each (up to 3 per run
+            // on 0083) without converting mid-chain. The counter still resets on
+            // fire so the verbatim retry passes. Kill-switched by
+            // LENS_ATOMIC_CHAIN_DENY (default ON); the bump only runs while the
+            // deny can fire, so a kill-switched or non-steering session never
+            // writes the counter.
             if atomic_lens && atomic_chain_deny_enabled() && ctx.level.steers() && ctx.mcp_ready {
                 let n = throttle::bump(ctx.data_dir, ctx.session_id, "achain-run");
-                if n >= ATOMIC_CHAIN_THRESHOLD {
+                if n >= ATOMIC_CHAIN_THRESHOLD
+                    && !throttle::fired(ctx.data_dir, ctx.session_id, "achain:done")
+                {
+                    throttle::mark(ctx.data_dir, ctx.session_id, "achain:done");
                     throttle::reset(ctx.data_dir, ctx.session_id, "achain-run");
                     return Decision::Deny(reroute::atomic_chain::deny_reason().to_string());
                 }
@@ -1612,9 +1618,8 @@ const BLOCK_HEAD: &str = r##"<context_window_protection>
     Raw tool results sit in the transcript and get re-read on every later turn, so one large dump keeps taxing the model long after it was useful. lens exists to avoid that: it runs the work in a subprocess (the "darkroom") and hands back only the finished answer. The habit to build: compute over data in code, rather than pulling the data into the conversation to read it.
   </why>
   <loading_lens_tools>
-    lens's tools may start out unregistered in this harness — their schemas aren't loaded, so a direct call errors ("tool not found" or a validation error). Register them once, before your first lens_* call:
+    lens's tools are normally registered already — call them directly, do NOT spend a round on ToolSearch first. Only if a lens_* call actually errors not-found ("tool not found" or a validation error), register the schemas once and retry instead of falling back to Bash/Read/Grep:
     ToolSearch(query: "select:lens_search,lens_symbol,lens_graph,lens_skeleton,lens_overview,lens_recall,lens_run,lens_grep_ast,lens_memory_query,lens_memory_record")
-    If a lens_* call later comes back not-found, re-run that ToolSearch and retry instead of falling back to Bash/Read/Grep.
   </loading_lens_tools>
   <which_tool>
     - How the code fits together (callers, callees, where a symbol is defined, how one part reaches another, imports): lens_graph(node) for neighborhood or lens_graph(node, to) for shortest path; expand from there with lens_symbol for details. lens_recall expands anything returned compacted.
@@ -2996,14 +3001,17 @@ mod tests {
             route("mcp__lens__lens_recall", &ti, &ctx),
             Decision::Passthrough
         );
-        // Per drift EPISODE, not once per session: two more hops re-arm it.
+        // ONCE PER SESSION: the first deny taught the lesson; a later chain
+        // passes instead of burning another round (2026-07-21 bad-set audit:
+        // repeat denies measured not converting mid-chain).
         assert_eq!(
             route("mcp__lens__lens_graph", &ti, &ctx),
             Decision::Passthrough
         );
-        assert!(
-            matches!(route("mcp__lens__lens_graph", &ti, &ctx), Decision::Deny(_)),
-            "a later chain must be denied again"
+        assert_eq!(
+            route("mcp__lens__lens_graph", &ti, &ctx),
+            Decision::Passthrough,
+            "a later chain must pass once the session's deny has fired"
         );
     }
 

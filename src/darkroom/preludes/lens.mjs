@@ -54,9 +54,13 @@ export function path(frm, to) {
   return q(["path", frm, to]);
 }
 
-export function skeleton(path, bodies = null) {
+// `includeBodies`/`withLines` mirror the MCP tool's parameter names, the ones
+// models reuse in scripts.
+export function skeleton(path, bodies = null, includeBodies = null, withLines = null) {
   const args = ["skeleton", path];
-  if (bodies && bodies.length) args.push("--bodies", bodies.join(","));
+  const b = bodies ?? includeBodies;
+  if (b && b.length) args.push("--bodies", b.join(","));
+  if (withLines === false) args.push("--no-lines");
   return q(args);
 }
 
@@ -66,12 +70,14 @@ export function grep_ast(
   lang = null,
   path = null,
   limit = null,
-  prodOnly = false
+  prodOnly = false,
+  language = null
 ) {
   const args = ["grep-ast"];
   if (pattern !== null) args.push("--pattern", pattern);
   if (query !== null) args.push("--query", query);
-  if (lang !== null) args.push("--lang", lang);
+  const l = lang ?? language;
+  if (l !== null) args.push("--lang", l);
   if (path !== null) args.push("--path", path);
   if (limit !== null) args.push("--limit", String(limit));
   if (prodOnly) args.push("--prod-only");

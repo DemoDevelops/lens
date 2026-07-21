@@ -89,7 +89,7 @@ symbol  <name> [--kind K] [--limit N]               declared symbols by name sub
 callers <name> [--depth N] [--transitive] [--prod-only]  directed fan-in subgraph (or full closure with witnesses)\n\
 callees <name> [--depth N] [--transitive] [--prod-only]  directed fan-out subgraph (or full closure with witnesses)\n\
 path    <from> <to>                                 shortest directed path\n\
-skeleton <file> [--bodies a,b]                      full skeleton text + per-def lines\n\
+skeleton <file> [--bodies a,b] [--no-lines]         full skeleton text + per-def lines\n\
 grep-ast [--path P] [--pattern PAT | --query Q] [--lang L] [--limit N] [--prod-only]\n\
 overview [--budget N] [--query Q]                   importance-ranked repo map\n\
 recall  <ref> [--grep S] [--offset N] [--limit N]   full stored blob";
@@ -383,7 +383,7 @@ fn path(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
 fn skeleton_verb(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
     let (positionals, flags) = parse_flags(args);
     let Some(file) = positionals.first() else {
-        return Err(QError::bad("usage: lens q skeleton <file> [--bodies a,b]"));
+        return Err(QError::bad("usage: lens q skeleton <file> [--bodies a,b] [--no-lines]"));
     };
     ctx.require_warmed()?;
     let p = ctx.resolve(file);
@@ -399,7 +399,9 @@ fn skeleton_verb(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
     let bodies: Option<Vec<String>> = flags
         .get("bodies")
         .map(|s| s.split(',').map(str::to_string).collect());
-    let Some(text) = skeleton::skeletonize(&content, &spec, bodies.as_deref(), true) else {
+    // Presence-only flag; line prefixes are on by default like the MCP tool.
+    let with_lines = !args.iter().any(|a| a == "--no-lines");
+    let Some(text) = skeleton::skeletonize(&content, &spec, bodies.as_deref(), with_lines) else {
         return Err(QError::bad(format!(
             "could not parse {} for skeleton; use Read",
             p.display()

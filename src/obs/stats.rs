@@ -611,10 +611,10 @@ pub fn snapshot_json_since(
     // way (see dashboard.rs's `scope=global` branch).
     let reroute = reroute_aggregate(std::slice::from_ref(&dir.to_path_buf()));
 
-    // "Actual Usage" plane: real per-model token/turn/cost mix from the active
-    // host's transcripts (Claude JSONL or opencode's storage/message store),
-    // same window/scope. (T6) Model-mix weighting unchanged; opencode rows are
-    // keyed by modelID with real token counts.
+    // "Actual Usage" plane: real per-model token/turn/cost mix from every host
+    // store present on the machine (Claude JSONL transcripts + opencode's db),
+    // merged per model, same window/scope. (T6) Model-mix weighting unchanged;
+    // opencode rows are keyed by modelID with real token counts.
     let cwd_filter: Option<PathBuf> = if crate::rtk::home_root().as_deref() == Some(dir) {
         None
     } else {
@@ -630,10 +630,15 @@ pub fn snapshot_json_since(
         .iter()
         .map(|m| {
             let price = super::pricing::price_for(&m.model);
-            let consumed_usd = m.input as f64 / 1e6 * price.input
+            let estimated_usd = m.input as f64 / 1e6 * price.input
                 + m.output as f64 / 1e6 * price.output
                 + m.cache_read as f64 / 1e6 * price.cache_read
                 + m.cache_creation as f64 / 1e6 * price.input;
+            // Provider-reported spend (opencode's `cost`, Claude API `costUSD`)
+            // wins when present; subscription transcripts report 0 and fall
+            // back to the catalog estimate.
+            let consumed_usd =
+                if m.cost_usd > 0.0 { m.cost_usd } else { estimated_usd };
             let share = if total_turns > 0 {
                 m.turns as f64 / total_turns as f64
             } else {
@@ -1425,10 +1430,11 @@ esac
         assert_eq!(none["gsym"]["epoch_stamp"], json!(0));
     }
 
-    /// Predicate verifier for T6: with LENS_HOST=opencode + a temp data dir
-    /// holding a message store (3 assistant messages), snapshot_json (what the
-    /// dashboard API uses) returns non-empty actual_usage with the 3 turns.
-    /// Claude paths untouched.
+    /// Predicate verifier for T6, tightened post-union: a temp data dir holding
+    /// an opencode message store (3 assistant messages) and NO LENS_HOST — the
+    /// realistic `lens dashboard` shell — must still surface the 3 turns in
+    /// snapshot_json's actual_usage. Claude vars are steered empty so the dev
+    /// machine's real transcripts can't leak into the sum.
     #[test]
     fn opencode_actual_usage_nonempty_in_snapshot() {
         let _g = crate::rtk::env_test_lock();
@@ -1436,6 +1442,8 @@ esac
         let prev_oc = std::env::var_os("OPENCODE_DATA_DIR");
         let prev_home = std::env::var_os("HOME");
         let prev_xdg = std::env::var_os("XDG_DATA_HOME");
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_xdg_cfg = std::env::var_os("XDG_CONFIG_HOME");
         let tmp = tempfile::tempdir().unwrap();
         let msgs = tmp.path().join("storage").join("message").join("ses_x");
         std::fs::create_dir_all(&msgs).unwrap();
@@ -1452,10 +1460,13 @@ esac
             )
             .unwrap();
         }
-        std::env::set_var("LENS_HOST", "opencode");
+        std::env::remove_var("LENS_HOST");
         std::env::set_var("OPENCODE_DATA_DIR", tmp.path());
-        std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
-        std::env::set_var("XDG_DATA_HOME", tempfile::tempdir().unwrap().path());
+        let empty = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", empty.path());
+        std::env::set_var("XDG_DATA_HOME", empty.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", empty.path());
+        std::env::set_var("XDG_CONFIG_HOME", empty.path());
 
         let data = tempfile::tempdir().unwrap();
         let snap = snapshot_json(data.path(), None);
@@ -1468,6 +1479,8 @@ esac
         restore_env("OPENCODE_DATA_DIR", prev_oc);
         restore_env("HOME", prev_home);
         restore_env("XDG_DATA_HOME", prev_xdg);
+        restore_env("CLAUDE_CONFIG_DIR", prev_cfg);
+        restore_env("XDG_CONFIG_HOME", prev_xdg_cfg);
     }
 
     fn restore_env(key: &str, prev: Option<std::ffi::OsString>) {

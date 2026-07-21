@@ -1,16 +1,25 @@
 //! Host usage reader behind the dashboard's "Actual Usage".
 //!
-//! Claude Code (the default host) writes one JSONL transcript per session under
-//! `<config dir>/projects/**/*.jsonl`; that path is unchanged from before the
-//! opencode work. opencode persists one JSON file per message under
-//! `<data dir>/storage/message/<sessionID>/*.json` (data dir:
-//! `$OPENCODE_DATA_DIR`, else `$XDG_DATA_HOME/opencode`, else
-//! `~/.local/share/opencode`); assistant messages carry `modelID`,
-//! `tokens {input, output, reasoning, cache {read, write}}`, `cost`, and
-//! `time.created` (epoch ms). `read_usage` dispatches on the detected host.
+//! Reads EVERY host store present on the machine and merges per model — the
+//! panel answers "what ran here", so which host produced a row is irrelevant.
+//! (Dispatching on LENS_HOST here was a bug: that var describes the process
+//! asking, not the data on disk, and it is only ever set inside the opencode
+//! MCP entry's environment — a plain `lens dashboard` shell never has it, so
+//! opencode rows could never appear.)
 //!
-//! Read-only and best-effort: a missing dir or unreadable file yields an empty
-//! result, never an error — this feeds a dashboard panel.
+//! Claude Code writes one JSONL transcript per session under
+//! `<config dir>/projects/**/*.jsonl`. opencode >= 1.x keeps everything in
+//! SQLite at `<data dir>/opencode.db`: `message.data` carries `modelID`,
+//! `tokens {input, output, reasoning, cache {read, write}}`, `cost`, and
+//! `time.created` (epoch ms); the `session` table's `directory` column scopes
+//! per-project. Older opencode wrote one JSON file per message under
+//! `<data dir>/storage/message/<sessionID>/*.json` (same payload, no session
+//! directory) — kept as a fallback for machines that never migrated. Data
+//! dir: `$OPENCODE_DATA_DIR`, else `$XDG_DATA_HOME/opencode`, else
+//! `~/.local/share/opencode`.
+//!
+//! Read-only and best-effort: a missing dir, unreadable file, or locked db
+//! yields an empty result, never an error — this feeds a dashboard panel.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -33,18 +42,41 @@ pub struct ModelUsage {
     pub cost_usd: f64,
 }
 
-/// Read and aggregate the active host's usage (Claude or opencode) into per-model
-/// (or host) summary. Dispatches on LENS_HOST (default Claude). Keeps all
-/// existing Claude behavior and fixtures untouched.
+/// Read and aggregate per-model usage across every host store present on this
+/// machine (Claude transcripts + opencode's db), merged by model id. Model ids
+/// never collide across hosts in practice; if one ever did, its rows would
+/// merge into a single honest total rather than one host shadowing the other.
 pub fn read_usage(
     since: Option<i64>,
     until: Option<i64>,
     cwd_filter: Option<&Path>,
 ) -> Vec<ModelUsage> {
-    if crate::client::is_claude() {
-        read_usage_claude(since, until, cwd_filter)
-    } else {
-        read_usage_opencode(since, until, cwd_filter)
+    let mut agg: BTreeMap<String, ModelUsage> = BTreeMap::new();
+    for row in read_usage_claude(since, until, cwd_filter)
+        .into_iter()
+        .chain(read_usage_opencode(since, until, cwd_filter))
+    {
+        accumulate(&mut agg, row);
+    }
+    agg.into_values().collect()
+}
+
+/// Fold one usage row into the per-model aggregate.
+fn accumulate(agg: &mut BTreeMap<String, ModelUsage>, row: ModelUsage) {
+    use std::collections::btree_map::Entry;
+    match agg.entry(row.model.clone()) {
+        Entry::Vacant(v) => {
+            v.insert(row);
+        }
+        Entry::Occupied(mut o) => {
+            let e = o.get_mut();
+            e.turns += row.turns;
+            e.input += row.input;
+            e.output += row.output;
+            e.cache_creation += row.cache_creation;
+            e.cache_read += row.cache_read;
+            e.cost_usd += row.cost_usd;
+        }
     }
 }
 
@@ -79,79 +111,141 @@ fn read_usage_claude(
                         continue; // resumed/rewritten turn, already counted
                     }
                 }
-                let entry = agg.entry(line.model.clone()).or_insert_with(|| ModelUsage {
-                    model: line.model,
-                    turns: 0,
-                    input: 0,
-                    output: 0,
-                    cache_creation: 0,
-                    cache_read: 0,
-                    cost_usd: 0.0,
-                });
-                entry.turns += 1;
-                entry.input += line.input;
-                entry.output += line.output;
-                entry.cache_creation += line.cache_creation;
-                entry.cache_read += line.cache_read;
-                entry.cost_usd += line.cost_usd;
+                accumulate(
+                    &mut agg,
+                    ModelUsage {
+                        model: line.model,
+                        turns: 1,
+                        input: line.input,
+                        output: line.output,
+                        cache_creation: line.cache_creation,
+                        cache_read: line.cache_read,
+                        cost_usd: line.cost_usd,
+                    },
+                );
             }
         }
     }
     agg.into_values().collect()
 }
 
-/// Read opencode usage from its message store:
-/// `<data dir>/storage/message/<sessionID>/*.json`, one JSON file per message.
-/// Only assistant messages carry usage (`modelID`, `tokens`, `cost`); user
-/// messages are skipped, mirroring the Claude reader's assistant-turn counting.
-/// Ignores cwd_filter (per-project scoping needs the session table; not wired).
+/// Read opencode usage. opencode >= 1.x persists messages in
+/// `<data dir>/opencode.db`; the legacy per-file store
+/// (`storage/message/<sessionID>/*.json`) is read only when no db exists,
+/// because a migrated install holds the same messages in both and reading
+/// both would double-count. Only assistant messages carry usage (`modelID`,
+/// `tokens`, `cost`); user messages are skipped, mirroring the Claude
+/// reader's assistant-turn counting. The legacy store records no session
+/// directory, so under a cwd_filter it contributes nothing: honest
+/// under-reporting beats attributing every repo's usage to this one.
 fn read_usage_opencode(
     since: Option<i64>,
     until: Option<i64>,
-    _cwd_filter: Option<&Path>,
+    cwd_filter: Option<&Path>,
 ) -> Vec<ModelUsage> {
     let mut agg: BTreeMap<String, ModelUsage> = BTreeMap::new();
     for data_dir in opencode_data_dirs() {
-        let Ok(sessions) = std::fs::read_dir(data_dir.join("storage").join("message")) else {
-            continue;
-        };
-        for session in sessions.flatten() {
-            let Ok(messages) = std::fs::read_dir(session.path()) else {
-                continue;
-            };
-            for file in messages.flatten() {
-                let path = file.path();
-                if path.extension().is_none_or(|e| e != "json") {
-                    continue;
-                }
-                let Ok(raw) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let Some(m) = parse_opencode_message(&raw) else {
-                    continue;
-                };
-                if since.is_some_and(|s| m.ts < s) || until.is_some_and(|u| m.ts >= u) {
-                    continue;
-                }
-                let entry = agg.entry(m.model.clone()).or_insert_with(|| ModelUsage {
-                    model: m.model,
-                    turns: 0,
-                    input: 0,
-                    output: 0,
-                    cache_creation: 0,
-                    cache_read: 0,
-                    cost_usd: 0.0,
-                });
-                entry.turns += 1;
-                entry.input += m.input;
-                entry.output += m.output;
-                entry.cache_creation += m.cache_creation;
-                entry.cache_read += m.cache_read;
-                entry.cost_usd += m.cost_usd;
-            }
+        let db = data_dir.join("opencode.db");
+        if db.is_file() {
+            read_opencode_db(&db, since, until, cwd_filter, &mut agg);
+        } else if cwd_filter.is_none() {
+            read_opencode_message_store(&data_dir, since, until, &mut agg);
         }
     }
     agg.into_values().collect()
+}
+
+/// Read usage out of opencode's SQLite store. `message.data` holds the same
+/// JSON payload the legacy per-file store held, so parsing is shared; the
+/// `session` join supplies `directory` for per-project scoping. The db is
+/// live (opencode may be writing); open read-only with a short busy timeout
+/// and give up silently on any failure, per the module contract.
+fn read_opencode_db(
+    db: &Path,
+    since: Option<i64>,
+    until: Option<i64>,
+    cwd_filter: Option<&Path>,
+    agg: &mut BTreeMap<String, ModelUsage>,
+) {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return;
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT m.data, s.directory FROM message m JOIN session s ON s.id = m.session_id",
+    ) else {
+        return;
+    };
+    let Ok(rows) =
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+    else {
+        return;
+    };
+    for (data, directory) in rows.flatten() {
+        let Some(m) = parse_opencode_message(&data) else {
+            continue;
+        };
+        if since.is_some_and(|s| m.ts < s) || until.is_some_and(|u| m.ts >= u) {
+            continue;
+        }
+        if cwd_filter.is_some_and(|filter| !Path::new(&directory).starts_with(filter)) {
+            continue;
+        }
+        fold_message(agg, m);
+    }
+}
+
+/// Read usage out of the legacy per-file message store:
+/// `<data dir>/storage/message/<sessionID>/*.json`, one JSON file per message.
+fn read_opencode_message_store(
+    data_dir: &Path,
+    since: Option<i64>,
+    until: Option<i64>,
+    agg: &mut BTreeMap<String, ModelUsage>,
+) {
+    let Ok(sessions) = std::fs::read_dir(data_dir.join("storage").join("message")) else {
+        return;
+    };
+    for session in sessions.flatten() {
+        let Ok(messages) = std::fs::read_dir(session.path()) else {
+            continue;
+        };
+        for file in messages.flatten() {
+            let path = file.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(m) = parse_opencode_message(&raw) else {
+                continue;
+            };
+            if since.is_some_and(|s| m.ts < s) || until.is_some_and(|u| m.ts >= u) {
+                continue;
+            }
+            fold_message(agg, m);
+        }
+    }
+}
+
+/// Fold one parsed opencode message into the aggregate as a single turn.
+fn fold_message(agg: &mut BTreeMap<String, ModelUsage>, m: OpencodeMessage) {
+    accumulate(
+        agg,
+        ModelUsage {
+            model: m.model,
+            turns: 1,
+            input: m.input,
+            output: m.output,
+            cache_creation: m.cache_creation,
+            cache_read: m.cache_read,
+            cost_usd: m.cost_usd,
+        },
+    );
 }
 
 /// One assistant message's usage, extracted from an opencode message file.
@@ -226,10 +320,11 @@ fn claude_config_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Every distinct opencode data dir that holds a message store: the union of
+/// Every distinct opencode data dir that holds a usage store: the union of
 /// `$OPENCODE_DATA_DIR`, `$XDG_DATA_HOME/opencode`, and
-/// `~/.local/share/opencode`, keeping only those with a `storage/message`
-/// subdir (the signal it holds messages) and deduping by canonical path.
+/// `~/.local/share/opencode`, keeping only those with an `opencode.db` file
+/// or a legacy `storage/message` subdir (the signal it holds messages) and
+/// deduping by canonical path.
 fn opencode_data_dirs() -> Vec<PathBuf> {
     let candidates = [
         std::env::var_os("OPENCODE_DATA_DIR").map(PathBuf::from),
@@ -239,7 +334,7 @@ fn opencode_data_dirs() -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut dirs = Vec::new();
     for dir in candidates.into_iter().flatten() {
-        if !dir.join("storage").join("message").is_dir() {
+        if !dir.join("opencode.db").is_file() && !dir.join("storage").join("message").is_dir() {
             continue;
         }
         let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
@@ -359,26 +454,33 @@ mod tests {
     }
 
     /// Point `CLAUDE_CONFIG_DIR` at a fresh temp dir holding the fixture for the
-    /// duration of `f`, and steer `HOME`/`XDG_CONFIG_HOME` at an empty dir so
-    /// the union reader can't reach the developer's real `~/.claude` (which
-    /// would pollute the hand-computed sums). Restores each var after. These are
-    /// process-global; serialize with `env_test_lock` like the other
+    /// duration of `f`, and steer `HOME`/`XDG_CONFIG_HOME` plus the opencode
+    /// vars (`OPENCODE_DATA_DIR`/`XDG_DATA_HOME`) at an empty dir so the union
+    /// reader can't reach the developer's real `~/.claude` or opencode db
+    /// (either would pollute the hand-computed sums). Restores each var after.
+    /// These are process-global; serialize with `env_test_lock` like the other
     /// env-mutating tests in this crate.
     fn with_fixture<T>(f: impl FnOnce() -> T) -> T {
         let _g = crate::rtk::env_test_lock();
         let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
         let prev_home = std::env::var_os("HOME");
         let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_oc = std::env::var_os("OPENCODE_DATA_DIR");
+        let prev_xdg_data = std::env::var_os("XDG_DATA_HOME");
         let tmp = tempfile::tempdir().unwrap();
         write_fixture(tmp.path());
         let empty = tempfile::tempdir().unwrap();
         std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
         std::env::set_var("HOME", empty.path());
         std::env::set_var("XDG_CONFIG_HOME", empty.path());
+        std::env::set_var("OPENCODE_DATA_DIR", empty.path());
+        std::env::set_var("XDG_DATA_HOME", empty.path());
         let out = f();
         restore("CLAUDE_CONFIG_DIR", prev_cfg);
         restore("HOME", prev_home);
         restore("XDG_CONFIG_HOME", prev_xdg);
+        restore("OPENCODE_DATA_DIR", prev_oc);
+        restore("XDG_DATA_HOME", prev_xdg_data);
         out
     }
 
@@ -430,6 +532,8 @@ mod tests {
         let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
         let prev_home = std::env::var_os("HOME");
         let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_oc = std::env::var_os("OPENCODE_DATA_DIR");
+        let prev_xdg_data = std::env::var_os("XDG_DATA_HOME");
         let cfg = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let xdg = tempfile::tempdir().unwrap();
@@ -446,10 +550,14 @@ mod tests {
         std::env::set_var("CLAUDE_CONFIG_DIR", cfg.path());
         std::env::set_var("HOME", home.path());
         std::env::set_var("XDG_CONFIG_HOME", xdg.path());
+        std::env::set_var("OPENCODE_DATA_DIR", xdg.path());
+        std::env::set_var("XDG_DATA_HOME", xdg.path());
         let usage = read_usage(None, None, None);
         restore("CLAUDE_CONFIG_DIR", prev_cfg);
         restore("HOME", prev_home);
         restore("XDG_CONFIG_HOME", prev_xdg);
+        restore("OPENCODE_DATA_DIR", prev_oc);
+        restore("XDG_DATA_HOME", prev_xdg_data);
         assert!(usage.iter().any(|m| m.model == "claude-opus-4-8"));
         let other = usage
             .iter()
@@ -567,27 +675,39 @@ mod tests {
         .unwrap();
     }
 
-    /// Point LENS_HOST=opencode + OPENCODE_DATA_DIR at a temp message store.
-    /// Steer HOME/XDG_DATA_HOME empty. Restores. Serialize via env_test_lock.
-    fn with_opencode_fixture<T>(f: impl FnOnce() -> T) -> T {
+    /// Point OPENCODE_DATA_DIR at a temp dir seeded by `write` (legacy store or
+    /// db fixture). Steer HOME/XDG_DATA_HOME plus the Claude vars
+    /// (CLAUDE_CONFIG_DIR/XDG_CONFIG_HOME) empty so the union reader sees only
+    /// the fixture. Deliberately does NOT set LENS_HOST: the reader must find
+    /// opencode data without it (that env-dispatch was the bug that kept
+    /// opencode rows off the dashboard). Restores. Serialize via env_test_lock.
+    fn with_opencode_dir<T>(write: impl FnOnce(&Path), f: impl FnOnce() -> T) -> T {
         let _g = crate::rtk::env_test_lock();
-        let prev_host = std::env::var_os("LENS_HOST");
         let prev_data = std::env::var_os("OPENCODE_DATA_DIR");
         let prev_home = std::env::var_os("HOME");
         let prev_xdg = std::env::var_os("XDG_DATA_HOME");
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_xdg_cfg = std::env::var_os("XDG_CONFIG_HOME");
         let tmp = tempfile::tempdir().unwrap();
-        write_opencode_storage_fixture(tmp.path());
+        write(tmp.path());
         let empty = tempfile::tempdir().unwrap();
-        std::env::set_var("LENS_HOST", "opencode");
         std::env::set_var("OPENCODE_DATA_DIR", tmp.path());
         std::env::set_var("HOME", empty.path());
         std::env::set_var("XDG_DATA_HOME", empty.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", empty.path());
+        std::env::set_var("XDG_CONFIG_HOME", empty.path());
         let out = f();
-        restore("LENS_HOST", prev_host);
         restore("OPENCODE_DATA_DIR", prev_data);
         restore("HOME", prev_home);
         restore("XDG_DATA_HOME", prev_xdg);
+        restore("CLAUDE_CONFIG_DIR", prev_cfg);
+        restore("XDG_CONFIG_HOME", prev_xdg_cfg);
         out
+    }
+
+    /// Legacy-store convenience wrapper around [`with_opencode_dir`].
+    fn with_opencode_fixture<T>(f: impl FnOnce() -> T) -> T {
+        with_opencode_dir(write_opencode_storage_fixture, f)
     }
 
     #[test]
@@ -642,5 +762,140 @@ mod tests {
         assert!(parse_opencode_message(r#"{"role":"user","time":{"created":1000}}"#).is_none());
         assert!(parse_opencode_message(r#"{"role":"assistant"}"#).is_none());
         assert!(parse_opencode_message("not json").is_none());
+    }
+
+    /// Write an opencode >= 1.x SQLite fixture (`<root>/opencode.db`) holding
+    /// the same messages as the legacy store fixture, with ses_a under
+    /// /Users/dev/projA and ses_b under /Users/dev/other so cwd scoping is
+    /// provable. Only the columns the reader touches are modeled.
+    fn write_opencode_db_fixture(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
+        let conn = rusqlite::Connection::open(root.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 time_created INTEGER NOT NULL,
+                 data TEXT NOT NULL
+             );
+             INSERT INTO session VALUES ('ses_a', '/Users/dev/projA');
+             INSERT INTO session VALUES ('ses_b', '/Users/dev/other');",
+        )
+        .unwrap();
+        let messages = [
+            (
+                "msg_1",
+                "ses_a",
+                1752192000000i64,
+                r#"{"id":"msg_1","role":"user","sessionID":"ses_a","time":{"created":1752192000000}}"#,
+            ),
+            (
+                "msg_2",
+                "ses_a",
+                1752192060000,
+                r#"{"id":"msg_2","role":"assistant","sessionID":"ses_a","modelID":"grok-4","providerID":"xai","cost":0.01,"tokens":{"input":100,"output":50,"reasoning":10,"cache":{"read":30,"write":20}},"time":{"created":1752192060000}}"#,
+            ),
+            (
+                "msg_3",
+                "ses_a",
+                1752192120000,
+                r#"{"id":"msg_3","role":"assistant","sessionID":"ses_a","modelID":"grok-4","providerID":"xai","cost":0.02,"tokens":{"input":200,"output":80,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1752192120000}}"#,
+            ),
+            (
+                "msg_4",
+                "ses_b",
+                1752195600000,
+                r#"{"id":"msg_4","role":"assistant","sessionID":"ses_b","modelID":"grok-3-mini","providerID":"xai","cost":0.0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1752195600000}}"#,
+            ),
+        ];
+        for (id, sess, ts, data) in messages {
+            conn.execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, sess, ts, data],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn read_usage_reads_opencode_sqlite_db() {
+        let usage =
+            with_opencode_dir(write_opencode_db_fixture, || read_usage(None, None, None));
+        assert_eq!(usage.len(), 2, "one row per model: {usage:?}");
+        let grok4 = usage.iter().find(|m| m.model == "grok-4").unwrap();
+        assert_eq!(grok4.turns, 2, "user messages are not turns");
+        assert_eq!(grok4.input, 300);
+        assert_eq!(grok4.output, 130 + 10, "reasoning folds into output");
+        assert_eq!(grok4.cache_read, 30);
+        assert_eq!(grok4.cache_creation, 20);
+        assert!((grok4.cost_usd - 0.03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn opencode_db_cwd_filter_scopes_by_session_directory() {
+        let usage = with_opencode_dir(write_opencode_db_fixture, || {
+            read_usage(None, None, Some(Path::new("/Users/dev/projA")))
+        });
+        assert_eq!(usage.len(), 1, "ses_b's grok-3-mini is off-path: {usage:?}");
+        assert_eq!(usage[0].model, "grok-4");
+        assert_eq!(usage[0].turns, 2);
+    }
+
+    #[test]
+    fn opencode_db_wins_over_legacy_store_no_double_count() {
+        // A migrated install holds the same messages in both stores; the db
+        // must win outright or every turn counts twice.
+        let usage = with_opencode_dir(
+            |root| {
+                write_opencode_db_fixture(root);
+                write_opencode_storage_fixture(root);
+            },
+            || read_usage(None, None, None),
+        );
+        let grok4 = usage.iter().find(|m| m.model == "grok-4").unwrap();
+        assert_eq!(grok4.turns, 2, "db-only, not db+legacy: {usage:?}");
+    }
+
+    #[test]
+    fn legacy_store_contributes_nothing_under_cwd_filter() {
+        // The per-file store records no session directory; a scoped read must
+        // exclude it rather than attribute every repo's usage to this one.
+        let usage =
+            with_opencode_fixture(|| read_usage(None, None, Some(Path::new("/Users/dev/projA"))));
+        assert!(usage.is_empty(), "got {usage:?}");
+    }
+
+    #[test]
+    fn read_usage_unions_claude_and_opencode_without_lens_host() {
+        // THE dashboard regression: both hosts' stores on one machine, no
+        // LENS_HOST anywhere, one read_usage call must return both.
+        let _g = crate::rtk::env_test_lock();
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg_cfg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_data = std::env::var_os("OPENCODE_DATA_DIR");
+        let prev_xdg_data = std::env::var_os("XDG_DATA_HOME");
+        let prev_host = std::env::var_os("LENS_HOST");
+        let claude = tempfile::tempdir().unwrap();
+        write_fixture(claude.path());
+        let opencode = tempfile::tempdir().unwrap();
+        write_opencode_db_fixture(opencode.path());
+        let empty = tempfile::tempdir().unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", claude.path());
+        std::env::set_var("OPENCODE_DATA_DIR", opencode.path());
+        std::env::set_var("HOME", empty.path());
+        std::env::set_var("XDG_CONFIG_HOME", empty.path());
+        std::env::set_var("XDG_DATA_HOME", empty.path());
+        std::env::remove_var("LENS_HOST");
+        let usage = read_usage(None, None, None);
+        restore("CLAUDE_CONFIG_DIR", prev_cfg);
+        restore("HOME", prev_home);
+        restore("XDG_CONFIG_HOME", prev_xdg_cfg);
+        restore("OPENCODE_DATA_DIR", prev_data);
+        restore("XDG_DATA_HOME", prev_xdg_data);
+        restore("LENS_HOST", prev_host);
+        assert!(usage.iter().any(|m| m.model == "claude-opus-4-8"), "claude rows: {usage:?}");
+        assert!(usage.iter().any(|m| m.model == "grok-4"), "opencode rows: {usage:?}");
     }
 }

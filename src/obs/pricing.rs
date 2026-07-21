@@ -78,11 +78,20 @@ pub fn normalize_model(raw: &str) -> &'static str {
     }
 }
 
-/// The price for a model, by raw id or display name; never panics. Claude-family
-/// ids use this module's curated table (it wins over the generated catalog's
-/// promo rates); other ids resolve through the models.dev catalog; anything
-/// still unknown falls back to the Sonnet rate.
+/// The price for a model, by raw id or display name; never panics. Non-Claude
+/// ids resolve through the models.dev catalog FIRST, so a family word inside a
+/// foreign id (the catalog ships `gemma-4-31b-fabled`) can't hijack the curated
+/// table via [`normalize_model`]'s substring match. Claude-family ids skip the
+/// catalog and use this module's curated table (it wins over the catalog's
+/// promo rates); display names ("Opus 4.8") miss the catalog and settle through
+/// the substring match. Anything unknown to both falls back to the Sonnet rate.
 pub fn price_for(model: &str) -> ModelPrice {
+    let s = model.trim().to_ascii_lowercase();
+    if !s.contains("claude") && !s.contains("anthropic") {
+        if let Some(p) = catalog_price(model) {
+            return p;
+        }
+    }
     match normalize_model(model) {
         OPUS => OPUS_PRICE,
         SONNET => SONNET_PRICE,
@@ -203,6 +212,15 @@ mod tests {
     fn claude_table_wins_over_catalog() {
         assert_eq!(price_for("claude-sonnet-5"), SONNET_PRICE);
         assert_eq!(price_for("anthropic/claude-sonnet-5"), SONNET_PRICE);
+    }
+
+    /// A foreign id that merely contains a Claude family word prices from the
+    /// catalog, not the curated table.
+    #[test]
+    fn family_word_inside_foreign_id_does_not_hijack_curated_table() {
+        let fabled = catalog_price("gemma-4-31b-fabled").expect("in catalog");
+        assert_ne!(fabled, FABLE_PRICE, "fixture id must not share Fable's rate");
+        assert_eq!(price_for("gemma-4-31b-fabled"), fabled);
     }
 
     /// The serialized table has one entry per canonical model.

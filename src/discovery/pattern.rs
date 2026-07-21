@@ -63,6 +63,21 @@ pub fn compile_pattern(pattern: &str, spec: &AnySpec) -> Result<String> {
              `...` token, use a raw tree-sitter `query` instead: `{pat}`"
         );
     }
+    // `$$$` beside another metavariable (whitespace or nothing between) always
+    // means a mis-transcribed single hole: the variadic is a sibling-list
+    // wildcard, so the neighbor becomes an extra required sibling no real code
+    // has and the compiled query silently matches nothing (2026-07-21 audit
+    // shape `Vec<&$$$ $TYPE>`). Reject up front with the fix.
+    if let Some((a, b)) = variadic_adjacent_metavar(pat) {
+        bail!(
+            "pattern places `{a}` and `{b}` side by side: `$$$` matches a LIST of \
+             sibling nodes (arguments, statements), not part of a type or \
+             expression, so the pair compiles to a shape no real code has and \
+             silently matches nothing. Use one metavariable per hole (`Vec<&$T>`, \
+             not `Vec<&$$$ $TYPE>`); in a list, separate elements with the real \
+             delimiter (`f($$$, $LAST)`): `{pat}`"
+        );
+    }
     let (substituted, metavars) = substitute_metavars(pat);
 
     let lang = spec.language();
@@ -393,6 +408,44 @@ fn diagnose_parse_failure(pat: &str, lang_name: &str) -> String {
          Try a code-shaped fragment, e.g. `fn $NAME($$$) {{ $$$BODY }}` or \
          `Some($X) => $X` (match arms are auto-wrapped)."
     )
+}
+
+/// Find a `$$$` variadic and another metavariable separated by whitespace alone
+/// (or nothing), returning the offending pair's tokens. Delimiter-separated
+/// pairs (`f($$$, $LAST)`) are fine and return `None`.
+fn variadic_adjacent_metavar(pat: &str) -> Option<(String, String)> {
+    // Metavariable token spans: (start, end, is_variadic).
+    let mut toks: Vec<(usize, usize, bool)> = Vec::new();
+    let b = pat.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        let variadic = b[i..].starts_with(b"$$$");
+        let name_start = i + if variadic { 3 } else { 1 };
+        // Singles must start with an uppercase letter, exactly as
+        // [`substitute_metavars`] recognizes them.
+        if !variadic && !b.get(name_start).is_some_and(u8::is_ascii_uppercase) {
+            i += 1;
+            continue;
+        }
+        let mut j = name_start;
+        while j < b.len() && (b[j].is_ascii_uppercase() || b[j].is_ascii_digit() || b[j] == b'_') {
+            j += 1;
+        }
+        toks.push((i, j, variadic));
+        i = j;
+    }
+    for w in toks.windows(2) {
+        let (s0, e0, v0) = w[0];
+        let (s1, e1, v1) = w[1];
+        if (v0 || v1) && pat[e0..s1].chars().all(char::is_whitespace) {
+            return Some((pat[s0..e0].to_string(), pat[s1..e1].to_string()));
+        }
+    }
+    None
 }
 
 /// Whether `pat` contains a bare `...` (not followed by an identifier or `$`,
@@ -1058,6 +1111,20 @@ mod tests {
             err.contains("fn $NAME") || err.contains("Try a code-shaped"),
             "must include a corrected example: {err}"
         );
+    }
+
+    /// `$$$` beside another metavariable (whitespace alone between) compiles to
+    /// an arity no real code has (2026-07-21 audit shape `Vec<&$$$ $TYPE>`,
+    /// which returned a silent zero); it must be a clear error, and the
+    /// delimiter-separated form must stay legal.
+    #[test]
+    fn variadic_adjacent_metavar_is_a_clear_error() {
+        let err = compile("fn $NAME($$$) -> Vec<&$$$ $TYPE> $BODY", "rust")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("$$$"), "{err}");
+        assert!(err.contains("Vec<&$T>"), "must show the single-metavar fix: {err}");
+        compile("f($$$, $LAST)", "rust").expect("delimiter-separated pair stays legal");
     }
 
     /// T4: a bare metavariable pins nothing concrete and would match nearly

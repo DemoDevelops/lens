@@ -443,12 +443,11 @@ fn grep_ast(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
     let matches =
         structural::grep_ast_filtered(&root, &query, lang, limit, only_capture, prod_only)
             .map_err(|e| QError::bad(e.to_string()))?;
+    // Serde serialization keeps parity with the MCP response shape: `origin`
+    // and `captures` appear only when set.
     let arr: Vec<Value> = matches
         .iter()
-        .map(|m| match &m.origin {
-            Some(o) => json!({ "path": m.path, "line": m.line, "text": m.text, "origin": o }),
-            None => json!({ "path": m.path, "line": m.line, "text": m.text }),
-        })
+        .map(|m| serde_json::to_value(m).unwrap_or_default())
         .collect();
     Ok(json!({ "count": arr.len(), "matches": arr, "stale": ctx.graph_stale() }))
 }

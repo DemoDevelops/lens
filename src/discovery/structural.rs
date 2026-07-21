@@ -148,75 +148,111 @@ pub fn grep_ast_filtered(
         if parser.set_language(&lang).is_err() {
             continue;
         }
-        let tree = match parser.parse(&source, None) {
-            Some(t) => t,
-            None => continue,
-        };
         let rel = file
             .strip_prefix(&base)
             .unwrap_or(&file)
             .to_string_lossy()
             .to_string();
-        let src = source.as_bytes();
         // Provenance for this file's matches: bench by path segment on the
         // reported relative path, test by `#[cfg(test)]` byte span (Rust only,
-        // off the tree already parsed for the query run).
+        // off the depth-0 tree, in absolute file bytes).
         let bench_file = super::is_bench_path(&rel);
-        let cfg_test_spans = if spec.name() == "rust" {
-            super::extract::collect_cfg_test_spans(&tree.root_node(), src)
-        } else {
-            Vec::new()
-        };
-        let mut cursor = QueryCursor::new();
-        let mut it = cursor.matches(&q, tree.root_node(), src);
-        while let Some(m) = it.next() {
-            // One row per query MATCH, not per capture: a raw multi-capture
-            // query (`(function_item (visibility_modifier) @vis name:
-            // (identifier) @name) @fn`) otherwise emits three rows per site
-            // and `count` triples (2026-07-21 audit: 117 reported vs 39 real
-            // pub fns). With `only_capture` (the pattern-DSL path) keep the
-            // named capture; otherwise represent the match by its OUTERMOST
-            // captured node (earliest start, longest span).
-            let picked: Vec<_> = if let Some(want) = only_capture {
-                m.captures
-                    .iter()
-                    .filter(|c| q.capture_names()[c.index as usize] == want)
-                    .collect()
-            } else {
-                m.captures
-                    .iter()
-                    .min_by_key(|c| (c.node.start_byte(), std::cmp::Reverse(c.node.end_byte())))
-                    .into_iter()
-                    .collect()
+        let mut cfg_test_spans: Vec<(usize, usize)> = Vec::new();
+        // Virtual documents: the file itself, then (Rust) each macro-invocation
+        // token-tree interior re-parsed as source. Macro bodies parse as opaque
+        // token trees, so the file's own tree cannot match a call like
+        // `matches!(std::env::var("X"), …)`; tree-sitter's error recovery still
+        // shapes the well-formed code inside a re-parsed interior, and the
+        // line/byte offsets map matches back to real file positions (so
+        // cfg(test) spans keep working on absolute bytes). Depth-bounded:
+        // nested macros re-parse again via their own interiors.
+        let mut docs: std::collections::VecDeque<VirtualDoc> = std::collections::VecDeque::new();
+        docs.push_back(VirtualDoc { text: source, line_off: 0, byte_off: 0, depth: 0 });
+        while let Some(doc) = docs.pop_front() {
+            let tree = match parser.parse(&doc.text, None) {
+                Some(t) => t,
+                None => continue,
             };
-            for cap in picked {
-                let node = cap.node;
-                // Bench (whole-file provenance) wins over an inner cfg(test)
-                // span, matching the graph's node-origin precedence.
-                let origin = if bench_file {
-                    "bench"
-                } else if super::extract::byte_in_spans(node.start_byte(), &cfg_test_spans) {
-                    "test"
+            let src = doc.text.as_bytes();
+            if doc.depth == 0 && spec.name() == "rust" {
+                cfg_test_spans = super::extract::collect_cfg_test_spans(&tree.root_node(), src);
+            }
+            let mut cursor = QueryCursor::new();
+            let mut it = cursor.matches(&q, tree.root_node(), src);
+            while let Some(m) = it.next() {
+                // One row per query MATCH, not per capture: a raw multi-capture
+                // query (`(function_item (visibility_modifier) @vis name:
+                // (identifier) @name) @fn`) otherwise emits three rows per site
+                // and `count` triples (2026-07-21 audit: 117 reported vs 39 real
+                // pub fns). With `only_capture` (the pattern-DSL path) keep the
+                // named capture; otherwise represent the match by its OUTERMOST
+                // captured node (earliest start, longest span).
+                let picked: Vec<_> = if let Some(want) = only_capture {
+                    m.captures
+                        .iter()
+                        .filter(|c| q.capture_names()[c.index as usize] == want)
+                        .collect()
                 } else {
-                    "prod"
+                    m.captures
+                        .iter()
+                        .min_by_key(|c| (c.node.start_byte(), std::cmp::Reverse(c.node.end_byte())))
+                        .into_iter()
+                        .collect()
                 };
-                if prod_only && origin != "prod" {
-                    continue;
+                // Raw multi-capture queries asked for several things by name;
+                // surface every capture's text on the row so the answer does
+                // not collapse to the representative node alone (2026-07-21
+                // audit: a `@name @r` query returned names without return
+                // types, forcing a full-skeleton follow-up).
+                let captures = if only_capture.is_none() && m.captures.len() > 1 {
+                    let mut map = std::collections::BTreeMap::new();
+                    for c in m.captures {
+                        let name = q.capture_names()[c.index as usize].to_string();
+                        let t: String =
+                            c.node.utf8_text(src).unwrap_or("").chars().take(80).collect();
+                        map.entry(name).or_insert(t);
+                    }
+                    Some(map)
+                } else {
+                    None
+                };
+                for cap in picked {
+                    let node = cap.node;
+                    // Bench (whole-file provenance) wins over an inner cfg(test)
+                    // span, matching the graph's node-origin precedence.
+                    let origin = if bench_file {
+                        "bench"
+                    } else if super::extract::byte_in_spans(
+                        doc.byte_off + node.start_byte(),
+                        &cfg_test_spans,
+                    ) {
+                        "test"
+                    } else {
+                        "prod"
+                    };
+                    if prod_only && origin != "prod" {
+                        continue;
+                    }
+                    let line = doc.line_off + node.start_position().row + 1;
+                    let text: String =
+                        node.utf8_text(src).unwrap_or("").chars().take(120).collect();
+                    if !seen.insert((rel.clone(), line, text.clone())) {
+                        continue;
+                    }
+                    out.push(AstMatch {
+                        path: rel.clone(),
+                        line,
+                        text,
+                        origin: Some(origin.to_string()),
+                        captures: captures.clone(),
+                    });
+                    if out.len() >= limit {
+                        return Ok(strip_all_prod_origins(out));
+                    }
                 }
-                let line = node.start_position().row + 1;
-                let text: String = node.utf8_text(src).unwrap_or("").chars().take(120).collect();
-                if !seen.insert((rel.clone(), line, text.clone())) {
-                    continue;
-                }
-                out.push(AstMatch {
-                    path: rel.clone(),
-                    line,
-                    text,
-                    origin: Some(origin.to_string()),
-                });
-                if out.len() >= limit {
-                    return Ok(strip_all_prod_origins(out));
-                }
+            }
+            if spec.name() == "rust" && doc.depth < 2 {
+                push_macro_interiors(tree.root_node(), &doc, &mut docs);
             }
         }
     }
@@ -236,6 +272,63 @@ pub fn grep_ast_filtered(
         bail!("query failed to compile for every encountered grammar: {joined}");
     }
     Ok(strip_all_prod_origins(out))
+}
+
+/// One source text to run the query over: the file itself (offsets 0), or a
+/// macro-invocation token-tree interior with offsets mapping its positions back
+/// to the enclosing file.
+struct VirtualDoc {
+    text: String,
+    /// Rows in the file before this doc's first row.
+    line_off: usize,
+    /// File byte offset of this doc's first byte (for cfg(test) span checks).
+    byte_off: usize,
+    /// Re-parse nesting level (0 = the file itself).
+    depth: u8,
+}
+
+/// Queue each `macro_invocation` token-tree interior in `node`'s subtree as a
+/// [`VirtualDoc`] to re-parse. The interior excludes the one-byte delimiters
+/// (`(…)`, `[…]`, `{…}`), so it starts on the token tree's own line. Nested
+/// macro invocations don't appear inside a token tree's CST (its contents are
+/// tokens); they surface in the interior's re-parse, one depth level down.
+fn push_macro_interiors(
+    node: tree_sitter::Node<'_>,
+    doc: &VirtualDoc,
+    docs: &mut std::collections::VecDeque<VirtualDoc>,
+) {
+    if node.kind() == "macro_invocation" {
+        for i in 0..node.child_count() {
+            let ch = node.child(i).expect("count checked");
+            if ch.kind() != "token_tree" {
+                continue;
+            }
+            let (s, e) = (ch.start_byte() + 1, ch.end_byte().saturating_sub(1));
+            if s >= e {
+                continue;
+            }
+            let interior = &doc.text[s..e];
+            if interior.trim().is_empty() {
+                continue;
+            }
+            docs.push_back(VirtualDoc {
+                text: interior.to_string(),
+                line_off: doc.line_off + ch.start_position().row,
+                byte_off: doc.byte_off + s,
+                depth: doc.depth + 1,
+            });
+        }
+        return;
+    }
+    let mut c = node.walk();
+    if c.goto_first_child() {
+        loop {
+            push_macro_interiors(c.node(), doc, docs);
+            if !c.goto_next_sibling() {
+                break;
+            }
+        }
+    }
 }
 
 /// All-or-none origin labeling, like the graph views: when every match is prod,
@@ -333,6 +426,78 @@ mod tests {
         assert!(
             hits[0].text.starts_with("pub fn one"),
             "the outermost node represents the match: {hits:?}"
+        );
+        // Every named capture's text rides on the row, so a multi-capture
+        // query answers all its questions in one call (the 0072 audit run got
+        // names without return types and burned a full-skeleton round).
+        let caps = hits[0].captures.as_ref().expect("multi-capture rows carry captures");
+        assert_eq!(caps.get("name").map(String::as_str), Some("one"), "{hits:?}");
+        assert_eq!(caps.get("vis").map(String::as_str), Some("pub"), "{hits:?}");
+    }
+
+    /// Rust macro invocation bodies parse as opaque token trees; the interior
+    /// re-parse must still find a call written inside one, at its real file
+    /// line, with cfg(test)-span origins intact.
+    #[test]
+    fn matches_inside_macro_invocation_bodies() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn explain_on() -> bool {\n    matches!(std::env::var(\"LENS_EXPLAIN\"), Ok(v) if v == \"1\")\n}\n#[cfg(test)]\nmod tests {\n    fn t() -> bool {\n        matches!(std::env::var(\"LENS_TEST_ONLY\"), Ok(_))\n    }\n}\n",
+        )
+        .unwrap();
+        let q = "(call_expression function: (scoped_identifier)) @c";
+        let hits = grep_ast(dir.path(), q, Some("rust"), 100).unwrap();
+        let explain: Vec<&AstMatch> =
+            hits.iter().filter(|m| m.text.contains("LENS_EXPLAIN")).collect();
+        assert_eq!(explain.len(), 1, "the matches!-wrapped call must be found: {hits:?}");
+        assert_eq!(explain[0].line, 2, "line maps back to the real file: {hits:?}");
+        assert_eq!(explain[0].origin.as_deref(), Some("prod"), "{hits:?}");
+        let test_only: Vec<&AstMatch> =
+            hits.iter().filter(|m| m.text.contains("LENS_TEST_ONLY")).collect();
+        assert_eq!(test_only[0].origin.as_deref(), Some("test"), "{hits:?}");
+        let prod = grep_ast_filtered(dir.path(), q, Some("rust"), 100, None, true).unwrap();
+        assert!(
+            prod.iter().any(|m| m.text.contains("LENS_EXPLAIN"))
+                && !prod.iter().any(|m| m.text.contains("LENS_TEST_ONLY")),
+            "prod_only keeps working on macro-interior matches: {prod:?}"
+        );
+
+        // The compiled $META pattern path reaches macro interiors too.
+        let pat_hits = {
+            let spec = crate::discovery::tags_adapter::any_spec_for_language("rust").unwrap();
+            let compiled = crate::discovery::pattern::compile_pattern("std::env::var($X)", &spec).unwrap();
+            grep_ast_filtered(
+                dir.path(),
+                &compiled,
+                Some("rust"),
+                100,
+                Some(crate::discovery::pattern::MATCH_CAPTURE),
+                true,
+            )
+            .unwrap()
+        };
+        assert!(
+            pat_hits.iter().any(|m| m.text.contains("LENS_EXPLAIN")),
+            "pattern-DSL matches inside macros: {pat_hits:?}"
+        );
+    }
+
+    /// A macro nested inside another macro's body is one re-parse level down;
+    /// the bounded recursion still reaches it.
+    #[test]
+    fn matches_inside_nested_macro_bodies() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn f(x: Option<i32>) {\n    assert!(matches!(x.unwrap(), 1));\n}\n",
+        )
+        .unwrap();
+        let q = "(call_expression function: (field_expression field: (field_identifier) @m))";
+        let hits = grep_ast(dir.path(), q, Some("rust"), 100).unwrap();
+        assert!(
+            hits.iter().any(|m| m.text == "unwrap" && m.line == 2),
+            "the assert!(matches!(…)) interior call must be found: {hits:?}"
         );
     }
 

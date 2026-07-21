@@ -555,6 +555,12 @@ pub struct AstMatch {
     /// when every match is prod, so no `origin` fields = all production code.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// For raw queries with several named captures: each capture's text
+    /// (capped), keyed by capture name, so a `@name … @return_type` query
+    /// answers both in one row instead of only the representative node's text.
+    /// Omitted for single-capture queries and compiled `pattern` matches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captures: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

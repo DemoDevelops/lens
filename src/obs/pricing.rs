@@ -1,10 +1,13 @@
-//! Per-model Claude price table, in US$ per million tokens (per-Mtok).
+//! Per-model price table (Anthropic defaults), in US$ per million tokens (per-Mtok).
 //!
 //! The single source of truth for token pricing on both the dashboard's web
 //! frontend and the `--tui`/CLI `--model` path, so the two can't drift. Prices
 //! are the current public Anthropic sticker rates (see the `claude-api` skill's
 //! model catalog); cache-read is priced at 0.1× the input rate, matching the
 //! documented "cache reads cost ~0.1× base input price".
+//!
+//! Generic for any host: unknown ids (grok, opencode, etc) fall back to Sonnet
+//! rate. Keep Anthropic prices as defaults; --model / raw ids supported.
 //!
 //! Not a live feed — a curated const table. Update the numbers here when Anthropic
 //! publishes new pricing.
@@ -50,7 +53,8 @@ pub const MODELS: &[&str] = &[FABLE, OPUS, SONNET, HAIKU];
 /// Liberal substring match on a lowercased copy, so every variant lands right:
 /// `claude-opus-4-8`, `claude-opus-4-8[1m]`, and `Opus 4.8` all → [`OPUS`]; the
 /// same for sonnet / haiku / fable. `claude-mythos-*` shares Fable's pricing, so
-/// it folds into [`FABLE`]. Anything else → [`UNKNOWN`].
+/// it folds into [`FABLE`]. Anything else (grok*, opencode, raw ids) → [`UNKNOWN`]
+/// (falls back to Sonnet pricing; no claude- assumption).
 pub fn normalize_model(raw: &str) -> &'static str {
     let s = raw.to_ascii_lowercase();
     if s.contains("opus") {
@@ -66,8 +70,9 @@ pub fn normalize_model(raw: &str) -> &'static str {
     }
 }
 
-/// The price for a model, by raw id or display name. Unknown models fall back to
-/// the Sonnet rate; never panics.
+/// The price for a model, by raw id or display name. Unknown models (incl. grok,
+/// opencode, non-claude) fall back to the Sonnet rate; never panics. Anthropic
+/// prices kept as defaults; raw ids or --model accepted upstream.
 pub fn price_for(model: &str) -> ModelPrice {
     match normalize_model(model) {
         OPUS => OPUS_PRICE,

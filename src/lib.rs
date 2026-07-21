@@ -1,6 +1,7 @@
 //! lens library crate. The binary (`main.rs`) wires these modules into an
 //! MCP stdio server; tests use them directly.
 
+pub mod client;
 pub mod darkroom;
 pub mod discovery;
 pub mod index;

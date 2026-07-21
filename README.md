@@ -1,6 +1,6 @@
 # lens
 
-*Like the glass it's named for, lens focuses: your script runs in a darkroom, and only the developed image comes back, never the raw light.*
+**Keep raw data out of your agent's context window.** When Claude Code or opencode (grok) reads a 50k-line log, greps a large repo, or fetches a web page, every byte enters the conversation and keeps re-costing tokens on every later turn. Like the glass it's named for, lens focuses: your script runs in a *darkroom* (a subprocess), and only the developed image comes back, never the raw light.
 
 **A context optimizer for Claude Code: same answers, a third fewer tokens, faster.** lens gives your agent a *darkroom* (a subprocess where scripts run and only stdout returns), a local full-text index, and a directed code-symbol graph, so it stops re-paying for raw bytes on every turn and answers structure questions with lookups instead of file piles.
 
@@ -32,15 +32,23 @@ Read each percentage as "what this mechanism does to a workload of this shape," 
 
 ## Install
 
-One line downloads the binary, registers the MCP server, installs the session hooks and the `/dashboard` command, installs RTK shell compression, sets routing, and prints a verification report:
+One line downloads the binary, registers the MCP server, installs the session hooks (Claude) or commands/ (opencode), installs RTK (Claude), sets routing, and prints a verification report:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh
 ```
 
-Restart Claude Code. Supported: macOS (arm64, x64), Linux (x64, arm64).
+For opencode (grok) use:
 
-Routing defaults to the aggressive `full` level: WebFetch and noisy commands are redirected into the darkroom, plus RTK shell compression. For nudges-only (encourages the lens tools, never denies WebFetch or rewrites commands), install with `… | LENS_ROUTING=nudge sh`, or change it anytime with `lens setup --routing <off|nudge|steer|wrap|full>`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | LENS_HOST=opencode sh
+```
+
+Or after having the binary: `lens setup --client opencode` (or `LENS_HOST=opencode lens setup`).
+
+Restart your client (Claude Code or opencode), then verify with the `lens_stats` tool. Supported: macOS (arm64, x64), Linux (x64, arm64).
+
+Routing defaults to the aggressive `full` level: WebFetch and noisy commands are redirected into the darkroom, plus RTK shell compression (Claude). For nudges-only (encourages the lens tools, never denies WebFetch or rewrites commands), install with `… | LENS_ROUTING=nudge sh`, or change it anytime with `lens setup --routing <off|nudge|steer|wrap|full>`.
 
 **From source** ([Rust](https://rustup.rs) stable; optional `python3`/`node`/`ruby`/`go`, only to run those languages through `lens_run`):
 
@@ -50,7 +58,9 @@ cargo build --release
 ./target/release/lens setup
 ```
 
-`lens setup` does the same wiring from a binary you built (copies it to `~/.local/bin`, registers the MCP server, installs the hooks + `/dashboard` + RTK, sets routing). Target a specific config dir with `lens setup --config-dir <dir>`.
+`lens setup` does the same wiring from a binary you built (copies it to `~/.local/bin`, registers the MCP server, installs the hooks + `/dashboard` + RTK for Claude or commands for opencode, sets routing). Target a specific config dir with `lens setup --config-dir <dir>`. Use `--client opencode` when targeting opencode.
+
+**Current limitations (opencode):** Lifecycle hooks (continuity, steering) and RTK are Claude-only for now. opencode gets full MCP tools (`lens_*`), bundled commands (`/dashboard`, `warmup`), darkroom execution, search, graph, and dashboard. Hooks/RTK support may come via opencode plugins later. Claude Code support is unchanged and fully backward-compatible.
 
 Update later with `lens update`: it checks the public GitHub release (no auth), downloads the matching binary, and re-applies setup (preserving your routing level). lens also drops a one-line heads-up into a session when a newer release is out; silence it with `LENS_NO_UPDATE_CHECK=1`.
 
@@ -136,7 +146,7 @@ lens_recall(ref="<retrieve_ref from a truncated result>")   # full content, loss
 
 A local, read-only view of what lens is saving you: the op log, token savings, applied value, and session activity, rendered live. Two front-ends over the same snapshot.
 
-**In Claude Code:** `/dashboard` launches the web view for the current repo as a background process and prints its URL. It reads `<cwd>/.lens`, so run it from the repo whose savings you want to see.
+**In Claude Code or opencode:** the bundled `/dashboard` command (or `lens dashboard` from terminal) launches the web view for the current repo as a background process and prints its URL. It reads `<cwd>/.lens`, so run it from the repo whose savings you want to see. (Claude Code sees it as slash command; opencode via commands/ or direct.)
 
 **Web** (`lens dashboard`): serves on `http://127.0.0.1:7878` (`--port` to change). Live `$` saved and tokens, throughput sparklines, a per-tool table, by-mechanism and RTK shell savings, an applied-value panel (benchmark rates × your live ops → estimated tokens and time saved), and session activity. Header controls, all remembered in the browser:
 
@@ -160,9 +170,29 @@ lens top --full --interval 2   # framed layout, refresh every 2s
 
 The `$` headline prices the measured tokens-saved at the model input rate (`--rate <$/M>` or `--model opus|sonnet|haiku`). Applied-value figures (tokens plus time, at `--rt-seconds` per avoided round-trip, default 4s) are estimates and never enter that headline.
 
+## Verification (opencode)
+
+For opencode (after `lens setup --client opencode` or `LENS_HOST=opencode lens setup` on a clean temp config):
+
+1. Ensure MCP: `opencode mcp list` (or the jsonc under `~/.config/opencode/opencode.jsonc` or `$OPENCODE_CONFIG_DIR`) shows lens enabled pointing at the bin.
+
+2. Commands populated: `ls ~/.config/opencode/commands/` contains `dashboard.md` and `warmup.md` (setup now installs them; `lens doctor` reports "/dashboard command installed").
+
+3. In a fresh opencode session (or simulated): call `lens_stats` (MCP tool or `LENS_HOST=opencode lens stats`).
+
+4. Index: `lens warmup .` (or first `lens_index` / lazy auto on search).
+
+5. Then exercise: `lens_search` (queries), `lens_map`, `lens_skeleton <path>`, `lens_symbol`, `lens_links`, `lens_path`, `lens_recall` etc. All return structured data.
+
+6. Dashboard: `/dashboard` (slash if exposed) or `lens dashboard` (or `lens top`) — non-interactive smoke: `lens dashboard --help` or run and check exit 0 + port output.
+
+`lens doctor --client opencode` (standalone) and `lens doctor` (claude default) report host-specific checks. No `claude` binary required for opencode path. Claude path remains byte-identical.
+
+See also `cargo test`, `cargo clippy -- -D warnings`, and the e2e MCP handshake tests (run with `LENS_HOST=opencode` for opencode branch).
+
 ## How it works
 
-lens is one Rust binary that attaches to Claude Code two ways: as an **MCP stdio server** (the `lens_*` tools, `src/server.rs`) and as **hook handlers** the same binary runs on Claude Code's PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, and SessionStart events. Per-repo state lives in `.lens/` (the symbol graph, the FTS index, and the reversible blob store); the managed RTK binary lives in `~/.lens/bin`.
+lens is one Rust binary that attaches to Claude Code (MCP + full lifecycle hooks) or opencode (MCP + commands/ only) : as an **MCP stdio server** (the `lens_*` tools, `src/server.rs`) and (for Claude) as **hook handlers** the same binary runs on PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, and SessionStart events. Per-repo state lives in `.lens/` (the symbol graph, the FTS index, and the reversible blob store); the managed RTK binary lives in `~/.lens/bin`. Lifecycle hooks/RTK/steering are Claude-only today; opencode gets the MCP tools, darkroom, search, graph, commands and dashboard.
 
 **Darkroom (`lens_run`).** Run your script in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly. The subprocess gives you process isolation and a timeout, not an OS sandbox (see [Security](#security)).
 

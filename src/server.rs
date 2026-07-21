@@ -1174,12 +1174,14 @@ impl ServerHandler for Forge {
     ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
         let mut tools = Self::tool_router().list_all();
         for tool in &mut tools {
-            let mut meta = tool.meta.take().unwrap_or_default();
-            meta.0.insert(
-                "anthropic/alwaysLoad".to_string(),
-                serde_json::Value::Bool(true),
-            );
-            tool.meta = Some(meta);
+            if crate::client::detect_host() == crate::client::Host::Claude {
+                let mut meta = tool.meta.take().unwrap_or_default();
+                meta.0.insert(
+                    "anthropic/alwaysLoad".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+                tool.meta = Some(meta);
+            }
             // Read-only tools carry `readOnlyHint` so Claude Code can auto-approve them;
             // without it an unattended agent stalls on a permission prompt even for a
             // pure-read call like lens_overview (Bug B).
@@ -1193,6 +1195,13 @@ impl ServerHandler for Forge {
                 if let Some(desc) = tool.description.take() {
                     tool.description = Some(format!("{desc}{SEARCH_FALLBACK_HINT}").into());
                 }
+            }
+            // schemars stamps Rust integer widths as JSON Schema `format` (`uint`,
+            // `uint64`, `int32`, …). They aren't real formats; Ajv-based hosts
+            // (opencode) log an "unknown format ... ignored" warning per occurrence.
+            Self::sanitize_schema(&mut tool.input_schema);
+            if let Some(output) = tool.output_schema.as_mut() {
+                Self::sanitize_schema(output);
             }
         }
         Ok(rmcp::model::ListToolsResult {
@@ -1208,6 +1217,38 @@ impl Forge {
     #[allow(dead_code)]
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    /// Drop schemars' Rust integer `format` markers (`uint`, `uint64`, `int32`, …)
+    /// from a schema tree; they aren't JSON Schema formats.
+    fn strip_rust_int_formats(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(f)) = map.get("format") {
+                    if f.starts_with("uint") || f.starts_with("int") {
+                        map.remove("format");
+                    }
+                }
+                for v in map.values_mut() {
+                    Self::strip_rust_int_formats(v);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for v in items {
+                    Self::strip_rust_int_formats(v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Sanitize one advertised tool schema (input or output) in place.
+    fn sanitize_schema(schema: &mut std::sync::Arc<rmcp::model::JsonObject>) {
+        let mut value = serde_json::Value::Object((**schema).clone());
+        Self::strip_rust_int_formats(&mut value);
+        if let serde_json::Value::Object(obj) = value {
+            *schema = std::sync::Arc::new(obj);
+        }
     }
 
     /// Resolve a possibly-relative path against the repo working dir.

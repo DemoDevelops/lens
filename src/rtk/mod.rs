@@ -24,6 +24,8 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::client;
+
 /// Pinned RTK release (headroom's pin; verified runnable on-machine in T0).
 pub const RTK_VERSION: &str = "v0.28.2";
 
@@ -127,6 +129,12 @@ pub fn rtk_available() -> bool {
     rtk_bin_path().is_some()
 }
 
+/// RTK (the shell compressor + hook) is supported only under Claude today.
+/// For opencode we skip install and emit: "RTK is Claude-specific today; shell savings via opencode plugins TBD".
+pub fn is_rtk_supported() -> bool {
+    client::is_claude()
+}
+
 /// Run the resolved RTK binary with `args`, capturing stdout/stderr. Errors if
 /// RTK isn't installed or the process can't be spawned. Shared by install/status
 /// (T1) and the gain bridge (T2).
@@ -151,12 +159,8 @@ pub fn run_rtk(args: &[&str]) -> Result<std::process::Output> {
 /// `$CLAUDE_CONFIG_DIR` differs from `~/.claude`, lens
 /// patches the config-dir settings itself rather than relying on `rtk init`'s patch.
 pub fn claude_config_dir() -> Option<PathBuf> {
-    if let Some(d) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        if !d.is_empty() {
-            return Some(PathBuf::from(d));
-        }
-    }
-    home_dir().map(|h| h.join(".claude"))
+    // delegate to client abstraction (T1: replaces inline Claude path hardcode)
+    client::config_dir_for(client::Host::Claude)
 }
 
 /// Path to the Claude settings file lens registers/detects the RTK hook in.
@@ -176,7 +180,9 @@ pub fn claude_settings_path() -> Option<PathBuf> {
 /// into the active config dir's `hooks/` when the two differ, so the hook is
 /// self-contained under the dir the running Claude Code reads.
 pub fn rtk_default_hook_script() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".claude").join("hooks").join("rtk-rewrite.sh"))
+    // use abstraction so Claude path not hardcoded here (T1)
+    client::config_dir_for(client::Host::Claude)
+        .map(|d| d.join("hooks").join("rtk-rewrite.sh"))
 }
 
 /// True if RTK's PreToolUse hook is registered in Claude settings — any
@@ -184,6 +190,9 @@ pub fn rtk_default_hook_script() -> Option<PathBuf> {
 /// `rtk-rewrite.sh` and older `rtk hook` markers). Missing/unreadable/malformed
 /// settings read as "not registered".
 pub fn rtk_hook_registered() -> bool {
+    if !client::is_claude() {
+        return false;
+    }
     let Some(path) = claude_settings_path() else {
         return false;
     };
@@ -229,6 +238,9 @@ fn hook_mentions_rtk(settings: &serde_json::Value) -> bool {
 /// [`crate::routing::mcp_ready`]); detection is currently global because RTK
 /// installs its hook globally.
 pub fn rtk_active(_data_dir: &Path) -> bool {
+    if !client::is_claude() {
+        return false;
+    }
     if let Some(forced) = env_flag("LENS_DEFER_BASH_TO_RTK") {
         return forced;
     }
@@ -253,6 +265,10 @@ fn env_flag(name: &str) -> Option<bool> {
 /// `lens rtk <install|status|uninstall|sync>`. A separate process — its
 /// stdout is its own response channel, never the MCP JSON-RPC stream.
 pub fn run_cli(args: &[String]) -> Result<()> {
+    if !is_rtk_supported() {
+        println!("RTK is Claude-specific today; shell savings via opencode plugins TBD.");
+        return Ok(());
+    }
     match args.first().map(|s| s.as_str()) {
         Some("install") => install::install(),
         Some("status") => install::status(),

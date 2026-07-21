@@ -1,6 +1,6 @@
 //! `lens hook <platform> <event>` — the active lifecycle entrypoint.
 //!
-//! Claude Code invokes this on PreToolUse / PostToolUse / UserPromptSubmit /
+//! Claude Code or opencode invokes this on PreToolUse / PostToolUse / UserPromptSubmit /
 //! PreCompact / SessionStart, passing a JSON payload on stdin. We read it, do
 //! the per-event work against the session store, and write the required
 //! response on stdout (the hook response channel). All logging goes to stderr,
@@ -16,7 +16,8 @@ use super::{extract, snapshot, store::SessionStore, Event, RawEvent};
 use crate::index::Index;
 use crate::routing;
 
-/// Parsed subset of the Claude Code hook stdin payload.
+/// Parsed subset of the Claude Code / opencode hook stdin payload.
+/// Parsing is tolerant: missing fields fall back to cwd / defaults.
 #[derive(Debug, Default, Deserialize)]
 struct HookInput {
     session_id: Option<String>,
@@ -62,15 +63,20 @@ impl HookInput {
     }
 
     /// The raw project path from the payload, before repo-root anchoring:
-    /// the payload `cwd`, else `$CLAUDE_PROJECT_DIR`, else the process cwd.
+    /// the payload `cwd`, else `$CLAUDE_PROJECT_DIR`/`$OPENCODE_PROJECT_DIR`, else process cwd.
+    /// Tolerant for opencode hook payloads (may omit cwd or use different env).
     fn candidate_project(&self) -> PathBuf {
         if let Some(c) = &self.cwd {
             if !c.is_empty() {
                 return PathBuf::from(c);
             }
         }
-        if let Some(c) = std::env::var_os("CLAUDE_PROJECT_DIR") {
-            return PathBuf::from(c);
+        for key in ["CLAUDE_PROJECT_DIR", "OPENCODE_PROJECT_DIR"] {
+            if let Some(c) = std::env::var_os(key) {
+                if !c.is_empty() {
+                    return PathBuf::from(c);
+                }
+            }
         }
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
@@ -139,7 +145,7 @@ fn follower_class6(tool: &str, tool_input: &Value) -> &'static str {
             .get("query")
             .and_then(Value::as_str)
             .is_some_and(|q| q.contains("lens"));
-    if tool.starts_with("mcp__lens__") || is_lens_toolsearch {
+    if normalize_tool_name(tool).starts_with("lens_") || is_lens_toolsearch {
         "lens"
     } else if tool == "Grep" {
         "grep"
@@ -151,6 +157,21 @@ fn follower_class6(tool: &str, tool_input: &Value) -> &'static str {
         "edit"
     } else {
         "other"
+    }
+}
+
+/// Normalize bare `lens_*` (from opencode) or `mcp__lens__*` (from claude) so
+/// both are treated as lens tools in classifiers. Keeps original tool name for
+/// extract / route (client specific).
+fn normalize_tool_name(t: &str) -> String {
+    if let Some(rest) = t.strip_prefix("mcp__lens__") {
+        if rest.starts_with("lens_") {
+            rest.to_string()
+        } else {
+            format!("lens_{rest}")
+        }
+    } else {
+        t.to_string()
     }
 }
 
@@ -211,15 +232,16 @@ fn repo_root(start: &Path) -> Option<PathBuf> {
 /// CLI entry: `args` is everything after `hook` (i.e. `[platform, event]`).
 /// Always exits 0 and prints a valid hook response, even on malformed input.
 pub fn run_cli(args: &[String]) -> anyhow::Result<()> {
-    // args[0] = platform (e.g. "claude"), args[1] = event name.
+    // args[0] = platform ("claude" or "opencode"), args[1] = event name.
+    let platform = args.first().cloned().unwrap_or_default();
     let event = args.get(1).cloned().unwrap_or_default();
 
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     let input: HookInput = serde_json::from_str(&raw).unwrap_or_default();
 
-    let stdout = handle(&event, &input).unwrap_or_else(|e| {
-        eprintln!("lens hook {event}: {e}");
+    let stdout = handle(&platform, &event, &input).unwrap_or_else(|e| {
+        eprintln!("lens hook {platform} {event}: {e}");
         default_response(&event)
     });
     println!("{stdout}");
@@ -227,7 +249,7 @@ pub fn run_cli(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// Route a single event. Returns the stdout JSON string per the contract.
-fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
+fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<String> {
     let project = input.project();
     let project_str = project.to_string_lossy().to_string();
     let session_id = input.session_id();
@@ -238,6 +260,10 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
     write_current_session(&data_dir, &session_id);
     let store = SessionStore::open(&data_dir)?;
     let ts = super::now_ts();
+
+    if platform == "opencode" && !matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "PreCompact" | "SessionStart") {
+        return Ok("{}".to_string());
+    }
 
     match event {
         "PreToolUse" => {
@@ -262,7 +288,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                     .get("query")
                     .and_then(Value::as_str)
                     .is_some_and(|q| q.contains("lens"));
-            let class = if tool.starts_with("mcp__lens__") || is_lens_toolsearch {
+            let class = if normalize_tool_name(&tool).starts_with("lens_") || is_lens_toolsearch {
                 "lens"
             } else if tool == "Grep" {
                 "grep"
@@ -373,8 +399,8 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
                     0
                 }
             } else if matches!(
-                tool.as_str(),
-                "mcp__lens__lens_map" | "mcp__lens__lens_overview"
+                normalize_tool_name(tool.as_str()).as_str(),
+                "lens_map" | "lens_overview"
             ) {
                 routing::throttle::reset(&data_dir, &session_id, "reads-since-map");
                 0
@@ -579,10 +605,7 @@ fn handle(event: &str, input: &HookInput) -> anyhow::Result<String> {
             // last-lens-call, not cumulative-per-session. A file edit resets it
             // too — Read-before-Edit was the right tool, not drift, so an
             // edit-heavy session never accumulates toward the deny.
-            let is_lens = tool
-                .strip_prefix("mcp__")
-                .and_then(|rest| rest.split("__").next())
-                .is_some_and(|server| server.contains("lens"));
+            let is_lens = normalize_tool_name(&tool).starts_with("lens_");
             if is_lens || matches!(tool.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
                 routing::throttle::reset(&data_dir, &session_id, "read-code");
                 // Also disarm the first-Grep and grep-scope denies: a lens call
@@ -1057,7 +1080,7 @@ mod tests {
     fn run(event: &str, input: HookInput) -> (String, SessionStore, PathBuf) {
         let dir = input.project();
         let data_dir = super::super::resolve_data_dir(&dir);
-        let out = handle(event, &input).unwrap();
+        let out = handle("claude", event, &input).unwrap();
         let store = SessionStore::open(&data_dir).unwrap();
         (out, store, data_dir)
     }
@@ -1169,7 +1192,7 @@ mod tests {
         // project() climbs to the repo root (the .git dir), not the subdir.
         assert_eq!(input.project().as_path(), repo.path());
 
-        handle("PostToolUse", &input).unwrap();
+        handle("claude", "PostToolUse", &input).unwrap();
 
         // Canonical data dir at the repo root; nothing scattered under the subdir.
         assert!(repo.path().join(".lens").is_dir());
@@ -1221,7 +1244,7 @@ mod tests {
 
         let mut ss = input_for(dir.path());
         ss.source = Some("compact".into());
-        let out = handle("SessionStart", &ss).unwrap();
+        let out = handle("claude", "SessionStart", &ss).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         let ctx = v["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -1242,7 +1265,7 @@ mod tests {
 
         let mut ss = input_for(dir.path());
         ss.source = Some("startup".into());
-        handle("SessionStart", &ss).unwrap();
+        handle("claude", "SessionStart", &ss).unwrap();
 
         let store = SessionStore::open(&super::super::resolve_data_dir(dir.path())).unwrap();
         assert_eq!(
@@ -1268,7 +1291,7 @@ mod tests {
 
         let mut ss = input_for(dir.path());
         ss.source = Some("startup".into());
-        let out = handle("SessionStart", &ss).unwrap();
+        let out = handle("claude", "SessionStart", &ss).unwrap();
 
         match prev {
             Some(v) => std::env::set_var("LENS_ROUTING", v),
@@ -1330,14 +1353,14 @@ mod tests {
         let mut g = input_for(dir.path());
         g.tool_name = Some("Grep".into());
         g.tool_input = Some(json!({"pattern": "impl Forge"}));
-        handle("PreToolUse", &g).unwrap();
+        handle("claude", "PreToolUse", &g).unwrap();
 
         // Event 2: the compliant follower (a lens call). The follower proxy
         // consumes `gast-live-pending` and bumps `gast_next_lens`.
         let mut f = input_for(dir.path());
         f.tool_name = Some("mcp__lens__lens_grep_ast".into());
         f.tool_input = Some(json!({}));
-        handle("PreToolUse", &f).unwrap();
+        handle("claude", "PreToolUse", &f).unwrap();
 
         // Restore env before asserting (an assert panic must not leak state).
         let restore = |k: &str, v: Option<String>| match v {
@@ -1371,5 +1394,53 @@ mod tests {
             0,
             "deny-only gast follower must NOT land in shadow (gast_shadow_next_*)"
         );
+    }
+
+    #[test]
+    fn opencode_hook_posttooluse_with_bare_lens_tool_is_safe_and_recognizes_in_is_lens() {
+        let dir = tempdir().unwrap();
+        let mut input = input_for(dir.path());
+        input.tool_name = Some("lens_search".into());
+        input.tool_input = Some(json!({}));
+        input.tool_response = Some(json!("ok"));
+        // uses platform=opencode, bare lens_* tool; is_lens path now hits via normalize
+        let out = handle("opencode", "PostToolUse", &input).unwrap();
+        assert_eq!(out, "{}");
+    }
+
+    #[test]
+    fn follower_class6_recognizes_bare_lens_and_mcp_equiv() {
+        let ti = json!({});
+        assert_eq!(follower_class6("lens_search", &ti), "lens");
+        assert_eq!(follower_class6("lens_map", &ti), "lens");
+        assert_eq!(follower_class6("lens_overview", &ti), "lens");
+        assert_eq!(follower_class6("mcp__lens__lens_search", &ti), "lens");
+        assert_eq!(follower_class6("Grep", &ti), "grep");
+        // opencode bare never matches ToolSearch wrapper (direct lens_*)
+        assert_eq!(follower_class6("lens_foo", &json!({"query": "lens"})), "lens");
+    }
+
+    #[test]
+    fn normalize_tool_name_covers_bare_vs_mcp_prefix() {
+        assert_eq!(normalize_tool_name("mcp__lens__lens_search"), "lens_search");
+        assert_eq!(normalize_tool_name("mcp__lens__foo_bar"), "lens_foo_bar");
+        assert_eq!(normalize_tool_name("lens_index"), "lens_index");
+        assert_eq!(normalize_tool_name("lens_"), "lens_");
+        assert_eq!(normalize_tool_name("Edit"), "Edit");
+        assert_eq!(normalize_tool_name("Bash"), "Bash");
+    }
+
+    #[test]
+    fn opencode_event_handling_returns_empty_for_unsupported() {
+        let dir = tempdir().unwrap();
+        let mut input = input_for(dir.path());
+        input.tool_name = Some("lens_search".into());
+        // unsupported event for opencode platform must safe-return {}
+        let out = handle("opencode", "SessionEnd", &input).unwrap();
+        assert_eq!(out, "{}");
+        // supported but non-lens event ok
+        let out2 = handle("opencode", "UserPromptSubmit", &input).unwrap();
+        // may store or {}, but must not panic
+        assert!(out2 == "{}" || out2.contains("hookSpecificOutput"));
     }
 }

@@ -4,12 +4,13 @@ allowed-tools: Bash
 ---
 
 Launch the lens live dashboard for THIS repo (the current working directory),
-then give me the URL. Notes:
+then give me the URL. Works in Claude Code and opencode (grok-build). Notes:
 
 - It reads `<cwd>/.lens`, so launching it from the session's own dir makes the
   MCP-savings and activity panes reflect THIS repo. (The RTK shell-savings pane is
   global via `rtk gain` either way.)
-- `lens` is on PATH after `lens setup`, so call it directly.
+- `lens` is on PATH after `lens setup`, so call it directly. (In opencode use the
+  terminal or the bundled command; `/dashboard` if your client exposes it.)
 
 Steps:
 1. Target port 7878. If something is already listening there, `curl -s

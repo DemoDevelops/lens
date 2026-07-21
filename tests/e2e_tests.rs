@@ -58,17 +58,20 @@ async fn full_mcp_session() {
     assert_eq!(names, expected, "advertised tools must be exactly the 10");
 
     // Every tool is stamped `anthropic/alwaysLoad` so Claude Code never defers them.
-    for t in &tools.tools {
-        let meta = t
-            .meta
-            .as_ref()
-            .unwrap_or_else(|| panic!("{} missing _meta", t.name));
-        assert_eq!(
-            meta.0.get("anthropic/alwaysLoad"),
-            Some(&json!(true)),
-            "{} should be marked alwaysLoad",
-            t.name
-        );
+    // Conditional for opencode (T12): the meta is only inserted when host==claude.
+    if std::env::var("LENS_HOST").unwrap_or_default() != "opencode" {
+        for t in &tools.tools {
+            let meta = t
+                .meta
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} missing _meta", t.name));
+            assert_eq!(
+                meta.0.get("anthropic/alwaysLoad"),
+                Some(&json!(true)),
+                "{} should be marked alwaysLoad",
+                t.name
+            );
+        }
     }
 
     let call = |name: &'static str, args: Value| {

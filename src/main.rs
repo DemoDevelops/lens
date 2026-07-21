@@ -2,7 +2,7 @@
 //!
 //! Two modes:
 //!   * No subcommand → run the MCP stdio server (the default).
-//!   * `lens hook <platform> <event>` → a short-lived session-continuity
+//!   * `lens hook <platform> <event>` (claude | opencode) → a short-lived session-continuity
 //!     lifecycle hook (stdin = hook payload, stdout = hook response).
 //!   * `lens session <install|uninstall|status>` → manage the hooks.
 //!   * `lens setup [--full]` → self-install for the current user: copy onto PATH,
@@ -36,6 +36,7 @@ fn main() -> Result<()> {
         Some("session") => return session::install::run_cli(&args[2..]),
         Some("setup") => return lens::setup::run_cli(&args[2..]),
         Some("update") => return lens::setup::run_update_cli(&args[2..]),
+        Some("doctor") => return lens::setup::run_doctor_cli(&args[2..]),
         // Hidden: refresh the cached latest-release tag for the SessionStart nudge.
         // Spawned detached by the hook; always silent, never errors out.
         Some("__update-check") => {

@@ -23,6 +23,7 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+use crate::client;
 use super::gain::{self, Scope};
 
 /// GitHub releases base — `…/download/<ver>/rtk-<triple>.<ext>` (mirrors
@@ -111,6 +112,10 @@ fn run_version(bin: &Path) -> Result<String> {
 /// idempotent). A failed hook registration is a **warning**, not a fatal error —
 /// the binary is still installed and usable.
 pub fn install() -> Result<()> {
+    if !client::is_claude() {
+        println!("RTK is Claude-specific today; shell savings via opencode plugins TBD.");
+        return Ok(());
+    }
     let version = version();
     let triple = target_triple()?;
     let want_digits = version_digits(&version);
@@ -514,6 +519,10 @@ fn cmd_exists(name: &str) -> bool {
 /// hook can rewrite live (rtk on PATH + jq), and a one-line gain summary.
 /// Best-effort — never errors when RTK is absent.
 pub fn status() -> Result<()> {
+    if !client::is_claude() {
+        println!("RTK is Claude-specific today; shell savings via opencode plugins TBD.");
+        return Ok(());
+    }
     match super::rtk_bin_path() {
         Some(bin) => {
             println!("rtk binary: {}", bin.display());
@@ -576,6 +585,10 @@ pub fn status() -> Result<()> {
 /// `RTK.md` and rtk's own `~/.claude` artifacts). Best-effort; returns `Ok` even when
 /// nothing is present. The binary at `~/.lens/bin/rtk` is left in place.
 pub fn uninstall() -> Result<()> {
+    if !client::is_claude() {
+        println!("RTK is Claude-specific today; shell savings via opencode plugins TBD.");
+        return Ok(());
+    }
     let settings = super::claude_settings_path().context("cannot resolve Claude settings path")?;
     match remove_hook_entry(&settings, "rtk-rewrite.sh") {
         Ok(true) => println!("Removed RTK hook from {}", settings.display()),

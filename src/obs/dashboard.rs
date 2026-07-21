@@ -74,15 +74,9 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             }
             "--model" => {
                 let m = args.get(i + 1).cloned().unwrap_or_default();
-                rate = match m.to_lowercase().as_str() {
-                    "opus" | "sonnet" | "haiku" | "fable" => pricing::price_for(&m).input,
-                    other => {
-                        eprintln!(
-                            "lens dashboard: unknown --model '{other}' (opus|sonnet|haiku|fable)"
-                        );
-                        std::process::exit(2);
-                    }
-                };
+                // generic: any name (grok, opencode, raw id) accepted; unknown falls to
+                // SONNET default inside price_for. No claude- assumption.
+                rate = pricing::price_for(&m).input;
                 i += 1;
             }
             "--rt-seconds" => {
@@ -113,7 +107,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                 eprintln!("usage: lens dashboard [--port <n>] [--host <addr>] [--session <id>]");
                 eprintln!("       lens dashboard --tui [--global] [--all] [--today | --since <today|all|15m|1h|3h|2d>]");
                 eprintln!(
-                    "            [--interval <s>] [--rate <$/M> | --model opus|sonnet|haiku|fable] [--rt-seconds <s>] [--theme dark|70s] [--mini|--full]"
+                    "            [--interval <s>] [--rate <$/M> | --model <name>] [--rt-seconds <s>] [--theme dark|70s] [--mini|--full]"
                 );
                 std::process::exit(2);
             }
@@ -672,12 +666,14 @@ winTo.addEventListener('change',commitRange);
 // RATES is server-sourced from stats.price_table (built once, on the first snapshot — see
 // buildRates), the single source of truth shared with the CLI's --model flag. MODEL_LABELS
 // maps price_table's canonical model key to a friendly display name, since price_table
-// itself carries only canonical keys. FALLBACK_RATES covers an older server payload with
-// no price_table, so the page still works.
+// itself carries only canonical keys (claude-*). FALLBACK_RATES covers an older server payload with
+// no price_table, so the page still works. For opencode the actual_usage models are "opencode".
 const MODEL_LABELS={'claude-opus-4-8':'Opus 4.8','claude-sonnet-5':'Sonnet 5','claude-haiku-4-5':'Haiku 4.5','claude-fable-5':'Fable 5'};
-// Friendly model name: the canonical label if known, else the raw id minus the `claude-`
-// vendor prefix and any trailing `-YYYYMMDD` date stamp (so old dated ids read cleanly).
-function modelLabel(raw){return MODEL_LABELS[raw]||raw.replace(/^claude-/,'').replace(/-\d{8}$/,'');}
+// Friendly model name for display. MODEL_LABELS for known claude keys (from price_table).
+// Strip ^claude- (and date) ONLY if raw starts with it (claude host); for opencode/grok/raw
+// ids (T6 produces "opencode" model), keep raw as-is — no hard claude- assumption or mangling.
+// See usage.rs for opencode model field, pricing for generic fallback.
+function modelLabel(raw){return MODEL_LABELS[raw]|| (raw && raw.startsWith('claude-') ? raw.replace(/^claude-/,'').replace(/-\d{8}$/,'') : raw );}
 const FALLBACK_RATES=[{m:'Opus 4.8',r:5},{m:'Fable 5',r:10},{m:'Sonnet 5',r:3},{m:'Haiku 4.5',r:1}];
 const ACTUAL='actual';
 let RATES=FALLBACK_RATES.slice();
@@ -758,6 +754,7 @@ function renderApplied(av){
 const rateDD=makeDD(document.getElementById('rate'),'model to price saved tokens against, or the real per-model usage mix');
 // Populate RATES + the dropdown from the server's price_table on the first snapshot (see
 // tick()); falls back to FALLBACK_RATES if an older server omits price_table.
+// Non-claude models (opencode) use raw key for label (price defaults to sonnet).
 function buildRates(priceTable){
   if(Array.isArray(priceTable)&&priceTable.length){
     RATES=priceTable.map(p=>({m:MODEL_LABELS[p.model]||p.model,r:p.input,key:p.model}));
@@ -1168,8 +1165,8 @@ mod tests {
     /// The "Actual Usage" dropdown mode (T4): the page markup offers it, and a served
     /// `/api/stats` body carries the T3 payload it renders from. `CLAUDE_CONFIG_DIR` is
     /// pointed at a fresh tempdir with no `projects/` subdir, so `usage::read_usage`
-    /// resolves no config dir and returns instantly instead of scanning this machine's
-    /// real `~/.claude` history (see usage.rs's `with_fixture` for the same idiom).
+    /// (claude path) resolves no config dir and returns instantly (see usage.rs's
+    /// with_fixture). Opencode path uses OPENCODE_CONFIG_DIR (T6).
     #[test]
     fn actual_usage_dropdown_and_payload_keys_present() {
         assert!(INDEX_HTML.contains("Actual Usage"));

@@ -5,7 +5,7 @@ allowed-tools: Bash
 
 Build the full lens database (structural graph + FTS5 search index) for THIS project
 (the current working directory), covering every file rather than relying on whatever's
-been touched so far this session.
+been touched so far this session. Works in Claude Code and opencode (grok-build).
 
 Steps:
 1. Run `lens warmup` (no path argument defaults to `.`, the repo root) as a normal

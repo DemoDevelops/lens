@@ -4,6 +4,9 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh
 #
+# For opencode (grok-build):
+#   curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | LENS_HOST=opencode sh
+#
 # Default is the aggressive mode: routing `full` (denies WebFetch, redirects
 # curl/build into the darkroom, wraps output) plus RTK shell compression. Opt down to
 # nudges-only (encourages the lens tools, never denies WebFetch or rewrites commands):
@@ -11,7 +14,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | LENS_ROUTING=nudge sh
 #
 # Overrides: LENS_ROUTING=<off|nudge|steer|wrap|full>, LENS_VERSION=vX.Y.Z,
-# LENS_BIN_DIR=<dir>, CLAUDE_CONFIG_DIR=<dir>.
+# LENS_BIN_DIR=<dir>, LENS_HOST=<claude|opencode>, CLAUDE_CONFIG_DIR=<dir>, OPENCODE_CONFIG_DIR=<dir>.
 set -eu
 
 REPO="DemoDevelops/lens"
@@ -27,8 +30,16 @@ done
 say() { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
 die() { printf '\n\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
-command -v claude >/dev/null 2>&1 \
-  || die "Claude Code ('claude') not found. Install it first: https://claude.com/claude-code"
+HOST="${LENS_HOST:-claude}"
+case "$HOST" in
+  opencode|open-code|grok) HOST=opencode ;;
+  claude|*) HOST=claude ;;
+esac
+if [ "$HOST" = "claude" ]; then
+  command -v claude >/dev/null 2>&1 \
+    || die "Claude Code ('claude') not found. Install it first: https://claude.com/claude-code"
+fi
+# opencode path requires no 'opencode' binary (we edit ~/.config/opencode/opencode.jsonc directly)
 
 # Map the host to the release asset built by .github/workflows/release.yml.
 os="$(uname -s)"
@@ -88,69 +99,11 @@ if [ "$os" = "Darwin" ]; then
 fi
 say "Installed: $bin"
 
-say "Registering the MCP server (lens_* tools)..."
-claude mcp add lens --scope user -- "$bin" 2>/dev/null \
-  || echo "  already registered; check: claude mcp list"
+say "Wiring MCP + client-specific pieces (hooks for Claude, commands for opencode, RTK, routing)..."
+# Delegate to lens setup (single source of truth post-T2/T4). It skips re-copy when
+# already at target, registers the right MCP entry, does Claude-only hooks/RTK/routing,
+# opencode-only jsonc, prints tailored Done/Restart/Uninstall, and ensures PATH.
+LENS_HOST="$HOST" LENS_BIN_DIR="$bindir" "$bin" setup --client "$HOST" --routing "$ROUTING"
 
-say "Installing session hooks (continuity + dashboard + nudges)..."
-"$bin" session install
-
-if [ "$WITH_RTK" = "1" ]; then
-  say "Installing RTK shell-output compression..."
-  "$bin" rtk install || echo "  RTK install skipped (non-fatal)."
-fi
-
-say "Setting routing level to '$ROUTING'..."
-CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-SETTINGS="$CONFIG_DIR/settings.json"
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$SETTINGS" "$ROUTING" <<'PY'
-import json, sys, pathlib
-p = pathlib.Path(sys.argv[1]); level = sys.argv[2]
-d = json.loads(p.read_text()) if p.exists() and p.read_text().strip() else {}
-d.setdefault("env", {})["LENS_ROUTING"] = level
-p.parent.mkdir(parents=True, exist_ok=True)
-p.write_text(json.dumps(d, indent=2) + "\n")
-print(f"  set LENS_ROUTING={level} in {p}")
-PY
-else
-  echo "  python3 not found; add to $SETTINGS by hand:  \"env\": { \"LENS_ROUTING\": \"$ROUTING\" }"
-fi
-
-# Put `lens` on PATH for new terminals so `lens dashboard` works by name. The
-# hooks and MCP server use the absolute path and do not need this.
-case ":$PATH:" in
-  *":$bindir:"*) ;;
-  *)
-    case "$(basename "${SHELL:-sh}")" in
-      zsh)  profile="$HOME/.zshrc" ;;
-      bash) profile="$HOME/.bashrc" ;;
-      *)    profile="$HOME/.profile" ;;
-    esac
-    if [ ! -f "$profile" ] || ! grep -qF "$bindir" "$profile" 2>/dev/null; then
-      printf '\n# added by lens installer\nexport PATH="%s:$PATH"\n' "$bindir" >> "$profile"
-      say "Added $bindir to PATH in $profile (open a new terminal to use 'lens' by name)."
-    fi
-    ;;
-esac
-
-note=""
-if [ "$ROUTING" = "nudge" ]; then
-  note=" (nudges only; no WebFetch deny or command rewrites)"
-fi
-rtk_uninstall=""
-if [ "$WITH_RTK" = "1" ]; then
-  rtk_uninstall="  &&  $bin rtk uninstall"
-fi
-
-cat <<EOF
-
-Done. Restart Claude Code to load lens.
-  Tools:     available immediately (run lens_stats to verify)
-  Routing:   $ROUTING$note
-  Dashboard: $bin dashboard   then open http://localhost:7878
-             (or just 'lens dashboard' in a new terminal)
-
-Opt down to nudges-only with LENS_ROUTING=nudge, or edit "env":{"LENS_ROUTING":"..."} in $SETTINGS.
-Uninstall:  $bin session uninstall$rtk_uninstall  &&  claude mcp remove lens  &&  rm "$bin"
-EOF
+# (setup prints the final instructions; old manual blocks removed to avoid duplication
+# and to keep client handling in one place.)

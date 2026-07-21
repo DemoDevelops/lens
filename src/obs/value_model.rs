@@ -8,7 +8,8 @@
 //! entirely *counterfactual*: the grep+read chains the agent never ran, the
 //! re-derivation it never paid. The benchmark suite measured those counterfactuals on
 //! real `claude-opus-4-8`; this module turns them into per-op rates and multiplies by
-//! the user's actual op counts.
+//! the user's actual op counts. Rates are host-generic (opencode/grok use same
+//! applied estimates; only provenance label is claude-era).
 //!
 //! Two kinds of value per op:
 //!   * `est_tokens_per_op` — counterfactual tokens saved, for dimensions whose live
@@ -49,6 +50,9 @@ pub struct ValueRate {
 pub const ROUND_TRIP_SECONDS: f64 = 4.0;
 
 /// The model + harness the benchmark rates were measured on.
+/// Kept for provenance (rates derived from claude-opus runs); pricing/display
+/// now generic (falls back for opencode/grok etc). Do not hard claude- assume
+/// elsewhere; this label is historical for the committed benchmark JSONs.
 pub const VALUE_MODEL_MODEL: &str = "claude-opus-4-8 (via claude-pty)";
 
 /// Caption both surfaces show, so these never read as live measurements.

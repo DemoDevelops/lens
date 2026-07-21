@@ -22,6 +22,8 @@ use crate::rtk;
 use crate::server::{READ_ONLY_TOOLS, WRITE_TOOLS};
 use crate::session;
 
+use crate::client;
+
 /// Routing levels accepted by `--routing` (mirrors `routing::Level::parse`).
 const ROUTING_LEVELS: [&str; 5] = ["off", "nudge", "steer", "wrap", "full"];
 
@@ -34,102 +36,202 @@ struct Opts {
     routing: String,
     bin_dir: PathBuf,
     config_dir: Option<PathBuf>,
+    dry_run: bool,
 }
 
 /// CLI entry: `args` is everything after `setup`.
 pub fn run_cli(args: &[String]) -> Result<()> {
     let opts = parse_opts(args)?;
 
+    // Auto-detect opencode (without --client or LENS_HOST) only if opencode on PATH
+    // and claude is absent. Matches T2 spec. When both present, default remains
+    // Claude (user must opt-in with --client opencode).
+    if std::env::var("LENS_HOST").unwrap_or_default().trim().is_empty()
+        && !std::env::args().any(|a| a == "--client")
+        && cmd_exists("opencode")
+        && !cmd_exists("claude")
+    {
+        std::env::set_var("LENS_HOST", "opencode");
+    }
+
     // Make every downstream installer agree on which Claude config dir to write:
     // `claude_settings_path()`, `claude mcp add`, and the hook installers all read
     // `$CLAUDE_CONFIG_DIR`, so set it once up front when targeting a specific account.
     if let Some(dir) = &opts.config_dir {
-        std::env::set_var("CLAUDE_CONFIG_DIR", dir);
+        // use client abstraction so we set host-correct env var (T1)
+        let var = if client::is_claude() { "CLAUDE_CONFIG_DIR" } else { "OPENCODE_CONFIG_DIR" };
+        std::env::set_var(var, dir);
     }
 
-    if !cmd_exists("claude") {
+    if client::is_claude() && !cmd_exists("claude") {
         bail!("Claude Code ('claude') not found on PATH. Install it first: https://claude.com/claude-code");
     }
-
-    let settings = rtk::claude_settings_path()
-        .ok_or_else(|| anyhow!("cannot resolve Claude settings path (is $HOME set?)"))?;
+    // opencode path does not require the `opencode` binary (we edit the jsonc directly)
 
     // 1. Copy this binary to a stable location; use THAT path everywhere so the
     //    MCP server + hooks keep working after the downloaded copy is deleted.
-    let bin = install_self(&opts.bin_dir).context("installing the lens binary")?;
-    say(&format!("Installed binary: {}", bin.display()));
-
-    // 2. Register the MCP server (the lens_* tools).
-    match register_mcp(&bin) {
-        Ok(true) => say("Registered MCP server 'lens'."),
-        Ok(false) => say("MCP server 'lens' already registered."),
-        Err(e) => warn(&format!(
-            "could not register MCP server: {e:#}\n  register by hand: claude mcp add lens --scope user -- {}",
-            bin.display()
-        )),
+    //    In --dry-run we compute the target path without copying.
+    let bin = if opts.dry_run {
+        let name = if cfg!(windows) { "lens.exe" } else { "lens" };
+        opts.bin_dir.join(name)
+    } else {
+        install_self(&opts.bin_dir).context("installing the lens binary")?
+    };
+    if opts.dry_run {
+        say(&format!("dry-run: would install binary to {}", bin.display()));
+    } else {
+        say(&format!("Installed binary: {}", bin.display()));
     }
 
-    // 3. Session hooks — clear a conflicting Context Mode first (install refuses
-    //    to coexist with it), then install lens's five lifecycle hooks.
-    match session::install::purge_context_mode(&settings) {
-        Ok(n) if n > 0 => say(&format!(
-            "Removed Context Mode wiring ({n} entr{}).",
-            if n == 1 { "y" } else { "ies" }
-        )),
-        Ok(_) => {}
-        Err(e) => warn(&format!("could not check for Context Mode: {e:#}")),
-    }
-    let bin_str = bin.to_string_lossy().to_string();
-    session::install::install(&settings, &bin_str).context("installing session hooks")?;
-    say("Installed session hooks (5 lifecycle events).");
-
-    // 4. RTK shell compression — install, then dedup to exactly one rtk hook so a
-    //    pre-existing rtk install can't double-fire alongside lens's managed one.
-    match rtk::install::install() {
-        Ok(()) => {
-            match rtk::install::dedup_rtk_hooks(&settings) {
-                Ok(n) if n > 0 => say(&format!(
-                    "Deduplicated RTK hooks (removed {n} extra so exactly one remains)."
-                )),
-                Ok(_) => {}
-                Err(e) => warn(&format!("could not dedup RTK hooks: {e:#}")),
+    // 2. Register the MCP server (the lens_* tools). Claude uses `claude mcp add`;
+    //    opencode edits opencode.jsonc directly (no `claude` CLI needed).
+    if opts.dry_run {
+        if client::is_claude() {
+            println!("dry-run: would run: claude mcp add lens --scope user -- {}", bin.display());
+        } else {
+            let cfg = opencode_config_path().unwrap_or_else(|_| PathBuf::from("~/.config/opencode/opencode.jsonc"));
+            let entry = build_opencode_mcp_entry(&bin);
+            println!("dry-run: would write MCP entry 'lens' to {}", cfg.display());
+            if let Ok(pretty) = serde_json::to_string_pretty(&entry) {
+                println!("{}", pretty);
             }
-            say("Installed RTK shell compression.");
         }
-        Err(e) => warn(&format!(
-            "RTK install skipped (non-fatal): {e:#}\n  retry later with: lens rtk install"
-        )),
+    } else {
+        let newly = if client::is_claude() {
+            register_mcp_claude(&bin)
+        } else {
+            register_mcp_opencode(&bin)
+        };
+        match newly {
+            Ok(true) => say("Registered MCP server 'lens'."),
+            Ok(false) => say("MCP server 'lens' already registered."),
+            Err(e) => {
+                let hint = if client::is_claude() {
+                    format!("claude mcp add lens --scope user -- {}", bin.display())
+                } else {
+                    format!("edit {} to add under mcp.lens", opencode_config_path().map(|p| p.display().to_string()).unwrap_or_default())
+                };
+                warn(&format!("could not register MCP server: {e:#}\n  register by hand: {hint}"));
+            }
+        }
     }
 
-    // 5. Routing level.
-    set_routing(&settings, &opts.routing).context("setting routing level")?;
-    say(&format!("Set routing level: {}", opts.routing));
+    // 3-5b. Session hooks, RTK, routing and allow-list are Claude-specific (mcp__ prefixes,
+    //    settings.json). For opencode: routing lives in the mcp "environment" we wrote;
+    //    commands via `lens session install --client opencode` (T4); full hooks TBD.
+    if !opts.dry_run && client::detect_host() == client::Host::Claude {
+        let settings = rtk::claude_settings_path()
+            .ok_or_else(|| anyhow!("cannot resolve Claude settings path (is $HOME set?)"))?;
 
-    // 5b. Pre-approve the lens tools so an agent is never blocked on a permission
-    //     prompt for a lens call (plan mode prompts for any MCP tool not allow-listed).
-    allow_lens_tools(&settings).context("allow-listing lens tools")?;
-    say("Allow-listed lens tools.");
+        // 3. Session hooks — clear a conflicting Context Mode first (install refuses
+        //    to coexist with it), then install lens's five lifecycle hooks.
+        match session::install::purge_context_mode(&settings) {
+            Ok(n) if n > 0 => say(&format!(
+                "Removed Context Mode wiring ({n} entr{}).",
+                if n == 1 { "y" } else { "ies" }
+            )),
+            Ok(_) => {}
+            Err(e) => warn(&format!("could not check for Context Mode: {e:#}")),
+        }
+        let bin_str = bin.to_string_lossy().to_string();
+        session::install::install(&settings, &bin_str).context("installing session hooks")?;
+        say("Installed session hooks (5 lifecycle events).");
+
+        // 4. RTK shell compression — install, then dedup to exactly one rtk hook so a
+        //    pre-existing rtk install can't double-fire alongside lens's managed one.
+        match rtk::install::install() {
+            Ok(()) => {
+                match rtk::install::dedup_rtk_hooks(&settings) {
+                    Ok(n) if n > 0 => say(&format!(
+                        "Deduplicated RTK hooks (removed {n} extra so exactly one remains)."
+                    )),
+                    Ok(_) => {}
+                    Err(e) => warn(&format!("could not dedup RTK hooks: {e:#}")),
+                }
+                say("Installed RTK shell compression.");
+            }
+            Err(e) => warn(&format!(
+                "RTK install skipped (non-fatal): {e:#}\n  retry later with: lens rtk install"
+            )),
+        }
+
+        // 5. Routing level.
+        set_routing(&settings, &opts.routing).context("setting routing level")?;
+        say(&format!("Set routing level: {}", opts.routing));
+
+        // 5b. Pre-approve the lens tools so an agent is never blocked on a permission
+        //     prompt for a lens call (plan mode prompts for any MCP tool not allow-listed).
+        allow_lens_tools(&settings).context("allow-listing lens tools")?;
+        say("Allow-listed lens tools.");
+    } else if opts.dry_run {
+        if client::is_claude() {
+            println!("dry-run: would install session hooks + RTK + routing + allow-list into Claude settings.json");
+        } else {
+            println!("dry-run: MCP environment already carries LENS_ROUTING; would install commands (/dashboard, /warmup)");
+        }
+    } else if !client::is_claude() {
+        // Auto-install commands during setup for opencode so that `lens setup --client opencode`
+        // populates commands/ immediately (doctor "/dashboard command installed" passes, and
+        // /dashboard or `lens dashboard` usable right away). Reuses the generalized fn from T4.
+        if let Some(cfg_dir) = client::config_dir_for(client::Host::Opencode) {
+            match session::install::install_commands(&cfg_dir) {
+                Ok(()) => say("Installed commands (/dashboard, /warmup)."),
+                Err(e) => warn(&format!("could not install commands: {e:#}")),
+            }
+        } else {
+            warn("could not resolve opencode config dir; commands not installed");
+        }
+    }
 
     // 6. PATH — so `lens` works as a bare command in new shells.
-    let path_added = ensure_on_path(&opts.bin_dir);
+    let path_added = if opts.dry_run {
+        false
+    } else {
+        ensure_on_path(&opts.bin_dir)
+    };
+    if opts.dry_run {
+        say(&format!("dry-run: would ensure {} is on PATH", opts.bin_dir.display()));
+    }
 
     // 7. Verify and report.
     println!();
-    let ok = doctor(&settings, &bin, &opts.bin_dir, path_added);
+    let ok = if opts.dry_run {
+        println!("dry-run: would verify install (skipped side effects)");
+        true
+    } else if client::is_claude() {
+        let settings = rtk::claude_settings_path()
+            .ok_or_else(|| anyhow!("cannot resolve Claude settings path (is $HOME set?)"))?;
+        doctor(&settings, &bin, &opts.bin_dir, path_added)
+    } else {
+        doctor_for_opencode(&bin, &opts.bin_dir, path_added)
+    };
     println!();
     if ok {
-        println!("Done. Restart Claude Code to load lens (verify with the lens_stats tool).");
+        if client::is_claude() {
+            println!("Done. Restart Claude Code to load lens (verify with the lens_stats tool).");
+        } else {
+            println!("Done. Restart opencode to load lens (verify with the lens_stats tool).");
+        }
     } else {
-        println!("Setup finished with the warnings above. Restart Claude Code, then fix the flagged items or re-run `lens setup`.");
+        if client::is_claude() {
+            println!("Setup finished with the warnings above. Restart Claude Code, then fix the flagged items or re-run `lens setup`.");
+        } else {
+            println!("Setup finished with the warnings above. Restart opencode, then fix the flagged items or re-run `lens setup --client opencode`.");
+        }
     }
-    println!(
-        "Uninstall: lens session uninstall && lens rtk uninstall && claude mcp remove lens && rm {}",
-        bin.display()
-    );
-
-    // 8. Offer the same lens-tool sync for the user's own custom subagents.
-    offer_agent_sync();
-
+    if client::is_claude() {
+        println!(
+            "Uninstall: lens session uninstall && lens rtk uninstall && claude mcp remove lens && rm {}",
+            bin.display()
+        );
+        // Offer the same lens-tool sync for the user's own custom subagents.
+        offer_agent_sync();
+    } else {
+        println!(
+            "Uninstall: lens session uninstall --client opencode && rm {}",
+            bin.display()
+        );
+    }
     Ok(())
 }
 
@@ -138,6 +240,7 @@ fn parse_opts(args: &[String]) -> Result<Opts> {
     let mut full = false;
     let mut bin_dir: Option<PathBuf> = None;
     let mut config_dir: Option<PathBuf> = None;
+    let mut dry_run = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -156,6 +259,12 @@ fn parse_opts(args: &[String]) -> Result<Opts> {
                     Some(PathBuf::from(args.get(i + 1).context("--config-dir needs a value")?));
                 i += 1;
             }
+            "--client" => {
+                // consumed early by client::from_cli_arg for Host detection; just skip value
+                let _ = args.get(i + 1);
+                i += 1;
+            }
+            "--dry-run" => dry_run = true,
             other => bail!("lens setup: unknown option '{other}'"),
         }
         i += 1;
@@ -170,6 +279,7 @@ fn parse_opts(args: &[String]) -> Result<Opts> {
         routing,
         bin_dir,
         config_dir,
+        dry_run,
     })
 }
 
@@ -244,7 +354,7 @@ fn install_self(bin_dir: &Path) -> Result<PathBuf> {
 /// `.git` ancestor > cwd). `$CLAUDE_PROJECT_DIR` is how Claude Code's own env already
 /// flows through to the spawned server at runtime, so no explicit registration is
 /// needed for that branch either.
-fn register_mcp(bin: &Path) -> Result<bool> {
+fn register_mcp_claude(bin: &Path) -> Result<bool> {
     let out = Command::new("claude")
         .args(["mcp", "add", "lens", "--scope", "user", "--"])
         .arg(bin)
@@ -263,17 +373,140 @@ fn register_mcp(bin: &Path) -> Result<bool> {
     );
 }
 
-/// Does `claude mcp list` show a `lens` server?
+/// Returns whether 'lens' MCP is registered for the current host.
+/// For Claude: via `claude mcp list`.
+/// For opencode: via presence of enabled entry in opencode.jsonc .
 fn mcp_registered() -> bool {
-    Command::new("claude")
-        .args(["mcp", "list"])
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .any(|l| l.trim_start().starts_with("lens"))
-        })
-        .unwrap_or(false)
+    if client::is_claude() {
+        Command::new("claude")
+            .args(["mcp", "list"])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("lens"))
+            })
+            .unwrap_or(false)
+    } else {
+        match opencode_config_path() {
+            Ok(p) => read_opencode_config(&p)
+                .ok()
+                .and_then(|v| {
+                    v.get("mcp")
+                        .and_then(|m| m.get("lens"))
+                        .and_then(|l| l.get("enabled"))
+                        .and_then(|e| e.as_bool())
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+}
+
+/// Resolve path to opencode's config (honors $OPENCODE_CONFIG_DIR).
+fn opencode_config_path() -> Result<PathBuf> {
+    client::config_dir_for(client::Host::Opencode)
+        .map(|d| d.join("opencode.jsonc"))
+        .context("cannot resolve opencode config dir (HOME or XDG_CONFIG_HOME not set?)")
+}
+
+/// Build the JSON value for the mcp.lens entry (used for dry-run print and write).
+fn build_opencode_mcp_entry(bin: &Path) -> Value {
+    let abs = std::fs::canonicalize(bin)
+        .unwrap_or_else(|_| bin.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    json!({
+        "type": "local",
+        "command": [abs],
+        "enabled": true,
+        "environment": {
+            "LENS_ROUTING": "full"
+        }
+    })
+}
+
+/// Read opencode.jsonc , stripping simple // line comments (jsonc) for parse.
+/// Block comments and complex cases not supported (note: write drops comments).
+fn read_opencode_config(path: &Path) -> Result<Value> {
+    if !path.is_file() {
+        return Ok(json!({}));
+    }
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    let cleaned = strip_jsonc_line_comments(&raw);
+    serde_json::from_str(&cleaned)
+        .with_context(|| format!("parsing {} (jsonc)", path.display()))
+}
+
+fn strip_jsonc_line_comments(raw: &str) -> String {
+    // minimal stateful strip of // comments, respecting "strings" (no \" handling for simplicity, but sufficient for config files)
+    let mut out = String::with_capacity(raw.len());
+    let mut in_string = false;
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            in_string = !in_string;
+            out.push(c);
+            continue;
+        }
+        if !in_string && c == '/' && chars.peek() == Some(&'/') {
+            chars.next(); // consume second /
+            // skip to eol or end
+            for cc in chars.by_ref() {
+                if cc == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Edit opencode.jsonc to register lens under mcp (idempotent on matching bin).
+/// Creates file/dir if needed. Returns Ok(true) if changed, Ok(false) if already present+enabled.
+fn register_mcp_opencode(bin: &Path) -> Result<bool> {
+    let cfg_path = opencode_config_path()?;
+    let mut root = read_opencode_config(&cfg_path)?;
+    if !root.is_object() {
+        root = json!({});
+    }
+    let obj = root.as_object_mut().unwrap();
+    // preserve/ensure schema like real opencode configs
+    obj.entry("$schema")
+        .or_insert(json!("https://opencode.ai/config.json"));
+
+    let mcp = obj.entry("mcp").or_insert_with(|| json!({}));
+    if !mcp.is_object() {
+        *mcp = json!({});
+    }
+    let mcp_obj = mcp.as_object_mut().unwrap();
+
+    let abs = std::fs::canonicalize(bin)
+        .unwrap_or_else(|_| bin.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let desired = build_opencode_mcp_entry(bin);
+
+    let already_good = mcp_obj.get("lens").map(|cur| {
+        // consider "already" if command matches (ignore env for re-detect)
+        cur.get("command") == Some(&json!([abs])) &&
+        cur.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true)
+    }).unwrap_or(false);
+
+    if already_good {
+        return Ok(false);
+    }
+
+    mcp_obj.insert("lens".to_string(), desired);
+    write_json(&cfg_path, &root)?;
+    Ok(true)
 }
 
 /// Write `env.LENS_ROUTING = level` into `settings`, preserving everything else.
@@ -301,6 +534,7 @@ fn set_routing(settings: &Path, level: &str) -> Result<()> {
 /// the confirmed workaround is a scoped wildcard, so `mcp__lens__*` is added too.
 /// The tool lists are [`READ_ONLY_TOOLS`] + [`WRITE_TOOLS`], shared with the server
 /// so they never drift.
+/// (opencode path skips this entirely; bare lens_* tools, different permission model)
 fn allow_lens_tools(settings: &Path) -> Result<()> {
     let mut root = read_json(settings)?;
     if !root.is_object() {
@@ -560,6 +794,7 @@ fn shell_profile() -> Option<PathBuf> {
 
 /// Print the install verification (mirrors the checklist a hand-written install
 /// prompt would run) and return whether every check passed.
+/// Host-aware via mcp_registered(); claude-only checks inside.
 fn doctor(settings: &Path, bin: &Path, bin_dir: &Path, path_added: bool) -> bool {
     let mut checks: Vec<(String, bool, String)> = Vec::new();
 
@@ -594,6 +829,46 @@ fn doctor(settings: &Path, bin: &Path, bin_dir: &Path, path_added: bool) -> bool
     checks.push(("lens resolves on PATH".into(), path_ok, note));
 
     println!("Verifying:");
+    let mut all_ok = true;
+    for (label, ok, note) in &checks {
+        all_ok &= *ok;
+        let mark = if *ok { "ok  " } else { "FAIL" };
+        if note.is_empty() {
+            println!("  [{mark}] {label}");
+        } else {
+            println!("  [{mark}] {label} — {note}");
+        }
+    }
+    all_ok
+}
+
+/// Opencode variant of doctor: only checks things that apply without claude settings.json.
+/// (MCP via jsonc, PATH, and note that commands/hooks are separate for opencode.)
+fn doctor_for_opencode(bin: &Path, bin_dir: &Path, path_added: bool) -> bool {
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+
+    checks.push(("MCP server registered".into(), mcp_registered(), String::new()));
+
+    // commands dir lives under opencode config dir (not settings.json parent)
+    let op_dir = client::config_dir_for(client::Host::Opencode).unwrap_or_default();
+    let cmd_present = op_dir.join("commands").join("dashboard.md").is_file();
+    checks.push(("/dashboard command installed".into(), cmd_present, String::new()));
+
+    // no RTK / context mode equivalent yet for opencode
+    checks.push(("RTK / session lifecycle".into(), true, "RTK is Claude-specific today; shell savings via opencode plugins TBD".into()));
+
+    let on_path_now = cmd_exists("lens");
+    let path_ok = bin.is_file() && (on_path_now || dir_on_path(bin_dir) || path_added);
+    let note = if on_path_now || dir_on_path(bin_dir) {
+        String::new()
+    } else if path_added {
+        format!("{} added to your profile — open a new terminal", bin_dir.display())
+    } else {
+        format!("add {} to your PATH", bin_dir.display())
+    };
+    checks.push(("lens resolves on PATH".into(), path_ok, note));
+
+    println!("Verifying (opencode):");
     let mut all_ok = true;
     for (label, ok, note) in &checks {
         all_ok &= *ok;
@@ -653,7 +928,9 @@ fn warn(msg: &str) {
 pub fn run_update_cli(args: &[String]) -> Result<()> {
     let config_dir = parse_config_dir(args);
     if let Some(dir) = &config_dir {
-        std::env::set_var("CLAUDE_CONFIG_DIR", dir);
+        // use client abstraction so we set host-correct env var (T1)
+        let var = if client::is_claude() { "CLAUDE_CONFIG_DIR" } else { "OPENCODE_CONFIG_DIR" };
+        std::env::set_var(var, dir);
     }
 
     if !cmd_exists("curl") {
@@ -688,12 +965,20 @@ pub fn run_update_cli(args: &[String]) -> Result<()> {
     // Re-apply install with the NEW binary so it copies itself onto PATH and
     // refreshes the hooks + /dashboard command. Preserve the current routing level
     // and the existing install location.
-    let settings = rtk::claude_settings_path()
-        .ok_or_else(|| anyhow!("cannot resolve Claude settings path"))?;
-    let routing = current_routing(&settings).unwrap_or_else(|| "full".to_string());
+    let routing = if client::is_claude() {
+        let settings = rtk::claude_settings_path()
+            .ok_or_else(|| anyhow!("cannot resolve Claude settings path"))?;
+        current_routing(&settings).unwrap_or_else(|| "full".to_string())
+    } else {
+        // for opencode read from the mcp env if present, else default
+        read_opencode_routing().unwrap_or_else(|| "full".to_string())
+    };
 
     let mut cmd = Command::new(&tmp);
     cmd.arg("setup").arg("--routing").arg(&routing);
+    if !client::is_claude() {
+        cmd.arg("--client").arg("opencode");
+    }
     if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
         cmd.arg("--bin-dir").arg(dir);
     }
@@ -780,6 +1065,19 @@ fn current_routing(settings: &Path) -> Option<String> {
     read_json(settings)
         .ok()?
         .get("env")?
+        .get("LENS_ROUTING")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Read LENS_ROUTING from opencode mcp.lens.environment (for update re-invoke).
+fn read_opencode_routing() -> Option<String> {
+    let path = opencode_config_path().ok()?;
+    read_opencode_config(&path)
+        .ok()?
+        .get("mcp")?
+        .get("lens")?
+        .get("environment")?
         .get("LENS_ROUTING")?
         .as_str()
         .map(|s| s.to_string())
@@ -905,6 +1203,61 @@ pub fn run_update_check_cli() {
     }
     let body = json!({ "checked_at": now_unix(), "latest_tag": tag });
     let _ = std::fs::write(&path, body.to_string());
+}
+
+/// CLI entry for `lens doctor` (standalone verification, no setup side-effects).
+/// Reuses the host-aware doctor logic. Accepts --client, --config-dir (to target
+/// specific accounts without mutating env for caller), --bin-dir (for PATH check).
+/// Reports per-host checks; `lens doctor --client opencode` works without claude bin.
+pub fn run_doctor_cli(args: &[String]) -> Result<()> {
+    // Parse enough to honor --config-dir (sets host-specific env like run_cli does)
+    // and --bin-dir. --client is consumed by client::from_cli_arg via detect.
+    let mut config_dir: Option<PathBuf> = None;
+    let mut bin_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config-dir" => {
+                if let Some(d) = args.get(i + 1) {
+                    config_dir = Some(PathBuf::from(d));
+                    i += 1;
+                }
+            }
+            "--bin-dir" => {
+                if let Some(d) = args.get(i + 1) {
+                    bin_dir = Some(PathBuf::from(d));
+                    i += 1;
+                }
+            }
+            "--client" => {
+                let _ = args.get(i + 1);
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if let Some(dir) = &config_dir {
+        let var = if client::is_claude() { "CLAUDE_CONFIG_DIR" } else { "OPENCODE_CONFIG_DIR" };
+        std::env::set_var(var, dir);
+    }
+
+    let host = client::detect_host();
+    let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lens"));
+    let bin_dir = bin_dir.unwrap_or_else(|| bin.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")));
+    let path_added = false;
+
+    let ok = if host == client::Host::Claude {
+        let settings = rtk::claude_settings_path()
+            .ok_or_else(|| anyhow!("cannot resolve Claude settings path (is $HOME set?)"))?;
+        doctor(&settings, &bin, &bin_dir, path_added)
+    } else {
+        doctor_for_opencode(&bin, &bin_dir, path_added)
+    };
+    if !ok {
+        // non-fatal for doctor CLI; caller sees FAILs in output
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1139,5 +1492,126 @@ mod tests {
             tag_from_release_url("https://github.com/o/r/releases"),
             None
         );
+    }
+
+    #[test]
+    fn register_mcp_opencode_creates_entry_and_is_idempotent() {
+        let _g = crate::rtk::env_test_lock();
+        let dir = tempdir().unwrap();
+        let cfg_dir = dir.path().join("opencode");
+        std::env::set_var("OPENCODE_CONFIG_DIR", cfg_dir.to_str().unwrap());
+        let bin = PathBuf::from("/tmp/fake-lens-register-test");
+        let newly = register_mcp_opencode(&bin).unwrap();
+        assert!(newly, "first registration must report newly added");
+        let cfg_path = opencode_config_path().unwrap();
+        let root = read_opencode_config(&cfg_path).unwrap();
+        assert_eq!(root["$schema"], "https://opencode.ai/config.json");
+        let lens = &root["mcp"]["lens"];
+        assert_eq!(lens["type"], "local");
+        assert_eq!(lens["command"], json!(["/tmp/fake-lens-register-test"]));
+        assert_eq!(lens["enabled"], true);
+        assert_eq!(lens["environment"]["LENS_ROUTING"], "full");
+        let again = register_mcp_opencode(&bin).unwrap();
+        assert!(!again, "re-registration must be no-op (returns false)");
+        std::env::remove_var("OPENCODE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn register_mcp_opencode_handles_existing_jsonc_and_preserves_other_keys() {
+        let _g = crate::rtk::env_test_lock();
+        let dir = tempdir().unwrap();
+        let cfg_dir = dir.path().join("opencode2");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let cfg_path = cfg_dir.join("opencode.jsonc");
+        // pre-existing with line comment (jsonc) and other mcp entry
+        let initial = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  // existing comment
+  "mcp": {
+    "other": {"type": "stdio", "command": ["foo"]}
+  }
+}"#;
+        std::fs::write(&cfg_path, initial).unwrap();
+        std::env::set_var("OPENCODE_CONFIG_DIR", cfg_dir.to_str().unwrap());
+        let bin = PathBuf::from("/tmp/fake-lens2");
+        let newly = register_mcp_opencode(&bin).unwrap();
+        assert!(newly);
+        let root = read_opencode_config(&cfg_path).unwrap();
+        assert!(root["mcp"]["other"].is_object());
+        let lens = &root["mcp"]["lens"];
+        assert_eq!(lens["command"], json!(["/tmp/fake-lens2"]));
+        // comments are dropped on write (per fn doc), but other keys preserved
+        let again = register_mcp_opencode(&bin).unwrap();
+        assert!(!again);
+        std::env::remove_var("OPENCODE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn parse_opts_accepts_client_flag_without_error() {
+        let args: Vec<String> = ["--client", "opencode", "--routing", "nudge"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let opts = parse_opts(&args).unwrap();
+        assert_eq!(opts.routing, "nudge");
+        // --client consumed by from_cli_arg for host; parse_opts just skips the flag
+    }
+
+    #[test]
+    fn mcp_registered_detects_opencode_mcp_entry() {
+        let _g = crate::rtk::env_test_lock();
+        let dir = tempdir().unwrap();
+        let cfg_dir = dir.path().join("oc-reg");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let cfg_path = cfg_dir.join("opencode.jsonc");
+        std::fs::write(
+            &cfg_path,
+            r#"{"mcp": {"lens": {"enabled": true, "command": ["/tmp/l"] } } }"#,
+        )
+        .unwrap();
+        std::env::set_var("LENS_HOST", "opencode");
+        std::env::set_var("OPENCODE_CONFIG_DIR", cfg_dir.to_str().unwrap());
+        assert!(mcp_registered());
+        std::env::remove_var("LENS_HOST");
+        std::env::remove_var("OPENCODE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn doctor_for_opencode_checks_mcp_and_commands() {
+        let _g = crate::rtk::env_test_lock();
+        let dir = tempdir().unwrap();
+        let cfg_dir = dir.path().join("oc-doc");
+        std::fs::create_dir_all(cfg_dir.join("commands")).unwrap();
+        let cfg_path = cfg_dir.join("opencode.jsonc");
+        std::fs::write(
+            &cfg_path,
+            r#"{"$schema":"https://opencode.ai/config.json","mcp":{"lens":{"type":"local","command":["/bin/fake-lens"],"enabled":true}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cfg_dir.join("commands").join("dashboard.md"),
+            "# dashboard",
+        )
+        .unwrap();
+        std::env::set_var("LENS_HOST", "opencode");
+        std::env::set_var("OPENCODE_CONFIG_DIR", cfg_dir.to_str().unwrap());
+        let bin = std::env::current_exe().unwrap();
+        let bin_dir = bin.parent().unwrap().to_path_buf();
+        let oldp = std::env::var_os("PATH");
+        let p = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        std::env::set_var("PATH", &p);
+        let ok = doctor_for_opencode(&bin, &bin_dir, false);
+        if let Some(op) = oldp {
+            std::env::set_var("PATH", op);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        std::env::remove_var("LENS_HOST");
+        std::env::remove_var("OPENCODE_CONFIG_DIR");
+        assert!(ok);
     }
 }

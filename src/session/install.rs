@@ -1,9 +1,8 @@
 //! `lens session <install|uninstall|status>` — register/remove the
-//! lifecycle hooks in Claude Code's `settings.json`.
+//! lifecycle hooks in Claude Code's `settings.json` (or install commands for opencode).
 //!
-//! Install is atomic (refuses to run alongside Context Mode's hooks, which would
-//! double-fire on the same lifecycle events) and reversible (uninstall removes
-//! only lens's entries, leaving any other hooks untouched).
+//! Host-aware via `--client` / `LENS_HOST` (from T1). For opencode: populates
+//! commands/ only; lifecycle hooks not supported yet. Claude behavior byte-identical.
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +11,7 @@ use serde_json::{json, Value};
 
 use super::store::SessionStore;
 use crate::index::Index;
+use crate::client::{self, Host};
 
 /// The five lifecycle events lens registers, with their settings matcher.
 /// Empty matcher = fire for all tools / always.
@@ -23,8 +23,10 @@ const EVENTS: [&str; 5] = [
     "SessionStart",
 ];
 
-/// Substring identifying a lens-owned hook command.
+/// Substring identifying a lens-owned hook command (Claude).
 const MARKER: &str = "hook claude";
+/// Substring for opencode (future hook support; commands path today).
+const OPENCODE_MARKER: &str = "hook opencode";
 const SELF_MARKER: &str = "lens";
 
 /// Bundled slash commands, embedded at compile time so a sent binary can install them
@@ -38,7 +40,8 @@ const BUNDLED_COMMANDS: &[(&str, &str)] = &[
 /// CLI entry: `args` is everything after `session`.
 pub fn run_cli(args: &[String]) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
-    let settings = settings_path(settings_override(args))?;
+    let host = client::detect_host();
+    let target = resolve_target(host, args)?;
     let bin = std::env::current_exe()
         .context("resolving lens binary path")?
         .to_string_lossy()
@@ -46,16 +49,22 @@ pub fn run_cli(args: &[String]) -> Result<()> {
 
     match sub {
         "install" => {
-            match install(&settings, &bin) {
+            match install_for(host, &target, &bin) {
                 Ok(()) => {
-                    println!("lens session hooks installed at {}", settings.display());
-                    println!("  binary: {bin}");
-                    println!("\nInstalling RTK shell compressor...");
-                    if let Err(e) = crate::rtk::install::install() {
-                        eprintln!("warning: RTK install failed: {e:#}");
-                        eprintln!("  Run `lens rtk install` manually to retry.");
+                    if host == Host::Claude {
+                        println!("lens session hooks installed at {}", target.display());
+                        println!("  binary: {bin}");
+                        println!("\nInstalling RTK shell compressor...");
+                        if let Err(e) = crate::rtk::install::install() {
+                            eprintln!("warning: RTK install failed: {e:#}");
+                            eprintln!("  Run `lens rtk install` manually to retry.");
+                        }
+                        println!("\nNext: uninstall Context Mode if you have it, then verify with `lens session status`.");
+                    } else {
+                        println!("lens session commands installed at {}", target.display());
+                        println!("  binary: {bin}");
+                        println!("\nNote: full lifecycle hooks are not yet supported for opencode (commands/dashboard + warmup only).");
                     }
-                    println!("\nNext: uninstall Context Mode if you have it, then verify with `lens session status`.");
                     Ok(())
                 }
                 Err(e) => {
@@ -65,17 +74,21 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             }
         }
         "uninstall" => {
-            let n = uninstall(&settings)?;
-            println!(
-                "removed {n} lens hook entr{} from {}",
-                if n == 1 { "y" } else { "ies" },
-                settings.display()
-            );
+            let n = uninstall_for(host, &target)?;
+            if host == Host::Claude {
+                println!(
+                    "removed {n} lens hook entr{} from {}",
+                    if n == 1 { "y" } else { "ies" },
+                    target.display()
+                );
+            } else {
+                println!("removed lens commands from {}", target.display());
+            }
             Ok(())
         }
         "status" => {
-            let r = status(&settings);
-            print_status(&r);
+            let r = status_for(host, &target);
+            print_status_for(host, &r);
             Ok(())
         }
         other => {
@@ -86,8 +99,8 @@ pub fn run_cli(args: &[String]) -> Result<()> {
 }
 
 /// `--config-dir <dir>` -> `<dir>/settings.json`; `--settings <file>` -> that
-/// file. Lets you point at a specific config dir explicitly instead of relying
-/// on ambient `$CLAUDE_CONFIG_DIR`. Flags follow the subcommand:
+/// file. (Claude-oriented; for opencode `--config-dir` is interpreted as config root
+/// via resolve_target stripping). Flags follow the subcommand:
 /// `lens session install --config-dir <dir>`.
 fn settings_override(args: &[String]) -> Option<PathBuf> {
     let mut i = 0;
@@ -102,11 +115,24 @@ fn settings_override(args: &[String]) -> Option<PathBuf> {
     None
 }
 
+/// Resolve the target for this host: for Claude the settings.json path,
+/// for opencode the config dir (so commands/ lives directly under it).
+/// Honors --config-dir/--settings (with host adjustment for opencode), LENS_* envs,
+/// and client::config_dir_for (which honors OPENCODE_CONFIG_DIR etc).
+fn resolve_target(host: Host, args: &[String]) -> Result<PathBuf> {
+    let ov = settings_override(args);
+    match host {
+        Host::Claude => settings_path(ov),
+        Host::Opencode => opencode_config_path(ov),
+    }
+}
+
 /// Resolve the settings.json to write, by precedence: an explicit CLI override
 /// (`--config-dir`/`--settings`), then `LENS_SETTINGS`, then the dir THIS Claude
 /// Code reads (`$CLAUDE_CONFIG_DIR` if set, else
 /// `~/.claude`). Mirrors the RTK side (`rtk::claude_settings_path`) so session +
 /// rtk hooks land in the same settings.json.
+/// (kept for Claude byte-compat; generalized callers use resolve_target)
 fn settings_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(p) = override_path {
         return Ok(p);
@@ -116,6 +142,31 @@ fn settings_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
     }
     crate::rtk::claude_config_dir()
         .map(|d| d.join("settings.json"))
+        .ok_or_else(|| anyhow!("HOME not set"))
+}
+
+/// For opencode: return config root (never a settings.json). Strips accidental
+/// /settings.json suffix that settings_override adds for --config-dir.
+fn opencode_config_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(mut p) = override_path {
+        if p.ends_with("settings.json") {
+            if let Some(parent) = p.parent() {
+                p = parent.to_path_buf();
+            }
+        }
+        // if --settings pointed at json for opencode, use its dir; else the path
+        if p.extension().is_some_and(|e| e == "json") {
+            if let Some(parent) = p.parent() {
+                p = parent.to_path_buf();
+            }
+        }
+        return Ok(p);
+    }
+    if let Some(p) = std::env::var_os("LENS_SETTINGS") {
+        let pb = PathBuf::from(p);
+        return Ok(pb.parent().unwrap_or(&pb).to_path_buf());
+    }
+    client::config_dir_for(Host::Opencode)
         .ok_or_else(|| anyhow!("HOME not set"))
 }
 
@@ -141,8 +192,20 @@ fn save(settings: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Install the five hooks. Errors (refuses) if Context Mode hooks are present.
+/// Install the five hooks (Claude). Errors (refuses) if Context Mode hooks are present.
+/// Kept for direct calls / tests; host-aware entry is install_for.
 pub fn install(settings: &Path, bin: &str) -> Result<()> {
+    install_for(Host::Claude, settings, bin)
+}
+
+fn install_for(host: Host, target: &Path, bin: &str) -> Result<()> {
+    match host {
+        Host::Claude => install_claude(target, bin),
+        Host::Opencode => install_opencode(target, bin),
+    }
+}
+
+fn install_claude(settings: &Path, bin: &str) -> Result<()> {
     let mut root = load(settings)?;
     if context_mode_present(&root) {
         return Err(anyhow!(
@@ -175,16 +238,23 @@ pub fn install(settings: &Path, bin: &str) -> Result<()> {
     }
 
     save(settings, &root)?;
-    write_command(settings)
+    if let Some(p) = settings.parent() {
+        install_commands(p)?;
+    }
+    Ok(())
 }
 
-/// Write the bundled slash commands into `<config dir>/commands/`, where the config
-/// dir is the settings file's parent. Overwrites (idempotent).
-fn write_command(settings: &Path) -> Result<()> {
-    let Some(dir) = settings.parent() else {
-        return Ok(());
-    };
-    let cmd_dir = dir.join("commands");
+/// For opencode: write only the bundled commands under config/commands/ .
+/// Never touches settings.json or any hook groups (lifecycle hooks not supported yet).
+fn install_opencode(config_dir: &Path, _bin: &str) -> Result<()> {
+    install_commands(config_dir)?;
+    Ok(())
+}
+
+/// Write the bundled slash commands into `<config dir>/commands/`.
+/// (generalized to take config dir directly; claude callers pass .parent())
+pub fn install_commands(config_dir: &Path) -> Result<()> {
+    let cmd_dir = config_dir.join("commands");
     std::fs::create_dir_all(&cmd_dir)
         .with_context(|| format!("creating {}", cmd_dir.display()))?;
     for (file, content) in BUNDLED_COMMANDS {
@@ -195,22 +265,39 @@ fn write_command(settings: &Path) -> Result<()> {
 }
 
 /// Remove the bundled command files (best-effort).
-fn remove_command(settings: &Path) {
-    if let Some(dir) = settings.parent() {
-        let cmd_dir = dir.join("commands");
-        for (file, _) in BUNDLED_COMMANDS {
-            let _ = std::fs::remove_file(cmd_dir.join(file));
-        }
+fn remove_commands(config_dir: &Path) {
+    let cmd_dir = config_dir.join("commands");
+    for (file, _) in BUNDLED_COMMANDS {
+        let _ = std::fs::remove_file(cmd_dir.join(file));
     }
 }
 
 /// Remove only lens's hook entries. Returns how many groups were removed.
+/// (claude; host-aware is uninstall_for)
 pub fn uninstall(settings: &Path) -> Result<usize> {
+    uninstall_for(Host::Claude, settings)
+}
+
+fn uninstall_for(host: Host, target: &Path) -> Result<usize> {
+    match host {
+        Host::Claude => uninstall_claude(target),
+        Host::Opencode => uninstall_opencode(target),
+    }
+}
+
+fn uninstall_claude(settings: &Path) -> Result<usize> {
     let mut root = load(settings)?;
     let removed = strip_lens(&mut root);
     save(settings, &root)?;
-    remove_command(settings);
+    if let Some(p) = settings.parent() {
+        remove_commands(p);
+    }
     Ok(removed)
+}
+
+fn uninstall_opencode(config_dir: &Path) -> Result<usize> {
+    remove_commands(config_dir);
+    Ok(0)
 }
 
 /// Remove every lens-owned hook group from `root`, pruning empty arrays.
@@ -249,7 +336,7 @@ fn group_is_lens(group: &Value) -> bool {
 fn command_is_lens(hook: &Value) -> bool {
     hook.get("command")
         .and_then(|c| c.as_str())
-        .map(|c| c.contains(SELF_MARKER) && c.contains(MARKER))
+        .map(|c| c.contains(SELF_MARKER) && (c.contains(MARKER) || c.contains(OPENCODE_MARKER)))
         .unwrap_or(false)
 }
 
@@ -366,6 +453,17 @@ pub struct Status {
 
 /// Inspect hook installation + backing stores.
 pub fn status(settings: &Path) -> Status {
+    status_for(Host::Claude, settings)
+}
+
+fn status_for(host: Host, target: &Path) -> Status {
+    match host {
+        Host::Claude => status_claude(target),
+        Host::Opencode => status_opencode(target),
+    }
+}
+
+fn status_claude(settings: &Path) -> Status {
     let root = load(settings).unwrap_or_else(|_| json!({}));
     let mut installed_events = Vec::new();
     if let Some(hooks) = root.get("hooks").and_then(|h| h.as_object()) {
@@ -392,26 +490,67 @@ pub fn status(settings: &Path) -> Status {
     }
 }
 
-fn print_status(s: &Status) {
+fn status_opencode(config_dir: &Path) -> Status {
+    // Opencode: no lifecycle hooks yet; report commands presence via the events vec for status.
+    // (avoids changing pub Status struct)
+    let cmd_dir = config_dir.join("commands");
+    let mut installed_events = Vec::new();
+    if cmd_dir.join("dashboard.md").is_file() {
+        installed_events.push("dashboard".to_string());
+    }
+    if cmd_dir.join("warmup.md").is_file() {
+        installed_events.push("warmup".to_string());
+    }
+    if !installed_events.is_empty() {
+        installed_events.insert(0, "commands".to_string());
+    }
+
+    let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let data_dir = super::resolve_data_dir(&project);
+    let store_ok = SessionStore::open(&data_dir).is_ok();
+    let fts_ok = Index::open(&data_dir).and_then(|i| i.chunk_count()).is_ok();
+
+    Status {
+        installed_events,
+        conflict: false,
+        store_ok,
+        fts_ok,
+    }
+}
+
+fn print_status_for(host: Host, s: &Status) {
     let mark = |b: bool| if b { "ok" } else { "FAIL" };
     println!("lens session status");
-    if s.installed_events.is_empty() {
-        println!("  hooks installed : none (run `lens session install`)");
-    } else {
-        println!(
-            "  hooks installed : {} ({})",
-            s.installed_events.len(),
-            s.installed_events.join(", ")
-        );
-    }
-    println!(
-        "  context-mode    : {}",
-        if s.conflict {
-            "PRESENT — conflict! uninstall it"
+    if host == Host::Claude {
+        if s.installed_events.is_empty() {
+            println!("  hooks installed : none (run `lens session install`)");
         } else {
-            "not detected"
+            println!(
+                "  hooks installed : {} ({})",
+                s.installed_events.len(),
+                s.installed_events.join(", ")
+            );
         }
-    );
+        println!(
+            "  context-mode    : {}",
+            if s.conflict {
+                "PRESENT — conflict! uninstall it"
+            } else {
+                "not detected"
+            }
+        );
+    } else {
+        // opencode
+        if s.installed_events.is_empty() {
+            println!("  commands installed : none (run `lens session install --client opencode`)");
+        } else {
+            println!(
+                "  commands installed : {}",
+                s.installed_events.join(", ")
+            );
+        }
+        println!("  lifecycle hooks : not supported yet (opencode commands only)");
+    }
     println!("  event store     : {}", mark(s.store_ok));
     println!("  Search index    : {}", mark(s.fts_ok));
 }
@@ -581,5 +720,32 @@ mod tests {
         assert!(body.contains("lens warmup"));
         uninstall(&settings).unwrap();
         assert!(!cmd.exists(), "/warmup command should be removed on uninstall");
+    }
+
+    #[test]
+    fn install_opencode_via_run_cli_writes_commands_cross_host() {
+        let _g = crate::rtk::env_test_lock();
+        let dir = tempdir().unwrap();
+        let cfg = dir.path().join("oc-cmds");
+        let prev_oc = std::env::var_os("OPENCODE_CONFIG_DIR");
+        let prev_host = std::env::var_os("LENS_HOST");
+        std::env::set_var("OPENCODE_CONFIG_DIR", cfg.to_str().unwrap());
+        std::env::set_var("LENS_HOST", "opencode");
+        let res = run_cli(&["install".to_string()]);
+        assert!(res.is_ok());
+        assert!(cfg.join("commands").join("dashboard.md").is_file());
+        assert!(cfg.join("commands").join("warmup.md").is_file());
+        // cross-host: flip to claude (no claude writes here), ensure opencode commands untouched
+        std::env::set_var("LENS_HOST", "claude");
+        assert!(cfg.join("commands").join("dashboard.md").is_file());
+        restore_env("OPENCODE_CONFIG_DIR", prev_oc);
+        restore_env("LENS_HOST", prev_host);
+    }
+
+    fn restore_env(k: &str, v: Option<std::ffi::OsString>) {
+        match v {
+            Some(val) => std::env::set_var(k, val),
+            None => std::env::remove_var(k),
+        }
     }
 }

@@ -611,16 +611,10 @@ pub fn snapshot_json_since(
     // way (see dashboard.rs's `scope=global` branch).
     let reroute = reroute_aggregate(std::slice::from_ref(&dir.to_path_buf()));
 
-    // "Actual Usage" plane: real per-model token/turn/cost mix from Claude Code's
-    // own JSONL transcripts, for the same window/scope as everything above.
-    // Model-mix weighting (Level A, the dashboard plan's locked design):
-    // `OpRecord` carries no model, so the window's `tokens_saved_est` is split
-    // across models by each model's share of assistant turns, then priced at
-    // that model's input rate (estimated/uncached-equiv). `dir` is already the
-    // caller's resolved scope (route()'s "global" branch passes home_root()
-    // itself; a repo branch passes `<repo>/.lens`), so cwd_filter falls out of
-    // that without a new parameter: the global home root gets no cwd
-    // restriction (it spans every repo); a `.lens` dir restricts to its parent.
+    // "Actual Usage" plane: real per-model (or host) token/turn/cost mix from
+    // the active host's transcripts (Claude JSONL or opencode db/jsonl), same
+    // window/scope. (T6) Model-mix weighting unchanged; opencode yields one
+    // "opencode" row with rough counts (no full tokens yet).
     let cwd_filter: Option<PathBuf> = if crate::rtk::home_root().as_deref() == Some(dir) {
         None
     } else {
@@ -1429,5 +1423,48 @@ esac
         let none = reroute_aggregate(&[plain.path().to_path_buf()]);
         assert_eq!(none["gsym"]["would_fire"], json!(6), "unstamped dir keeps full cumulative");
         assert_eq!(none["gsym"]["epoch_stamp"], json!(0));
+    }
+
+    /// Predicate verifier for T6: with LENS_HOST=opencode + temp state dir holding
+    /// prompt-history.jsonl (3 user turns), snapshot_json (what dashboard API uses)
+    /// returns non-empty actual_usage with >0 turns. Claude paths untouched.
+    #[test]
+    fn opencode_actual_usage_nonempty_in_snapshot() {
+        let _g = crate::rtk::env_test_lock();
+        let prev_host = std::env::var_os("LENS_HOST");
+        let prev_oc = std::env::var_os("OPENCODE_CONFIG_DIR");
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let tmp = tempfile::tempdir().unwrap();
+        let lines = r#"{"role":"user","content":"u1 with length for size","timestamp":"2026-07-11T00:00:00Z"}
+{"role":"user","content":"u2 prompt text here","timestamp":"2026-07-11T00:01:00Z"}
+{"role":"user","content":"u3","timestamp":"2026-07-11T00:02:00Z"}
+"#;
+        std::fs::write(tmp.path().join("prompt-history.jsonl"), lines).unwrap();
+        std::env::set_var("LENS_HOST", "opencode");
+        std::env::set_var("OPENCODE_CONFIG_DIR", tmp.path());
+        std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
+        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
+
+        let data = tempfile::tempdir().unwrap();
+        let snap = snapshot_json(data.path(), None);
+        let au = snap["actual_usage"].as_array().expect("array");
+        println!("OPENCODE SNAPSHOT actual_usage: {}", serde_json::to_string_pretty(&snap["actual_usage"]).unwrap());
+        let turns: u64 = au.iter().map(|m| m["turns"].as_u64().unwrap_or(0)).sum();
+        println!("total turns from opencode: {}", turns);
+        assert!(!au.is_empty(), "non-empty actual_usage for opencode");
+        assert!(turns >= 3, "at least the 3 user turns");
+
+        restore_env("LENS_HOST", prev_host);
+        restore_env("OPENCODE_CONFIG_DIR", prev_oc);
+        restore_env("HOME", prev_home);
+        restore_env("XDG_CONFIG_HOME", prev_xdg);
+    }
+
+    fn restore_env(key: &str, prev: Option<std::ffi::OsString>) {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
 }

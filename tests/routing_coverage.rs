@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use lens::routing::{route, Decision, Level, RouteCtx};
+use lens::routing::{post_route, route, session_block, Decision, Level, RouteCtx};
 use serde_json::{json, Value};
 
 /// Extract every `"lens_..."`-shaped string literal out of the live source of
@@ -344,4 +344,154 @@ fn tool_coverage_matrix_is_exhaustive_and_proven() {
             other => panic!("expected the escalation deny on the 4th consecutive lookup, got {other:?}"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// T4 (graph_reverify): a `lens_graph` PostToolUse response marks its files;
+// route()'s Read/Grep arms deny that file's 2nd+ visit toward the composed
+// `lens.callers(transitive=True)` darkroom program.
+// ---------------------------------------------------------------------------
+
+/// A minimal `GraphResponse::Neighbors` (`GraphView`)-shaped JSON string
+/// naming `file` on its one node — enough for
+/// `reroute::graph_reverify::files_in_graph_response` to extract it.
+fn graph_view_response(file: &str) -> String {
+    json!({
+        "nodes": [
+            {"id": "n1", "name": "some_symbol", "kind": "function", "file": file, "line": 1, "language": "rust"},
+        ],
+        "edges": [],
+        "truncated": false,
+        "resolved": [],
+    })
+    .to_string()
+}
+
+// Both env-independent assertions AND the `LENS_GRAPH_REVERIFY=0` kill-switch
+// live in ONE test function: `cargo test` runs different `#[test]` fns on
+// separate threads in the same process, so a second test flipping the shared
+// process-global env var mid-run could race this one — folding the kill
+// switch in here (env restored before returning) is the same one-test
+// discipline used for env-mutating cases elsewhere in this suite.
+#[test]
+fn graph_reverify_denies_the_second_visit_to_a_graph_surfaced_file() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let ctx = full_ctx(d.path(), "cov-grevf", 0);
+
+    // A lens_graph PostToolUse call surfaces src/widget.rs as a node — never
+    // denies (PostToolUse can only observe), but arms the file marker.
+    assert_eq!(
+        post_route(
+            "mcp__lens__lens_graph",
+            &graph_view_response("src/widget.rs"),
+            &ctx,
+        ),
+        Decision::Passthrough,
+    );
+
+    // First Grep of that exact file passes (the agent still needs one look);
+    // a narrow single-file scope with a plain-text pattern also keeps every
+    // OTHER Grep rail (scope/gsym/gast) out of the way, so grevf is the only
+    // actor here.
+    let grep_widget = json!({"pattern": "some_symbol_use", "path": "src/widget.rs"});
+    assert_eq!(
+        route("Grep", &grep_widget, &ctx),
+        Decision::Passthrough,
+        "the first visit to a graph-surfaced file must pass"
+    );
+
+    // Second visit denies, naming the file and the composed program.
+    let reason = assert_deny_or_modify_containing("Grep", &grep_widget, &ctx, "src/widget.rs");
+    assert!(
+        reason.contains("lens.callers") && reason.contains("transitive=True"),
+        "deny must name the composed program: {reason}"
+    );
+
+    // One-shot per file: the verbatim retry (3rd visit) passes.
+    assert_eq!(
+        route("Grep", &grep_widget, &ctx),
+        Decision::Passthrough,
+        "the verbatim retry must pass — denied at most once per file per session"
+    );
+
+    // A DIFFERENT graph-surfaced file gets its own one-shot, proven via Read
+    // this time (the rail applies to both tools, keyed on the same
+    // `graphfile:{path}`/`grevf:{path}` markers regardless of which one asks).
+    // A whole-file Read also happens to be rskel-eligible, but grevf runs
+    // FIRST in `read_decision`, so its own verdict — pass, then deny with the
+    // composed-program reason — wins outright on the file's 1st/2nd visits.
+    let ctx2 = full_ctx(d.path(), "cov-grevf-2", 0);
+    post_route(
+        "mcp__lens__lens_graph",
+        &graph_view_response("src/other.rs"),
+        &ctx2,
+    );
+    let read_other = json!({"file_path": "src/other.rs"});
+    // 1st visit: grevf lets it through (still passes to whichever OTHER rail
+    // wants it, e.g. rskel — irrelevant here, just not a grevf deny).
+    match route("Read", &read_other, &ctx2) {
+        Decision::Deny(reason) => assert!(
+            !reason.contains("lens.callers"),
+            "the FIRST visit must not be the grevf deny: {reason}"
+        ),
+        Decision::Passthrough => {}
+        other => panic!("unexpected first-visit decision: {other:?}"),
+    }
+    // 2nd visit: grevf wins outright with its own composed-program reason.
+    match route("Read", &read_other, &ctx2) {
+        Decision::Deny(reason) => assert!(
+            reason.contains("src/other.rs") && reason.contains("lens.callers"),
+            "the file's 2nd visit must be the grevf deny: {reason}"
+        ),
+        other => panic!("expected the grevf deny on this file's 2nd visit, got {other:?}"),
+    }
+
+    // A file never surfaced by any lens_graph call is untouched by this rail.
+    let ctx3 = full_ctx(d.path(), "cov-grevf-3", 0);
+    let never_surfaced = json!({"pattern": "some_symbol_use", "path": "src/never_surfaced.rs"});
+    for _ in 0..3 {
+        assert_eq!(
+            route("Grep", &never_surfaced, &ctx3),
+            Decision::Passthrough,
+            "a file never surfaced by lens_graph must never grevf-deny"
+        );
+    }
+
+    // Kill switch: LENS_GRAPH_REVERIFY=0 disables the rail outright, even for
+    // a file the graph did surface.
+    std::env::set_var("LENS_GRAPH_REVERIFY", "0");
+    let ctx4 = full_ctx(d.path(), "cov-grevf-off", 0);
+    post_route(
+        "mcp__lens__lens_graph",
+        &graph_view_response("src/killswitch.rs"),
+        &ctx4,
+    );
+    let grep_killswitch = json!({"pattern": "some_symbol_use", "path": "src/killswitch.rs"});
+    for i in 1..=3 {
+        assert_eq!(
+            route("Grep", &grep_killswitch, &ctx4),
+            Decision::Passthrough,
+            "visit {i}: LENS_GRAPH_REVERIFY=0 must never deny"
+        );
+    }
+    std::env::remove_var("LENS_GRAPH_REVERIFY");
+}
+
+#[test]
+fn session_start_guide_carries_the_composed_program_worked_example_exactly_once() {
+    let b = session_block(Level::Full);
+    let needle = "compose it in the darkroom instead of firing lens_graph repeatedly";
+    assert!(
+        b.contains(needle),
+        "the guide must carry the composed-program worked example: {b}"
+    );
+    assert_eq!(
+        b.matches(needle).count(),
+        1,
+        "the worked example must appear exactly once in the assembled guide"
+    );
+    // The composed call itself, and its transitive-closure flag, are part of
+    // that same worked example.
+    assert!(b.contains("lens.callers('X', transitive=True"));
 }

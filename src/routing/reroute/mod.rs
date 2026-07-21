@@ -13,6 +13,7 @@
 //! - `edit_callers` → `elink`
 //! - `grep_ast` → `gast`
 //! - `read_overview` → `rovr`
+//! - `graph_reverify` → `grevf`
 //!
 //! Env flags — kill-switch polarity: every flag is ON by default and `=0`
 //! disables it (the `LENS_GREP_FIRST_DENY` pattern), one flag per rail:
@@ -24,17 +25,23 @@
 //! - `LENS_READ_OVERVIEW_DENY`
 //! - `LENS_BASH_GREP_DENY`
 //! - `LENS_READ_RUNFILE_DENY`
+//! - `LENS_GRAPH_REVERIFY`
 //!
 //! Every rail is DENY-only, firing under `Level::steers` (Steer|Full). The
 //! nudge arms were retired 2026-07-19 (measured conversion 0-33% for nudges
 //! vs 51-71% for denies). Each rail keeps its one-shot throttle key and the
 //! `{p}_would_fire` / `{p}_next_{class}` counter keys — the prefix identifies
 //! the rail; `{p}_shadow_next_{class}` is the follower counter when the
-//! operator has kill-switched the rail (`=0`).
+//! operator has kill-switched the rail (`=0`). `grevf` is per-FILE rather than
+//! per-symbol/session (see `graph_reverify`'s doc); its `would_fire`/`next`
+//! counters are enumerated in `obs::stats::REROUTE_PREFIXES` but, unlike its
+//! siblings, are not yet emitted from `session::hook`'s shadow-counter plane —
+//! a deferred follow-up.
 
 pub mod bash_aggregate;
 pub mod bash_grep;
 pub mod edit_callers;
+pub mod graph_reverify;
 pub mod grep_ast;
 pub mod grep_symbol;
 pub mod read_overview;
@@ -53,3 +60,5 @@ pub const PREFIX_EDIT_LINKS: &str = "elink";
 pub const PREFIX_GREP_AST: &str = "gast";
 #[allow(dead_code)]
 pub const PREFIX_READ_OVERVIEW: &str = "rovr";
+#[allow(dead_code)]
+pub const PREFIX_GRAPH_REVERIFY: &str = "grevf";

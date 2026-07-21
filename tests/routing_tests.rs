@@ -60,6 +60,7 @@ fn run_hook(
         .env_remove("LENS_READ_OVERVIEW_DENY")
         .env_remove("LENS_BASH_GREP_DENY")
         .env_remove("LENS_READ_RUNFILE_DENY")
+        .env_remove("LENS_GRAPH_REVERIFY")
         .env_remove("LENS_EDIT_LINKS_MIN_CALLERS")
         .env_remove("LENS_READ_OVERVIEW_THRESHOLD")
         // RTK coexistence (plan T4): force the defer-Bash-to-RTK gate OFF so these
@@ -860,7 +861,7 @@ const FULL_UP: [(&str, &str); 2] = [("LENS_ROUTING", "full"), ("LENS_ROUTING_MCP
 /// flag is ON by default, so a test isolating ONE rail must silence the
 /// others or an unrelated rail can pre-empt the assertion (e.g. `impl Foo` is
 /// BOTH a gsym- and a gast-shaped Grep pattern).
-const ALL_RAILS_OFF: [(&str, &str); 9] = [
+const ALL_RAILS_OFF: [(&str, &str); 10] = [
     ("LENS_GREP_SCOPE_DENY", "0"),
     ("LENS_GREP_SYMBOL_DENY", "0"),
     ("LENS_READ_SKELETON_DENY", "0"),
@@ -870,6 +871,7 @@ const ALL_RAILS_OFF: [(&str, &str); 9] = [
     ("LENS_EDIT_LINKS_DENY", "0"),
     ("LENS_BASH_GREP_DENY", "0"),
     ("LENS_READ_RUNFILE_DENY", "0"),
+    ("LENS_GRAPH_REVERIFY", "0"),
 ];
 
 /// Build a deterministic env vec for a rail test: `level` (e.g. `FULL_UP`)
@@ -1775,4 +1777,93 @@ fn kill_switch_all_rail_flags_off_leaves_only_grep_first_and_escalation_denies()
         is_deny(&fourth),
         "the read-escalation deny is unaffected by the rail kill-switches: {fourth}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T4: graph_reverify — a lens_graph PostToolUse response marks its files; the
+// next PreToolUse Read/Grep on a marked file denies on its 2nd+ visit, naming
+// the composed lens.callers(transitive=True) darkroom program. Every call
+// drives the real binary end to end (PostToolUse mark, then PreToolUse deny).
+// ---------------------------------------------------------------------------
+
+/// A `mcp__lens__lens_graph` PostToolUse payload whose response names `file`
+/// on its one node — enough for `graph_reverify` to mark it.
+fn graph_post_payload(dir: &Path, session: &str, file: &str) -> Value {
+    json!({
+        "session_id": session,
+        "cwd": dir.to_string_lossy(),
+        "tool_name": "mcp__lens__lens_graph",
+        "tool_input": { "node": "some_symbol" },
+        "tool_response": {
+            "nodes": [
+                {"id": "n1", "name": "some_symbol", "kind": "function", "file": file, "line": 1, "language": "rust"},
+            ],
+            "edges": [],
+            "truncated": false,
+            "resolved": [],
+        },
+    })
+}
+
+#[test]
+fn graph_reverify_denies_second_visit_then_kill_switch_disables_it() {
+    let d = tempfile::tempdir().unwrap();
+    seed_index(d.path());
+    let envs = rail_envs(&FULL_UP, &[("LENS_GRAPH_REVERIFY", "1")]);
+    let sess = "grevf-e2e";
+
+    // A lens_graph call surfaces src/widget.rs as a node.
+    run_hook(
+        "PostToolUse",
+        &graph_post_payload(d.path(), sess, "src/widget.rs"),
+        &envs,
+        d.path(),
+    );
+
+    // A Grep scoped to that exact file: a narrow single-file scope with a
+    // plain-text pattern keeps every OTHER Grep rail out of the way (they are
+    // pinned off by `rail_envs` regardless).
+    let mut g = grep_payload(d.path(), sess, "some_symbol_use");
+    g["tool_input"]["path"] = json!("src/widget.rs");
+
+    let (_, first) = run_hook("PreToolUse", &g, &envs, d.path());
+    assert!(
+        !is_deny(&first),
+        "the first visit to a graph-surfaced file must pass: {first}"
+    );
+
+    let (_, second) = run_hook("PreToolUse", &g, &envs, d.path());
+    assert!(is_deny(&second), "the second visit must deny: {second}");
+    let reason = second["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(reason.contains("src/widget.rs"), "{reason}");
+    assert!(
+        reason.contains("lens.callers") && reason.contains("transitive=True"),
+        "deny names the composed program: {reason}"
+    );
+
+    // One-shot per file: the verbatim retry (3rd visit) passes.
+    let (_, third) = run_hook("PreToolUse", &g, &envs, d.path());
+    assert!(!is_deny(&third), "the verbatim retry must pass: {third}");
+
+    // Kill switch: LENS_GRAPH_REVERIFY=0 disables the rail outright, even for
+    // a graph-surfaced file visited twice.
+    let off_envs = rail_envs(&FULL_UP, &[]);
+    let sess_off = "grevf-e2e-off";
+    run_hook(
+        "PostToolUse",
+        &graph_post_payload(d.path(), sess_off, "src/killswitch.rs"),
+        &off_envs,
+        d.path(),
+    );
+    let mut g_off = grep_payload(d.path(), sess_off, "some_symbol_use");
+    g_off["tool_input"]["path"] = json!("src/killswitch.rs");
+    for i in 1..=3 {
+        let (_, v) = run_hook("PreToolUse", &g_off, &off_envs, d.path());
+        assert!(
+            !is_deny(&v),
+            "visit {i}: LENS_GRAPH_REVERIFY=0 must never deny: {v}"
+        );
+    }
 }

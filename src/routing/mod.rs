@@ -427,6 +427,18 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             if !ctx.level.nudges() {
                 return Decision::Passthrough;
             }
+            // Reroute rail 3 (grevf) DENY: a graph-surfaced file's 2nd+ Grep
+            // this session — see `graph_reverify_decision`. Only a Grep whose
+            // `path` names that exact file (not a directory it lives under)
+            // is in scope; a directory/whole-repo Grep never matches. Runs
+            // first so no other Grep rail's one-shot gets spent on a call
+            // this one is about to deny instead.
+            if let Some(d) = graph_reverify_decision(
+                tool_input.get("path").and_then(Value::as_str).unwrap_or(""),
+                ctx,
+            ) {
+                return d;
+            }
             // Scope-gated Grep deny: a broad-scope Grep (path spanning a dir or
             // the whole repo) can be denied once per prompt toward a lens call.
             // Two mechanisms share ONE deny budget — the always-on first-Grep
@@ -587,9 +599,21 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
 /// PostToolUse routing entry point (the session hook renders its result via
 /// [`to_post_hook_json`]). The one mechanism this carried — the grep-flood
 /// nudge toward lens_search — was retired with the other nudge arms (measured
-/// conversion 0-33% vs 51-71% for denies), so every PostToolUse call now
-/// passes through. Kept as the seam for a future deny-grade PostToolUse rail.
-pub fn post_route(_tool: &str, _tool_response: &str, _ctx: &RouteCtx) -> Decision {
+/// conversion 0-33% vs 51-71% for denies). This seam now backs the
+/// `graph_reverify` (grevf) rail's other half: a `lens_graph` response's
+/// per-node files are marked here (`graphfile:{file}`, via
+/// [`reroute::graph_reverify::files_in_graph_response`]) so `route_inner`'s
+/// Read/Grep arms can deny that file's 2nd+ visit toward the composed
+/// `lens.callers(transitive=True)` program instead of a second whole-file
+/// look (see [`graph_reverify_decision`]). PostToolUse can only observe, never
+/// deny — [`post_route`] itself always passes through; the deny fires later,
+/// at the next PreToolUse Read/Grep.
+pub fn post_route(tool: &str, tool_response: &str, ctx: &RouteCtx) -> Decision {
+    if tool == "mcp__lens__lens_graph" && graph_reverify_enabled() {
+        for file in reroute::graph_reverify::files_in_graph_response(tool_response) {
+            throttle::mark(ctx.data_dir, ctx.session_id, &format!("graphfile:{file}"));
+        }
+    }
     Decision::Passthrough
 }
 
@@ -700,6 +724,10 @@ pub fn bash_grep_deny_enabled() -> bool {
 pub fn read_runfile_deny_enabled() -> bool {
     std::env::var("LENS_READ_RUNFILE_DENY").map_or(true, |v| v.trim() != "0")
 }
+/// Graph-reverify deny arm (`grevf`): `LENS_GRAPH_REVERIFY=0` disables it.
+pub fn graph_reverify_enabled() -> bool {
+    std::env::var("LENS_GRAPH_REVERIFY").map_or(true, |v| v.trim() != "0")
+}
 
 /// The symbol whose declaration this Edit/MultiEdit touches, or `None`. Edit
 /// carries `old_string`/`new_string` at the top level; MultiEdit carries an
@@ -779,6 +807,12 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
         return Decision::Passthrough;
     }
     let path = tool_input["file_path"].as_str().unwrap_or("");
+    // Reroute rail 3 (grevf) DENY: a graph-surfaced file's 2nd+ Read this
+    // session — see `graph_reverify_decision`. Runs first so no other rail's
+    // one-shot gets spent on a call this one is about to deny instead.
+    if let Some(d) = graph_reverify_decision(path, ctx) {
+        return d;
+    }
     // Reroute rail 1b (rskel) DENY: a whole, unedited code-file Read is denied
     // toward lens_skeleton, once per FILE per session (`read-skeleton:{path}`,
     // the elink per-key pattern) — kill-switch LENS_READ_SKELETON_DENY, the
@@ -864,6 +898,41 @@ fn read_decision(tool_input: &Value, ctx: &RouteCtx) -> Decision {
         }
     }
     Decision::Passthrough
+}
+
+/// Reroute rail 3 (grevf) DENY: after a session's `lens_graph` call (marked by
+/// `post_route`'s file-marking side effect — see below), the graph answer
+/// already carries per-node witnesses proving every edge and, for a
+/// transitive closure, a `complete: true` claim — so re-reading one of its
+/// files a SECOND time is a re-verification, not new evidence. The FIRST
+/// Read/Grep of a graph-surfaced file always passes (the agent still needs to
+/// look at it once): a per-file `grevf-seen:{path}` throttle key remembers
+/// that first visit, silently, without denying. Only that SAME file's 2nd+
+/// visit is eligible to deny, and — the `edit_callers.rs` one-shot-per-symbol
+/// precedent applied per-file here — at most ONCE per file per session
+/// (`grevf:{path}` marks the deny fired), so the verbatim retry, and every
+/// later visit to that file, passes. `None` → the caller falls through to its
+/// other checks unchanged. Kill-switch `LENS_GRAPH_REVERIFY` (default ON, see
+/// [`graph_reverify_enabled`]); gated on `mcp_ready` like the other
+/// MCP-redirect denies, since the deny points at `lens_run`.
+fn graph_reverify_decision(path: &str, ctx: &RouteCtx) -> Option<Decision> {
+    if path.is_empty() || !graph_reverify_enabled() || !ctx.level.steers() || !ctx.mcp_ready {
+        return None;
+    }
+    if !throttle::fired(ctx.data_dir, ctx.session_id, &format!("graphfile:{path}")) {
+        return None; // this file never appeared in a lens_graph answer
+    }
+    let seen_key = format!("grevf-seen:{path}");
+    if !throttle::fired(ctx.data_dir, ctx.session_id, &seen_key) {
+        // First look at a graph-surfaced file always passes — just remember it.
+        throttle::mark(ctx.data_dir, ctx.session_id, &seen_key);
+        return None;
+    }
+    if !nudge_once(ctx, &format!("grevf:{path}")) {
+        return None; // already denied this file once — every later visit passes
+    }
+    throttle::reset(ctx.data_dir, ctx.session_id, "read-code");
+    Some(Decision::Deny(reroute::graph_reverify::deny_reason(path)))
 }
 
 /// Shared consecutive-lookup escalation for code Reads and Greps (the
@@ -1493,7 +1562,7 @@ const BULLET_BASH: &str = "\n    - Bash: keep it for commands that change someth
 
 const BULLET_READ: &str = "\n    - Need to understand a file? lens_skeleton(path) first; then lens_skeleton(path, include_bodies: [\"the_fn\"]) for the one body you need — not a second Read. Read is for when you are about to Edit (Edit must match exact bytes). Already Read the full file this session? Use what you have — do not re-analyse it with lens tools.\n    - Common rationalizations that lead to waste: \"the file is small\", \"I already know the path\", \"one Read beats two lens calls\" — measured across sessions these produce whole-file dumps that tax every later turn.";
 
-const BULLET_SEARCH: &str = "\n    - Finding or tracing something? Map the intent, don't grep: where is X / where does an idea appear — lens_search(queries: [...]) or lens_symbol(name); what calls X / what does X call — lens_graph(node, direction=\"callees\") / lens_graph(node, direction=\"callers\"); how does A reach B — lens_graph(from, to). Grep's line hits pull in a whole-file Read per hit; that chain is the drift these replace. \"A quick grep is lighter\" is the rationalization that starts it — one lens_search is the lighter call.";
+const BULLET_SEARCH: &str = "\n    - Finding or tracing something? Map the intent, don't grep: where is X / where does an idea appear — lens_search(queries: [...]) or lens_symbol(name); what calls X / what does X call — lens_graph(node, direction=\"callees\") / lens_graph(node, direction=\"callers\"); how does A reach B — lens_graph(from, to). Grep's line hits pull in a whole-file Read per hit; that chain is the drift these replace. \"A quick grep is lighter\" is the rationalization that starts it — one lens_search is the lighter call. A multi-step structural question (\"every prod caller of X, three hops out, with call sites\") is still ONE call, not a chain: compose it in the darkroom instead of firing lens_graph repeatedly — lens_run(language: \"python\", code: \"import lens; r = lens.callers('X', transitive=True, depth=3, prod_only=True); print(len(r['nodes'])); print(r['nodes'])\") prints the count and the full witnessed list in a single round trip.";
 
 const BULLET_WEBFETCH: &str = "\n    - WebFetch is off here: pull a URL with lens_run (python), keep only the part of the response you need, and print that. The full page stays in the darkroom, retrievable via lens_recall.";
 
@@ -2324,6 +2393,7 @@ mod tests {
             ("LENS_READ_OVERVIEW_DENY", read_overview_deny_enabled),
             ("LENS_BASH_GREP_DENY", bash_grep_deny_enabled),
             ("LENS_READ_RUNFILE_DENY", read_runfile_deny_enabled),
+            ("LENS_GRAPH_REVERIFY", graph_reverify_enabled),
         ];
         for (var, enabled) in helpers {
             std::env::remove_var(var);
@@ -2768,6 +2838,38 @@ mod tests {
             Decision::Passthrough,
             "the grep-flood nudge is retired: PostToolUse never routes"
         );
+    }
+
+    #[test]
+    fn post_route_marks_graph_surfaced_files_but_still_passes_through() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let resp = json!({
+            "nodes": [
+                {"id": "n1", "name": "foo", "kind": "function", "file": "src/widget.rs", "line": 1, "language": "rust"},
+            ],
+            "edges": [],
+            "truncated": false,
+            "resolved": [],
+        })
+        .to_string();
+        assert_eq!(
+            post_route("mcp__lens__lens_graph", &resp, &ctx),
+            Decision::Passthrough,
+            "post_route never denies — it only arms the file marker"
+        );
+        assert!(
+            throttle::fired(ctx.data_dir, ctx.session_id, "graphfile:src/widget.rs"),
+            "the graph-surfaced file must be marked for the graph_reverify rail"
+        );
+        // A non-graph tool response never marks anything.
+        let ctx2 = rc(Level::Full, true, d.path());
+        post_route("Grep", &resp, &ctx2);
+        assert!(!throttle::fired(
+            ctx2.data_dir,
+            ctx2.session_id,
+            "graphfile:src/widget.rs"
+        ));
     }
 
     #[test]

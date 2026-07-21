@@ -170,12 +170,26 @@ pub fn grep_ast_filtered(
         let mut cursor = QueryCursor::new();
         let mut it = cursor.matches(&q, tree.root_node(), src);
         while let Some(m) = it.next() {
-            for cap in m.captures {
-                if let Some(want) = only_capture {
-                    if q.capture_names()[cap.index as usize] != want {
-                        continue;
-                    }
-                }
+            // One row per query MATCH, not per capture: a raw multi-capture
+            // query (`(function_item (visibility_modifier) @vis name:
+            // (identifier) @name) @fn`) otherwise emits three rows per site
+            // and `count` triples (2026-07-21 audit: 117 reported vs 39 real
+            // pub fns). With `only_capture` (the pattern-DSL path) keep the
+            // named capture; otherwise represent the match by its OUTERMOST
+            // captured node (earliest start, longest span).
+            let picked: Vec<_> = if let Some(want) = only_capture {
+                m.captures
+                    .iter()
+                    .filter(|c| q.capture_names()[c.index as usize] == want)
+                    .collect()
+            } else {
+                m.captures
+                    .iter()
+                    .min_by_key(|c| (c.node.start_byte(), std::cmp::Reverse(c.node.end_byte())))
+                    .into_iter()
+                    .collect()
+            };
+            for cap in picked {
                 let node = cap.node;
                 // Bench (whole-file provenance) wins over an inner cfg(test)
                 // span, matching the graph's node-origin precedence.
@@ -298,6 +312,27 @@ mod tests {
         assert!(
             err.contains("every encountered grammar") || err.contains("failed to compile"),
             "must aggregate compile failures, not return empty: {err}"
+        );
+    }
+
+    /// A raw query with several captures per pattern reports ONE match per
+    /// site (the outermost captured node), so `count` equals real sites: the
+    /// 2026-07-21 audit shape `@vis @name @fn` reported 3x the true pub-fn
+    /// count.
+    #[test]
+    fn multi_capture_query_counts_sites_not_captures() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "pub fn one() {}\npub fn two() {}\nfn private() {}\n",
+        )
+        .unwrap();
+        let q = "(function_item (visibility_modifier) @vis name: (identifier) @name) @fn";
+        let hits = grep_ast(dir.path(), q, Some("rust"), 100).unwrap();
+        assert_eq!(hits.len(), 2, "one row per pub fn, not per capture: {hits:?}");
+        assert!(
+            hits[0].text.starts_with("pub fn one"),
+            "the outermost node represents the match: {hits:?}"
         );
     }
 

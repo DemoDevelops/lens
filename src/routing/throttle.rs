@@ -59,28 +59,33 @@ fn ensure_loaded(state: &mut DirState, data_dir: &Path) {
     }
 }
 
-/// Append one `session\tkey` fire to the on-disk log (best-effort).
-fn append(data_dir: &Path, session: &str, key: &str) {
+/// Append one fully formed line to the on-disk log (best-effort). The line is
+/// emitted in ONE `write` syscall: concurrent hook processes (parallel
+/// sessions share one data dir) append to this file, and `writeln!` on an
+/// unbuffered `File` issues one write per format fragment, so two processes'
+/// fragments interleave and tear both records — a torn `achain:done` mark /
+/// `!reset` sentinel is how the once-per-session achain deny re-fired
+/// (2026-07-21 parallel-lane bench audit). A single `write_all` of the whole
+/// line under `O_APPEND` keeps each record intact.
+fn append_line(data_dir: &Path, line: &str) {
     let _ = std::fs::create_dir_all(data_dir);
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_path(data_dir))
     {
-        let _ = writeln!(f, "{session}\t{key}");
+        let _ = f.write_all(line.as_bytes());
     }
+}
+
+/// Append one `session\tkey` fire to the on-disk log (best-effort).
+fn append(data_dir: &Path, session: &str, key: &str) {
+    append_line(data_dir, &format!("{session}\t{key}\n"));
 }
 
 /// Append a `session\tkey\t!reset` sentinel to the on-disk log (best-effort).
 fn append_reset(data_dir: &Path, session: &str, key: &str) {
-    let _ = std::fs::create_dir_all(data_dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path(data_dir))
-    {
-        let _ = writeln!(f, "{session}\t{key}\t!reset");
-    }
+    append_line(data_dir, &format!("{session}\t{key}\t!reset\n"));
 }
 
 /// Has `(session, key)` already fired this session? (cross-process)
@@ -250,6 +255,54 @@ mod tests {
             1,
             "a new process must honor the on-disk reset and count up from zero"
         );
+    }
+
+    #[test]
+    fn concurrent_appends_never_tear_records() {
+        // Parallel bench lanes (separate hook processes, one shared data dir)
+        // tore log lines when a record spanned several write syscalls: a torn
+        // `achain:done` / `!reset` line broke the once-per-session deny. Each
+        // append goes through its own file handle here, mimicking processes;
+        // every reloaded line must parse back to exactly the sessions/keys
+        // written.
+        let d = tempdir().unwrap();
+        let dir = d.path().to_path_buf();
+        // Hammer the raw append fns directly: `bump`/`mark` serialize on the
+        // in-process cache mutex, but separate hook PROCESSES don't, and
+        // `append` (its own file handle per call, no lock) is exactly that
+        // contention shape.
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    let sess = format!("sess-{t}");
+                    for i in 0..200 {
+                        if i % 5 == 0 {
+                            append_reset(&dir, &sess, "achain-run");
+                        } else {
+                            append(&dir, &sess, "achain-run");
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let text = std::fs::read_to_string(log_path(&dir)).unwrap();
+        let mut lines = 0;
+        for line in text.lines() {
+            lines += 1;
+            let fields: Vec<&str> = line.split('\t').collect();
+            assert!(
+                (fields.len() == 2 || (fields.len() == 3 && fields[2] == "!reset"))
+                    && fields[0].starts_with("sess-")
+                    && fields[0].len() == 6
+                    && fields[1] == "achain-run",
+                "torn or malformed log line: {line:?}"
+            );
+        }
+        assert_eq!(lines, 8 * 200, "every append must land as exactly one line");
     }
 
     #[test]

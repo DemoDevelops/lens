@@ -678,6 +678,39 @@ print(os.environ.get('LENS_DIR', ''))
         );
     }
 
+    // The python bootstrap pre-imports the prelude: `lens` is usable without
+    // `import lens` (the audited NameError round), an explicit import still
+    // works, and a traceback names the real script file and line.
+    #[tokio::test]
+    async fn python_lens_global_needs_no_import() {
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+        let req = ExecuteRequest {
+            path: None,
+            language: "python".into(),
+            code: "print(type(lens).__name__)\nimport lens as l2\nprint(l2 is lens)".into(),
+            timeout_secs: 30,
+            stdin: None,
+        };
+        let r = run(req, dir.path(), &store, 8192).await.unwrap();
+        assert_eq!(r.stdout.trim(), "module\nTrue", "stderr: {}", r.stderr);
+
+        let req = ExecuteRequest {
+            path: None,
+            language: "python".into(),
+            code: "x = 1\nboom()".into(),
+            timeout_secs: 30,
+            stdin: None,
+        };
+        let r = run(req, dir.path(), &store, 8192).await.unwrap();
+        assert_eq!(r.exit_code, 1);
+        assert!(
+            r.stderr.contains("line 2") && r.stderr.contains("boom"),
+            "traceback must keep the script's own line numbers: {}",
+            r.stderr
+        );
+    }
+
     #[tokio::test]
     async fn run_file_passes_path_as_argv() {
         // The file path is injected as argv; the code reads the file but only

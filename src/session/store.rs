@@ -80,6 +80,15 @@ impl SessionStore {
 
     fn init(&self) -> Result<()> {
         let conn = self.conn()?;
+        // Schema-version fast path: every hook process re-opens this store, and
+        // the IF-NOT-EXISTS DDL batch takes a write lock each time — on a
+        // contended shared db (the global mirror) that stalls the hot hook
+        // paths. A read-only PRAGMA skips it once the schema is stamped. Bump
+        // the stamp when the schema changes so the DDL runs again.
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if v >= 1 {
+            return Ok(());
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS session_events (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,7 +125,8 @@ impl SessionStore {
                 text       TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY (project, category, text)
-             );",
+             );
+             PRAGMA user_version = 1;",
         )?;
         Ok(())
     }

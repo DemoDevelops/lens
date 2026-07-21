@@ -449,7 +449,7 @@ impl Forge {
     /// Large output is offloaded to the reversible store and replaced with a
     /// preview + ref.
     #[tool(
-        description = "Run code (python|javascript|typescript|bash|ruby|go) in a darkroom; only the script's stdout/stderr returns to context, not the data it processed. Pass `path` to analyze a file: it arrives as the script's first CLI argument (python sys.argv[1] / node process.argv[2] / bash $1), so the file's contents never enter context either. Large output is offloaded and retrievable via lens_recall. Compose against the live repo: inside your script, `import lens` (python) or `import('./lens.mjs')` (js) exposes search/symbol/callers/callees/path/skeleton/grep_ast/overview/recall against this repo's live index and graph; compose and print only the answer."
+        description = "Run code (python|javascript|typescript|bash|ruby|go) in a darkroom; only the script's stdout/stderr returns to context, not the data it processed. Pass `path` to analyze a file: it arrives as the script's first CLI argument (python sys.argv[1] / node process.argv[2] / bash $1), so the file's contents never enter context either. Large output is offloaded and retrievable via lens_recall. Compose against the live repo: in python the `lens` module is already imported as a global (no `import lens` needed); in js `import('./lens.mjs')` does the same — each exposes search/symbol/callers/callees/path/skeleton/grep_ast/overview/recall against this repo's live index and graph; compose and print only the answer."
     )]
     async fn lens_run(
         &self,
@@ -599,11 +599,26 @@ impl Forge {
         // for graph views: a skeleton whose signatures alone overflow the response cap
         // (mined defect, 21 cases: large files blew the 25k client cap) gets a
         // budgeted head plus a ref to the full skeleton text, instead of being
-        // returned raw and unbounded.
+        // returned raw and unbounded. Doc comments go first: in a doc-heavy file
+        // they dwarf the signatures (query.rs: 19.8k skeleton, ~80% docs), and a
+        // mid-file hard cut hides later declarations — the 2026-07-21 audit's
+        // 0070 lens runs burned 2+ recall rounds chasing the pub fns the cut
+        // hid. Elide docs, keep EVERY signature; hard-truncate only if the
+        // signatures alone still overflow.
         let (skeleton, truncated, skeleton_ref) = if skeleton.len() > self.max_inline {
             let full_ref = self.store.put(&skeleton).ok();
             let short_ref = full_ref.map(|r| r[..r.len().min(12)].to_string());
-            (truncate_skeleton(&skeleton, self.max_inline), true, short_ref)
+            let stripped = elide_doc_comments(&skeleton);
+            let body = if stripped.len() <= self.max_inline {
+                format!(
+                    "{stripped}\n… [doc comments elided to fit the response budget; \
+                     every declaration above is present; full skeleton at skeleton_ref \
+                     via lens_recall]"
+                )
+            } else {
+                truncate_skeleton(&stripped, self.max_inline)
+            };
+            (body, true, short_ref)
         } else {
             (skeleton, false, None)
         };
@@ -957,7 +972,7 @@ impl Forge {
 
     /// Structural (tree-sitter) search: run an AST query, get path:line matches.
     #[tool(
-        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns one deduplicated path:line match per distinct call/pattern site (a call matched more than once internally, e.g. once per extra argument, still surfaces once), plus `count`, the authoritative match total: read it for counting questions, don't count list items. `limit` caps the underlying scan of raw captures before dedup, so `truncated: true` can still return fewer than `limit` matches. No match returns an empty result, not an error. When a result contains test/bench code, every match carries `origin` (prod/test/bench: `#[cfg(test)]` spans and bench/fixture paths, the graph's own provenance rules); no `origin` fields = all production code. `prod_only: true` drops non-prod matches before they count toward `limit` — use it for any 'excluding tests' count. For plain-text/idea search use lens_search; this is for syntax-shape matches."
+        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns one deduplicated path:line match per distinct call/pattern site (a call matched more than once internally, e.g. once per extra argument, still surfaces once), plus `count`, the authoritative match total: read it for counting questions, don't count list items. `limit` caps the underlying scan of raw captures before dedup, so `truncated: true` can still return fewer than `limit` matches. No match returns an empty result, not an error. When a result contains test/bench code, every match carries `origin` (prod/test/bench: `#[cfg(test)]` spans and bench/fixture paths, the graph's own provenance rules); no `origin` fields = all production code. `prod_only: true` drops non-prod matches before they count toward `limit` — use it for any 'excluding tests' count. Blind spot: code inside macro invocation bodies (`matches!(…)`, `format!(…)`, …) parses as a token tree, not expressions, so structural patterns cannot match there — for an exhaustive count, cross-check with a textual search and reconcile the difference. For plain-text/idea search use lens_search; this is for syntax-shape matches."
     )]
     async fn lens_grep_ast(
         &self,
@@ -2022,6 +2037,57 @@ fn compacted_len(view: &GraphView) -> usize {
     crate::store::compress::compact_json(&original).to_string().len()
 }
 
+/// Drop doc-comment lines (`///`, `//!`, and `/** … */` blocks) from a skeleton,
+/// collapsing the blank runs they leave, so an over-budget skeleton loses its
+/// docs before it loses declarations. Tolerates the optional `L{n}: ` line-number
+/// prefix the skeletonizer emits. Signature/structure lines pass through
+/// untouched.
+fn elide_doc_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_block = false;
+    let mut last_blank = false;
+    for line in s.lines() {
+        // Content after the optional `L{n}: ` prefix.
+        let body = match line.split_once(": ") {
+            Some((pre, rest))
+                if pre.len() >= 2 && pre.starts_with('L') && pre[1..].bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                rest
+            }
+            _ => line,
+        };
+        let t = body.trim_start();
+        if in_block {
+            if t.contains("*/") {
+                in_block = false;
+            }
+            continue;
+        }
+        if t.starts_with("///") || t.starts_with("//!") {
+            continue;
+        }
+        if t.starts_with("/**") && !t.contains("*/") {
+            in_block = true;
+            continue;
+        }
+        if t.starts_with("/**") {
+            continue; // one-line /** … */ doc
+        }
+        let blank = t.is_empty();
+        if blank && last_blank {
+            continue;
+        }
+        last_blank = blank;
+        out.push_str(line);
+        out.push('\n');
+    }
+    // Match the input's trailing-newline shape (lines() drops it).
+    if !s.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// Truncate a `lens_skeleton` skeleton to at most `budget` bytes, backing off to a
 /// UTF-8 char boundary and then the last newline at or before the cut point (so a
 /// line is never split mid-way), and appending a note pointing at `skeleton_ref`.
@@ -2234,6 +2300,21 @@ mod tests {
     use crate::store::compress;
     use crate::tools::NodeView;
     use tempfile::tempdir;
+
+    /// An over-budget skeleton loses doc comments before declarations: `///`,
+    /// `//!`, and `/** … */` lines go (with their blank runs collapsed), while
+    /// every signature line survives, including under `L{n}: ` prefixes.
+    #[test]
+    fn elide_doc_comments_keeps_every_declaration() {
+        let s = "//! module doc\n\n/// doc one\n\n/// doc two\n\npub fn a() { … }\n/** block\ndoc */\npub fn b() { … }\nL9: /// prefixed doc\nL10: pub fn c() { … }\n";
+        let out = elide_doc_comments(s);
+        assert!(!out.contains("doc one") && !out.contains("module doc") && !out.contains("block"));
+        assert!(!out.contains("prefixed doc"));
+        for sig in ["pub fn a()", "pub fn b()", "L10: pub fn c()"] {
+            assert!(out.contains(sig), "{sig} must survive: {out:?}");
+        }
+        assert!(!out.contains("\n\n\n"), "blank runs collapse: {out:?}");
+    }
 
     /// Every registered MCP tool must appear in READ_ONLY_TOOLS or WRITE_TOOLS, so the
     /// `lens setup` permission allowlist can never silently miss a tool (a missed tool

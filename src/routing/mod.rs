@@ -1629,7 +1629,7 @@ const BLOCK_HEAD: &str = r##"<context_window_protection>
     - Recovering something offloaded or truncated: lens_recall(ref).
     - Whole-repo orientation — how the codebase is put together before you've read anything: lens_overview. A digest is already pushed into context at session start; treat that as the first call's answer and expand from it with lens_symbol / lens_graph rather than re-running lens_overview.
     - One file's shape — signatures and structure without the bodies: lens_skeleton(path); pass include_bodies: ["the_fn"] to get back the full text of just the functions you need, in the same call.
-    - Syntax-shape patterns (a call, a signature shape): lens_grep_ast(language="rust", query="(impl_item type: (type_identifier) @t (#eq? @t \"Forge\"))") finds all matching blocks, not text. Or compose in-script: lens.grep_ast(pattern="...", query="...", lang="...").
+    - Syntax-shape patterns (a call, a signature shape): lens_grep_ast(language="rust", query="(impl_item type: (type_identifier) @t (#eq? @t \"Forge\"))") finds all matching blocks, not text. Or compose in-script: lens.grep_ast(pattern="...", query="...", lang="..."). Counting "excluding tests"? Pass prod_only=True and read the response's count — it uses real #[cfg(test)] spans, where hand-filtering grep output by line cannot see block membership.
   </which_tool>
   <when_plain_tools_win>"##;
 

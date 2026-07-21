@@ -45,13 +45,32 @@ pub fn ts_program_for(bun_available: bool) -> (&'static str, Vec<&'static str>) 
     }
 }
 
+/// Python bootstrap run via `-c`: pre-imports the `lens` prelude as a global
+/// before handing off to the user script with `runpy` (correct file names and
+/// line numbers in tracebacks, `__main__` semantics preserved). The 2026-07-21
+/// bad-set audit found scripts calling `lens.…` without `import lens` burning a
+/// full round on the NameError; with this, `lens` just works and an explicit
+/// `import lens` stays a no-op. `sys.argv`/`sys.path` are reshaped to match the
+/// plain `python3 script.py` invocation this replaces.
+const PY_BOOTSTRAP: &str = concat!(
+    "import os, sys, runpy\n",
+    "sys.argv = sys.argv[1:]\n",
+    "sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[0])))\n",
+    "try:\n",
+    "    import builtins, lens\n",
+    "    builtins.lens = lens\n",
+    "except Exception:\n",
+    "    pass\n",
+    "runpy.run_path(sys.argv[0], run_name='__main__')\n",
+);
+
 /// Resolve a language string to its runtime, or `None` if unsupported.
 pub fn runtime_for(language: &str) -> Option<Runtime> {
     let lang = language.trim().to_ascii_lowercase();
     let rt = match lang.as_str() {
         "python" | "python3" | "py" => Runtime {
             program: "python3".to_owned(),
-            pre_args: vec![],
+            pre_args: vec!["-c", PY_BOOTSTRAP],
             extension: "py",
         },
         "javascript" | "js" | "node" => Runtime {

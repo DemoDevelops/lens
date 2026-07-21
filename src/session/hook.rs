@@ -262,7 +262,11 @@ fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<Stri
     // server process never receives the per-event hook payload, so this file is the
     // only channel that lets it stamp its op records with the current session.
     write_current_session(&data_dir, &session_id);
-    let store = SessionStore::open(&data_dir)?;
+    // Opened lazily per arm: PreToolUse (the per-tool-call hot path) never
+    // touches the session store, and an open costs two sqlite opens (local +
+    // global mirror) — measured at ~0.4s of the hook's ~0.6s wall on a
+    // contended machine (2026-07-21 audit).
+    let open_store = || SessionStore::open(&data_dir);
     let ts = super::now_ts();
 
     match event {
@@ -592,6 +596,7 @@ fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<Stri
             Ok(routing::to_hook_json(&decision).to_string())
         }
         "PostToolUse" => {
+            let store = open_store()?;
             store.ensure_session(&session_id, &project_str, ts)?;
             let tool = input.tool_name.clone().unwrap_or_default();
             let ti = input.tool_input.clone().unwrap_or(json!({}));
@@ -659,6 +664,7 @@ fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<Stri
                 .or_else(|| input.message.clone())
                 .unwrap_or_default();
             if !is_system_message(&prompt) && !prompt.trim().is_empty() {
+                let store = open_store()?;
                 store.ensure_session(&session_id, &project_str, ts)?;
                 let raws = extract::extract_user_events(&prompt);
                 let events = attribute(raws, &session_id, &project_str, ts, "UserPromptSubmit");
@@ -716,6 +722,7 @@ fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<Stri
             Ok("{}".to_string())
         }
         "PreCompact" => {
+            let store = open_store()?;
             let events = store.resolved_events_for_session(&session_id)?;
             if !events.is_empty() {
                 let compacts = store.compact_count(&session_id)? + 1;
@@ -726,6 +733,7 @@ fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<Stri
             Ok("{}".to_string())
         }
         "SessionStart" => {
+            let store = open_store()?;
             let source = input.source.clone().unwrap_or_else(|| "startup".into());
             let ctx = session_start(
                 &store,

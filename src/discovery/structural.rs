@@ -30,19 +30,27 @@ pub fn grep_ast(
     language: Option<&str>,
     limit: usize,
 ) -> Result<Vec<AstMatch>> {
-    grep_ast_filtered(root, query, language, limit, None)
+    grep_ast_filtered(root, query, language, limit, None, false)
 }
 
 /// As [`grep_ast`], but when `only_capture` is given only captures with that name
 /// produce matches. The compiled `$META`-pattern path uses this: its queries
 /// capture the whole pattern as `@match` plus bookkeeping captures (`@c0`, ...)
 /// that feed `#eq?` predicates and must not surface as results.
+///
+/// Every match carries an origin ("prod"/"test"/"bench"): bench for files with a
+/// `benchmarks`/`tests`/`fixtures` segment in the reported relative path (the
+/// graph's [`super::is_bench_path`] rule), test for Rust captures inside a
+/// `#[cfg(test)]` span (the graph's `Origin::Test` machinery). Labels are
+/// all-or-none: stripped when every match is prod. `prod_only` drops non-prod
+/// matches BEFORE they count toward `limit`.
 pub fn grep_ast_filtered(
     root: &Path,
     query: &str,
     language: Option<&str>,
     limit: usize,
     only_capture: Option<&str>,
+    prod_only: bool,
 ) -> Result<Vec<AstMatch>> {
     if !root.exists() {
         anyhow::bail!("grep_ast root does not exist: {}", root.display());
@@ -150,6 +158,15 @@ pub fn grep_ast_filtered(
             .to_string_lossy()
             .to_string();
         let src = source.as_bytes();
+        // Provenance for this file's matches: bench by path segment on the
+        // reported relative path, test by `#[cfg(test)]` byte span (Rust only,
+        // off the tree already parsed for the query run).
+        let bench_file = super::is_bench_path(&rel);
+        let cfg_test_spans = if spec.name() == "rust" {
+            super::extract::collect_cfg_test_spans(&tree.root_node(), src)
+        } else {
+            Vec::new()
+        };
         let mut cursor = QueryCursor::new();
         let mut it = cursor.matches(&q, tree.root_node(), src);
         while let Some(m) = it.next() {
@@ -160,6 +177,18 @@ pub fn grep_ast_filtered(
                     }
                 }
                 let node = cap.node;
+                // Bench (whole-file provenance) wins over an inner cfg(test)
+                // span, matching the graph's node-origin precedence.
+                let origin = if bench_file {
+                    "bench"
+                } else if super::extract::byte_in_spans(node.start_byte(), &cfg_test_spans) {
+                    "test"
+                } else {
+                    "prod"
+                };
+                if prod_only && origin != "prod" {
+                    continue;
+                }
                 let line = node.start_position().row + 1;
                 let text: String = node.utf8_text(src).unwrap_or("").chars().take(120).collect();
                 if !seen.insert((rel.clone(), line, text.clone())) {
@@ -169,9 +198,10 @@ pub fn grep_ast_filtered(
                     path: rel.clone(),
                     line,
                     text,
+                    origin: Some(origin.to_string()),
                 });
                 if out.len() >= limit {
-                    return Ok(out);
+                    return Ok(strip_all_prod_origins(out));
                 }
             }
         }
@@ -191,7 +221,18 @@ pub fn grep_ast_filtered(
         }
         bail!("query failed to compile for every encountered grammar: {joined}");
     }
-    Ok(out)
+    Ok(strip_all_prod_origins(out))
+}
+
+/// All-or-none origin labeling, like the graph views: when every match is prod,
+/// drop the labels so "no `origin` fields" keeps meaning "all production code".
+fn strip_all_prod_origins(mut matches: Vec<AstMatch>) -> Vec<AstMatch> {
+    if matches.iter().all(|m| m.origin.as_deref() == Some("prod")) {
+        for m in &mut matches {
+            m.origin = None;
+        }
+    }
+    matches
 }
 
 #[cfg(test)]
@@ -258,6 +299,67 @@ mod tests {
             err.contains("every encountered grammar") || err.contains("failed to compile"),
             "must aggregate compile failures, not return empty: {err}"
         );
+    }
+
+    /// Rust matches inside a `#[cfg(test)]` span are test-origin; when any
+    /// non-prod match is present every match carries a label, and when all
+    /// matches are prod none does (all-or-none, like the graph views).
+    #[test]
+    fn origin_labels_cfg_test_spans_all_or_none() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn prod() { x.unwrap() }\n#[cfg(test)]\nmod tests {\n    fn t() { y.unwrap() }\n}\n",
+        )
+        .unwrap();
+        let q = "(call_expression function: (field_expression field: (field_identifier) @m))";
+        let hits = grep_ast(dir.path(), q, Some("rust"), 100).unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(hits[0].origin.as_deref(), Some("prod"), "{hits:?}");
+        assert_eq!(hits[1].origin.as_deref(), Some("test"), "{hits:?}");
+
+        let all_prod = tempdir().unwrap();
+        fs::write(all_prod.path().join("a.rs"), "fn prod() { x.unwrap() }\n").unwrap();
+        let hits = grep_ast(all_prod.path(), q, Some("rust"), 100).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].origin.is_none(), "all-prod results carry no labels: {hits:?}");
+    }
+
+    /// `prod_only` drops test matches BEFORE they count toward `limit`: a limit
+    /// of 1 must still surface the prod match sitting after a test-span one.
+    #[test]
+    fn prod_only_filters_before_limit() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "#[cfg(test)]\nmod tests {\n    fn t() { y.unwrap() }\n}\nfn prod() { x.unwrap() }\n",
+        )
+        .unwrap();
+        let q = "(call_expression function: (field_expression field: (field_identifier) @m))";
+        let hits = grep_ast_filtered(dir.path(), q, Some("rust"), 1, None, true).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].line, 5, "the prod call, not the test-span one: {hits:?}");
+        assert!(hits[0].origin.is_none(), "prod-only results are all-prod: {hits:?}");
+    }
+
+    /// Files under a `tests/` (or `benchmarks/`/`fixtures/`) directory are
+    /// bench-origin by path, and `prod_only` excludes them.
+    #[test]
+    fn bench_path_origin_and_prod_only() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("tests")).unwrap();
+        fs::write(dir.path().join("prod.rs"), "fn p() { x.unwrap() }\n").unwrap();
+        fs::write(dir.path().join("tests").join("i.rs"), "fn t() { y.unwrap() }\n").unwrap();
+        let q = "(call_expression function: (field_expression field: (field_identifier) @m))";
+        let hits = grep_ast(dir.path(), q, Some("rust"), 100).unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        let bench: Vec<&AstMatch> =
+            hits.iter().filter(|m| m.origin.as_deref() == Some("bench")).collect();
+        assert_eq!(bench.len(), 1, "{hits:?}");
+        assert!(bench[0].path.contains("tests"), "{hits:?}");
+        let prod = grep_ast_filtered(dir.path(), q, Some("rust"), 100, None, true).unwrap();
+        assert_eq!(prod.len(), 1, "{prod:?}");
+        assert_eq!(prod[0].path, "prod.rs", "{prod:?}");
     }
 
     #[test]

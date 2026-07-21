@@ -532,6 +532,11 @@ pub struct GrepAstRequest {
     /// Max matches to return (default 100).
     #[serde(default = "default_grep_ast_limit")]
     pub limit: usize,
+    /// Only return production-origin matches: drops matches inside `#[cfg(test)]`
+    /// spans (Rust) and matches in bench/fixture files (a `benchmarks`/`tests`/
+    /// `fixtures` segment in the reported relative path). Default false.
+    #[serde(default)]
+    pub prod_only: bool,
 }
 
 fn default_grep_ast_limit() -> usize {
@@ -545,6 +550,11 @@ pub struct AstMatch {
     pub line: usize,
     /// The captured node's text (capped).
     pub text: String,
+    /// Provenance: "prod", "test" (inside a `#[cfg(test)]` span), or "bench"
+    /// (bench/fixture file path). All-or-none per response: omitted everywhere
+    /// when every match is prod, so no `origin` fields = all production code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

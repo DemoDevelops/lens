@@ -90,7 +90,7 @@ callers <name> [--depth N] [--transitive] [--prod-only]  directed fan-in subgrap
 callees <name> [--depth N] [--transitive] [--prod-only]  directed fan-out subgraph (or full closure with witnesses)\n\
 path    <from> <to>                                 shortest directed path\n\
 skeleton <file> [--bodies a,b]                      full skeleton text + per-def lines\n\
-grep-ast [--path P] [--pattern PAT | --query Q] [--lang L] [--limit N]\n\
+grep-ast [--path P] [--pattern PAT | --query Q] [--lang L] [--limit N] [--prod-only]\n\
 overview [--budget N] [--query Q]                   importance-ranked repo map\n\
 recall  <ref> [--grep S] [--offset N] [--limit N]   full stored blob";
 
@@ -408,11 +408,13 @@ fn skeleton_verb(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
     Ok(json!({ "skeleton": text, "language": spec.name, "stale": ctx.graph_stale() }))
 }
 
-/// `grep-ast [--path P] [--pattern PAT | --query Q] [--lang L] [--limit N]` - the
-/// `lens_grep_ast` engine (`structural::grep_ast_filtered`), resolving `--pattern`
-/// through the same `$META` compiler the handler uses.
+/// `grep-ast [--path P] [--pattern PAT | --query Q] [--lang L] [--limit N]
+/// [--prod-only]` - the `lens_grep_ast` engine (`structural::grep_ast_filtered`),
+/// resolving `--pattern` through the same `$META` compiler the handler uses.
 fn grep_ast(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
     let (_, flags) = parse_flags(args);
+    // Presence-only flag, like `--transitive`/`--prod-only` on callers/callees.
+    let prod_only = args.iter().any(|a| a == "--prod-only");
     ctx.require_warmed()?;
     let root = ctx.resolve(flags.get("path").map(String::as_str).unwrap_or("."));
     let lang = flags.get("lang").map(String::as_str);
@@ -436,11 +438,15 @@ fn grep_ast(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
             return Err(QError::bad("set exactly one of --query or --pattern (neither was given)"))
         }
     };
-    let matches = structural::grep_ast_filtered(&root, &query, lang, limit, only_capture)
-        .map_err(|e| QError::bad(e.to_string()))?;
+    let matches =
+        structural::grep_ast_filtered(&root, &query, lang, limit, only_capture, prod_only)
+            .map_err(|e| QError::bad(e.to_string()))?;
     let arr: Vec<Value> = matches
         .iter()
-        .map(|m| json!({ "path": m.path, "line": m.line, "text": m.text }))
+        .map(|m| match &m.origin {
+            Some(o) => json!({ "path": m.path, "line": m.line, "text": m.text, "origin": o }),
+            None => json!({ "path": m.path, "line": m.line, "text": m.text }),
+        })
         .collect();
     Ok(json!({ "matches": arr, "stale": ctx.graph_stale() }))
 }

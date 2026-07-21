@@ -407,7 +407,7 @@ fn byte_to_point(s: &str, byte: usize) -> Point {
 /// tree, NOT a "line-cut to EOF" heuristic: production code after the test module
 /// is outside the span. Iterative DFS; spans may nest/overlap, which
 /// [`byte_in_spans`] handles.
-fn collect_cfg_test_spans(root: &TsNode, src: &[u8]) -> Vec<(usize, usize)> {
+pub(crate) fn collect_cfg_test_spans(root: &TsNode, src: &[u8]) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut stack = vec![*root];
     while let Some(node) = stack.pop() {
@@ -459,7 +459,7 @@ fn is_cfg_test_attr(attr_item: &TsNode, src: &[u8]) -> bool {
 }
 
 /// Whether `byte` falls inside any `[start, end)` span.
-fn byte_in_spans(byte: usize, spans: &[(usize, usize)]) -> bool {
+pub(crate) fn byte_in_spans(byte: usize, spans: &[(usize, usize)]) -> bool {
     spans.iter().any(|(s, e)| byte >= *s && byte < *e)
 }
 

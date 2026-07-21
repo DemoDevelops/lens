@@ -957,7 +957,7 @@ impl Forge {
 
     /// Structural (tree-sitter) search: run an AST query, get path:line matches.
     #[tool(
-        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns one deduplicated path:line match per distinct call/pattern site (a call matched more than once internally, e.g. once per extra argument, still surfaces once). `limit` caps the underlying scan of raw captures before dedup, so `truncated: true` can still return fewer than `limit` matches. No match returns an empty result, not an error. For plain-text/idea search use lens_search; this is for syntax-shape matches."
+        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns one deduplicated path:line match per distinct call/pattern site (a call matched more than once internally, e.g. once per extra argument, still surfaces once). `limit` caps the underlying scan of raw captures before dedup, so `truncated: true` can still return fewer than `limit` matches. No match returns an empty result, not an error. When a result contains test/bench code, every match carries `origin` (prod/test/bench: `#[cfg(test)]` spans and bench/fixture paths, the graph's own provenance rules); no `origin` fields = all production code. `prod_only: true` drops non-prod matches before they count toward `limit` — use it for any 'excluding tests' count. For plain-text/idea search use lens_search; this is for syntax-shape matches."
     )]
     async fn lens_grep_ast(
         &self,
@@ -973,6 +973,7 @@ impl Forge {
             "lens_grep_ast",
             serde_json::json!({
                 "path": req.path, "language": req.language, "limit": req.limit, "mode": mode,
+                "prod_only": req.prod_only,
             }),
         );
         // Resolve to a tree-sitter query: raw queries pass through; a pattern is
@@ -1012,6 +1013,7 @@ impl Forge {
             req.language.as_deref(),
             req.limit,
             only_capture,
+            req.prod_only,
         ) {
             Ok(matches) => {
                 // grep_ast_filtered dedupes capture sites before counting toward
@@ -2370,6 +2372,7 @@ mod tests {
             pattern: pattern.map(String::from),
             language: language.map(String::from),
             limit: 100,
+            prod_only: false,
         }
     }
 

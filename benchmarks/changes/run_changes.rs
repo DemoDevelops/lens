@@ -1312,6 +1312,7 @@ fn c21_match_set(fixture: &Path, query: &str, lang: &str) -> C21MatchSet {
         Some(lang),
         200,
         Some(lens::discovery::pattern::MATCH_CAPTURE),
+        false,
     )
     .unwrap()
     .into_iter()

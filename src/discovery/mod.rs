@@ -210,7 +210,7 @@ struct FileResult {
 /// how the incremental path stays identical to a from-scratch rebuild.
 /// Whether a `/`-separated relative path lives under a `benchmarks/`, `tests/`, or
 /// `fixtures/` directory at any depth — the bench/fixture provenance signal.
-fn is_bench_path(path: &str) -> bool {
+pub(crate) fn is_bench_path(path: &str) -> bool {
     path.split('/')
         .any(|seg| matches!(seg, "benchmarks" | "tests" | "fixtures"))
 }

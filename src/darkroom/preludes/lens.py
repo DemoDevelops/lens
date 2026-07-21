@@ -69,7 +69,7 @@ def skeleton(path, bodies=None):
     return _q(args)
 
 
-def grep_ast(pattern=None, query=None, lang=None):
+def grep_ast(pattern=None, query=None, lang=None, path=None, limit=None, prod_only=False):
     args = ["grep-ast"]
     if pattern is not None:
         args += ["--pattern", pattern]
@@ -77,6 +77,12 @@ def grep_ast(pattern=None, query=None, lang=None):
         args += ["--query", query]
     if lang is not None:
         args += ["--lang", lang]
+    if path is not None:
+        args += ["--path", path]
+    if limit is not None:
+        args += ["--limit", str(limit)]
+    if prod_only:
+        args.append("--prod-only")
     return _q(args)
 
 

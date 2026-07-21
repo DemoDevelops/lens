@@ -60,11 +60,21 @@ export function skeleton(path, bodies = null) {
   return q(args);
 }
 
-export function grep_ast(pattern = null, query = null, lang = null) {
+export function grep_ast(
+  pattern = null,
+  query = null,
+  lang = null,
+  path = null,
+  limit = null,
+  prodOnly = false
+) {
   const args = ["grep-ast"];
   if (pattern !== null) args.push("--pattern", pattern);
   if (query !== null) args.push("--query", query);
   if (lang !== null) args.push("--lang", lang);
+  if (path !== null) args.push("--path", path);
+  if (limit !== null) args.push("--limit", String(limit));
+  if (prodOnly) args.push("--prod-only");
   return q(args);
 }
 

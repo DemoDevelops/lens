@@ -52,6 +52,17 @@ pub fn compile_pattern(pattern: &str, spec: &AnySpec) -> Result<String> {
     if pat.is_empty() {
         bail!("pattern is empty");
     }
+    // A bare `...` is semgrep's any-arity hole, not lens syntax. Some grammars
+    // parse it as a LITERAL token (Rust `variadic_parameter`, Python Ellipsis),
+    // which would silently match nothing the author meant, so reject up front.
+    // `...NAME` (JS/TS spread) is real code and passes through.
+    if !pat.contains("$$$") && bare_dots(pat) {
+        bail!(
+            "pattern uses `...` as a wildcard; lens uses `$$$` for zero-or-more \
+             (any arity), e.g. `fn $NAME($$$) -> Vec<$$$> $BODY`. For a literal \
+             `...` token, use a raw tree-sitter `query` instead: `{pat}`"
+        );
+    }
     let (substituted, metavars) = substitute_metavars(pat);
 
     let lang = spec.language();
@@ -336,6 +347,15 @@ fn diagnose_parse_failure(pat: &str, lang_name: &str) -> String {
     if let Some(mismatch) = bracket_mismatch(pat) {
         shapes.push(format!("mismatched brackets: {mismatch}"));
     }
+    // Semgrep-style `...` as an any-arity hole is not lens syntax (and rarely
+    // valid code); the variadic metavariable is `$$$`.
+    if pat.contains("...") && !pat.contains("$$$") {
+        shapes.push(
+            "`...` used as a wildcard; lens uses `$$$` for zero-or-more, e.g. \
+             `fn $NAME($$$) -> Vec<$$$> $BODY`"
+                .into(),
+        );
+    }
     // `=>` means different things per grammar; a wrong claim here sends the
     // user chasing the wrong fix, so only assert language-true shapes. Rust
     // match arms compile standalone (auto-wrapped), so a failing `=>` fragment
@@ -373,6 +393,16 @@ fn diagnose_parse_failure(pat: &str, lang_name: &str) -> String {
          Try a code-shaped fragment, e.g. `fn $NAME($$$) {{ $$$BODY }}` or \
          `Some($X) => $X` (match arms are auto-wrapped)."
     )
+}
+
+/// Whether `pat` contains a bare `...` (not followed by an identifier or `$`,
+/// which would be JS/TS spread like `...args` or `...$REST`).
+fn bare_dots(pat: &str) -> bool {
+    let b = pat.as_bytes();
+    (0..b.len().saturating_sub(2)).any(|i| {
+        &b[i..i + 3] == b"..."
+            && !matches!(b.get(i + 3), Some(c) if c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$')
+    })
 }
 
 /// First bracket-kind error in `pat`, if any: a closer of the wrong kind
@@ -815,7 +845,7 @@ mod tests {
 
     fn matches(dir: &std::path::Path, pattern: &str, lang: &str) -> Vec<AstMatch> {
         let q = compile(pattern, lang).unwrap();
-        grep_ast_filtered(dir, &q, Some(lang), 100, Some(MATCH_CAPTURE)).unwrap()
+        grep_ast_filtered(dir, &q, Some(lang), 100, Some(MATCH_CAPTURE), false).unwrap()
     }
 
     /// The T4 oracle row `$X.unwrap()`: the emitted query is deterministic and
@@ -897,8 +927,9 @@ mod tests {
         .unwrap();
         let q = compile("$X == $X", "rust").unwrap();
         assert!(q.contains("(#eq? @c0 @c1)"), "capture-to-capture eq: {q}");
-        let hits = grep_ast_filtered(dir.path(), &q, Some("rust"), 100, Some(MATCH_CAPTURE))
-            .unwrap();
+        let hits =
+            grep_ast_filtered(dir.path(), &q, Some("rust"), 100, Some(MATCH_CAPTURE), false)
+                .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].line, 2, "`a == a` only");
     }
@@ -937,6 +968,16 @@ mod tests {
     fn rust_bad_arm_hint_mentions_autowrap() {
         let err = compile("Some($X) => 1 2", "rust").unwrap_err().to_string();
         assert!(err.contains("auto-wrap"), "{err}");
+    }
+
+    /// Semgrep intuition writes `...` for "any arguments" (a mined bench-run
+    /// failure); the error must point at `$$$` instead of a bare parse failure.
+    #[test]
+    fn dots_wildcard_failure_teaches_variadic() {
+        let err = compile("fn $NAME(...) -> Vec<&$TYPE>", "rust")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("$$$"), "must point at `$$$`: {err}");
     }
 
     #[test]
@@ -1079,7 +1120,8 @@ mod tests {
         )
         .unwrap();
         let q = compile("h($$$A, $$$B)", "rust").unwrap();
-        let hits = grep_ast_filtered(dir.path(), &q, Some("rust"), 4, Some(MATCH_CAPTURE)).unwrap();
+        let hits =
+            grep_ast_filtered(dir.path(), &q, Some("rust"), 4, Some(MATCH_CAPTURE), false).unwrap();
         assert_eq!(hits.len(), 3, "all three distinct call sites: {hits:?}");
         let lines: Vec<usize> = hits.iter().map(|m| m.line).collect();
         assert_eq!(lines, vec![2, 3, 4], "one match per site: {hits:?}");

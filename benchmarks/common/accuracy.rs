@@ -1232,9 +1232,16 @@ fn run_agentic_arm(task: &Task, model: &str, arm: &ArmSpec) -> anyhow::Result<Ar
 /// What one agentic session measured.
 struct AgenticRun {
     answer: String,
-    /// Raw `tool_use` names in call order. `rounds` is just its length; the names
-    /// themselves are what prove the baseline arm never reached lens.
+    /// Raw `tool_use` names in call order. `rounds` is just its length. Names
+    /// alone are ATTEMPTS: an instructed model can emit a `mcp__lens__*` call
+    /// in an arm whose config cannot serve it (`--strict-mcp-config`), so lens
+    /// REACH is proven by `lens_call_succeeded`, not by these names.
     tools: Vec<String>,
+    /// True iff at least one `mcp__lens__*` call got a NON-error `tool_result`
+    /// back. The canary verdicts key on this: an attempted-but-failed lens call
+    /// proves the baseline's isolation held (the plumbing refused the call),
+    /// while only a SUCCEEDED call proves the lens arm's plumbing works.
+    lens_call_succeeded: bool,
     tokens: usize,
     /// Times lens's SessionStart guide landed in this session.
     guide_injections: usize,
@@ -1297,16 +1304,21 @@ const CANARY_PROMPT: &str = "Use the `mcp__lens__lens_search` tool exactly once,
     {\"canary\":\"ok\"} and nothing else — no prose, no code fences.";
 
 /// Did the forced-lens session behave as this arm's config promises? The lens
-/// arm must REACH lens (its plumbing works); the baseline arm must NOT (its
-/// isolation holds). A pass either way means the arm measures the right thing,
-/// so an organic zero-lens run on the lens arm can be trusted as real
-/// non-adoption rather than silently-broken config.
+/// arm must SUCCEED at a lens call (its plumbing works); the baseline arm must
+/// have NO lens call succeed (its isolation holds). Keyed on `tool_result`
+/// success, not `tool_use` names: the canary prompt is adversarial, so an
+/// obedient baseline model routinely ATTEMPTS the instructed call — the
+/// attempt then erroring is proof isolation held, not a leak. (The prior
+/// name-based verdict scored those attempts as FAIL: 8 of 9 sonnet baseline
+/// canaries aborted on 2026-07-21 with `--strict-mcp-config` verifiably in
+/// force.) A pass either way means the arm measures the right thing, so an
+/// organic zero-lens run on the lens arm can be trusted as real non-adoption
+/// rather than silently-broken config.
 fn canary_verdict(run: &AgenticRun, arm: &ArmSpec) -> bool {
-    let reached_lens = run.tools.iter().any(|t| t.starts_with("mcp__lens__"));
     if arm.expects_guide {
-        reached_lens
+        run.lens_call_succeeded
     } else {
-        !reached_lens
+        !run.lens_call_succeeded
     }
 }
 
@@ -1497,6 +1509,7 @@ fn parse_agentic_stream(stream: &str) -> Result<AgenticRun, String> {
         return Ok(AgenticRun {
             answer: String::new(),
             tools: tool_use_names(&lines),
+            lens_call_succeeded: lens_call_succeeded(&lines),
             tokens: stream_tokens(result, &lines),
             guide_injections,
             hit_turn_cap,
@@ -1517,11 +1530,46 @@ fn parse_agentic_stream(stream: &str) -> Result<AgenticRun, String> {
     Ok(AgenticRun {
         answer,
         tools: tool_use_names(&lines),
+        lens_call_succeeded: lens_call_succeeded(&lines),
         tokens: stream_tokens(result, &lines),
         guide_injections,
         hit_turn_cap,
         duration_ms,
     })
+}
+
+/// Whether any `mcp__lens__*` `tool_use` in the transcript got a non-error
+/// `tool_result` back (matched by `tool_use_id`). Attempt names alone cannot
+/// distinguish "the model obeyed the prompt" from "the arm actually served
+/// lens": under `--strict-mcp-config` a baseline session still EMITS the
+/// instructed call, but it errors. A `tool_result` without `is_error` counts
+/// as success (the stream omits the field on ok results).
+fn lens_call_succeeded(lines: &[Value]) -> bool {
+    let lens_ids: std::collections::HashSet<&str> = lines
+        .iter()
+        .filter(|o| o.get("type").and_then(Value::as_str) == Some("assistant"))
+        .filter_map(|o| o.pointer("/message/content").and_then(Value::as_array))
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .filter(|item| {
+            item.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.starts_with("mcp__lens__"))
+        })
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .collect();
+    lines
+        .iter()
+        .filter(|o| o.get("type").and_then(Value::as_str) == Some("user"))
+        .filter_map(|o| o.pointer("/message/content").and_then(Value::as_array))
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .any(|item| {
+            item.get("tool_use_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| lens_ids.contains(id))
+                && !item.get("is_error").and_then(Value::as_bool).unwrap_or(false)
+        })
 }
 
 /// Tool calls in the transcript in call order, deduped by `tool_use` id: one
@@ -2443,6 +2491,7 @@ mod validity_gate_tests {
     fn run(guide_injections: usize, tools: Vec<&str>) -> AgenticRun {
         AgenticRun {
             answer: "{}".to_string(),
+            lens_call_succeeded: tools.iter().any(|t| t.starts_with("mcp__lens__")),
             tools: tools.into_iter().map(str::to_string).collect(),
             tokens: 10,
             guide_injections,
@@ -2712,6 +2761,28 @@ not even json
         assert_eq!(run.tokens, 112 + 255, "m1 deduped to last emission, plus m2");
     }
 
+    /// Success requires a non-error `tool_result` correlated by `tool_use_id`:
+    /// an instructed-but-refused lens call (the `--strict-mcp-config` baseline
+    /// shape) must parse as attempted-not-succeeded.
+    #[test]
+    fn lens_call_success_requires_a_non_error_tool_result() {
+        let refused = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__lens__lens_search","input":{}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"No such tool available"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"{}","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let run = parse_agentic_stream(refused).expect("parse");
+        assert_eq!(run.tools, vec!["mcp__lens__lens_search"], "attempt recorded");
+        assert!(!run.lens_call_succeeded, "errored result is not a success");
+
+        let served = refused.replace(",\"is_error\":true", "");
+        let run = parse_agentic_stream(&served).expect("parse");
+        assert!(run.lens_call_succeeded, "non-error result is a success");
+
+        // A non-lens success never counts.
+        let other = refused.replace("mcp__lens__lens_search", "Bash");
+        let run = parse_agentic_stream(&other).expect("parse");
+        assert!(!run.lens_call_succeeded);
+    }
+
     #[test]
     fn usage_counts_cached_input_not_just_the_uncached_remainder() {
         let usage = json!({
@@ -2755,6 +2826,7 @@ mod canary_set_adoption_tests {
     fn agentic_run(tools: Vec<&str>) -> AgenticRun {
         AgenticRun {
             answer: "{}".to_string(),
+            lens_call_succeeded: tools.iter().any(|t| t.starts_with("mcp__lens__")),
             tools: tools.into_iter().map(str::to_string).collect(),
             tokens: 10,
             guide_injections: 1,
@@ -2817,6 +2889,23 @@ mod canary_set_adoption_tests {
     fn baseline_arm_canary_passes_only_when_lens_is_not_reached() {
         assert!(canary_verdict(&agentic_run(vec!["Read", "Bash"]), &arm(false)));
         assert!(!canary_verdict(&agentic_run(vec!["mcp__lens__lens_search"]), &arm(false)));
+    }
+
+    #[test]
+    fn canary_keys_on_call_success_not_attempt() {
+        // An attempted-but-FAILED lens call: the baseline's isolation held
+        // (pass), and the lens arm's plumbing did NOT work (fail).
+        let mut attempted = agentic_run(vec!["mcp__lens__lens_search"]);
+        attempted.lens_call_succeeded = false;
+        assert!(
+            canary_verdict(&attempted, &arm(false)),
+            "an obedient baseline model attempting a call that errors is proof \
+             isolation held, not a leak"
+        );
+        assert!(
+            !canary_verdict(&attempted, &arm(true)),
+            "a lens arm whose forced call errors has broken plumbing"
+        );
     }
 
     // --- canary gate aborts the suite ---------------------------------------

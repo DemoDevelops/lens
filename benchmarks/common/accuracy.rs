@@ -2727,7 +2727,7 @@ mod agentic_isolation_tests {
     #[test]
     #[ignore = "spawns live `claude -p` sessions; needs target/release/lens built"]
     fn arms_are_lens_installed_vs_not() {
-        use super::{arm_isolation, claude_agentic_attempt, AgenticHost};
+        use super::{arm_isolation, claude_agentic_attempt, is_lens_tool_name, AgenticHost};
         let iso = arm_isolation(AgenticHost::Claude).expect("isolation setup");
         let prompt = format_agentic_user(&task_with_fixture("../../src/discovery"));
         let model = super::default_model();

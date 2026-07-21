@@ -874,29 +874,9 @@ fn doctor(settings: &Path, bin: &Path, bin_dir: &Path, path_added: bool) -> bool
         .unwrap_or(false);
     checks.push(("/dashboard command installed".into(), cmd_present, String::new()));
 
-    let on_path_now = cmd_exists("lens");
-    let path_ok = bin.is_file() && (on_path_now || dir_on_path(bin_dir) || path_added);
-    let note = if on_path_now || dir_on_path(bin_dir) {
-        String::new()
-    } else if path_added {
-        format!("{} added to your profile — open a new terminal", bin_dir.display())
-    } else {
-        format!("add {} to your PATH", bin_dir.display())
-    };
-    checks.push(("lens resolves on PATH".into(), path_ok, note));
+    checks.push(path_check(bin, bin_dir, path_added));
 
-    println!("Verifying:");
-    let mut all_ok = true;
-    for (label, ok, note) in &checks {
-        all_ok &= *ok;
-        let mark = if *ok { "ok  " } else { "FAIL" };
-        if note.is_empty() {
-            println!("  [{mark}] {label}");
-        } else {
-            println!("  [{mark}] {label} — {note}");
-        }
-    }
-    all_ok
+    print_checks("Verifying:", &checks)
 }
 
 /// Opencode variant of doctor: only checks things that apply without claude settings.json.
@@ -917,6 +897,14 @@ fn doctor_for_opencode(bin: &Path, bin_dir: &Path, path_added: bool) -> bool {
     // no RTK equivalent yet for opencode
     checks.push(("RTK shell compression".into(), true, "Claude-specific today; not required for opencode".into()));
 
+    checks.push(path_check(bin, bin_dir, path_added));
+
+    print_checks("Verifying (opencode):", &checks)
+}
+
+/// The shared PATH check row: does the installed binary resolve now, or will it
+/// after a profile reload?
+fn path_check(bin: &Path, bin_dir: &Path, path_added: bool) -> (String, bool, String) {
     let on_path_now = cmd_exists("lens");
     let path_ok = bin.is_file() && (on_path_now || dir_on_path(bin_dir) || path_added);
     let note = if on_path_now || dir_on_path(bin_dir) {
@@ -926,11 +914,14 @@ fn doctor_for_opencode(bin: &Path, bin_dir: &Path, path_added: bool) -> bool {
     } else {
         format!("add {} to your PATH", bin_dir.display())
     };
-    checks.push(("lens resolves on PATH".into(), path_ok, note));
+    ("lens resolves on PATH".into(), path_ok, note)
+}
 
-    println!("Verifying (opencode):");
+/// Print the check rows under `header` and return whether every check passed.
+fn print_checks(header: &str, checks: &[(String, bool, String)]) -> bool {
+    println!("{header}");
     let mut all_ok = true;
-    for (label, ok, note) in &checks {
+    for (label, ok, note) in checks {
         all_ok &= *ok;
         let mark = if *ok { "ok  " } else { "FAIL" };
         if note.is_empty() {

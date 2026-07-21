@@ -1,0 +1,12 @@
+{
+  "id": "0093_real_agentic_overview_engine",
+  "prompt": "One function takes a code graph, a token budget, and an optional personalized-PageRank seed map, and returns a ranked structural map of the most important symbols that fits the budget. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "overview" },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_overview",
+  "evidence": ["overview"],
+  "treatment": { "skeleton": "../../src/discovery/query.rs" },
+  "notes": "GT verified with: /opt/homebrew/bin/rg -n '^pub fn overview\\b' src/discovery/query.rs => line 741; re-running reproduces the function name. (judgment: primary_mechanism search — overview engine is often reached via name/idea search rather than the overview tool itself.)"
+}

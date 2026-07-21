@@ -1,0 +1,12 @@
+{
+  "id": "0086_real_agentic_skeleton_compile_pattern",
+  "prompt": "One function turns an ast-grep-style code snippet with $UPPER metavariables into a tree-sitter query string for a given language grammar. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "compile_pattern" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_skeleton",
+  "evidence": ["compile_pattern"],
+  "treatment": { "skeleton": "../../src/discovery/pattern.rs" },
+  "notes": "GT verified with: /opt/homebrew/bin/rg -n 'pub fn compile_pattern' src/discovery/pattern.rs => line 50; re-running reproduces the function name."
+}

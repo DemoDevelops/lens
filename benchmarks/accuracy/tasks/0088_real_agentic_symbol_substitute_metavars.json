@@ -1,0 +1,12 @@
+{
+  "id": "0088_real_agentic_symbol_substitute_metavars",
+  "prompt": "One function walks a code-pattern string, replaces each $UPPER and $$$ metavariable with a numbered placeholder, and returns both the substituted text and a parallel list of metavar kinds. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "substitute_metavars" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_symbol",
+  "evidence": ["substitute_metavars"],
+  "treatment": { "skeleton": "../../src/discovery/pattern.rs" },
+  "notes": "GT verified with: /opt/homebrew/bin/rg -n 'fn substitute_metavars' src/discovery/pattern.rs => line 116; re-running reproduces the function name."
+}

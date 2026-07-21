@@ -1,0 +1,12 @@
+{
+  "id": "0087_real_agentic_skeleton_snippet_candidates",
+  "prompt": "When a code pattern fragment does not parse on its own, one function builds the ordered list of language-specific wrapper candidates (bare fn body, impl block, match arm, and so on) that the compiler tries until one is ERROR-free. Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "snippet_candidates" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_skeleton",
+  "evidence": ["snippet_candidates"],
+  "treatment": { "skeleton": "../../src/discovery/pattern.rs" },
+  "notes": "GT verified with: /opt/homebrew/bin/rg -n 'fn snippet_candidates' src/discovery/pattern.rs => line 179; re-running reproduces the function name."
+}

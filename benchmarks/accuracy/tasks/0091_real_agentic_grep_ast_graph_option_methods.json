@@ -1,0 +1,13 @@
+{
+  "id": "0091_real_agentic_grep_ast_graph_option_methods",
+  "prompt": "How many public methods on Graph in src/discovery/graph.rs return an Option type? Answer with key `count`.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "count": 2 },
+  "check": "numeric_tolerance",
+  "tolerance": 0,
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_grep_ast",
+  "evidence": ["2", "node", "shortest_path"],
+  "treatment": { "skeleton": "../../src/discovery/graph.rs" },
+  "notes": "GT verified with: /opt/homebrew/bin/rg -n 'pub fn \\w+.*-> Option' src/discovery/graph.rs | wc -l => 2 (node, shortest_path); re-running reproduces the count. Answerable via one grep_ast pattern matching method signatures returning Option."
+}

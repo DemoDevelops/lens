@@ -1,0 +1,12 @@
+{
+  "id": "0089_real_agentic_symbol_shortest_path",
+  "prompt": "On the code graph, one method runs a BFS between two node ids and returns the ordered list of node ids along the shortest directed path, or None if unreachable. Which method is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "shortest_path" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_symbol",
+  "evidence": ["shortest_path"],
+  "treatment": { "skeleton": "../../src/discovery/graph.rs" },
+  "notes": "GT verified with: /opt/homebrew/bin/rg -n 'pub fn shortest_path' src/discovery/graph.rs => line 507; re-running reproduces the function name."
+}

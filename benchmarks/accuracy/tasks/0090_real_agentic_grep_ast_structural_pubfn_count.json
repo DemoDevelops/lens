@@ -1,0 +1,13 @@
+{
+  "id": "0090_real_agentic_grep_ast_structural_pubfn_count",
+  "prompt": "How many top-level `pub fn` declarations does src/discovery/structural.rs contain? Answer with key `count`.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "count": 2 },
+  "check": "numeric_tolerance",
+  "tolerance": 0,
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_grep_ast",
+  "evidence": ["2", "grep_ast"],
+  "treatment": { "skeleton": "../../src/discovery/structural.rs" },
+  "notes": "GT verified with: /opt/homebrew/bin/rg -n '^pub fn ' src/discovery/structural.rs | wc -l => 2 (grep_ast, grep_ast_filtered); re-running reproduces the count. Answerable via one grep_ast pattern over function_item."
+}

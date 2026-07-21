@@ -1,0 +1,12 @@
+{
+  "id": "0092_real_agentic_overview_repo_map_block",
+  "prompt": "At Claude Code SessionStart, one function builds the token-budgeted repo-map digest string that gets injected into the session context (empty seed, fixed budget). Which function is it? Answer with just the function name.",
+  "fixtures": ["../../src"],
+  "ground_truth": { "function": "repo_map_block" },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_overview",
+  "evidence": ["repo_map_block"],
+  "treatment": { "skeleton": "../../src/session/hook.rs" },
+  "notes": "GT verified with: /opt/homebrew/bin/rg -n 'fn repo_map_block' src/session/hook.rs => line 896; re-running reproduces the function name."
+}

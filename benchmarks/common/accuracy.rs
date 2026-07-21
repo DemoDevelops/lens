@@ -46,6 +46,11 @@ pub fn default_model() -> String {
     std::env::var("LENS_BENCH_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string())
 }
 
+/// Default model for the opencode agentic backend (`provider/model`).
+pub fn default_opencode_model() -> String {
+    std::env::var("LENS_BENCH_MODEL").unwrap_or_else(|_| "xai/grok-4.5".to_string())
+}
+
 // --- Task spec --------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +215,11 @@ pub enum Model {
     /// the setting lens actually runs in. The string is the `--model` passed to
     /// `claude` (empty = the session default).
     ClaudeAgentic(String),
+    /// Same agentic A/B shape as [`ClaudeAgentic`], driven through headless
+    /// `opencode run --format json` (bills the configured provider — typically
+    /// xAI/Grok — instead of Claude Code plan quota). The string is the
+    /// `provider/model` passed to `opencode -m` (e.g. `xai/grok-4.5`).
+    OpenCodeAgentic(String),
 }
 
 impl Model {
@@ -223,8 +233,11 @@ impl Model {
             Model::ClaudeHeadless(m) => format!("{m} (via claude-headless)"),
             Model::ClaudeAgentic(m) if m.is_empty() => "claude-agentic".to_string(),
             Model::ClaudeAgentic(m) => format!("{m} (via claude-agentic)"),
+            Model::OpenCodeAgentic(m) if m.is_empty() => "opencode-agentic".to_string(),
+            Model::OpenCodeAgentic(m) => format!("{m} (via opencode-agentic)"),
         }
     }
+
 }
 
 // --- Arm execution ----------------------------------------------------------
@@ -328,7 +341,8 @@ pub struct TaskResult {
 pub async fn run_task(task: &Task, model: &Model, runs: usize) -> anyhow::Result<TaskResult> {
     let runs = runs.max(1);
     let (mut control, mut treatment) = match model {
-        Model::ClaudeAgentic(id) => agentic_arms(task, id, runs)?,
+        Model::ClaudeAgentic(id) => agentic_arms(task, id, runs, AgenticHost::Claude)?,
+        Model::OpenCodeAgentic(id) => agentic_arms(task, id, runs, AgenticHost::OpenCode)?,
         _ => context_arms(task, model, runs).await?,
     };
     let control_runs = to_run_records(&control);
@@ -449,7 +463,9 @@ fn run_arm(task: &Task, model: &Model, context: &str) -> anyhow::Result<ArmResul
         }
         // `run_task` routes the agentic backend to `agentic_arms` before this
         // point: its arms explore the repo, they don't answer from a context.
-        Model::ClaudeAgentic(_) => unreachable!("agentic arms do not run from a prebuilt context"),
+        Model::ClaudeAgentic(_) | Model::OpenCodeAgentic(_) => {
+            unreachable!("agentic arms do not run from a prebuilt context")
+        }
     };
     let correct = score(&answer, &task.ground_truth, &task.check, task.tolerance);
     Ok(ArmResult {
@@ -984,7 +1000,14 @@ fn format_agentic_user(task: &Task) -> String {
     )
 }
 
-/// Live A/B of two configs a user could actually install: **vanilla Claude** vs
+/// Which agent host drives the live agentic A/B.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgenticHost {
+    Claude,
+    OpenCode,
+}
+
+/// Live A/B of two configs a user could actually install: **vanilla host** vs
 /// **lens as `lens setup` installs it**. The adoption layer (SessionStart guide,
 /// nudge/deny rails) ships with lens, so it belongs to the lens arm rather than
 /// being equalized away; equalizing it would amputate the thing being measured.
@@ -992,21 +1015,24 @@ fn agentic_arms(
     task: &Task,
     model: &str,
     runs: usize,
+    host: AgenticHost,
 ) -> anyhow::Result<(Vec<ArmResult>, Vec<ArmResult>)> {
-    let iso = arm_isolation()?;
+    let iso = arm_isolation(host)?;
     let mut control = Vec::new();
     let mut treatment = Vec::new();
     for _ in 0..runs {
-        control.push(run_agentic_arm(task, model, &iso.baseline())?);
-        treatment.push(run_agentic_arm(task, model, &iso.lens_arm())?);
+        control.push(run_agentic_arm(task, model, &iso.baseline(), host)?);
+        treatment.push(run_agentic_arm(task, model, &iso.lens_arm(), host)?);
     }
     Ok((control, treatment))
 }
 
-/// One side of the A/B as it reaches `claude -p`.
+/// One side of the A/B as it reaches the agent host.
 struct ArmSpec<'a> {
     allowed_tools: &'a str,
+    /// Claude: `--mcp-config` JSON. OpenCode: full `OPENCODE_CONFIG` JSON.
     mcp_config: &'a Path,
+    /// Claude only: `--settings` JSON. OpenCode ignores this path.
     settings: &'a Path,
     /// Whether lens's SessionStart guide must reach this arm. A lens arm without
     /// it means routing silently failed to take; a baseline with it means lens
@@ -1064,20 +1090,64 @@ impl ArmIsolation {
 /// found" and zero organic `mcp__lens__*` calls, yet the validity gate at the
 /// time only checked that the guide fired); `validate_arm_run` is the
 /// backstop that now catches a recurrence instead of scoring it as a loss.
-fn arm_isolation() -> anyhow::Result<ArmIsolation> {
-    if !supports_strict_mcp_config() {
-        return Err(anyhow::anyhow!(
-            "this `claude` CLI has no --strict-mcp-config, so the baseline arm cannot be \
-             isolated from the ambient lens MCP server; refusing to run an invalid A/B"
-        ));
-    }
+fn arm_isolation(host: AgenticHost) -> anyhow::Result<ArmIsolation> {
     let bin = lens_release_bin();
-    eprintln!("agentic bench: --mcp-config resolves to {}", bin.display());
-    Ok(ArmIsolation {
-        baseline_mcp: write_temp_json(&json!({ "mcpServers": {} }))?,
-        baseline_settings: write_temp_json(&baseline_settings_json())?,
-        lens_mcp: write_temp_json(&mcp_config_json(&bin))?,
-        lens_settings: write_temp_json(&lens_settings_json())?,
+    eprintln!(
+        "agentic bench: host={host:?} lens bin={}",
+        bin.display()
+    );
+    match host {
+        AgenticHost::Claude => {
+            if !supports_strict_mcp_config() {
+                return Err(anyhow::anyhow!(
+                    "this `claude` CLI has no --strict-mcp-config, so the baseline arm cannot be \
+                     isolated from the ambient lens MCP server; refusing to run an invalid A/B"
+                ));
+            }
+            Ok(ArmIsolation {
+                baseline_mcp: write_temp_json(&json!({ "mcpServers": {} }))?,
+                baseline_settings: write_temp_json(&baseline_settings_json())?,
+                lens_mcp: write_temp_json(&mcp_config_json(&bin))?,
+                lens_settings: write_temp_json(&lens_settings_json())?,
+            })
+        }
+        AgenticHost::OpenCode => {
+            // OPENCODE_CONFIG replaces the ambient config for the child. Baseline
+            // explicitly disables the ambient `lens` MCP entry; lens arm points at
+            // this run's release binary with LENS_HOST=opencode.
+            Ok(ArmIsolation {
+                baseline_mcp: write_temp_json(&opencode_baseline_config_json())?,
+                baseline_settings: write_temp_json(&json!({}))?,
+                lens_mcp: write_temp_json(&opencode_lens_config_json(&bin))?,
+                lens_settings: write_temp_json(&json!({}))?,
+            })
+        }
+    }
+}
+
+/// OpenCode baseline: no lens MCP (ambient `lens` entry forced off).
+fn opencode_baseline_config_json() -> Value {
+    json!({
+        "mcp": { "lens": { "enabled": false } },
+        "permission": { "*": "allow" }
+    })
+}
+
+/// OpenCode lens arm: MCP server = this run's release binary, host pinned.
+fn opencode_lens_config_json(lens_bin: &Path) -> Value {
+    json!({
+        "mcp": {
+            "lens": {
+                "type": "local",
+                "command": [lens_bin.to_string_lossy()],
+                "enabled": true,
+                "environment": {
+                    "LENS_HOST": "opencode",
+                    "LENS_ROUTING": "full"
+                }
+            }
+        },
+        "permission": { "*": "allow" }
     })
 }
 
@@ -1174,14 +1244,23 @@ const REROUTE_RAIL_FLAGS: &[&str] = &[
 ];
 
 /// One arm, retried once (a transient kill/timeout succeeds on the second try).
-fn run_agentic_arm(task: &Task, model: &str, arm: &ArmSpec) -> anyhow::Result<ArmResult> {
+fn run_agentic_arm(
+    task: &Task,
+    model: &str,
+    arm: &ArmSpec,
+    host: AgenticHost,
+) -> anyhow::Result<ArmResult> {
     let prompt = format_agentic_user(task);
     let mut last_err = String::new();
     for attempt in 0..2 {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_secs(3));
         }
-        match claude_agentic_attempt(&prompt, model, arm) {
+        let attempt_result = match host {
+            AgenticHost::Claude => claude_agentic_attempt(&prompt, model, arm),
+            AgenticHost::OpenCode => opencode_agentic_attempt(&prompt, model, arm),
+        };
+        match attempt_result {
             Ok(run) => {
                 // A misconfigured arm is not worth retrying, and silently measuring
                 // it is how the first two builds shipped an invalid A/B. Post-canary
@@ -1288,9 +1367,14 @@ fn validate_arm_run(run: &AgenticRun, arm: &ArmSpec) -> Result<bool, String> {
             arm.allowed_tools
         ));
     }
-    let adoption_miss =
-        arm.expects_guide && !run.tools.iter().any(|t| t.starts_with("mcp__lens__"));
+    let adoption_miss = arm.expects_guide && !run.tools.iter().any(|t| is_lens_tool_name(t));
     Ok(adoption_miss)
+}
+
+/// Claude emits `mcp__lens__lens_search`; opencode emits `lens_lens_search`
+/// (server name + tool name). Both count as lens reach.
+fn is_lens_tool_name(name: &str) -> bool {
+    name.starts_with("mcp__lens__") || name.starts_with("lens_lens_")
 }
 
 // --- Canary gate + gated suite ----------------------------------------------
@@ -1298,9 +1382,11 @@ fn validate_arm_run(run: &AgenticRun, arm: &ArmSpec) -> Result<bool, String> {
 /// The canary prompt forces exactly one lens call, so a passing lens arm is
 /// unambiguous and a broken one is loud. Run through the SAME plumbing as the
 /// scored arm (`--mcp-config`, settings/hooks file, binary), it proves config
-/// validity ONCE per (model, arm) before any task is scored.
-const CANARY_PROMPT: &str = "Use the `mcp__lens__lens_search` tool exactly once, with its \
-    `queries` argument set to [\"canary\"]. Then reply with only the minified JSON object \
+/// validity ONCE per (model, arm) before any task is scored. Names both the
+/// Claude MCP spelling and the opencode server+tool spelling.
+const CANARY_PROMPT: &str = "Use the lens search tool exactly once \
+    (`mcp__lens__lens_search` or `lens_lens_search`), with its `queries` argument \
+    set to [\"canary\"]. Then reply with only the minified JSON object \
     {\"canary\":\"ok\"} and nothing else — no prose, no code fences.";
 
 /// Did the forced-lens session behave as this arm's config promises? The lens
@@ -1322,17 +1408,21 @@ fn canary_verdict(run: &AgenticRun, arm: &ArmSpec) -> bool {
     }
 }
 
-/// Run the canary for one arm config: a live `claude -p` forced-lens session
-/// through the arm's exact plumbing, retried once for a transient kill. Returns
-/// the pass/fail verdict; a transport failure that never yields a transcript is
-/// an error (the config can't be proven either way, so the suite aborts).
-fn run_canary(model: &str, arm: &ArmSpec) -> anyhow::Result<bool> {
+/// Run the canary for one arm config: a live forced-lens session through the
+/// arm's exact plumbing, retried once for a transient kill. Returns the
+/// pass/fail verdict; a transport failure that never yields a transcript is an
+/// error (the config can't be proven either way, so the suite aborts).
+fn run_canary(model: &str, arm: &ArmSpec, host: AgenticHost) -> anyhow::Result<bool> {
     let mut last_err = String::new();
     for attempt in 0..2 {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_secs(3));
         }
-        match claude_agentic_attempt(CANARY_PROMPT, model, arm) {
+        let attempt_result = match host {
+            AgenticHost::Claude => claude_agentic_attempt(CANARY_PROMPT, model, arm),
+            AgenticHost::OpenCode => opencode_agentic_attempt(CANARY_PROMPT, model, arm),
+        };
+        match attempt_result {
             Ok(run) => return Ok(canary_verdict(&run, arm)),
             Err(e) => {
                 eprintln!(
@@ -1396,17 +1486,39 @@ pub async fn run_agentic_suite(
     model: &str,
     runs: usize,
 ) -> anyhow::Result<Vec<TaskResult>> {
-    let iso = arm_isolation()?;
+    run_agentic_suite_on(tasks, model, runs, AgenticHost::Claude).await
+}
+
+/// Agentic suite driven by headless `opencode run` (typically `xai/grok-4.5`).
+pub async fn run_opencode_agentic_suite(
+    tasks: &[Task],
+    model: &str,
+    runs: usize,
+) -> anyhow::Result<Vec<TaskResult>> {
+    run_agentic_suite_on(tasks, model, runs, AgenticHost::OpenCode).await
+}
+
+async fn run_agentic_suite_on(
+    tasks: &[Task],
+    model: &str,
+    runs: usize,
+    host: AgenticHost,
+) -> anyhow::Result<Vec<TaskResult>> {
+    let iso = arm_isolation(host)?;
     let mut canary_ok = true;
     for (label, arm) in [("baseline", iso.baseline()), ("lens", iso.lens_arm())] {
-        let pass = run_canary(model, &arm)?;
+        let pass = run_canary(model, &arm, host)?;
         eprintln!(
-            "canary [{label} arm, model={model}]: {}",
+            "canary [{label} arm, host={host:?}, model={model}]: {}",
             if pass { "PASS" } else { "FAIL" }
         );
         canary_ok &= pass;
     }
-    score_gated(tasks, &Model::ClaudeAgentic(model.to_string()), runs, canary_ok).await
+    let model_enum = match host {
+        AgenticHost::Claude => Model::ClaudeAgentic(model.to_string()),
+        AgenticHost::OpenCode => Model::OpenCodeAgentic(model.to_string()),
+    };
+    score_gated(tasks, &model_enum, runs, canary_ok).await
 }
 
 /// One live `claude -p` seeing exactly the MCP servers in `arm.mcp_config` and the
@@ -1473,6 +1585,182 @@ fn claude_agentic_attempt(
         ));
     }
     parse_agentic_stream(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// One live `opencode run --format json` seeing exactly the MCP servers in
+/// `arm.mcp_config` (as `OPENCODE_CONFIG`). Wall-clock bounded by `perl alarm`.
+///
+/// OpenCode has no SessionStart injection channel equivalent to Claude's hooks,
+/// so the lens arm's routing guide is prepended into the user prompt (still
+/// carrying [`GUIDE_SENTINEL`]) and counted as one injection when expected.
+fn opencode_agentic_attempt(
+    prompt: &str,
+    model: &str,
+    arm: &ArmSpec,
+) -> Result<AgenticRun, String> {
+    let workdir = env!("CARGO_MANIFEST_DIR");
+    let model_id = if model.is_empty() {
+        default_opencode_model()
+    } else {
+        model.to_string()
+    };
+    // OpenCode's plugin cannot inject SessionStart context the way Claude hooks
+    // do; stamp the guide (with sentinel) into the lens-arm prompt so
+    // `validate_arm_run`'s expects_guide check stays meaningful.
+    let full_prompt = if arm.expects_guide {
+        format!(
+            "{GUIDE_SENTINEL}\n\
+             lens is installed in this session. Prefer its MCP tools \
+             (lens_search, lens_symbol, lens_graph, lens_skeleton, lens_overview, \
+             lens_run, lens_grep_ast, lens_recall) over raw Read/Grep/Bash when \
+             they fit the question.\n\n{prompt}"
+        )
+    } else {
+        prompt.to_string()
+    };
+
+    let mut cmd = Command::new("perl");
+    cmd.current_dir(workdir)
+        .args(["-e", "alarm shift; exec @ARGV", "600"])
+        .arg("opencode")
+        .arg("run")
+        .args(["-m", &model_id])
+        .args(["--format", "json"])
+        .arg("--auto")
+        .args(["--dir", workdir])
+        .arg(&full_prompt);
+    // Isolate MCP from ambient ~/.config/opencode: OPENCODE_CONFIG is the whole
+    // config for the child (baseline disables lens; lens arm pins this binary).
+    cmd.env("OPENCODE_CONFIG", arm.mcp_config);
+    cmd.env_remove("LENS_ROUTING");
+    for flag in REROUTE_RAIL_FLAGS {
+        cmd.env_remove(flag);
+    }
+
+    let started = std::time::Instant::now();
+    let out = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawning opencode: {e}"))?
+        .wait_with_output()
+        .map_err(|e| format!("waiting on opencode: {e}"))?;
+    let duration_ms = started.elapsed().as_millis() as usize;
+    if !out.status.success() {
+        // Still try to parse a partial stream (tool events may have landed).
+        if let Ok(mut run) = parse_opencode_stream(&String::from_utf8_lossy(&out.stdout)) {
+            run.duration_ms = duration_ms;
+            if arm.expects_guide {
+                run.guide_injections = run.guide_injections.max(1);
+            }
+            if !run.answer.is_empty() || run.lens_call_succeeded {
+                return Ok(run);
+            }
+        }
+        return Err(format!(
+            "opencode exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(500)
+                .collect::<String>()
+        ));
+    }
+    let mut run = parse_opencode_stream(&String::from_utf8_lossy(&out.stdout))?;
+    run.duration_ms = duration_ms;
+    if arm.expects_guide {
+        // Prompt-stamped guide always "landed" on the lens arm.
+        run.guide_injections = run.guide_injections.max(1);
+    } else if run.answer.contains(GUIDE_SENTINEL) || run.tools.iter().any(|t| is_lens_tool_name(t))
+    {
+        // Baseline must not see the sentinel. (lens tool success is already
+        // rejected by canary_verdict; guide_injections stays 0 unless the
+        // ambient config leaked the prompt stamp — which it can't, we only
+        // stamp on expects_guide.)
+    }
+    Ok(run)
+}
+
+/// Fold an `opencode run --format json` event stream into [`AgenticRun`].
+fn parse_opencode_stream(stream: &str) -> Result<AgenticRun, String> {
+    let lines: Vec<Value> = stream
+        .lines()
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    if lines.is_empty() {
+        return Err("opencode stream carried no JSON events".into());
+    }
+
+    let mut tools = Vec::new();
+    let mut lens_call_succeeded = false;
+    let mut tokens = 0usize;
+    let mut last_text = String::new();
+    let mut guide_injections = 0usize;
+
+    for o in &lines {
+        let ty = o.get("type").and_then(Value::as_str).unwrap_or("");
+        match ty {
+            "tool_use" => {
+                let part = o.get("part").unwrap_or(o);
+                let name = part
+                    .get("tool")
+                    .or_else(|| part.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !name.is_empty() {
+                    tools.push(name.clone());
+                }
+                let status = part
+                    .pointer("/state/status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let err = part
+                    .pointer("/state/error")
+                    .map(|e| !e.is_null() && e.as_str().map(|s| !s.is_empty()).unwrap_or(true))
+                    .unwrap_or(false);
+                if is_lens_tool_name(&name) && status == "completed" && !err {
+                    lens_call_succeeded = true;
+                }
+            }
+            "text" => {
+                if let Some(t) = o
+                    .pointer("/part/text")
+                    .or_else(|| o.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    last_text = t.to_string();
+                    guide_injections += t.matches(GUIDE_SENTINEL).count();
+                }
+            }
+            "step_finish" => {
+                if let Some(total) = o
+                    .pointer("/part/tokens/total")
+                    .or_else(|| o.pointer("/tokens/total"))
+                    .and_then(Value::as_u64)
+                {
+                    // Sum per-step totals (each step reports its own window).
+                    tokens = tokens.saturating_add(total as usize);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if last_text.is_empty() && tools.is_empty() {
+        return Err("opencode stream had events but no text or tool_use".into());
+    }
+
+    Ok(AgenticRun {
+        answer: last_text,
+        tools,
+        lens_call_succeeded,
+        tokens,
+        guide_injections,
+        hit_turn_cap: false,
+        duration_ms: 0,
+    })
 }
 
 /// Fold a `--output-format stream-json` transcript into what one session
@@ -1554,7 +1842,7 @@ fn lens_call_succeeded(lines: &[Value]) -> bool {
         .filter(|item| {
             item.get("name")
                 .and_then(Value::as_str)
-                .is_some_and(|n| n.starts_with("mcp__lens__"))
+                .is_some_and(is_lens_tool_name)
         })
         .filter_map(|item| item.get("id").and_then(Value::as_str))
         .collect();
@@ -2439,8 +2727,8 @@ mod agentic_isolation_tests {
     #[test]
     #[ignore = "spawns live `claude -p` sessions; needs target/release/lens built"]
     fn arms_are_lens_installed_vs_not() {
-        use super::{arm_isolation, claude_agentic_attempt};
-        let iso = arm_isolation().expect("isolation setup");
+        use super::{arm_isolation, claude_agentic_attempt, AgenticHost};
+        let iso = arm_isolation(AgenticHost::Claude).expect("isolation setup");
         let prompt = format_agentic_user(&task_with_fixture("../../src/discovery"));
         let model = super::default_model();
 

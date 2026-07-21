@@ -48,8 +48,10 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(1);
 
-    // Backend precedence: explicit `LENS_BENCH_BACKEND=claude-headless|claude-pty|agentic`
-    // (all bill plan quota via Claude Code) > Anthropic API key > mock.
+    // Backend precedence: explicit `LENS_BENCH_BACKEND=claude-headless|claude-pty|agentic|
+    // opencode-agentic` > Anthropic API key > mock. `opencode-agentic` (aliases
+    // `grok-agentic`, `opencode`) bills the configured provider (default
+    // `xai/grok-4.5`) instead of Claude Code plan quota.
     let backend = std::env::var("LENS_BENCH_BACKEND").unwrap_or_default();
     let has_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
     let (model, pending, mode) = if backend == "claude-headless" || backend == "headless" {
@@ -61,12 +63,19 @@ async fn main() -> anyhow::Result<()> {
     } else if backend == "agentic" {
         eprintln!("running accuracy harness via agentic claude -p (plan quota, tools live incl mcp__lens)");
         (Model::ClaudeAgentic(default_model()), false, "real")
+    } else if backend == "opencode-agentic" || backend == "grok-agentic" || backend == "opencode" {
+        let m = accuracy::default_opencode_model();
+        eprintln!(
+            "running accuracy harness via agentic opencode run (model={m}, tools live incl lens MCP)"
+        );
+        (Model::OpenCodeAgentic(m), false, "real")
     } else if has_key {
         (Model::Anthropic(default_model()), false, "real")
     } else {
         eprintln!(
             "ANTHROPIC_API_KEY not set — running accuracy harness in MOCK mode \
-             (scoring/plumbing only, no real-model accuracy). Set the key for a real run."
+             (scoring/plumbing only, no real-model accuracy). Set the key for a real run, \
+             or LENS_BENCH_BACKEND=opencode-agentic for Grok via opencode."
         );
         (Model::Mock, true, "mock")
     };
@@ -98,20 +107,24 @@ async fn main() -> anyhow::Result<()> {
     // the canonical full record for its version and writes fresh.
     let filtered = only.is_some();
 
-    let mut results: Vec<TaskResult> = if let Model::ClaudeAgentic(id) = &model {
-        // The agentic backend canary-gates both arm configs once before scoring
-        // (aborts loudly on a broken arm) and records adoption misses instead of
+    let mut results: Vec<TaskResult> = match &model {
+        // Agentic backends canary-gate both arm configs once before scoring
+        // (abort loudly on a broken arm) and record adoption misses instead of
         // dropping zero-lens cells.
-        run_agentic_suite(&tasks, id, runs).await?
-    } else {
-        let mut r = Vec::new();
-        for task in &tasks {
-            match run_task(task, &model, runs).await {
-                Ok(x) => r.push(x),
-                Err(e) => eprintln!("task {} failed: {e}", task.id),
-            }
+        Model::ClaudeAgentic(id) => run_agentic_suite(&tasks, id, runs).await?,
+        Model::OpenCodeAgentic(id) => {
+            accuracy::run_opencode_agentic_suite(&tasks, id, runs).await?
         }
-        r
+        _ => {
+            let mut r = Vec::new();
+            for task in &tasks {
+                match run_task(task, &model, runs).await {
+                    Ok(x) => r.push(x),
+                    Err(e) => eprintln!("task {} failed: {e}", task.id),
+                }
+            }
+            r
+        }
     };
 
     // `LENS_BENCH_OUT` redirects results so concurrent runs don't clobber the

@@ -1014,19 +1014,11 @@ impl Forge {
             only_capture,
         ) {
             Ok(matches) => {
-                // `truncated` reflects the raw scan hitting `limit`, before dedup.
+                // grep_ast_filtered dedupes capture sites before counting toward
+                // `limit`, so hitting `limit` means `limit` DISTINCT matches —
+                // `truncated: true` can no longer be an artifact of duplicate
+                // captures crowding out real sites.
                 let truncated = matches.len() >= req.limit;
-                // Unanchored sibling matching (e.g. one alternative per call
-                // argument) can capture the same call/pattern site more than
-                // once. AstMatch carries no byte range, so dedupe on
-                // (path, line, text) — for a real duplicate capture (the same
-                // node matched twice) all three are identical.
-                let mut seen: std::collections::HashSet<(String, usize, String)> =
-                    std::collections::HashSet::new();
-                let matches: Vec<AstMatch> = matches
-                    .into_iter()
-                    .filter(|m| seen.insert((m.path.clone(), m.line, m.text.clone())))
-                    .collect();
                 let resp = GrepAstResponse { matches, truncated };
                 let returned = obs::json_len(&resp);
                 let note = format!("{} matches", resp.matches.len());

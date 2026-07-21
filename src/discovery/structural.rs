@@ -16,11 +16,14 @@ use super::tags_adapter::{any_spec_for_extension, any_spec_for_language};
 use crate::tools::AstMatch;
 
 /// Run tree-sitter `query` over the supported source files under `root`, returning
-/// one [`AstMatch`] per capture (path, 1-based line, capped node text), up to
-/// `limit`. When `language` is given only that language's files are searched and
-/// the query is validated up front; otherwise each file is matched against the
-/// query compiled for its own grammar, and files whose grammar can't compile the
-/// query are skipped. Deterministic: files are walked in sorted order.
+/// one [`AstMatch`] per distinct capture site (path, 1-based line, capped node
+/// text), up to `limit`. Duplicate captures of the same site are dropped BEFORE
+/// they count toward `limit`: unanchored sibling matching (e.g. adjacent `$$$`
+/// variadic groups, which multiply raw matches 2^(k-1)-fold) must not evict
+/// genuine later matches. When `language` is given only that language's files are
+/// searched and the query is validated up front; otherwise each file is matched
+/// against the query compiled for its own grammar, and files whose grammar can't
+/// compile the query are skipped. Deterministic: files are walked in sorted order.
 pub fn grep_ast(
     root: &Path,
     query: &str,
@@ -87,6 +90,11 @@ pub fn grep_ast_filtered(
     files.sort();
 
     let mut out: Vec<AstMatch> = Vec::new();
+    // Dedup key per capture site. AstMatch carries no byte range, so
+    // (path, line, text) stands in: a true duplicate capture (the same node
+    // matched again) is identical on all three.
+    let mut seen: std::collections::HashSet<(String, usize, String)> =
+        std::collections::HashSet::new();
     // When no language is named, track per-grammar compile failures so a query
     // that fails under every encountered grammar errors instead of silently
     // returning `[]`.
@@ -154,6 +162,9 @@ pub fn grep_ast_filtered(
                 let node = cap.node;
                 let line = node.start_position().row + 1;
                 let text: String = node.utf8_text(src).unwrap_or("").chars().take(120).collect();
+                if !seen.insert((rel.clone(), line, text.clone())) {
+                    continue;
+                }
                 out.push(AstMatch {
                     path: rel.clone(),
                     line,
@@ -167,6 +178,17 @@ pub fn grep_ast_filtered(
     }
     if language.is_none() && saw_grammar && !any_compile_ok && !compile_errs.is_empty() {
         let joined = compile_errs.into_iter().collect::<Vec<_>>().join("; ");
+        // Same hint as the up-front single-language validation above; the
+        // aggregate path must not degrade to the raw tree-sitter error.
+        if joined.contains("Impossible pattern") {
+            bail!(
+                "query failed to compile for every encountered grammar: {joined}. \
+                 lens hint: predicates like `#eq?` must sit at the pattern's top level, \
+                 not nested inside a capture. Hoist them — wrong: \
+                 `((identifier) @a (#eq? @a \"foo\"))`; \
+                 right: `((identifier) @a) (#eq? @a \"foo\")`."
+            );
+        }
         bail!("query failed to compile for every encountered grammar: {joined}");
     }
     Ok(out)

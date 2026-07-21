@@ -1000,6 +1000,26 @@ mod tests {
         );
     }
 
+    /// Adjacent `$$$` groups make tree-sitter emit multiple raw matches per
+    /// call site (one per way of splitting the sibling run: 2^(k-1)-fold).
+    /// Those duplicates must not count toward `limit` — with 3 real sites and
+    /// limit 4, all 3 must survive (pre-fix, raw duplicates hit the cap after
+    /// 2 sites and silently dropped the third).
+    #[test]
+    fn adjacent_variadic_duplicates_do_not_eat_the_limit() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.rs"),
+            "fn f() {\n    h(1, 2);\n    h(3, 4);\n    h(5, 6);\n}\n",
+        )
+        .unwrap();
+        let q = compile("h($$$A, $$$B)", "rust").unwrap();
+        let hits = grep_ast_filtered(dir.path(), &q, Some("rust"), 4, Some(MATCH_CAPTURE)).unwrap();
+        assert_eq!(hits.len(), 3, "all three distinct call sites: {hits:?}");
+        let lines: Vec<usize> = hits.iter().map(|m| m.line).collect();
+        assert_eq!(lines, vec![2, 3, 4], "one match per site: {hits:?}");
+    }
+
     /// JS/TS: `$$$` must not compile to a literal-`$$$` `#eq?` pin.
     #[test]
     fn js_variadic_is_not_literal_dollar_pin() {

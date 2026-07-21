@@ -14,6 +14,7 @@
 //! - `grep_ast` → `gast`
 //! - `read_overview` → `rovr`
 //! - `graph_reverify` → `grevf`
+//! - `atomic_chain` → `achain`
 //!
 //! Env flags — kill-switch polarity: every flag is ON by default and `=0`
 //! disables it (the `LENS_GREP_FIRST_DENY` pattern), one flag per rail:
@@ -26,6 +27,7 @@
 //! - `LENS_BASH_GREP_DENY`
 //! - `LENS_READ_RUNFILE_DENY`
 //! - `LENS_GRAPH_REVERIFY`
+//! - `LENS_ATOMIC_CHAIN_DENY`
 //!
 //! Every rail is DENY-only, firing under `Level::steers` (Steer|Full). The
 //! nudge arms were retired 2026-07-19 (measured conversion 0-33% for nudges
@@ -36,8 +38,11 @@
 //! per-symbol/session (see `graph_reverify`'s doc); its `would_fire`/`next`
 //! counters are enumerated in `obs::stats::REROUTE_PREFIXES` but, unlike its
 //! siblings, are not yet emitted from `session::hook`'s shadow-counter plane —
-//! a deferred follow-up.
+//! a deferred follow-up. `achain` denies per drift EPISODE (its consecutive
+//! counter resets on fire, `inspect_escalation`-style) rather than once per
+//! session, and shares `grevf`'s deferred-counter status.
 
+pub mod atomic_chain;
 pub mod bash_aggregate;
 pub mod bash_grep;
 pub mod edit_callers;
@@ -62,3 +67,5 @@ pub const PREFIX_GREP_AST: &str = "gast";
 pub const PREFIX_READ_OVERVIEW: &str = "rovr";
 #[allow(dead_code)]
 pub const PREFIX_GRAPH_REVERIFY: &str = "grevf";
+#[allow(dead_code)]
+pub const PREFIX_ATOMIC_CHAIN: &str = "achain";

@@ -402,6 +402,21 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
         return Decision::Passthrough;
     }
 
+    // achain chain-break: any tool that is not an atomic lens exploration call
+    // zeroes the consecutive-atomic counter, EXCEPT the ToolSearch schema
+    // bootstrap (loading deferred schemas mid-chain is ceremony, not a change
+    // of approach). Guarded on `armed` so a session that never chains never
+    // appends a reset line per tool call.
+    let atomic_lens = tool
+        .strip_prefix("mcp__lens__")
+        .is_some_and(reroute::atomic_chain::is_atomic);
+    if !atomic_lens
+        && tool != "ToolSearch"
+        && throttle::armed(ctx.data_dir, ctx.session_id, "achain-run")
+    {
+        throttle::reset(ctx.data_dir, ctx.session_id, "achain-run");
+    }
+
     match tool {
         // WebFetch deny: only when the replacement (lens_run via MCP) is
         // actually reachable, and at most ONCE per session — a subagent whose
@@ -592,6 +607,27 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             throttle::mark(ctx.data_dir, ctx.session_id, &key);
             Decision::Deny(reroute::edit_callers::deny_reason(&sym, n))
         }
+        // Reroute rail (achain): the 3rd CONSECUTIVE atomic lens exploration
+        // call (graph/skeleton/symbol/recall/overview, with nothing but
+        // ToolSearch between) is denied toward one composed call — the
+        // measured 0.11-dev loop shapes are lens_graph hop-by-hop instead of
+        // `transitive: true`, lens_recall body-chasing instead of
+        // `include_bodies`, and per-file skeletons instead of one lens_run
+        // program. Denies per drift episode (`inspect_escalation`'s pattern):
+        // the counter resets on fire, so the verbatim retry passes and a later
+        // chain can be denied again. Kill-switched by LENS_ATOMIC_CHAIN_DENY
+        // (default ON); the bump only runs while the deny can fire, so a
+        // kill-switched or non-steering session never writes the counter.
+        t if t.starts_with("mcp__lens__") => {
+            if atomic_lens && atomic_chain_deny_enabled() && ctx.level.steers() && ctx.mcp_ready {
+                let n = throttle::bump(ctx.data_dir, ctx.session_id, "achain-run");
+                if n >= ATOMIC_CHAIN_THRESHOLD {
+                    throttle::reset(ctx.data_dir, ctx.session_id, "achain-run");
+                    return Decision::Deny(reroute::atomic_chain::deny_reason().to_string());
+                }
+            }
+            Decision::Passthrough
+        }
         _ => Decision::Passthrough,
     }
 }
@@ -707,6 +743,16 @@ pub fn bash_agg_deny_enabled() -> bool {
 pub fn edit_links_deny_enabled() -> bool {
     std::env::var("LENS_EDIT_LINKS_DENY").map_or(true, |v| v.trim() != "0")
 }
+/// Atomic-chain deny arm (`achain`): `LENS_ATOMIC_CHAIN_DENY=0` disables it.
+pub fn atomic_chain_deny_enabled() -> bool {
+    std::env::var("LENS_ATOMIC_CHAIN_DENY").map_or(true, |v| v.trim() != "0")
+}
+
+/// The achain deny threshold: the Nth consecutive atomic lens call is denied.
+/// 3, because every measured 0.11-dev chain (graph x8 on 0060, skeleton x6 on
+/// 0083, recall x2 after a skeleton on 0068/0070) is already unambiguous at
+/// the third hop, and a chain of two is often legitimate disambiguation.
+const ATOMIC_CHAIN_THRESHOLD: u64 = 3;
 /// Grep-ast deny arm (`gast`): `LENS_GREP_AST_DENY=0` disables it.
 pub fn grep_ast_deny_enabled() -> bool {
     std::env::var("LENS_GREP_AST_DENY").map_or(true, |v| v.trim() != "0")
@@ -2882,8 +2928,9 @@ mod tests {
 
     #[test]
     fn mcp_tools_pass_through_untouched() {
-        // The periodic external-MCP nudge is retired: every MCP tool call is a
-        // pure passthrough now.
+        // The periodic external-MCP nudge is retired: non-lens MCP tools and
+        // composing lens calls always pass through — the achain rail below
+        // only ever watches the atomic lens exploration calls.
         let d = tempdir().unwrap();
         let ctx = rc(Level::Full, true, d.path());
         let ti = json!({});
@@ -2895,6 +2942,122 @@ mod tests {
             route("mcp__lens__lens_run", &ti, &ctx),
             Decision::Passthrough
         );
+    }
+
+    // ── route(): atomic-chain (achain) compose deny ─────────────────────────
+
+    #[test]
+    fn achain_third_consecutive_atomic_call_denied_then_retry_passes() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let ti = json!({});
+        assert_eq!(
+            route("mcp__lens__lens_skeleton", &ti, &ctx),
+            Decision::Passthrough
+        );
+        assert_eq!(
+            route("mcp__lens__lens_recall", &ti, &ctx),
+            Decision::Passthrough
+        );
+        match route("mcp__lens__lens_recall", &ti, &ctx) {
+            Decision::Deny(r) => {
+                assert!(r.contains("transitive: true"), "names the closure escape");
+                assert!(r.contains("include_bodies"), "names the bodies escape");
+                assert!(r.contains("lens_run"), "names the composed program");
+            }
+            other => panic!("3rd consecutive atomic call must deny, got {other:?}"),
+        }
+        // The deny reset the counter: the verbatim retry passes.
+        assert_eq!(
+            route("mcp__lens__lens_recall", &ti, &ctx),
+            Decision::Passthrough
+        );
+        // Per drift EPISODE, not once per session: two more hops re-arm it.
+        assert_eq!(
+            route("mcp__lens__lens_graph", &ti, &ctx),
+            Decision::Passthrough
+        );
+        assert!(
+            matches!(route("mcp__lens__lens_graph", &ti, &ctx), Decision::Deny(_)),
+            "a later chain must be denied again"
+        );
+    }
+
+    #[test]
+    fn achain_chain_broken_by_composing_call_or_plain_tool() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let ti = json!({});
+        // Two atomic hops, then a composing lens call: the chain restarts.
+        route("mcp__lens__lens_skeleton", &ti, &ctx);
+        route("mcp__lens__lens_symbol", &ti, &ctx);
+        assert_eq!(
+            route("mcp__lens__lens_run", &ti, &ctx),
+            Decision::Passthrough
+        );
+        assert_eq!(
+            route("mcp__lens__lens_skeleton", &ti, &ctx),
+            Decision::Passthrough,
+            "a composing call must have restarted the count"
+        );
+        // Two hops again, then a plain tool: restarts again — the next atomic
+        // calls are a fresh chain of 1 and 2, never a 3rd.
+        route("mcp__lens__lens_symbol", &ti, &ctx);
+        assert_eq!(route("Glob", &ti, &ctx), Decision::Passthrough);
+        assert_eq!(
+            route("mcp__lens__lens_recall", &ti, &ctx),
+            Decision::Passthrough
+        );
+        assert_eq!(
+            route("mcp__lens__lens_graph", &ti, &ctx),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn achain_toolsearch_does_not_break_the_chain() {
+        // Loading deferred schemas mid-chain is ceremony, not a change of
+        // approach — the chain must survive it.
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        let ti = json!({});
+        route("mcp__lens__lens_graph", &ti, &ctx);
+        assert_eq!(route("ToolSearch", &ti, &ctx), Decision::Passthrough);
+        route("mcp__lens__lens_graph", &ti, &ctx);
+        assert!(
+            matches!(route("mcp__lens__lens_graph", &ti, &ctx), Decision::Deny(_)),
+            "ToolSearch between atomic calls must not reset the chain"
+        );
+    }
+
+    #[test]
+    fn achain_never_fires_at_nudge_level_or_before_mcp_ready() {
+        let d = tempdir().unwrap();
+        let ti = json!({});
+        let ctx = rc(Level::Nudge, true, d.path());
+        for _ in 0..4 {
+            assert_eq!(
+                route("mcp__lens__lens_skeleton", &ti, &ctx),
+                Decision::Passthrough
+            );
+        }
+        let ctx = rc(Level::Full, false, d.path());
+        for _ in 0..4 {
+            assert_eq!(
+                route("mcp__lens__lens_skeleton", &ti, &ctx),
+                Decision::Passthrough
+            );
+        }
+    }
+
+    #[test]
+    fn achain_kill_switch_polarity() {
+        // Route-level kill-switch runs would race the other achain tests on
+        // the process-global env, so only the flag parse is asserted here.
+        std::env::set_var("LENS_ATOMIC_CHAIN_DENY", "0");
+        assert!(!atomic_chain_deny_enabled());
+        std::env::remove_var("LENS_ATOMIC_CHAIN_DENY");
+        assert!(atomic_chain_deny_enabled(), "on by default");
     }
 
     #[test]

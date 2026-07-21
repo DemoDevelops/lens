@@ -2,10 +2,11 @@
   "id": "0070_real_agentic_query_pub_fn_survey",
   "prompt": "How many public functions (`pub fn`) does src/discovery/query.rs declare at its top level, and which one is alphabetically first? Answer with keys `fn_count` and `first_alpha`.",
   "fixtures": ["../../src"],
-  "ground_truth": { "fn_count": 10, "first_alpha": "find" },
+  "ground_truth": { "fn_count": 11, "first_alpha": "find" },
   "check": "contains",
   "primary_mechanism": "skeleton",
-  "lens_fn": "lens_overview",
+  "lens_fn": "lens_skeleton",
   "evidence": ["find", "query"],
-  "treatment": { "skeleton": "../../src/discovery/query.rs" }
+  "treatment": { "skeleton": "../../src/discovery/query.rs" },
+  "notes": "Ground truth went stale when commit c91166d (T2, \"engine: directed transitive closure with witnesses\") added `pub fn transitive_closure` to src/discovery/query.rs, lifting the top-level pub fn count from 10 to 11; both arms' stored first-run answers already said 11. Re-derived 2026-07-20: 11 `^pub fn ` lines in src/discovery/query.rs. Also retagged `lens_fn` from lens_overview to lens_skeleton: this is a single-file skeleton question (treatment is a `skeleton` fixture) and the stored lens-arm run used lens_skeleton+lens_recall."
 }

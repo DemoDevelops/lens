@@ -292,6 +292,18 @@ pub struct ArmStats {
     pub lens_runs: usize,
 }
 
+/// One run's answer, correctness, and tool sequence, kept for every run K
+/// (unlike `control`/`treatment` below, which keep only the first). Lets an
+/// offline regrade recompute a folded record's `success_rate` against a
+/// corrected ground truth, and lets a composed-shape judgment look at all K
+/// sequences instead of just the first run's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRecord {
+    pub answer: Value,
+    pub correct: bool,
+    pub tools: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResult {
     pub id: String,
@@ -303,6 +315,12 @@ pub struct TaskResult {
     pub control_stats: Option<ArmStats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub treatment_stats: Option<ArmStats>,
+    /// Every run's answer/correct/tools, in order. `#[serde(default)]` so
+    /// results committed before this existed still deserialize (as empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_runs: Vec<RunRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub treatment_runs: Vec<RunRecord>,
 }
 
 /// Run both arms of one task `runs` times each. `runs = 1` reproduces the
@@ -313,14 +331,31 @@ pub async fn run_task(task: &Task, model: &Model, runs: usize) -> anyhow::Result
         Model::ClaudeAgentic(id) => agentic_arms(task, id, runs)?,
         _ => context_arms(task, model, runs).await?,
     };
+    let control_runs = to_run_records(&control);
+    let treatment_runs = to_run_records(&treatment);
     Ok(TaskResult {
         id: task.id.clone(),
         mechanism: task.primary_mechanism.clone(),
         control_stats: fold_arm(&control),
         treatment_stats: fold_arm(&treatment),
+        control_runs,
+        treatment_runs,
         control: control.remove(0),
         treatment: treatment.remove(0),
     })
+}
+
+/// Every run's answer/correct/tools, in call order. `fold_arm` keeps only the
+/// aggregate stats and `control`/`treatment` keep only the first run; this is
+/// the per-run detail both discard.
+fn to_run_records(runs: &[ArmResult]) -> Vec<RunRecord> {
+    runs.iter()
+        .map(|r| RunRecord {
+            answer: r.answer.clone(),
+            correct: r.correct,
+            tools: r.tools.clone(),
+        })
+        .collect()
 }
 
 /// The classic two-context arms: one control/treatment context built once, then
@@ -2139,6 +2174,22 @@ mod k_run_tests {
         assert!(md.contains("lens rounds"), "{md}");
     }
 
+    /// `fold_arm` only keeps aggregate stats, and `control`/`treatment` only keep
+    /// the first run; `control_runs`/`treatment_runs` must carry all K.
+    #[tokio::test]
+    async fn k_run_retains_every_runs_answer_and_tools() {
+        let r = run_task(&reach_task(), &Model::Mock, 3).await.expect("run");
+        assert_eq!(r.control_runs.len(), 3);
+        assert_eq!(r.treatment_runs.len(), 3);
+        assert_eq!(r.treatment_runs[0].answer, r.treatment.answer);
+        assert_eq!(r.treatment_runs[0].correct, r.treatment.correct);
+        assert!(r.treatment_runs.iter().all(|run| run.correct));
+        assert!(
+            r.treatment_runs.iter().all(|run| run.tools.is_empty()),
+            "Mock is tools-off"
+        );
+    }
+
     /// The pre-K-run table is what every committed result renders as; a default
     /// `runs = 1` must not gain a column or a `±`.
     #[tokio::test]
@@ -2470,7 +2521,7 @@ mod function_report_tests {
     }
 
     fn result(id: &str, mechanism: &str, control: ArmResult, treatment: ArmResult) -> TaskResult {
-        TaskResult { id: id.to_string(), mechanism: mechanism.to_string(), control, treatment, control_stats: None, treatment_stats: None }
+        TaskResult { id: id.to_string(), mechanism: mechanism.to_string(), control, treatment, control_stats: None, treatment_stats: None, control_runs: vec![], treatment_runs: vec![] }
     }
 
     #[test]
@@ -2804,6 +2855,8 @@ mod canary_set_adoption_tests {
             treatment: cell(vec!["mcp__lens__lens_search"], false),
             control_stats: None,
             treatment_stats: None,
+            control_runs: vec![],
+            treatment_runs: vec![],
         };
         let missed = TaskResult {
             id: "b".into(),
@@ -2812,6 +2865,8 @@ mod canary_set_adoption_tests {
             treatment: cell(vec![], true), // scored, flagged as a miss (not dropped)
             control_stats: None,
             treatment_stats: None,
+            control_runs: vec![],
+            treatment_runs: vec![],
         };
         let a = adoption_report(&[adopted, missed]);
         assert_eq!(a.total_runs, 2, "both cells were scored, neither dropped");

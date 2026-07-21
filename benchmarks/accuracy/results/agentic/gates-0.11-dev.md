@@ -102,3 +102,21 @@ Overall end-to-end on the 26-task set: lens **452k vs 526k tokens (-14.0%)**,
 accuracy **82% vs 85%**, time **27.4s vs 40.2s (-31.8%)**. Two of three gates
 fail: the composed-program front door is reached but not composed into one
 program, and the skeleton/search token targets are not met on sonnet-medium.
+
+## Post-run corrections (2026-07-20)
+
+- **0070 ground truth was stale** (`fn_count: 10` vs the correct 11; both
+  arms' stored first-run answers were 11). The stored success rates (control
+  1/3, lens 0/3) graded against the stale value and cannot be recomputed
+  offline, because the folded record kept only first-run answers. The
+  "`lens_overview` +58% tokens with a real accuracy loss 0% vs 33%" line in
+  Gate 2 is therefore an artifact of a stale GT, not an overview defect. GT
+  is now fixed for future runs; the harness now retains per-run answers.
+- **0072** (the `lens_grep_ast` +88% row): the lens arm's stored sequence is
+  `Grep, Grep, Grep`, zero lens calls (one of the 7 scored adoption misses).
+  The +88% is lens-arm fixed context overhead plus one extra round, not
+  grep_ast cost.
+- The lens arm carries a measurable fixed floor: on 1-round tasks (0074: one
+  `lens_search` vs one `Grep`) lens 147.0k vs control 121.1k tokens (+21%),
+  i.e. static per-round context (schemas + guide), which bounds how far
+  short-task buckets can drop.

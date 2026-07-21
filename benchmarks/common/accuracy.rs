@@ -1687,6 +1687,30 @@ fn claude_agentic_attempt(
     parse_agentic_stream(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// OpenCode cannot deliver SessionStart `additionalContext` the way Claude
+/// hooks do (see `assets/opencode/lens.js`), so the lens arm stamps the same
+/// routing guide Claude gets — [`lens::routing::session_block`] — into the
+/// user prompt, plus a short host-specific anti-thrash note. Carries
+/// [`GUIDE_SENTINEL`] so `validate_arm_run`'s expects_guide check stays real.
+fn opencode_lens_guide() -> String {
+    let block = lens::routing::session_block(lens::routing::Level::Full);
+    format!(
+        "{block}\n\
+         <opencode_host>\n\
+         lens tools are already registered in this session (names like \
+         lens_search / lens_lens_search). Skip ToolSearch.\n\
+         Discipline (measured failure mode without this note: 10–70× lens_run \
+         loops and 5-tool stacks that lose to two greps):\n\
+         - One well-chosen lens call first. Stop when the answer is in hand.\n\
+         - lens_run is one composed script, not a debug REPL — never iterate \
+         lens_run more than twice on the same question.\n\
+         - Do not stack lens_search + lens_symbol + lens_graph + lens_skeleton \
+         + lens_overview when one of them already answers.\n\
+         - When plain tools win (short glance — see when_plain_tools_win), use them.\n\
+         </opencode_host>"
+    )
+}
+
 /// One live `opencode run --format json` seeing exactly the MCP servers in
 /// `arm.mcp_config` (as `OPENCODE_CONFIG`). Wall-clock bounded by `perl alarm`.
 ///
@@ -1704,17 +1728,8 @@ fn opencode_agentic_attempt(
     } else {
         model.to_string()
     };
-    // OpenCode's plugin cannot inject SessionStart context the way Claude hooks
-    // do; stamp the guide (with sentinel) into the lens-arm prompt so
-    // `validate_arm_run`'s expects_guide check stays meaningful.
     let full_prompt = if arm.expects_guide {
-        format!(
-            "{GUIDE_SENTINEL}\n\
-             lens is installed in this session. Prefer its MCP tools \
-             (lens_search, lens_symbol, lens_graph, lens_skeleton, lens_overview, \
-             lens_run, lens_grep_ast, lens_recall) over raw Read/Grep/Bash when \
-             they fit the question.\n\n{prompt}"
-        )
+        format!("{}\n\n{prompt}", opencode_lens_guide())
     } else {
         prompt.to_string()
     };
@@ -3199,6 +3214,27 @@ not even json
     fn stddev_of_a_sum_adds_variances_not_deviations() {
         // 3² + 4² = 5², not 3 + 4.
         assert_eq!(stddev_of_sum([3.0, 4.0].into_iter()), 5.0);
+    }
+
+    #[test]
+    fn opencode_lens_guide_is_full_session_block_not_prefer_one_liner() {
+        let g = super::opencode_lens_guide();
+        assert!(
+            g.contains(super::GUIDE_SENTINEL),
+            "must carry the SessionStart sentinel for expects_guide"
+        );
+        assert!(
+            g.contains("when_plain_tools_win") && g.contains("lens_run"),
+            "must be the real routing session_block, not a prefer-lens one-liner"
+        );
+        assert!(
+            g.contains("opencode_host") && g.contains("debug REPL"),
+            "must carry the opencode anti-thrash note measured from the 0.12 Grok gate"
+        );
+        assert!(
+            !g.contains("Prefer its MCP tools"),
+            "old thin stamp must not remain"
+        );
     }
 }
 

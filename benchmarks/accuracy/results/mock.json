@@ -1,40 +1,223 @@
 {
+  "adoption": null,
+  "bench_binary": null,
   "groups": [
     {
-      "control_acc": 0.6666666666666666,
-      "control_tokens": 2999,
+      "control_acc": 0.2857142857142857,
+      "control_tokens": 7238,
       "mechanism": "darkroom",
-      "n": 6,
-      "treatment_acc": 1.0,
-      "treatment_tokens": 111
+      "n": 14,
+      "treatment_acc": 0.5,
+      "treatment_tokens": 1894
     },
     {
-      "control_acc": 1.0,
-      "control_tokens": 990,
+      "control_acc": 0.16666666666666666,
+      "control_tokens": 12446,
       "mechanism": "discovery",
-      "n": 3,
-      "treatment_acc": 1.0,
-      "treatment_tokens": 677
+      "n": 24,
+      "treatment_acc": 0.875,
+      "treatment_tokens": 29334
     },
     {
-      "control_acc": 1.0,
-      "control_tokens": 465,
+      "control_acc": 0.14285714285714285,
+      "control_tokens": 6541,
       "mechanism": "search",
-      "n": 2,
-      "treatment_acc": 1.0,
-      "treatment_tokens": 392
+      "n": 14,
+      "treatment_acc": 0.7857142857142857,
+      "treatment_tokens": 13912
     },
     {
       "control_acc": 0.0,
-      "control_tokens": 1470,
+      "control_tokens": 7950,
       "mechanism": "skeleton",
-      "n": 3,
-      "treatment_acc": 0.6666666666666666,
-      "treatment_tokens": 1559
+      "n": 15,
+      "treatment_acc": 0.9333333333333333,
+      "treatment_tokens": 36987
     }
   ],
   "mode": "mock",
   "model": "mock",
+  "overall": [
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "overall",
+      "n": 34,
+      "success_mean": 0.5882352941176471,
+      "success_std": 0.4921529567847503,
+      "tokens_mean": 1491.4411764705883,
+      "tokens_std": 1621.2435893324473
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "overall",
+      "n": 34,
+      "success_mean": 0.029411764705882353,
+      "success_std": 0.1689577248981772,
+      "tokens_mean": 537.6176470588235,
+      "tokens_std": 7.100185191795032
+    }
+  ],
+  "per_function": [
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_graph",
+      "n": 3,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 713.0,
+      "tokens_std": 762.2825372961568
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_graph",
+      "n": 3,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 540.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_grep_ast",
+      "n": 3,
+      "success_mean": 0.6666666666666666,
+      "success_std": 0.4714045207910317,
+      "tokens_mean": 2547.3333333333335,
+      "tokens_std": 1031.9044960115684
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_grep_ast",
+      "n": 3,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 540.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_overview",
+      "n": 3,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 2579.3333333333335,
+      "tokens_std": 1982.7188964203228
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_overview",
+      "n": 3,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 540.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_run",
+      "n": 10,
+      "success_mean": 0.3,
+      "success_std": 0.45825756949558405,
+      "tokens_mean": 189.0,
+      "tokens_std": 190.15730330439587
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_run",
+      "n": 10,
+      "success_mean": 0.1,
+      "success_std": 0.30000000000000004,
+      "tokens_mean": 531.9,
+      "tokens_std": 11.18436408563312
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_search",
+      "n": 8,
+      "success_mean": 0.625,
+      "success_std": 0.4841229182759271,
+      "tokens_mean": 808.5,
+      "tokens_std": 41.270449476592816
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_search",
+      "n": 8,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 540.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_skeleton",
+      "n": 4,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 4332.5,
+      "tokens_std": 749.3358726232183
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_skeleton",
+      "n": 4,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 540.0,
+      "tokens_std": 0.0
+    },
+    {
+      "arm": "lens",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_symbol",
+      "n": 3,
+      "success_mean": 1.0,
+      "success_std": 0.0,
+      "tokens_mean": 2500.6666666666665,
+      "tokens_std": 1324.6565173239774
+    },
+    {
+      "arm": "baseline",
+      "duration_ms_mean": 0.0,
+      "duration_ms_std": 0.0,
+      "fn": "lens_symbol",
+      "n": 3,
+      "success_mean": 0.0,
+      "success_std": 0.0,
+      "tokens_mean": 540.0,
+      "tokens_std": 0.0
+    }
+  ],
+  "task_set": null,
   "tasks": [
     {
       "control": {
@@ -46,6 +229,16 @@
         "correct": false,
         "tokens": 738
       },
+      "control_runs": [
+        {
+          "answer": {
+            "distinct_error_types": "UNKNOWN",
+            "most_frequent": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
       "id": "0001_count_error_types",
       "mechanism": "darkroom",
       "treatment": {
@@ -56,7 +249,17 @@
         "context_bytes": 288,
         "correct": true,
         "tokens": 77
-      }
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "distinct_error_types": 7,
+            "most_frequent": "ConnectionTimeout"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -67,6 +270,15 @@
         "correct": true,
         "tokens": 738
       },
+      "control_runs": [
+        {
+          "answer": {
+            "count": 12
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
       "id": "0002_count_connection_timeouts",
       "mechanism": "darkroom",
       "treatment": {
@@ -76,7 +288,16 @@
         "context_bytes": 34,
         "correct": true,
         "tokens": 6
-      }
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": 12
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -87,6 +308,15 @@
         "correct": true,
         "tokens": 383
       },
+      "control_runs": [
+        {
+          "answer": {
+            "max_latency_ms": 5012
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
       "id": "0003_max_latency",
       "mechanism": "darkroom",
       "treatment": {
@@ -96,7 +326,16 @@
         "context_bytes": 20,
         "correct": true,
         "tokens": 7
-      }
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "max_latency_ms": 5012
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -107,6 +346,15 @@
         "correct": false,
         "tokens": 383
       },
+      "control_runs": [
+        {
+          "answer": {
+            "total_requests": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
       "id": "0004_total_requests",
       "mechanism": "darkroom",
       "treatment": {
@@ -116,7 +364,16 @@
         "context_bytes": 20,
         "correct": true,
         "tokens": 6
-      }
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "total_requests": 2719
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -127,6 +384,15 @@
         "correct": true,
         "tokens": 374
       },
+      "control_runs": [
+        {
+          "answer": {
+            "count": 12
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
       "id": "0005_count_timeout_events",
       "mechanism": "darkroom",
       "treatment": {
@@ -136,7 +402,16 @@
         "context_bytes": 19,
         "correct": true,
         "tokens": 5
-      }
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": 12
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -147,6 +422,15 @@
         "correct": true,
         "tokens": 383
       },
+      "control_runs": [
+        {
+          "answer": {
+            "endpoint": "/healthz"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
       "id": "0006_busiest_endpoint",
       "mechanism": "darkroom",
       "treatment": {
@@ -156,7 +440,16 @@
         "context_bytes": 36,
         "correct": true,
         "tokens": 10
-      }
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "endpoint": "/healthz"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -167,6 +460,15 @@
         "correct": true,
         "tokens": 330
       },
+      "control_runs": [
+        {
+          "answer": {
+            "file": "db.rs"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
       "id": "0007_defines_connect_db",
       "mechanism": "discovery",
       "treatment": {
@@ -176,7 +478,16 @@
         "context_bytes": 853,
         "correct": true,
         "tokens": 317
-      }
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "file": "db.rs"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -187,16 +498,34 @@
         "correct": true,
         "tokens": 330
       },
+      "control_runs": [
+        {
+          "answer": {
+            "reachable": "yes"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
       "id": "0008_reachable_path",
       "mechanism": "discovery",
       "treatment": {
         "answer": {
           "reachable": "yes"
         },
-        "context_bytes": 538,
+        "context_bytes": 757,
         "correct": true,
-        "tokens": 183
-      }
+        "tokens": 271
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "reachable": "yes"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -207,6 +536,15 @@
         "correct": true,
         "tokens": 330
       },
+      "control_runs": [
+        {
+          "answer": {
+            "kind": "struct"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
       "id": "0009_kind_of_connection",
       "mechanism": "discovery",
       "treatment": {
@@ -216,7 +554,16 @@
         "context_bytes": 481,
         "correct": true,
         "tokens": 177
-      }
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "kind": "struct"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -227,36 +574,72 @@
         "correct": true,
         "tokens": 330
       },
+      "control_runs": [
+        {
+          "answer": {
+            "file": "crypto.rs"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
       "id": "0010_defines_rotate_keys",
       "mechanism": "search",
       "treatment": {
         "answer": {
           "file": "crypto.rs"
         },
-        "context_bytes": 438,
+        "context_bytes": 1317,
         "correct": true,
-        "tokens": 134
-      }
+        "tokens": 361
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "file": "crypto.rs"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
         "answer": {
           "port": 8080
         },
-        "context_bytes": 412,
+        "context_bytes": 408,
         "correct": true,
-        "tokens": 135
+        "tokens": 134
       },
+      "control_runs": [
+        {
+          "answer": {
+            "port": 8080
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
       "id": "0011_default_port",
       "mechanism": "search",
       "treatment": {
         "answer": {
           "port": 8080
         },
-        "context_bytes": 809,
+        "context_bytes": 1012,
         "correct": true,
-        "tokens": 258
-      }
+        "tokens": 301
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "port": 8080
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -267,16 +650,34 @@
         "correct": false,
         "tokens": 490
       },
+      "control_runs": [
+        {
+          "answer": {
+            "return_type": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
       "id": "0012_skeleton_return_type",
       "mechanism": "skeleton",
       "treatment": {
         "answer": {
           "return_type": "Result<Summary, LedgerError>"
         },
-        "context_bytes": 1982,
+        "context_bytes": 2246,
         "correct": true,
-        "tokens": 460
-      }
+        "tokens": 540
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "return_type": "Result<Summary, LedgerError>"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -287,16 +688,528 @@
         "correct": false,
         "tokens": 490
       },
+      "control_runs": [
+        {
+          "answer": {
+            "method": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
       "id": "0013_skeleton_method",
       "mechanism": "skeleton",
       "treatment": {
         "answer": {
           "method": "close_period"
         },
-        "context_bytes": 1982,
+        "context_bytes": 2246,
         "correct": true,
-        "tokens": 460
-      }
+        "tokens": 540
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "method": "close_period"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "callers": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 718
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "callers": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0014",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "callers": "route_request"
+        },
+        "context_bytes": 4889,
+        "correct": true,
+        "tokens": 1741
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "callers": "route_request"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "marker": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 363
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "marker": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0015_shard_checkpoint_marker",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "marker": "QUORUM_SEAL_4F2A"
+        },
+        "context_bytes": 2119,
+        "correct": true,
+        "tokens": 544
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "marker": "QUORUM_SEAL_4F2A"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "order_gateway"
+        },
+        "context_bytes": 1008,
+        "correct": true,
+        "tokens": 339
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "order_gateway"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0016_findloc_maxA",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "order_gateway"
+        },
+        "context_bytes": 4247,
+        "correct": true,
+        "tokens": 1588
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "order_gateway"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "payment_bus"
+        },
+        "context_bytes": 793,
+        "correct": true,
+        "tokens": 279
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "payment_bus"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0017_findloc_maxB",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "payment_bus"
+        },
+        "context_bytes": 3884,
+        "correct": true,
+        "tokens": 1442
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "payment_bus"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "cache_ring"
+        },
+        "context_bytes": 524,
+        "correct": true,
+        "tokens": 192
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "cache_ring"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0018_findloc_bordA",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "cache_ring"
+        },
+        "context_bytes": 2358,
+        "correct": true,
+        "tokens": 895
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "cache_ring"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "queue_core"
+        },
+        "context_bytes": 469,
+        "correct": true,
+        "tokens": 171
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "queue_core"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0019_findloc_bordB",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "queue_core"
+        },
+        "context_bytes": 1986,
+        "correct": true,
+        "tokens": 720
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "queue_core"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "metrics_sink"
+        },
+        "context_bytes": 534,
+        "correct": true,
+        "tokens": 185
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "metrics_sink"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0020_findloc_bordC",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "metrics_sink"
+        },
+        "context_bytes": 3021,
+        "correct": true,
+        "tokens": 1105
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "metrics_sink"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "rotate_keys"
+        },
+        "context_bytes": 466,
+        "correct": true,
+        "tokens": 146
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "rotate_keys"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0021_findloc_nullA",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "rotate_keys"
+        },
+        "context_bytes": 2016,
+        "correct": true,
+        "tokens": 771
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "rotate_keys"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "session_validate"
+        },
+        "context_bytes": 801,
+        "correct": true,
+        "tokens": 264
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "session_validate"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0022_findloc_nullB",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "session_validate"
+        },
+        "context_bytes": 3801,
+        "correct": true,
+        "tokens": 1448
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "session_validate"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "audit_validate"
+        },
+        "context_bytes": 732,
+        "correct": true,
+        "tokens": 245
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "audit_validate"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0023_findloc_nullC",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 3499,
+        "correct": false,
+        "tokens": 1339
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "stream_pipe"
+        },
+        "context_bytes": 630,
+        "correct": true,
+        "tokens": 199
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "stream_pipe"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0024_findloc_bordD",
+      "mechanism": "rerank",
+      "treatment": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 1084,
+        "correct": false,
+        "tokens": 387
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "marker": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 358
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "marker": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0025_identrank_needle",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "marker": "SEALCODE_K9W2Q7"
+        },
+        "context_bytes": 2453,
+        "correct": true,
+        "tokens": 706
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "marker": "SEALCODE_K9W2Q7"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "token": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 496
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "token": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0026_rrf_prose_needle",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "token": "RRFCODE_T4X9Z2"
+        },
+        "context_bytes": 1943,
+        "correct": true,
+        "tokens": 588
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "token": "RRFCODE_T4X9Z2"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     },
     {
       "control": {
@@ -310,19 +1223,1973 @@
         "correct": false,
         "tokens": 490
       },
+      "control_runs": [
+        {
+          "answer": {
+            "field1": "UNKNOWN",
+            "field2": "UNKNOWN",
+            "field3": "UNKNOWN",
+            "line": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
       "id": "0027_skeleton_struct_fields",
       "mechanism": "skeleton",
       "treatment": {
         "answer": {
-          "field1": "UNKNOWN",
-          "field2": "UNKNOWN",
-          "field3": "UNKNOWN",
-          "line": "UNKNOWN"
+          "field1": "posted",
+          "field2": "rejected",
+          "field3": "net_cents",
+          "line": "78"
         },
         "context_bytes": 2409,
-        "correct": false,
+        "correct": true,
         "tokens": 639
-      }
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "field1": "posted",
+            "field2": "rejected",
+            "field3": "net_cents",
+            "line": "78"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "callee": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 750
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "callee": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0028_overview_focus",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "callee": "niche_sink"
+        },
+        "context_bytes": 228,
+        "correct": true,
+        "tokens": 72
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "callee": "niche_sink"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 520
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0034_real_focus_repomap",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "repo_map_block"
+        },
+        "context_bytes": 7070,
+        "correct": true,
+        "tokens": 2000
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "repo_map_block"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 527
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0035_real_focus_tantivy",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "index_path"
+        },
+        "context_bytes": 6866,
+        "correct": true,
+        "tokens": 1998
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "index_path"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 523
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0036_real_focus_overviewdue",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "overview_due"
+        },
+        "context_bytes": 6572,
+        "correct": true,
+        "tokens": 1999
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "overview_due"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 513
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0037_real_focus_skeletonize",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "skeletonize"
+        },
+        "context_bytes": 7401,
+        "correct": true,
+        "tokens": 1998
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "skeletonize"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 523
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0050_real_focus_is_version_probe",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "is_version_probe"
+        },
+        "context_bytes": 6660,
+        "correct": true,
+        "tokens": 1996
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "is_version_probe"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 523
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0051_real_focus_matches_bounded",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "matches_bounded"
+        },
+        "context_bytes": 6704,
+        "correct": true,
+        "tokens": 2000
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "matches_bounded"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 527
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0052_real_focus_chunk_markdown",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "chunk_markdown"
+        },
+        "context_bytes": 6879,
+        "correct": true,
+        "tokens": 2000
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "chunk_markdown"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 527
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0053_real_focus_register_tokenizers",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "register_tokenizers"
+        },
+        "context_bytes": 6811,
+        "correct": true,
+        "tokens": 1995
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "register_tokenizers"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 513
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0054_real_focus_parse_frontmatter",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "parse_frontmatter"
+        },
+        "context_bytes": 7406,
+        "correct": true,
+        "tokens": 2000
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "parse_frontmatter"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 513
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0055_real_focus_merge_nested_graph",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "merge_nested_graph"
+        },
+        "context_bytes": 7245,
+        "correct": true,
+        "tokens": 1999
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "merge_nested_graph"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 520
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0056_real_focus_resolve_contradictions",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "resolve_contradictions"
+        },
+        "context_bytes": 7233,
+        "correct": true,
+        "tokens": 2000
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "resolve_contradictions"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 533
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0057_real_focus_civil_from_days",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "function": "civil_from_days"
+        },
+        "context_bytes": 7091,
+        "correct": true,
+        "tokens": 2000
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "civil_from_days"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "caller": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 513
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "caller": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0058_caller_of_spec_for_extension",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "caller": "any_spec_for_extension"
+        },
+        "context_bytes": 760,
+        "correct": true,
+        "tokens": 244
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "caller": "any_spec_for_extension"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "reachable": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 513
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "reachable": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0059_reaches_personalized_importance",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "reachable": "yes"
+        },
+        "context_bytes": 785,
+        "correct": true,
+        "tokens": 281
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "reachable": "yes"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "caller_1": "UNKNOWN",
+          "caller_2": "UNKNOWN",
+          "caller_3": "UNKNOWN",
+          "caller_4": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "caller_1": "UNKNOWN",
+            "caller_2": "UNKNOWN",
+            "caller_3": "UNKNOWN",
+            "caller_4": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0060_real_agentic_transitive_callers_spec_for_language",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "caller_1": "UNKNOWN",
+          "caller_2": "UNKNOWN",
+          "caller_3": "UNKNOWN",
+          "caller_4": "UNKNOWN"
+        },
+        "context_bytes": 5992,
+        "correct": false,
+        "tokens": 1791
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "caller_1": "UNKNOWN",
+            "caller_2": "UNKNOWN",
+            "caller_3": "UNKNOWN",
+            "caller_4": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "reach_1": "UNKNOWN",
+          "reach_2": "UNKNOWN",
+          "reach_3": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "reach_1": "UNKNOWN",
+            "reach_2": "UNKNOWN",
+            "reach_3": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0061_real_agentic_reachability_trio",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "reach_1": "UNKNOWN",
+          "reach_2": "UNKNOWN",
+          "reach_3": "UNKNOWN"
+        },
+        "context_bytes": 515,
+        "correct": false,
+        "tokens": 181
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "reach_1": "UNKNOWN",
+            "reach_2": "UNKNOWN",
+            "reach_3": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "caller_1": "UNKNOWN",
+          "caller_2": "UNKNOWN",
+          "caller_3": "UNKNOWN",
+          "caller_4": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "caller_1": "UNKNOWN",
+            "caller_2": "UNKNOWN",
+            "caller_3": "UNKNOWN",
+            "caller_4": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0062_real_agentic_transitive_callers_tag_from_release_url",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "caller_1": "UNKNOWN",
+          "caller_2": "UNKNOWN",
+          "caller_3": "UNKNOWN",
+          "caller_4": "UNKNOWN"
+        },
+        "context_bytes": 498,
+        "correct": false,
+        "tokens": 167
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "caller_1": "UNKNOWN",
+            "caller_2": "UNKNOWN",
+            "caller_3": "UNKNOWN",
+            "caller_4": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0063_real_agentic_darkroom_distinct_env_names",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "count": 53
+        },
+        "context_bytes": 1043,
+        "correct": true,
+        "tokens": 384
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": 53
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0064_real_agentic_darkroom_nontest_unwrap_total",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 298,
+        "correct": false,
+        "tokens": 111
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": 1
+        },
+        "context_bytes": 2000,
+        "correct": true,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": 1
+          },
+          "correct": true,
+          "tools": []
+        }
+      ],
+      "id": "0065_real_agentic_ast_unwraps_index_mod",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "count": 1
+        },
+        "context_bytes": 130,
+        "correct": true,
+        "tokens": 42
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": 1
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0066_real_agentic_ast_unwraps_discovery_mod",
+      "mechanism": "discovery",
+      "treatment": {
+        "answer": {
+          "count": 2
+        },
+        "context_bytes": 223,
+        "correct": true,
+        "tokens": 65
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": 2
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0067_real_agentic_search_inner_repo_boundary",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "nested_repo_roots"
+        },
+        "context_bytes": 3081,
+        "correct": true,
+        "tokens": 795
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "nested_repo_roots"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0068_real_agentic_search_deny_requires_server",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 3103,
+        "correct": false,
+        "tokens": 812
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "first_module": "UNKNOWN",
+          "mod_count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "first_module": "UNKNOWN",
+            "mod_count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0069_real_agentic_lib_pub_mod_count",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "first_module": "darkroom",
+          "mod_count": 14
+        },
+        "context_bytes": 357,
+        "correct": true,
+        "tokens": 92
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "first_module": "darkroom",
+            "mod_count": 14
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "first_alpha": "UNKNOWN",
+          "fn_count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "first_alpha": "UNKNOWN",
+            "fn_count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0070_real_agentic_query_pub_fn_survey",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "first_alpha": "find",
+          "fn_count": 11
+        },
+        "context_bytes": 19791,
+        "correct": true,
+        "tokens": 4944
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "first_alpha": "find",
+            "fn_count": 11
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "param_name": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "param_name": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0071_real_agentic_warmup_second_param",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "param_name": "data_dir"
+        },
+        "context_bytes": 2451,
+        "correct": true,
+        "tokens": 636
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "param_name": "data_dir"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": "UNKNOWN",
+          "method_1": "UNKNOWN",
+          "method_2": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN",
+            "method_1": "UNKNOWN",
+            "method_2": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0072_real_agentic_graph_vec_returning_methods",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "count": 2,
+          "method_1": "find_by_name",
+          "method_2": "incident"
+        },
+        "context_bytes": 12836,
+        "correct": true,
+        "tokens": 3277
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": 2,
+            "method_1": "find_by_name",
+            "method_2": "incident"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "param_type": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "param_type": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0073_real_agentic_extract_spec_for_extension_param",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "param_type": "&str"
+        },
+        "context_bytes": 20389,
+        "correct": true,
+        "tokens": 5208
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "param_type": "&str"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0074_real_agentic_search_ast_chunk_boundaries",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "chunk_by_ast"
+        },
+        "context_bytes": 3033,
+        "correct": true,
+        "tokens": 790
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "chunk_by_ast"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0075_real_agentic_search_prune_deleted_files",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2927,
+        "correct": false,
+        "tokens": 790
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0076_real_agentic_search_fold_inner_repo_hits",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 3469,
+        "correct": false,
+        "tokens": 885
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0077_real_agentic_search_compound_name_parts",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "split_subwords"
+        },
+        "context_bytes": 3468,
+        "correct": true,
+        "tokens": 865
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "split_subwords"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0078_real_agentic_search_tightest_term_window",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "min_cover_span"
+        },
+        "context_bytes": 2963,
+        "correct": true,
+        "tokens": 764
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "min_cover_span"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0079_real_agentic_search_index_freshness_gate",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "ensure_index"
+        },
+        "context_bytes": 3122,
+        "correct": true,
+        "tokens": 767
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "ensure_index"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "caller_1": "UNKNOWN",
+          "caller_2": "UNKNOWN",
+          "caller_3": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "caller_1": "UNKNOWN",
+            "caller_2": "UNKNOWN",
+            "caller_3": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0080_real_agentic_composed_callers_audit",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "caller_1": "UNKNOWN",
+          "caller_2": "UNKNOWN",
+          "caller_3": "UNKNOWN"
+        },
+        "context_bytes": 0,
+        "correct": false,
+        "tokens": 0
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "caller_1": "UNKNOWN",
+            "caller_2": "UNKNOWN",
+            "caller_3": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0081_real_agentic_composed_search_aggregate",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 0,
+        "correct": false,
+        "tokens": 0
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "caller_1": "UNKNOWN",
+          "caller_2": "UNKNOWN",
+          "caller_3": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 533
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "caller_1": "UNKNOWN",
+            "caller_2": "UNKNOWN",
+            "caller_3": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0082_real_agentic_composed_pricing_callers_audit",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "caller_1": "UNKNOWN",
+          "caller_2": "UNKNOWN",
+          "caller_3": "UNKNOWN"
+        },
+        "context_bytes": 0,
+        "correct": false,
+        "tokens": 0
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "caller_1": "UNKNOWN",
+            "caller_2": "UNKNOWN",
+            "caller_3": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 520
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0083_real_agentic_composed_session_pubfn_count",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 1287,
+        "correct": false,
+        "tokens": 432
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 513
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0084_real_agentic_composed_store_pubfn_count",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 1287,
+        "correct": false,
+        "tokens": 433
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "callee_1": "UNKNOWN",
+          "callee_2": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 513
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "callee_1": "UNKNOWN",
+            "callee_2": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0085_real_agentic_composed_compress_callees_audit",
+      "mechanism": "darkroom",
+      "treatment": {
+        "answer": {
+          "callee_1": "UNKNOWN",
+          "callee_2": "UNKNOWN"
+        },
+        "context_bytes": 1238,
+        "correct": false,
+        "tokens": 423
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "callee_1": "UNKNOWN",
+            "callee_2": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0086_real_agentic_skeleton_compile_pattern",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "function": "compile_pattern"
+        },
+        "context_bytes": 14007,
+        "correct": true,
+        "tokens": 3589
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "compile_pattern"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0087_real_agentic_skeleton_snippet_candidates",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "function": "snippet_candidates"
+        },
+        "context_bytes": 14007,
+        "correct": true,
+        "tokens": 3589
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "snippet_candidates"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0088_real_agentic_symbol_substitute_metavars",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "function": "substitute_metavars"
+        },
+        "context_bytes": 14007,
+        "correct": true,
+        "tokens": 3589
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "substitute_metavars"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0089_real_agentic_symbol_shortest_path",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "function": "shortest_path"
+        },
+        "context_bytes": 12836,
+        "correct": true,
+        "tokens": 3277
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "shortest_path"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0090_real_agentic_grep_ast_structural_pubfn_count",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "count": 2
+        },
+        "context_bytes": 4334,
+        "correct": true,
+        "tokens": 1088
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": 2
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0091_real_agentic_grep_ast_graph_option_methods",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "count": "UNKNOWN"
+        },
+        "context_bytes": 12836,
+        "correct": false,
+        "tokens": 3277
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "count": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0092_real_agentic_overview_repo_map_block",
+      "mechanism": "skeleton",
+      "treatment": {
+        "answer": {
+          "function": "repo_map_block"
+        },
+        "context_bytes": 10659,
+        "correct": true,
+        "tokens": 2702
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "repo_map_block"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "control": {
+        "answer": {
+          "function": "UNKNOWN"
+        },
+        "context_bytes": 2000,
+        "correct": false,
+        "tokens": 540
+      },
+      "control_runs": [
+        {
+          "answer": {
+            "function": "UNKNOWN"
+          },
+          "correct": false,
+          "tools": []
+        }
+      ],
+      "id": "0093_real_agentic_overview_engine",
+      "mechanism": "search",
+      "treatment": {
+        "answer": {
+          "function": "overview"
+        },
+        "context_bytes": 19791,
+        "correct": true,
+        "tokens": 4944
+      },
+      "treatment_runs": [
+        {
+          "answer": {
+            "function": "overview"
+          },
+          "correct": true,
+          "tools": []
+        }
+      ]
     }
   ]
 }

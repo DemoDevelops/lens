@@ -74,8 +74,15 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             }
             "--model" => {
                 let m = args.get(i + 1).cloned().unwrap_or_default();
-                // generic: any name (grok, opencode, raw id) accepted; unknown falls to
-                // SONNET default inside price_for. No claude- assumption.
+                // generic: any name (grok, gpt, raw id) accepted; Claude table
+                // first, then the models.dev catalog; a genuinely unknown name
+                // falls to the Sonnet default with a note so a typo doesn't
+                // silently reprice.
+                if pricing::normalize_model(&m) == pricing::UNKNOWN
+                    && pricing::catalog_price(&m).is_none()
+                {
+                    eprintln!("lens dashboard: unknown model '{m}', pricing at the Sonnet rate");
+                }
                 rate = pricing::price_for(&m).input;
                 i += 1;
             }
@@ -666,13 +673,14 @@ winTo.addEventListener('change',commitRange);
 // RATES is server-sourced from stats.price_table (built once, on the first snapshot — see
 // buildRates), the single source of truth shared with the CLI's --model flag. MODEL_LABELS
 // maps price_table's canonical model key to a friendly display name, since price_table
-// itself carries only canonical keys (claude-*). FALLBACK_RATES covers an older server payload with
-// no price_table, so the page still works. For opencode the actual_usage models are "opencode".
+// itself carries only canonical keys (claude-*). FALLBACK_RATES covers an older server payload
+// with no price_table, so the page still works. For opencode the actual_usage models are the
+// raw modelIDs from its message store (e.g. "grok-4").
 const MODEL_LABELS={'claude-opus-4-8':'Opus 4.8','claude-sonnet-5':'Sonnet 5','claude-haiku-4-5':'Haiku 4.5','claude-fable-5':'Fable 5'};
 // Friendly model name for display. MODEL_LABELS for known claude keys (from price_table).
 // Strip ^claude- (and date) ONLY if raw starts with it (claude host); for opencode/grok/raw
-// ids (T6 produces "opencode" model), keep raw as-is — no hard claude- assumption or mangling.
-// See usage.rs for opencode model field, pricing for generic fallback.
+// ids, keep raw as-is — no hard claude- assumption or mangling.
+// See usage.rs for the opencode model field, pricing for the generic fallback.
 function modelLabel(raw){return MODEL_LABELS[raw]|| (raw && raw.startsWith('claude-') ? raw.replace(/^claude-/,'').replace(/-\d{8}$/,'') : raw );}
 const FALLBACK_RATES=[{m:'Opus 4.8',r:5},{m:'Fable 5',r:10},{m:'Sonnet 5',r:3},{m:'Haiku 4.5',r:1}];
 const ACTUAL='actual';

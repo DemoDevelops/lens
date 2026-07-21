@@ -611,10 +611,10 @@ pub fn snapshot_json_since(
     // way (see dashboard.rs's `scope=global` branch).
     let reroute = reroute_aggregate(std::slice::from_ref(&dir.to_path_buf()));
 
-    // "Actual Usage" plane: real per-model (or host) token/turn/cost mix from
-    // the active host's transcripts (Claude JSONL or opencode db/jsonl), same
-    // window/scope. (T6) Model-mix weighting unchanged; opencode yields one
-    // "opencode" row with rough counts (no full tokens yet).
+    // "Actual Usage" plane: real per-model token/turn/cost mix from the active
+    // host's transcripts (Claude JSONL or opencode's storage/message store),
+    // same window/scope. (T6) Model-mix weighting unchanged; opencode rows are
+    // keyed by modelID with real token counts.
     let cwd_filter: Option<PathBuf> = if crate::rtk::home_root().as_deref() == Some(dir) {
         None
     } else {
@@ -1425,40 +1425,49 @@ esac
         assert_eq!(none["gsym"]["epoch_stamp"], json!(0));
     }
 
-    /// Predicate verifier for T6: with LENS_HOST=opencode + temp state dir holding
-    /// prompt-history.jsonl (3 user turns), snapshot_json (what dashboard API uses)
-    /// returns non-empty actual_usage with >0 turns. Claude paths untouched.
+    /// Predicate verifier for T6: with LENS_HOST=opencode + a temp data dir
+    /// holding a message store (3 assistant messages), snapshot_json (what the
+    /// dashboard API uses) returns non-empty actual_usage with the 3 turns.
+    /// Claude paths untouched.
     #[test]
     fn opencode_actual_usage_nonempty_in_snapshot() {
         let _g = crate::rtk::env_test_lock();
         let prev_host = std::env::var_os("LENS_HOST");
-        let prev_oc = std::env::var_os("OPENCODE_CONFIG_DIR");
+        let prev_oc = std::env::var_os("OPENCODE_DATA_DIR");
         let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_xdg = std::env::var_os("XDG_DATA_HOME");
         let tmp = tempfile::tempdir().unwrap();
-        let lines = r#"{"role":"user","content":"u1 with length for size","timestamp":"2026-07-11T00:00:00Z"}
-{"role":"user","content":"u2 prompt text here","timestamp":"2026-07-11T00:01:00Z"}
-{"role":"user","content":"u3","timestamp":"2026-07-11T00:02:00Z"}
-"#;
-        std::fs::write(tmp.path().join("prompt-history.jsonl"), lines).unwrap();
+        let msgs = tmp.path().join("storage").join("message").join("ses_x");
+        std::fs::create_dir_all(&msgs).unwrap();
+        for i in 1u64..=3 {
+            std::fs::write(
+                msgs.join(format!("msg_{i}.json")),
+                format!(
+                    r#"{{"id":"msg_{i}","role":"assistant","sessionID":"ses_x","modelID":"grok-4","cost":0.0,"tokens":{{"input":{},"output":{},"cache":{{"read":0,"write":0}}}},"time":{{"created":{}}}}}"#,
+                    i * 100,
+                    i * 10,
+                    // 2026-07-11T00:00:00Z + i minutes, epoch ms
+                    1783728000000u64 + i * 60000
+                ),
+            )
+            .unwrap();
+        }
         std::env::set_var("LENS_HOST", "opencode");
-        std::env::set_var("OPENCODE_CONFIG_DIR", tmp.path());
+        std::env::set_var("OPENCODE_DATA_DIR", tmp.path());
         std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
-        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
+        std::env::set_var("XDG_DATA_HOME", tempfile::tempdir().unwrap().path());
 
         let data = tempfile::tempdir().unwrap();
         let snap = snapshot_json(data.path(), None);
         let au = snap["actual_usage"].as_array().expect("array");
-        println!("OPENCODE SNAPSHOT actual_usage: {}", serde_json::to_string_pretty(&snap["actual_usage"]).unwrap());
         let turns: u64 = au.iter().map(|m| m["turns"].as_u64().unwrap_or(0)).sum();
-        println!("total turns from opencode: {}", turns);
         assert!(!au.is_empty(), "non-empty actual_usage for opencode");
-        assert!(turns >= 3, "at least the 3 user turns");
+        assert_eq!(turns, 3, "the 3 assistant turns");
 
         restore_env("LENS_HOST", prev_host);
-        restore_env("OPENCODE_CONFIG_DIR", prev_oc);
+        restore_env("OPENCODE_DATA_DIR", prev_oc);
         restore_env("HOME", prev_home);
-        restore_env("XDG_CONFIG_HOME", prev_xdg);
+        restore_env("XDG_DATA_HOME", prev_xdg);
     }
 
     fn restore_env(key: &str, prev: Option<std::ffi::OsString>) {

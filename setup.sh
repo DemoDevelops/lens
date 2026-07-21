@@ -33,7 +33,7 @@ if [ "$HOST" = "claude" ]; then
   command -v claude >/dev/null 2>&1 || \
     die "Claude Code (the 'claude' command) is not installed. Install it first, then re-run."
 fi
-# For opencode we do not require the 'opencode' CLI (direct jsonc edit).
+# For opencode we do not require the 'opencode' CLI (direct opencode.json edit).
 
 if ! command -v cargo >/dev/null 2>&1; then
   die "Rust is not installed. Install it once with:
@@ -55,7 +55,7 @@ if [ "$HOST" = "claude" ]; then
     || echo "  already registered (or add skipped); check with: claude mcp list"
 else
   LENS_HOST=opencode LENS_BIN_DIR="$(dirname "$BIN")" "$BIN" setup --client opencode --routing "$ROUTING" --bin-dir "$(dirname "$BIN")" \
-    || echo "  opencode MCP configured via jsonc (see output above); re-run safe."
+    || echo "  opencode MCP configured via opencode.json (see output above); re-run safe."
 fi
 
 say "Installing session hooks..."
@@ -110,8 +110,8 @@ Done. Next steps:
 Notes:
   - Routing is '$ROUTING'. With 'full' or 'steer', WebFetch is redirected into the
     darkroom; if that gets in your way, re-run with:  LENS_ROUTING=wrap ./setup.sh
-  - Lifecycle hooks and RTK are Claude-only for now; opencode gets MCP + commands/ + darkroom tools.
+  - RTK is Claude-only for now; opencode gets MCP + commands/ + darkroom tools + lifecycle hooks via plugins/lens.js.
   - Do not also enable the context-mode plugin: the hook install refuses to coexist.
   - To undo:  lens session uninstall && lens rtk uninstall && claude mcp remove lens   (Claude)
-             or: lens session uninstall --client opencode && rm the binary   (opencode; edit opencode.jsonc to drop mcp.lens)
+             or: lens session uninstall --client opencode && rm the binary   (opencode; removes commands/ + the mcp.lens entry)
 EOF

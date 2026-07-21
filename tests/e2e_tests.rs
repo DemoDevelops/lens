@@ -691,3 +691,39 @@ async fn nested_autobuild_max_files_skips_oversized_nested_repo() {
 
     client.cancel().await.ok();
 }
+
+/// Under the opencode host the Anthropic-specific `anthropic/alwaysLoad` meta
+/// must NOT be stamped (Ajv-based hosts warn on unknown meta/formats).
+#[tokio::test]
+async fn opencode_host_omits_always_load_meta() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("lib.rs"), "fn helper() {}\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_lens");
+    let repo_path = repo.path().to_path_buf();
+    let data_path = data.path().to_path_buf();
+    let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
+        cmd.current_dir(&repo_path)
+            .env("LENS_HOST", "opencode")
+            .env("LENS_DIR", &data_path);
+    }))
+    .unwrap();
+    let client = ().serve(transport).await.expect("handshake");
+
+    let tools = client.list_tools(Default::default()).await.unwrap();
+    assert!(!tools.tools.is_empty());
+    for t in &tools.tools {
+        let stamped = t
+            .meta
+            .as_ref()
+            .is_some_and(|m| m.0.contains_key("anthropic/alwaysLoad"));
+        assert!(
+            !stamped,
+            "{} must not carry anthropic/alwaysLoad under opencode",
+            t.name
+        );
+    }
+
+    client.cancel().await.ok();
+}

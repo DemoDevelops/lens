@@ -2,7 +2,7 @@
 //! lifecycle hooks in Claude Code's `settings.json` (or install commands for opencode).
 //!
 //! Host-aware via `--client` / `LENS_HOST` (from T1). For opencode: populates
-//! commands/ only; lifecycle hooks not supported yet. Claude behavior byte-identical.
+//! commands/ plus the plugins/lens.js lifecycle bridge. Claude behavior byte-identical.
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +37,13 @@ const BUNDLED_COMMANDS: &[(&str, &str)] = &[
     ("warmup.md", include_str!("../../assets/commands/warmup.md")),
 ];
 
+/// Bundled opencode lifecycle-bridge plugin (see assets/opencode/lens.js),
+/// written to `<config dir>/plugins/lens.js` with the placeholders filled at
+/// install time. It shells opencode's tool/session hooks into
+/// `lens hook opencode <event>`, the same contract the Claude hooks use.
+const OPENCODE_PLUGIN: &str = include_str!("../../assets/opencode/lens.js");
+const OPENCODE_PLUGIN_FILE: &str = "lens.js";
+
 /// CLI entry: `args` is everything after `session`.
 pub fn run_cli(args: &[String]) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
@@ -61,9 +68,9 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                         }
                         println!("\nNext: uninstall Context Mode if you have it, then verify with `lens session status`.");
                     } else {
-                        println!("lens session commands installed at {}", target.display());
+                        println!("lens session commands + lifecycle plugin installed at {}", target.display());
                         println!("  binary: {bin}");
-                        println!("\nNote: full lifecycle hooks are not yet supported for opencode (commands/dashboard + warmup only).");
+                        println!("\nNote: lifecycle events bridge through plugins/lens.js (tool before/after, prompt, session events); RTK stays Claude-only.");
                     }
                     Ok(())
                 }
@@ -82,7 +89,11 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                     target.display()
                 );
             } else {
-                println!("removed lens commands from {}", target.display());
+                println!(
+                    "removed lens commands{} from {}",
+                    if n > 0 { " and the mcp.lens entry" } else { "" },
+                    target.display()
+                );
             }
             Ok(())
         }
@@ -123,7 +134,7 @@ fn resolve_target(host: Host, args: &[String]) -> Result<PathBuf> {
     let ov = settings_override(args);
     match host {
         Host::Claude => settings_path(ov),
-        Host::Opencode => opencode_config_path(ov),
+        Host::Opencode => opencode_config_dir(ov),
     }
 }
 
@@ -147,7 +158,7 @@ fn settings_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
 
 /// For opencode: return config root (never a settings.json). Strips accidental
 /// /settings.json suffix that settings_override adds for --config-dir.
-fn opencode_config_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
+fn opencode_config_dir(override_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(mut p) = override_path {
         if p.ends_with("settings.json") {
             if let Some(parent) = p.parent() {
@@ -244,10 +255,27 @@ fn install_claude(settings: &Path, bin: &str) -> Result<()> {
     Ok(())
 }
 
-/// For opencode: write only the bundled commands under config/commands/ .
-/// Never touches settings.json or any hook groups (lifecycle hooks not supported yet).
-fn install_opencode(config_dir: &Path, _bin: &str) -> Result<()> {
+/// For opencode: bundled commands + the lifecycle-bridge plugin. Never touches
+/// settings.json or any Claude hook groups.
+fn install_opencode(config_dir: &Path, bin: &str) -> Result<()> {
+    install_opencode_assets(config_dir, bin)
+}
+
+/// Write the bundled commands and the lifecycle plugin for opencode. The
+/// plugin's routing level comes from the registered mcp.lens entry when
+/// present (setup registers MCP first), else `full`.
+pub fn install_opencode_assets(config_dir: &Path, bin: &str) -> Result<()> {
     install_commands(config_dir)?;
+    let routing =
+        crate::setup::read_opencode_routing().unwrap_or_else(|| "full".to_string());
+    let plugin_dir = config_dir.join("plugins");
+    std::fs::create_dir_all(&plugin_dir)
+        .with_context(|| format!("creating {}", plugin_dir.display()))?;
+    let content = OPENCODE_PLUGIN
+        .replace("__LENS_BIN__", bin)
+        .replace("__LENS_ROUTING__", &routing);
+    let path = plugin_dir.join(OPENCODE_PLUGIN_FILE);
+    std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -297,7 +325,13 @@ fn uninstall_claude(settings: &Path) -> Result<usize> {
 
 fn uninstall_opencode(config_dir: &Path) -> Result<usize> {
     remove_commands(config_dir);
-    Ok(0)
+    let _ = std::fs::remove_file(config_dir.join("plugins").join(OPENCODE_PLUGIN_FILE));
+    // Also drop the mcp.lens entry setup wrote, so opencode uninstall is as
+    // complete as the Claude path's `claude mcp remove lens`.
+    match crate::setup::unregister_mcp_opencode() {
+        Ok(true) => Ok(1),
+        _ => Ok(0),
+    }
 }
 
 /// Remove every lens-owned hook group from `root`, pruning empty arrays.
@@ -491,7 +525,7 @@ fn status_claude(settings: &Path) -> Status {
 }
 
 fn status_opencode(config_dir: &Path) -> Status {
-    // Opencode: no lifecycle hooks yet; report commands presence via the events vec for status.
+    // Opencode: report commands + plugin presence via the events vec for status.
     // (avoids changing pub Status struct)
     let cmd_dir = config_dir.join("commands");
     let mut installed_events = Vec::new();
@@ -503,6 +537,9 @@ fn status_opencode(config_dir: &Path) -> Status {
     }
     if !installed_events.is_empty() {
         installed_events.insert(0, "commands".to_string());
+    }
+    if config_dir.join("plugins").join(OPENCODE_PLUGIN_FILE).is_file() {
+        installed_events.push("plugin".to_string());
     }
 
     let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -549,7 +586,11 @@ fn print_status_for(host: Host, s: &Status) {
                 s.installed_events.join(", ")
             );
         }
-        println!("  lifecycle hooks : not supported yet (opencode commands only)");
+        if s.installed_events.iter().any(|e| e == "plugin") {
+            println!("  lifecycle hooks : via plugins/lens.js (tool before/after, prompt, session events)");
+        } else {
+            println!("  lifecycle hooks : plugin not installed (run `lens session install --client opencode`)");
+        }
     }
     println!("  event store     : {}", mark(s.store_ok));
     println!("  Search index    : {}", mark(s.fts_ok));
@@ -735,9 +776,23 @@ mod tests {
         assert!(res.is_ok());
         assert!(cfg.join("commands").join("dashboard.md").is_file());
         assert!(cfg.join("commands").join("warmup.md").is_file());
+        // the lifecycle plugin is written with the placeholders filled
+        let plugin = cfg.join("plugins").join("lens.js");
+        assert!(plugin.is_file(), "plugins/lens.js should be installed");
+        let body = std::fs::read_to_string(&plugin).unwrap();
+        assert!(!body.contains("__LENS_BIN__"), "bin placeholder must be filled");
+        assert!(!body.contains("__LENS_ROUTING__"), "routing placeholder must be filled");
+        assert!(body.contains("hook\", \"opencode\"") || body.contains("\"hook\", \"opencode\""));
+        // no mcp entry registered in this fixture, so routing defaults to full
+        assert!(body.contains("LENS_ROUTING = \"full\""));
         // cross-host: flip to claude (no claude writes here), ensure opencode commands untouched
         std::env::set_var("LENS_HOST", "claude");
         assert!(cfg.join("commands").join("dashboard.md").is_file());
+        // uninstall removes commands + plugin
+        std::env::set_var("LENS_HOST", "opencode");
+        run_cli(&["uninstall".to_string()]).unwrap();
+        assert!(!plugin.exists(), "plugin removed on uninstall");
+        assert!(!cfg.join("commands").join("dashboard.md").exists());
         restore_env("OPENCODE_CONFIG_DIR", prev_oc);
         restore_env("LENS_HOST", prev_host);
     }

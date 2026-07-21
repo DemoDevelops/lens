@@ -250,6 +250,10 @@ pub fn run_cli(args: &[String]) -> anyhow::Result<()> {
 
 /// Route a single event. Returns the stdout JSON string per the contract.
 fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<String> {
+    if platform == "opencode" && !matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "PreCompact" | "SessionStart") {
+        return Ok("{}".to_string());
+    }
+
     let project = input.project();
     let project_str = project.to_string_lossy().to_string();
     let session_id = input.session_id();
@@ -260,10 +264,6 @@ fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<Stri
     write_current_session(&data_dir, &session_id);
     let store = SessionStore::open(&data_dir)?;
     let ts = super::now_ts();
-
-    if platform == "opencode" && !matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "PreCompact" | "SessionStart") {
-        return Ok("{}".to_string());
-    }
 
     match event {
         "PreToolUse" => {

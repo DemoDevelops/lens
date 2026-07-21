@@ -1,12 +1,20 @@
-//! Host usage reader (Claude Code JSONL or opencode prompt-history.jsonl + opencode.db).
-//! Behind the dashboard's "Actual Usage". Keeps all Claude paths; adds parallel
-//! opencode_config_dirs + read for LENS_HOST=opencode (T6).
-//! Models are generic: claude-* as recorded, opencode uses "opencode" or raw from history.
+//! Host usage reader behind the dashboard's "Actual Usage".
+//!
+//! Claude Code (the default host) writes one JSONL transcript per session under
+//! `<config dir>/projects/**/*.jsonl`; that path is unchanged from before the
+//! opencode work. opencode persists one JSON file per message under
+//! `<data dir>/storage/message/<sessionID>/*.json` (data dir:
+//! `$OPENCODE_DATA_DIR`, else `$XDG_DATA_HOME/opencode`, else
+//! `~/.local/share/opencode`); assistant messages carry `modelID`,
+//! `tokens {input, output, reasoning, cache {read, write}}`, `cost`, and
+//! `time.created` (epoch ms). `read_usage` dispatches on the detected host.
+//!
+//! Read-only and best-effort: a missing dir or unreadable file yields an empty
+//! result, never an error — this feeds a dashboard panel.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -92,91 +100,41 @@ fn read_usage_claude(
     agg.into_values().collect()
 }
 
-/// Read opencode usage from prompt-history.jsonl (user turns + rough input size
-/// from content len/4) and/or opencode.db (session/message counts + tokens).
-/// Falls back to dir walk proxy for activity if no history files. Model set to
-/// value from history if present (e.g. grok-*) else "opencode" (generic, no claude force).
-/// Returns at most one aggregated entry per distinct model (mostly "opencode" v1).
-/// Ignores cwd_filter (opencode transcripts lack the cwd field shape).
+/// Read opencode usage from its message store:
+/// `<data dir>/storage/message/<sessionID>/*.json`, one JSON file per message.
+/// Only assistant messages carry usage (`modelID`, `tokens`, `cost`); user
+/// messages are skipped, mirroring the Claude reader's assistant-turn counting.
+/// Ignores cwd_filter (per-project scoping needs the session table; not wired).
 fn read_usage_opencode(
     since: Option<i64>,
     until: Option<i64>,
     _cwd_filter: Option<&Path>,
 ) -> Vec<ModelUsage> {
     let mut agg: BTreeMap<String, ModelUsage> = BTreeMap::new();
-    for config_dir in opencode_config_dirs() {
-        // Prefer sqlite (has real prompt/completion tokens + cost + counts).
-        let db_path = config_dir.join("opencode.db");
-        if db_path.is_file() {
-            if let Ok(rows) = read_opencode_db(&db_path, since, until) {
-                for (model, turns, input, output, cost) in rows {
-                    let entry = agg.entry(model.clone()).or_insert_with(|| ModelUsage {
-                        model,
-                        turns: 0,
-                        input: 0,
-                        output: 0,
-                        cache_creation: 0,
-                        cache_read: 0,
-                        cost_usd: 0.0,
-                    });
-                    entry.turns += turns;
-                    entry.input += input;
-                    entry.output += output;
-                    entry.cost_usd += cost;
+    for data_dir in opencode_data_dirs() {
+        let Ok(sessions) = std::fs::read_dir(data_dir.join("storage").join("message")) else {
+            continue;
+        };
+        for session in sessions.flatten() {
+            let Ok(messages) = std::fs::read_dir(session.path()) else {
+                continue;
+            };
+            for file in messages.flatten() {
+                let path = file.path();
+                if path.extension().is_none_or(|e| e != "json") {
+                    continue;
                 }
-            }
-        }
-
-        // jsonl fallback / complement: count user turns, rough input size.
-        let jpath = config_dir.join("prompt-history.jsonl");
-        if jpath.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&jpath) {
-                for raw in content.lines() {
-                    let Some(line) = parse_opencode_line(raw) else {
-                        continue;
-                    };
-                    if since.is_some_and(|s| line.ts < s) {
-                        continue;
-                    }
-                    if until.is_some_and(|u| line.ts >= u) {
-                        continue;
-                    }
-                    // use model from history if present (for future per-model opencode), else "opencode"
-                    // (never force claude-* here; generic for non-claude hosts)
-                    let model = line.model.clone().unwrap_or_else(|| "opencode".to_string());
-                    let entry = agg.entry(model.clone()).or_insert_with(|| ModelUsage {
-                        model,
-                        turns: 0,
-                        input: 0,
-                        output: 0,
-                        cache_creation: 0,
-                        cache_read: 0,
-                        cost_usd: 0.0,
-                    });
-                    entry.turns += 1;
-                    entry.input += line.input;
+                let Ok(raw) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Some(m) = parse_opencode_message(&raw) else {
+                    continue;
+                };
+                if since.is_some_and(|s| m.ts < s) || until.is_some_and(|u| m.ts >= u) {
+                    continue;
                 }
-            }
-        }
-
-        // Last-resort proxy (no history files): count subdirs/files as activity.
-        if !agg.contains_key("opencode") && config_dir.is_dir() {
-            let mut proxy = 0u64;
-            if let Ok(rd) = std::fs::read_dir(&config_dir) {
-                for e in rd.flatten() {
-                    let p = e.path();
-                    if p.is_dir()
-                        || p.extension()
-                            .is_some_and(|e| e == "jsonl" || e == "json" || e == "db")
-                    {
-                        proxy += 1;
-                    }
-                }
-            }
-            if proxy > 0 {
-                let model = "opencode".to_string();
-                let entry = agg.entry(model.clone()).or_insert_with(|| ModelUsage {
-                    model,
+                let entry = agg.entry(m.model.clone()).or_insert_with(|| ModelUsage {
+                    model: m.model,
                     turns: 0,
                     input: 0,
                     output: 0,
@@ -184,98 +142,63 @@ fn read_usage_opencode(
                     cache_read: 0,
                     cost_usd: 0.0,
                 });
-                entry.turns += proxy;
-                entry.input += proxy * 50; // rough
+                entry.turns += 1;
+                entry.input += m.input;
+                entry.output += m.output;
+                entry.cache_creation += m.cache_creation;
+                entry.cache_read += m.cache_read;
+                entry.cost_usd += m.cost_usd;
             }
         }
     }
     agg.into_values().collect()
 }
 
-/// Internal row from opencode.db (model-ish, turns, prompt, completion, cost).
-type OpencodeDbRow = (String, u64, u64, u64, f64);
-
-/// Open opencode.db read-only and pull session/message counts + token totals.
-/// Times are ms; we ignore since/until for db (predicate uses full window).
-/// Best-effort: any error -> empty.
-fn read_opencode_db(
-    db_path: &Path,
-    _since: Option<i64>,
-    _until: Option<i64>,
-) -> rusqlite::Result<Vec<OpencodeDbRow>> {
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let turns: u64 = conn
-        .query_row("SELECT COUNT(*) FROM messages WHERE role = 'user'", [], |r| {
-            r.get(0)
-        })
-        .unwrap_or(0);
-    let (p, c, cost): (u64, u64, f64) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cost),0.0) FROM sessions",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap_or((0, 0, 0.0));
-    let mut out = Vec::new();
-    if turns > 0 || p > 0 {
-        out.push(("opencode".to_string(), turns, p, c, cost));
-    }
-    Ok(out)
+/// One assistant message's usage, extracted from an opencode message file.
+struct OpencodeMessage {
+    ts: i64,
+    model: String,
+    input: u64,
+    output: u64,
+    cache_creation: u64,
+    cache_read: u64,
+    cost_usd: f64,
 }
 
-/// Parse one line of prompt-history.jsonl for a user turn. Tolerates several
-/// shapes (role/user, type/user, content/prompt/text keys). Rough input size
-/// from content bytes /4 (proxy tokens). Returns None for non-user or bad.
-fn parse_opencode_line(raw: &str) -> Option<ParsedOpencodeLine> {
-    let raw = raw.trim();
-    if raw.is_empty() {
+/// Parse one opencode message file. `None` for user messages, malformed JSON,
+/// or anything without a `tokens` object — the caller skips those.
+fn parse_opencode_message(raw: &str) -> Option<OpencodeMessage> {
+    let v: Value = serde_json::from_str(raw).ok()?;
+    if v.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
-    let v: Value = serde_json::from_str(raw).ok()?;
-    let role = v.get("role").and_then(Value::as_str);
-    let typ = v.get("type").and_then(Value::as_str);
-    let is_user = role == Some("user") || typ == Some("user") || typ == Some("prompt");
-    if !is_user {
-        // fallback: if has prompt/content and no explicit assistant role
-        if v.get("prompt").is_some() || v.get("content").is_some() {
-            if role != Some("assistant") && typ != Some("assistant") {
-                // treat as user turn
-            } else {
-                return None;
-            }
-        } else {
-            return None;
-        }
-    }
-    let ts = if let Some(s) = v.get("timestamp").and_then(Value::as_str) {
-        iso8601_to_secs(s).unwrap_or(0)
-    } else if let Some(n) = v.get("ts").and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64))) {
-        n
-    } else if let Some(n) = v.get("created_at").and_then(|x| x.as_i64()) {
-        n / 1000 // ms -> s
-    } else {
-        0
-    };
-    let content = v
-        .get("content")
+    let tokens = v.get("tokens")?;
+    let tok = |k: &str| tokens.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let cache = tokens.get("cache");
+    let cache_tok =
+        |k: &str| cache.and_then(|c| c.get(k)).and_then(Value::as_u64).unwrap_or(0);
+    // time.created is epoch ms.
+    let ts = v
+        .get("time")
+        .and_then(|t| t.get("created"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        / 1000;
+    let model = v
+        .get("modelID")
         .and_then(Value::as_str)
-        .or_else(|| v.get("prompt").and_then(Value::as_str))
-        .or_else(|| v.get("text").and_then(Value::as_str))
-        .or_else(|| v.get("message").and_then(|m| m.get("content")).and_then(Value::as_str))
-        .unwrap_or("");
-    let input = if content.is_empty() { 1 } else { (content.len() as u64) / 4 + 1 };
-    let model = v.get("model")
-        .and_then(Value::as_str)
-        .or_else(|| v.get("message").and_then(|m| m.get("model")).and_then(Value::as_str))
-        .or_else(|| v.get("response").and_then(|r| r.get("model")).and_then(Value::as_str))
-        .map(|s| s.to_string());
-    Some(ParsedOpencodeLine { ts, input, model })
-}
-
-struct ParsedOpencodeLine {
-    ts: i64,
-    input: u64,
-    model: Option<String>,
+        .unwrap_or("opencode")
+        .to_string();
+    Some(OpencodeMessage {
+        ts,
+        model,
+        input: tok("input"),
+        // Reasoning tokens are billed as output; ModelUsage has no separate slot.
+        output: tok("output") + tok("reasoning"),
+        cache_creation: cache_tok("write"),
+        cache_read: cache_tok("read"),
+        cost_usd: v.get("cost").and_then(Value::as_f64).unwrap_or(0.0),
+    })
 }
 
 /// Every distinct Claude Code config dir that actually holds transcripts: the
@@ -303,25 +226,20 @@ fn claude_config_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Every distinct opencode state dir: union of `$OPENCODE_CONFIG_DIR`,
-/// `$XDG_CONFIG_HOME/opencode`, `~/.config/opencode`, `~/.local/share/opencode`.
-/// Keeps only those that look like they hold state (db or history file or dir).
-/// Dedup by canonical path.
-fn opencode_config_dirs() -> Vec<PathBuf> {
+/// Every distinct opencode data dir that holds a message store: the union of
+/// `$OPENCODE_DATA_DIR`, `$XDG_DATA_HOME/opencode`, and
+/// `~/.local/share/opencode`, keeping only those with a `storage/message`
+/// subdir (the signal it holds messages) and deduping by canonical path.
+fn opencode_data_dirs() -> Vec<PathBuf> {
     let candidates = [
-        std::env::var_os("OPENCODE_CONFIG_DIR").map(PathBuf::from),
-        std::env::var_os("XDG_CONFIG_HOME").map(|x| PathBuf::from(x).join("opencode")),
-        home_dir().map(|h| h.join(".config").join("opencode")),
+        std::env::var_os("OPENCODE_DATA_DIR").map(PathBuf::from),
+        std::env::var_os("XDG_DATA_HOME").map(|x| PathBuf::from(x).join("opencode")),
         home_dir().map(|h| h.join(".local").join("share").join("opencode")),
     ];
     let mut seen = HashSet::new();
     let mut dirs = Vec::new();
     for dir in candidates.into_iter().flatten() {
-        let has_state = dir.join("opencode.db").exists()
-            || dir.join("prompt-history.jsonl").exists()
-            || dir.join("sessions").is_dir()
-            || dir.is_dir();
-        if !has_state {
+        if !dir.join("storage").join("message").is_dir() {
             continue;
         }
         let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
@@ -619,175 +537,110 @@ mod tests {
         assert_eq!(total_turns, 5);
     }
 
-    /// Write a minimal prompt-history.jsonl with 3 user turns into the dir.
-    /// Used for opencode fixture (no projects/ nesting).
-    fn write_opencode_jsonl_fixture(root: &Path) {
-        std::fs::create_dir_all(root).unwrap();
-        let lines = r#"{"role":"user","content":"first user turn with some words to count size","timestamp":"2026-07-11T00:00:00Z"}
-{"role":"user","content":"second user turn here with more text for input size proxy","timestamp":"2026-07-11T00:01:00Z"}
-{"role":"user","content":"third","timestamp":"2026-07-11T00:02:00Z"}
-"#;
-        std::fs::write(root.join("prompt-history.jsonl"), lines).unwrap();
+    /// Write an opencode message-store fixture into `<root>/storage/message/`:
+    /// three assistant messages (two grok-4, one grok-3-mini across two
+    /// sessions) plus one user message that must be skipped.
+    fn write_opencode_storage_fixture(root: &Path) {
+        let s1 = root.join("storage").join("message").join("ses_a");
+        let s2 = root.join("storage").join("message").join("ses_b");
+        std::fs::create_dir_all(&s1).unwrap();
+        std::fs::create_dir_all(&s2).unwrap();
+        std::fs::write(
+            s1.join("msg_1.json"),
+            r#"{"id":"msg_1","role":"user","sessionID":"ses_a","time":{"created":1752192000000}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            s1.join("msg_2.json"),
+            r#"{"id":"msg_2","role":"assistant","sessionID":"ses_a","modelID":"grok-4","providerID":"xai","cost":0.01,"tokens":{"input":100,"output":50,"reasoning":10,"cache":{"read":30,"write":20}},"time":{"created":1752192060000}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            s1.join("msg_3.json"),
+            r#"{"id":"msg_3","role":"assistant","sessionID":"ses_a","modelID":"grok-4","providerID":"xai","cost":0.02,"tokens":{"input":200,"output":80,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1752192120000}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            s2.join("msg_4.json"),
+            r#"{"id":"msg_4","role":"assistant","sessionID":"ses_b","modelID":"grok-3-mini","providerID":"xai","cost":0.0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1752195600000}}"#,
+        )
+        .unwrap();
     }
 
-    /// Point LENS_HOST=opencode + OPENCODE_CONFIG_DIR at temp with jsonl fixture.
-    /// Steer HOME/XDG empty. Restores. Serialize via env_test_lock.
+    /// Point LENS_HOST=opencode + OPENCODE_DATA_DIR at a temp message store.
+    /// Steer HOME/XDG_DATA_HOME empty. Restores. Serialize via env_test_lock.
     fn with_opencode_fixture<T>(f: impl FnOnce() -> T) -> T {
         let _g = crate::rtk::env_test_lock();
         let prev_host = std::env::var_os("LENS_HOST");
-        let prev_oc = std::env::var_os("OPENCODE_CONFIG_DIR");
+        let prev_data = std::env::var_os("OPENCODE_DATA_DIR");
         let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_xdg = std::env::var_os("XDG_DATA_HOME");
         let tmp = tempfile::tempdir().unwrap();
-        write_opencode_jsonl_fixture(tmp.path());
+        write_opencode_storage_fixture(tmp.path());
         let empty = tempfile::tempdir().unwrap();
         std::env::set_var("LENS_HOST", "opencode");
-        std::env::set_var("OPENCODE_CONFIG_DIR", tmp.path());
+        std::env::set_var("OPENCODE_DATA_DIR", tmp.path());
         std::env::set_var("HOME", empty.path());
-        std::env::set_var("XDG_CONFIG_HOME", empty.path());
+        std::env::set_var("XDG_DATA_HOME", empty.path());
         let out = f();
         restore("LENS_HOST", prev_host);
-        restore("OPENCODE_CONFIG_DIR", prev_oc);
+        restore("OPENCODE_DATA_DIR", prev_data);
         restore("HOME", prev_home);
-        restore("XDG_CONFIG_HOME", prev_xdg);
+        restore("XDG_DATA_HOME", prev_xdg);
         out
     }
 
     #[test]
-    fn opencode_config_dirs_finds_env_and_jsonl() {
-        let _g = crate::rtk::env_test_lock();
-        let prev_host = std::env::var_os("LENS_HOST");
-        let prev_oc = std::env::var_os("OPENCODE_CONFIG_DIR");
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        let cfg = tempfile::tempdir().unwrap();
-        write_opencode_jsonl_fixture(cfg.path());
-        std::env::set_var("LENS_HOST", "opencode");
-        std::env::set_var("OPENCODE_CONFIG_DIR", cfg.path());
-        std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
-        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
-        let dirs = opencode_config_dirs();
-        restore("LENS_HOST", prev_host);
-        restore("OPENCODE_CONFIG_DIR", prev_oc);
-        restore("HOME", prev_home);
-        restore("XDG_CONFIG_HOME", prev_xdg);
-        assert!(!dirs.is_empty(), "got {dirs:?}");
-        assert!(dirs.iter().any(|d| d == cfg.path()));
+    fn opencode_data_dirs_finds_env_dir_and_skips_storeless() {
+        with_opencode_fixture(|| {
+            let dirs = opencode_data_dirs();
+            // Only the env dir qualifies: HOME/XDG_DATA_HOME point at empty
+            // tempdirs with no storage/message.
+            assert_eq!(dirs.len(), 1, "got {dirs:?}");
+        });
     }
 
     #[test]
-    fn read_usage_opencode_counts_user_turns_from_jsonl() {
+    fn read_usage_opencode_aggregates_assistant_messages_per_model() {
         let usage = with_opencode_fixture(|| read_usage(None, None, None));
-        assert_eq!(usage.len(), 1);
-        let u = &usage[0];
-        assert_eq!(u.model, "opencode");
-        assert_eq!(u.turns, 3);
-        assert!(u.input > 0, "rough input from content sizes");
-        assert_eq!(u.output, 0);
-        assert_eq!(u.cost_usd, 0.0);
+        assert_eq!(usage.len(), 2, "one row per model, no phantom rows: {usage:?}");
+        let grok4 = usage.iter().find(|m| m.model == "grok-4").unwrap();
+        assert_eq!(grok4.turns, 2, "user messages are not turns");
+        assert_eq!(grok4.input, 300);
+        assert_eq!(grok4.output, 130 + 10, "reasoning folds into output");
+        assert_eq!(grok4.cache_read, 30);
+        assert_eq!(grok4.cache_creation, 20);
+        assert!((grok4.cost_usd - 0.03).abs() < 1e-9);
+        let mini = usage.iter().find(|m| m.model == "grok-3-mini").unwrap();
+        assert_eq!(mini.turns, 1);
+        assert_eq!(mini.input, 10);
     }
 
     #[test]
-    fn opencode_usage_via_db_and_proxy() {
-        // also exercise sqlite path + proxy fallback (create dir w/ db marker but minimal)
-        let _g = crate::rtk::env_test_lock();
-        let prev_host = std::env::var_os("LENS_HOST");
-        let prev_oc = std::env::var_os("OPENCODE_CONFIG_DIR");
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        let tmp = tempfile::tempdir().unwrap();
-        // create empty db file as marker (read will give 0 but proxy? wait use jsonl + db)
-        std::fs::write(tmp.path().join("opencode.db"), b"").unwrap(); // marker, read handles bad as 0
-        // also write jsonl so has turns
-        write_opencode_jsonl_fixture(tmp.path());
-        std::env::set_var("LENS_HOST", "opencode");
-        std::env::set_var("OPENCODE_CONFIG_DIR", tmp.path());
-        std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
-        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
-        let usage = read_usage(None, None, None);
-        restore("LENS_HOST", prev_host);
-        restore("OPENCODE_CONFIG_DIR", prev_oc);
-        restore("HOME", prev_home);
-        restore("XDG_CONFIG_HOME", prev_xdg);
-        assert!(!usage.is_empty());
-        let u = usage.iter().find(|m| m.model == "opencode").unwrap();
-        assert!(u.turns >= 3);
+    fn read_usage_opencode_respects_window() {
+        // Fixture timestamps: msg_2 at 1752192060, msg_3 at 1752192120,
+        // msg_4 at 1752195600 (all epoch seconds).
+        let usage =
+            with_opencode_fixture(|| read_usage(Some(1752192100), Some(1752195600), None));
+        assert_eq!(usage.len(), 1, "only msg_3 falls in the window: {usage:?}");
+        assert_eq!(usage[0].model, "grok-4");
+        assert_eq!(usage[0].turns, 1);
+        assert_eq!(usage[0].input, 200);
     }
 
     #[test]
-    fn opencode_parse_variants_cover_content_keys_and_models() {
-        let _g = crate::rtk::env_test_lock();
-        let prev_host = std::env::var_os("LENS_HOST");
-        let prev_oc = std::env::var_os("OPENCODE_CONFIG_DIR");
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        let tmp = tempfile::tempdir().unwrap();
-        // variant: role+content + ts
-        let lines = r#"{"role":"user","content":"hi there with words","timestamp":"2026-07-11T00:00:00Z"}
-{"role":"user","prompt":"alt key here","ts":1752225600}
-"#;
-        std::fs::write(tmp.path().join("prompt-history.jsonl"), lines).unwrap();
-        std::env::set_var("LENS_HOST", "opencode");
-        std::env::set_var("OPENCODE_CONFIG_DIR", tmp.path());
-        std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
-        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
-        let usage = read_usage(None, None, None);
-        restore("LENS_HOST", prev_host.clone());
-        restore("OPENCODE_CONFIG_DIR", prev_oc.clone());
-        restore("HOME", prev_home.clone());
-        restore("XDG_CONFIG_HOME", prev_xdg.clone());
-        assert_eq!(usage.len(), 1);
-        assert_eq!(usage[0].turns, 2);
-        // variant with explicit model
-        let lines2 = r#"{"role":"user","content":"g","model":"grok-beta","timestamp":"2026-07-11T00:00:00Z"}
-"#;
-        std::fs::write(tmp.path().join("prompt-history.jsonl"), lines2).unwrap();
-        std::env::set_var("LENS_HOST", "opencode");
-        std::env::set_var("OPENCODE_CONFIG_DIR", tmp.path());
-        let usage2 = read_usage(None, None, None);
-        restore("LENS_HOST", prev_host);
-        restore("OPENCODE_CONFIG_DIR", prev_oc);
-        restore("HOME", prev_home);
-        restore("XDG_CONFIG_HOME", prev_xdg);
-        assert_eq!(usage2[0].model, "grok-beta");
-    }
-
-    #[test]
-    fn opencode_config_dirs_and_sqlite_stub_use_proxy_on_empty() {
-        let _g = crate::rtk::env_test_lock();
-        let prev_host = std::env::var_os("LENS_HOST");
-        let prev_oc = std::env::var_os("OPENCODE_CONFIG_DIR");
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        let good = tempfile::tempdir().unwrap();
-        write_opencode_jsonl_fixture(good.path());
-        // empty candidate dir that will be filtered (no state files, but is_dir check in union)
-        let xdg = tempfile::tempdir().unwrap();
-        // do not create xdg/opencode , its candidate will have !has_state
-        std::env::set_var("LENS_HOST", "opencode");
-        std::env::set_var("OPENCODE_CONFIG_DIR", good.path());
-        std::env::set_var("XDG_CONFIG_HOME", xdg.path());
-        std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
-        let dirs = opencode_config_dirs();
-        restore("LENS_HOST", prev_host.clone());
-        restore("OPENCODE_CONFIG_DIR", prev_oc.clone());
-        restore("HOME", prev_home.clone());
-        restore("XDG_CONFIG_HOME", prev_xdg.clone());
-        assert_eq!(dirs.len(), 1, "empty xdg/opencode candidate must be skipped");
-        // now sqlite stub (bad db) + no jsonl -> should proxy count the dir itself
-        let stub = tempfile::tempdir().unwrap();
-        std::fs::write(stub.path().join("opencode.db"), b"").unwrap();
-        // no prompt-history.jsonl
-        std::env::set_var("LENS_HOST", "opencode");
-        std::env::set_var("OPENCODE_CONFIG_DIR", stub.path());
-        std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
-        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
-        let usage = read_usage(None, None, None);
-        restore("LENS_HOST", prev_host);
-        restore("OPENCODE_CONFIG_DIR", prev_oc);
-        restore("HOME", prev_home);
-        restore("XDG_CONFIG_HOME", prev_xdg);
-        assert!(!usage.is_empty());
-        assert!(usage.iter().any(|m| m.model == "opencode"));
+    fn opencode_message_without_model_id_falls_back_to_host_label() {
+        assert_eq!(
+            parse_opencode_message(
+                r#"{"role":"assistant","tokens":{"input":1,"output":1},"time":{"created":1000}}"#
+            )
+            .unwrap()
+            .model,
+            "opencode"
+        );
+        // user messages and token-less messages are skipped
+        assert!(parse_opencode_message(r#"{"role":"user","time":{"created":1000}}"#).is_none());
+        assert!(parse_opencode_message(r#"{"role":"assistant"}"#).is_none());
+        assert!(parse_opencode_message("not json").is_none());
     }
 }

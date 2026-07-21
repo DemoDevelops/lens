@@ -1,4 +1,4 @@
-The efficiency release: search overhauled end to end, the code graph made directed, and the first apples-to-apples numbers against vanilla Claude Code: same 89% accuracy at 35.7% fewer tokens and 8.5% faster time-to-answer, measured with tools live on the validity-gated agentic benchmark (see [BENCHMARKS.md](BENCHMARKS.md)). Covers everything merged since v0.8.1. First-class opencode / grok support via `lens setup --client opencode` / `LENS_HOST=opencode` (MCP registration, commands/, lifecycle bridge).
+The efficiency release: search overhauled end to end, the code graph made directed, and the first apples-to-apples numbers against vanilla Claude Code: same 89% accuracy at 35.7% fewer tokens and 8.5% faster time-to-answer, measured with tools live on the validity-gated agentic benchmark (see [BENCHMARKS.md](BENCHMARKS.md)). Covers everything merged since v0.8.1. First-class opencode / grok support via `lens setup --client opencode` / `LENS_HOST=opencode` (MCP registration, commands/, lifecycle bridge plugin, models.dev pricing catalog).
 
 ### Added
 

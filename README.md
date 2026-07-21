@@ -60,7 +60,7 @@ cargo build --release
 
 `lens setup` does the same wiring from a binary you built (copies it to `~/.local/bin`, registers the MCP server, installs the hooks + `/dashboard` + RTK for Claude or commands for opencode, sets routing). Target a specific config dir with `lens setup --config-dir <dir>`. Use `--client opencode` when targeting opencode.
 
-**Current limitations (opencode):** Lifecycle hooks (continuity, steering) and RTK are Claude-only for now. opencode gets full MCP tools (`lens_*`), bundled commands (`/dashboard`, `warmup`), darkroom execution, search, graph, and dashboard. Hooks/RTK support may come via opencode plugins later. Claude Code support is unchanged and fully backward-compatible.
+**Current limitations (opencode):** RTK shell compression is Claude-only for now. opencode gets full MCP tools (`lens_*`), bundled commands (`/dashboard`, `warmup`), darkroom execution, search, graph, dashboard, and lifecycle hooks via the bundled `plugins/lens.js` bridge (tool before/after routing + adoption counters, prompt attribution, session events; SessionStart context injection is still limited because opencode has no injection channel). Claude Code support is unchanged and fully backward-compatible.
 
 Update later with `lens update`: it checks the public GitHub release (no auth), downloads the matching binary, and re-applies setup (preserving your routing level). lens also drops a one-line heads-up into a session when a newer release is out; silence it with `LENS_NO_UPDATE_CHECK=1`.
 
@@ -174,9 +174,9 @@ The `$` headline prices the measured tokens-saved at the model input rate (`--ra
 
 For opencode (after `lens setup --client opencode` or `LENS_HOST=opencode lens setup` on a clean temp config):
 
-1. Ensure MCP: `opencode mcp list` (or the jsonc under `~/.config/opencode/opencode.jsonc` or `$OPENCODE_CONFIG_DIR`) shows lens enabled pointing at the bin.
+1. Ensure MCP: `opencode mcp list` (or `~/.config/opencode/opencode.json` / `.jsonc`, or under `$OPENCODE_CONFIG_DIR`) shows lens enabled pointing at the bin, with `LENS_HOST=opencode` in its `environment`.
 
-2. Commands populated: `ls ~/.config/opencode/commands/` contains `dashboard.md` and `warmup.md` (setup now installs them; `lens doctor` reports "/dashboard command installed").
+2. Commands populated: `ls ~/.config/opencode/commands/` contains `dashboard.md` and `warmup.md`, and `~/.config/opencode/plugins/lens.js` exists (the lifecycle bridge; `lens doctor` reports both).
 
 3. In a fresh opencode session (or simulated): call `lens_stats` (MCP tool or `LENS_HOST=opencode lens stats`).
 
@@ -188,11 +188,11 @@ For opencode (after `lens setup --client opencode` or `LENS_HOST=opencode lens s
 
 `lens doctor --client opencode` (standalone) and `lens doctor` (claude default) report host-specific checks. No `claude` binary required for opencode path. Claude path remains byte-identical.
 
-See also `cargo test`, `cargo clippy -- -D warnings`, and the e2e MCP handshake tests (run with `LENS_HOST=opencode` for opencode branch).
+See also `cargo test`, `cargo clippy -- -D warnings`, and the e2e MCP handshake tests (both hosts covered: the main session pins the Claude default; a dedicated test spawns the server under `LENS_HOST=opencode`).
 
 ## How it works
 
-lens is one Rust binary that attaches to Claude Code (MCP + full lifecycle hooks) or opencode (MCP + commands/ only) : as an **MCP stdio server** (the `lens_*` tools, `src/server.rs`) and (for Claude) as **hook handlers** the same binary runs on PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, and SessionStart events. Per-repo state lives in `.lens/` (the symbol graph, the FTS index, and the reversible blob store); the managed RTK binary lives in `~/.lens/bin`. Lifecycle hooks/RTK/steering are Claude-only today; opencode gets the MCP tools, darkroom, search, graph, commands and dashboard.
+lens is one Rust binary that attaches to Claude Code or opencode two ways: as an **MCP stdio server** (the `lens_*` tools, `src/server.rs`) and as **hook handlers** the same binary runs on PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, and SessionStart events — wired natively in Claude Code's settings.json, and through the bundled `plugins/lens.js` bridge in opencode (its plugin hooks shell each event into `lens hook opencode <event>`). Per-repo state lives in `.lens/` (the symbol graph, the FTS index, and the reversible blob store); the managed RTK binary lives in `~/.lens/bin`. RTK shell compression is Claude-only today.
 
 **Darkroom (`lens_run`).** Run your script in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly. The subprocess gives you process isolation and a timeout, not an OS sandbox (see [Security](#security)).
 

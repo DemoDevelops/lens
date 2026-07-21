@@ -6,13 +6,21 @@
 //! model catalog); cache-read is priced at 0.1× the input rate, matching the
 //! documented "cache reads cost ~0.1× base input price".
 //!
-//! Generic for any host: unknown ids (grok, opencode, etc) fall back to Sonnet
-//! rate. Keep Anthropic prices as defaults; --model / raw ids supported.
+//! Generic for any host: non-Claude ids (grok, gpt, gemini, ...) resolve
+//! through the generated models.dev catalog (`pricing_catalog`, covering every
+//! model in opencode's provider directory); anything still unknown falls back
+//! to the Sonnet rate.
 //!
-//! Not a live feed — a curated const table. Update the numbers here when Anthropic
-//! publishes new pricing.
+//! Not a live feed — curated/generated const tables. Update the numbers here
+//! when Anthropic publishes new pricing; regenerate `pricing_catalog.rs` for
+//! the rest.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use serde::Serialize;
+
+use super::pricing_catalog::CATALOG;
 
 /// One model's token prices, in US$ per million tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -70,17 +78,38 @@ pub fn normalize_model(raw: &str) -> &'static str {
     }
 }
 
-/// The price for a model, by raw id or display name. Unknown models (incl. grok,
-/// opencode, non-claude) fall back to the Sonnet rate; never panics. Anthropic
-/// prices kept as defaults; raw ids or --model accepted upstream.
+/// The price for a model, by raw id or display name; never panics. Claude-family
+/// ids use this module's curated table (it wins over the generated catalog's
+/// promo rates); other ids resolve through the models.dev catalog; anything
+/// still unknown falls back to the Sonnet rate.
 pub fn price_for(model: &str) -> ModelPrice {
     match normalize_model(model) {
         OPUS => OPUS_PRICE,
         SONNET => SONNET_PRICE,
         HAIKU => HAIKU_PRICE,
         FABLE => FABLE_PRICE,
-        _ => SONNET_PRICE, // UNKNOWN → documented Sonnet-rate fallback
+        _ => catalog_price(model).unwrap_or(SONNET_PRICE),
     }
+}
+
+/// Look a raw model id up in the generated models.dev catalog (lowercased
+/// exact match, then the segment after the last `/` for `provider/model` ids).
+/// `None` when the catalog doesn't price it.
+pub fn catalog_price(model: &str) -> Option<ModelPrice> {
+    static INDEX: OnceLock<HashMap<&'static str, ModelPrice>> = OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        CATALOG
+            .iter()
+            .map(|&(id, input, output, cache_read)| {
+                (id, ModelPrice { input, output, cache_read })
+            })
+            .collect()
+    });
+    let s = model.trim().to_ascii_lowercase();
+    index
+        .get(s.as_str())
+        .or_else(|| s.rsplit('/').next().and_then(|tail| index.get(tail)))
+        .copied()
 }
 
 /// One row of the serialized price table: the canonical key plus its prices.
@@ -145,12 +174,35 @@ mod tests {
         assert_eq!(price_for("claude-haiku-4-5-20251001"), haiku);
     }
 
-    /// An unrecognized model returns the Sonnet-rate fallback without panicking.
+    /// A model absent from both the Claude table and the catalog returns the
+    /// Sonnet-rate fallback without panicking.
     #[test]
     fn unknown_model_falls_back_to_sonnet() {
-        assert_eq!(normalize_model("gpt-4"), UNKNOWN);
-        assert_eq!(price_for("gpt-4"), price_for("claude-sonnet-5"));
+        assert_eq!(normalize_model("totally-made-up-model"), UNKNOWN);
+        assert_eq!(price_for("totally-made-up-model"), SONNET_PRICE);
         assert_eq!(price_for(""), SONNET_PRICE);
+    }
+
+    /// Non-Claude ids resolve through the generated models.dev catalog:
+    /// exact id, provider-prefixed id, and case-insensitivity all land.
+    #[test]
+    fn catalog_prices_opencode_directory_models() {
+        let gpt5 = price_for("gpt-5");
+        assert_eq!(gpt5, ModelPrice { input: 1.25, output: 10.0, cache_read: 0.125 });
+        assert_eq!(price_for("openai/gpt-5"), gpt5);
+        assert_eq!(price_for("GPT-5"), gpt5);
+        let grok = price_for("grok-4.5");
+        assert_eq!(grok, ModelPrice { input: 2.0, output: 6.0, cache_read: 0.5 });
+        assert!(catalog_price("grok-build-0.1").is_some());
+        assert!(catalog_price("totally-made-up-model").is_none());
+    }
+
+    /// The curated Claude table wins over the catalog (which may carry promo
+    /// rates for the same ids).
+    #[test]
+    fn claude_table_wins_over_catalog() {
+        assert_eq!(price_for("claude-sonnet-5"), SONNET_PRICE);
+        assert_eq!(price_for("anthropic/claude-sonnet-5"), SONNET_PRICE);
     }
 
     /// The serialized table has one entry per canonical model.

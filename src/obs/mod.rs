@@ -15,6 +15,7 @@
 pub mod credit;
 pub mod dashboard;
 pub mod pricing;
+mod pricing_catalog;
 pub mod stats;
 pub mod tui;
 pub mod usage;

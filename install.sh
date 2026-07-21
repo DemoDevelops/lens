@@ -19,10 +19,9 @@ set -eu
 
 REPO="DemoDevelops/lens"
 ROUTING="${LENS_ROUTING:-full}"
-WITH_RTK=1
 for arg in "$@"; do
   case "$arg" in
-    --full) ROUTING="full"; WITH_RTK=1 ;;
+    --full) ROUTING="full" ;;
     *) echo "lens install: unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -39,7 +38,7 @@ if [ "$HOST" = "claude" ]; then
   command -v claude >/dev/null 2>&1 \
     || die "Claude Code ('claude') not found. Install it first: https://claude.com/claude-code"
 fi
-# opencode path requires no 'opencode' binary (we edit ~/.config/opencode/opencode.jsonc directly)
+# opencode path requires no 'opencode' binary (we edit ~/.config/opencode/opencode.json directly)
 
 # Map the host to the release asset built by .github/workflows/release.yml.
 os="$(uname -s)"
@@ -99,7 +98,7 @@ if [ "$os" = "Darwin" ]; then
 fi
 say "Installed: $bin"
 
-say "Wiring MCP + client-specific pieces (hooks for Claude, commands for opencode, RTK, routing)..."
+say "Wiring MCP + client-specific pieces (hooks for Claude, commands+plugin for opencode, RTK, routing)..."
 # Delegate to lens setup (single source of truth post-T2/T4). It skips re-copy when
 # already at target, registers the right MCP entry, does Claude-only hooks/RTK/routing,
 # opencode-only jsonc, prints tailored Done/Restart/Uninstall, and ensures PATH.

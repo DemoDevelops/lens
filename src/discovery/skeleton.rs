@@ -81,6 +81,81 @@ pub fn skeletonize(
     include_bodies: Option<&[String]>,
     with_lines: bool,
 ) -> Option<String> {
+    skeletonize_ex(
+        source,
+        spec,
+        SkeletonOptions {
+            include_bodies,
+            with_lines,
+            query: None,
+            only: None,
+        },
+    )
+    .map(|o| o.text)
+}
+
+/// Options for [`skeletonize_ex`]: the plain `skeletonize` entry point above is
+/// the `query: None, only: None` case, kept as a separate function so the
+/// ~15 existing call sites (mostly tests) are untouched.
+pub struct SkeletonOptions<'a> {
+    pub include_bodies: Option<&'a [String]>,
+    pub with_lines: bool,
+    /// Case-insensitive substring match against definition names: matching
+    /// defs get their full body emitted verbatim, unioned with `include_bodies`.
+    pub query: Option<&'a str>,
+    /// `"pub"` (public items only) or `"name:<prefix>"` (definitions whose name
+    /// starts with `<prefix>`). Non-matching definitions are dropped entirely
+    /// (not just elided) along with their nested children.
+    pub only: Option<&'a str>,
+}
+
+/// [`skeletonize_ex`]'s result: the skeleton text, plus `only`-filter counts
+/// (only meaningful when `filtered` is true) so a shrunken skeleton is never
+/// mistaken for the whole file.
+pub struct SkeletonOutput {
+    pub text: String,
+    pub filtered: bool,
+    pub kept: usize,
+    pub total: usize,
+}
+
+/// `only` filter, parsed from the request string. An unrecognized string (not
+/// `"pub"` and not `"name:"`-prefixed) parses to `None`: no filtering applied.
+enum OnlyFilter {
+    Pub,
+    NamePrefix(String),
+}
+
+fn parse_only(only: &str) -> Option<OnlyFilter> {
+    if only == "pub" {
+        Some(OnlyFilter::Pub)
+    } else {
+        only.strip_prefix("name:")
+            .map(|prefix| OnlyFilter::NamePrefix(prefix.to_string()))
+    }
+}
+
+/// Bundles the per-call, read-only options threaded through the recursive walk
+/// (replaces the growing `include_bodies`/`with_lines`/... parameter list).
+struct WalkOpts<'a> {
+    include_bodies: Option<&'a [String]>,
+    with_lines: bool,
+    query: Option<String>,
+    only: Option<OnlyFilter>,
+}
+
+/// Mutable `only`-filter counters accumulated during the walk.
+#[derive(Default)]
+struct Counts {
+    kept: usize,
+    total: usize,
+}
+
+/// `query` + `only` superset of `skeletonize`: `query` names get their bodies
+/// included (unioned with `include_bodies`); `only` drops non-matching
+/// definitions entirely. Returns `None` under the same conditions as
+/// `skeletonize` (grammar/parse failure).
+pub fn skeletonize_ex(source: &str, spec: &LangSpec, opts: SkeletonOptions) -> Option<SkeletonOutput> {
     let language = (spec.language)();
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
@@ -92,14 +167,33 @@ pub fn skeletonize(
     // its prose/subsections are siblings, so the generic container model
     // (`container_kinds`/`is_body_node`/`find_body_child`) doesn't map. Emit the
     // heading tree directly instead, collapsing each section's prose to one `…`.
+    // `query`/`only` are no-ops for markdown (no definition-name concept here).
     if spec.name == "markdown" {
         emit_md_children(root, src, &mut out);
-        return Some(normalize_blank_lines(&out));
+        return Some(SkeletonOutput {
+            text: normalize_blank_lines(&out),
+            filtered: false,
+            kept: 0,
+            total: 0,
+        });
     }
-    emit_children(root, src, spec.name, include_bodies, with_lines, &mut out);
+    let walk = WalkOpts {
+        include_bodies: opts.include_bodies,
+        with_lines: opts.with_lines,
+        query: opts.query.map(|q| q.to_lowercase()),
+        only: opts.only.and_then(parse_only),
+    };
+    let mut counts = Counts::default();
+    emit_children(root, src, spec.name, &walk, &mut counts, &mut out);
     // Collapse any run of blank lines introduced by elision to a single newline
     // for stable, compact output.
-    Some(normalize_blank_lines(&out))
+    let filtered = walk.only.is_some();
+    Some(SkeletonOutput {
+        text: normalize_blank_lines(&out),
+        filtered,
+        kept: counts.kept,
+        total: counts.total,
+    })
 }
 
 /// Walk the `section` children of a markdown `document`/`section` node and emit
@@ -156,10 +250,10 @@ fn push_heading_line(heading: TsNode, src: &[u8], out: &mut String) {
 
 /// Emit the source-order children of `node`, eliding bodies. Top-level entry
 /// walks the root's children.
-fn emit_children(node: TsNode, src: &[u8], lang: &str, include_bodies: Option<&[String]>, with_lines: bool, out: &mut String) {
+fn emit_children(node: TsNode, src: &[u8], lang: &str, opts: &WalkOpts, counts: &mut Counts, out: &mut String) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        emit_node(child, src, lang, include_bodies, with_lines, out);
+        emit_node(child, src, lang, opts, counts, out);
     }
 }
 
@@ -175,11 +269,20 @@ fn push_line_prefix(node: TsNode, with_lines: bool, out: &mut String) {
 
 /// Emit a single top-level-or-nested node. If it's a container definition we
 /// keep its header and recurse into the body; otherwise we keep the header and
-/// elide the body to `…`, unless its name is in `include_bodies` or its body
-/// is itself a signature (struct/enum/union fields), in which case the body
-/// is kept verbatim.
-fn emit_node(node: TsNode, src: &[u8], lang: &str, include_bodies: Option<&[String]>, with_lines: bool, out: &mut String) {
+/// elide the body to `…`, unless its name is in `include_bodies`/matches
+/// `query`, or its body is itself a signature (struct/enum/union fields), in
+/// which case the body is kept verbatim. `only`, when set, drops the whole
+/// node (and any nested definitions) if it doesn't pass the filter.
+fn emit_node(node: TsNode, src: &[u8], lang: &str, opts: &WalkOpts, counts: &mut Counts, out: &mut String) {
     let kind = node.kind();
+
+    if let (Some(only), true) = (&opts.only, is_filterable_kind(lang, kind)) {
+        counts.total += 1;
+        if !passes_only(node, kind, lang, src, only) {
+            return;
+        }
+        counts.kept += 1;
+    }
 
     // Find the body child (if any) by kind.
     let body = find_body_child(node);
@@ -188,23 +291,24 @@ fn emit_node(node: TsNode, src: &[u8], lang: &str, include_bodies: Option<&[Stri
         None => {
             // No body: emit the node verbatim (imports, use decls, consts,
             // type aliases, struct field lists we treat as leaf, etc.).
-            push_line_prefix(node, with_lines, out);
+            push_line_prefix(node, opts.with_lines, out);
             push_text(node, src, out);
             out.push('\n');
         }
         Some(body) => {
             // Emit the header: everything from node start up to body start.
-            push_line_prefix(node, with_lines, out);
+            push_line_prefix(node, opts.with_lines, out);
             push_range(src, node.start_byte(), body.start_byte(), out);
             let is_container = container_kinds(lang).contains(&kind);
             if is_container {
                 // Keep the body's opening delimiter, recurse to keep nested
                 // signatures, then the closing delimiter.
-                emit_container_body(body, src, lang, include_bodies, with_lines, out);
-            } else if wants_body(node, src, include_bodies) || is_signature_body_kind(lang, kind) {
-                // Caller asked for this definition's body verbatim, or the body
-                // IS the signature (struct/enum/union fields) rather than
-                // executable code, so it's never elided.
+                emit_container_body(body, src, lang, opts, counts, out);
+            } else if wants_body(node, src, opts) || is_signature_body_kind(lang, kind) {
+                // Caller asked for this definition's body verbatim (via
+                // `include_bodies` or `query`), or the body IS the signature
+                // (struct/enum/union fields) rather than executable code, so
+                // it's never elided.
                 push_range(src, body.start_byte(), body.end_byte(), out);
             } else {
                 // Leaf def (function/method): elide the whole body to a single
@@ -219,17 +323,89 @@ fn emit_node(node: TsNode, src: &[u8], lang: &str, include_bodies: Option<&[Stri
     }
 }
 
-/// True if `node`'s definition name is in `include_bodies`. Name extraction
-/// mirrors `extract`'s definitions: the tree-sitter `name` field, falling back
-/// to the first `identifier`-kind child.
-fn wants_body(node: TsNode, src: &[u8], include_bodies: Option<&[String]>) -> bool {
-    let Some(wanted) = include_bodies else {
-        return false;
-    };
+/// True if `node`'s definition name is in `include_bodies` or matches `query`
+/// (case-insensitive substring). Name extraction mirrors `extract`'s
+/// definitions: the tree-sitter `name` field, falling back to the first
+/// `identifier`-kind child.
+fn wants_body(node: TsNode, src: &[u8], opts: &WalkOpts) -> bool {
     let Some(name) = def_name(node, src) else {
         return false;
     };
-    wanted.iter().any(|w| w == &name)
+    if let Some(wanted) = opts.include_bodies {
+        if wanted.iter().any(|w| w == &name) {
+            return true;
+        }
+    }
+    if let Some(query) = &opts.query {
+        if name.to_lowercase().contains(query.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Definition kinds the `only` filter applies to (functions, types, modules,
+/// impls). Everything else (imports, comments, statement-level nodes) passes
+/// through untouched and uncounted.
+fn is_filterable_kind(lang: &str, kind: &str) -> bool {
+    match lang {
+        "rust" => matches!(
+            kind,
+            "function_item"
+                | "struct_item"
+                | "enum_item"
+                | "trait_item"
+                | "impl_item"
+                | "mod_item"
+                | "const_item"
+                | "static_item"
+                | "type_item"
+                | "union_item"
+        ),
+        "python" => matches!(kind, "function_definition" | "class_definition"),
+        "javascript" => matches!(
+            kind,
+            "function_declaration" | "class_declaration" | "method_definition"
+        ),
+        "typescript" => matches!(
+            kind,
+            "function_declaration"
+                | "class_declaration"
+                | "method_definition"
+                | "interface_declaration"
+        ),
+        "go" => matches!(kind, "function_declaration" | "method_declaration" | "type_declaration"),
+        "swift" => matches!(
+            kind,
+            "function_declaration" | "class_declaration" | "protocol_declaration"
+        ),
+        _ => false,
+    }
+}
+
+/// Whether `node` passes the `only` filter.
+fn passes_only(node: TsNode, kind: &str, lang: &str, src: &[u8], only: &OnlyFilter) -> bool {
+    match only {
+        OnlyFilter::Pub => is_pub_item(node, kind, lang),
+        OnlyFilter::NamePrefix(prefix) => def_name(node, src)
+            .map(|n| n.starts_with(prefix.as_str()))
+            .unwrap_or(false),
+    }
+}
+
+/// Public-visibility check for `only: "pub"`. Only rust has an explicit
+/// `visibility_modifier` grammar node; other languages have no reliable,
+/// grammar-generic "public" concept, so everything passes there. `impl_item`
+/// is exempt (Rust impl blocks are never themselves visibility-scoped) so its
+/// methods still get filtered individually instead of the whole block
+/// disappearing.
+fn is_pub_item(node: TsNode, kind: &str, lang: &str) -> bool {
+    if lang != "rust" || kind == "impl_item" {
+        return true;
+    }
+    (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .any(|c| c.kind() == "visibility_modifier")
 }
 
 /// Extract a definition node's name: the `name` field if the grammar has one,
@@ -251,7 +427,7 @@ fn find_body_child(node: TsNode) -> Option<TsNode> {
 }
 
 /// A container body: keep the delimiter run and recurse into nested defs.
-fn emit_container_body(body: TsNode, src: &[u8], lang: &str, include_bodies: Option<&[String]>, with_lines: bool, out: &mut String) {
+fn emit_container_body(body: TsNode, src: &[u8], lang: &str, opts: &WalkOpts, counts: &mut Counts, out: &mut String) {
     // Opening delimiter: the body's first byte up to its first named child.
     let first_named = first_named_child(body);
     let open_end = first_named
@@ -259,7 +435,7 @@ fn emit_container_body(body: TsNode, src: &[u8], lang: &str, include_bodies: Opt
         .unwrap_or(body.end_byte());
     push_range(src, body.start_byte(), open_end, out);
     // Recurse into the body's children, emitting their signatures.
-    emit_children(body, src, lang, include_bodies, with_lines, out);
+    emit_children(body, src, lang, opts, counts, out);
     // Closing delimiter: from the last named child end to body end.
     let last_named = last_named_child(body);
     let close_start = last_named.map(|c| c.end_byte()).unwrap_or(body.start_byte());
@@ -726,5 +902,102 @@ fn beta() {
         let include = vec!["nonexistent".to_string()];
         let unknown_skel = skeletonize(FOO_BAR_SRC, &spec, Some(&include), false).unwrap();
         assert_eq!(unknown_skel, none_skel);
+    }
+
+    /// `query` includes the matching def's body verbatim (like `include_bodies`,
+    /// but a case-insensitive substring match) while other defs stay elided.
+    #[test]
+    fn query_includes_matching_body_and_elides_rest() {
+        let spec = spec_for_language("rust").unwrap();
+        let out = skeletonize_ex(
+            FOO_BAR_SRC,
+            &spec,
+            SkeletonOptions {
+                include_bodies: None,
+                with_lines: false,
+                query: Some("FO"),
+                only: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            out.text.contains("let x = 1;") && out.text.contains("println!(\"{}\", x);"),
+            "foo's body not emitted verbatim for query match:\n{}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("let y = 2;"),
+            "bar's body should stay elided:\n{}",
+            out.text
+        );
+        assert!(out.text.contains(ELLIPSIS), "bar's elision missing:\n{}", out.text);
+        assert!(!out.filtered);
+    }
+
+    /// `only: "pub"` drops private fns entirely and reports kept/total counts.
+    #[test]
+    fn only_pub_drops_private_fns_and_sets_counts() {
+        let spec = spec_for_language("rust").unwrap();
+        let src = r#"
+pub fn exposed() {
+    let _ = 1;
+}
+
+fn hidden() {
+    let _ = 2;
+}
+"#;
+        let out = skeletonize_ex(
+            src,
+            &spec,
+            SkeletonOptions {
+                include_bodies: None,
+                with_lines: false,
+                query: None,
+                only: Some("pub"),
+            },
+        )
+        .unwrap();
+        assert!(out.text.contains("pub fn exposed"), "kept pub fn dropped:\n{}", out.text);
+        assert!(!out.text.contains("hidden"), "private fn not dropped:\n{}", out.text);
+        assert!(out.filtered);
+        assert_eq!(out.kept, 1);
+        assert_eq!(out.total, 2);
+    }
+
+    /// `query` and `only` both compose correctly with `with_lines`: the
+    /// surviving def keeps its `L{n}: ` prefix and its body verbatim.
+    #[test]
+    fn query_and_only_compose_with_with_lines() {
+        let spec = spec_for_language("rust").unwrap();
+        let src = r#"pub fn exposed() {
+    let _ = 1;
+}
+
+fn hidden() {
+    let _ = 2;
+}
+"#;
+        let out = skeletonize_ex(
+            src,
+            &spec,
+            SkeletonOptions {
+                include_bodies: None,
+                with_lines: true,
+                query: Some("expo"),
+                only: Some("pub"),
+            },
+        )
+        .unwrap();
+        assert!(
+            out.text.starts_with("L1: pub fn exposed"),
+            "missing line prefix on surviving def:\n{}",
+            out.text
+        );
+        assert!(out.text.contains("let _ = 1;"), "queried body not verbatim:\n{}", out.text);
+        assert!(!out.text.contains("hidden"), "private fn not dropped:\n{}", out.text);
+        assert!(out.filtered);
+        assert_eq!(out.kept, 1);
+        assert_eq!(out.total, 2);
     }
 }

@@ -54,13 +54,15 @@ export function path(frm, to) {
   return q(["path", frm, to]);
 }
 
-// `includeBodies`/`withLines` mirror the MCP tool's parameter names, the ones
-// models reuse in scripts.
-export function skeleton(path, bodies = null, includeBodies = null, withLines = null) {
+// `includeBodies`/`withLines`/`query`/`only` mirror the MCP tool's parameter
+// names, the ones models reuse in scripts.
+export function skeleton(path, bodies = null, includeBodies = null, withLines = null, query = null, only = null) {
   const args = ["skeleton", path];
   const b = bodies ?? includeBodies;
   if (b && b.length) args.push("--bodies", b.join(","));
   if (withLines === false) args.push("--no-lines");
+  if (query !== null) args.push("--query", query);
+  if (only !== null) args.push("--only", only);
   return q(args);
 }
 

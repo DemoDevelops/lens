@@ -89,7 +89,7 @@ symbol  <name> [--kind K] [--limit N]               declared symbols by name sub
 callers <name> [--depth N] [--transitive] [--prod-only]  directed fan-in subgraph (or full closure with witnesses)\n\
 callees <name> [--depth N] [--transitive] [--prod-only]  directed fan-out subgraph (or full closure with witnesses)\n\
 path    <from> <to>                                 shortest directed path\n\
-skeleton <file> [--bodies a,b] [--no-lines]         full skeleton text + per-def lines\n\
+skeleton <file> [--bodies a,b] [--no-lines] [--query Q] [--only pub|name:P]  full skeleton text + per-def lines\n\
 grep-ast [--path P] [--pattern PAT | --query Q] [--lang L] [--limit N] [--prod-only]\n\
 overview [--budget N] [--query Q]                   importance-ranked repo map\n\
 recall  <ref> [--grep S] [--offset N] [--limit N]   full stored blob";
@@ -377,20 +377,38 @@ fn path(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
     with_stale(serde_json::to_value(&resp), ctx.graph_stale())
 }
 
-/// `skeleton <file> [--bodies a,b]` - the full skeleton text with per-def line
-/// numbers, no budget/truncation (unlike the MCP tool). `--bodies` names definitions
-/// to emit in full (comma-separated), mirroring `include_bodies`.
+/// `skeleton <file> [--bodies a,b] [--query Q] [--only pub|name:PREFIX]` - the
+/// full skeleton text with per-def line numbers, no budget/truncation (unlike
+/// the MCP tool). `--bodies` names definitions to emit in full (comma-separated),
+/// mirroring `include_bodies`; `--query` matches definition names by substring
+/// for the same effect; `--only` drops non-matching definitions entirely.
 fn skeleton_verb(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
     let (positionals, flags) = parse_flags(args);
     let Some(file) = positionals.first() else {
-        return Err(QError::bad("usage: lens q skeleton <file> [--bodies a,b] [--no-lines]"));
+        return Err(QError::bad(
+            "usage: lens q skeleton <file> [--bodies a,b] [--no-lines] [--query Q] [--only pub|name:PREFIX]",
+        ));
     };
     ctx.require_warmed()?;
     let p = ctx.resolve(file);
     let content = std::fs::read_to_string(&p)
         .map_err(|e| QError::bad(format!("read {}: {e}", p.display())))?;
     let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+    // Presence-only flag; line prefixes are on by default like the MCP tool.
+    let with_lines = !args.iter().any(|a| a == "--no-lines");
     let Some(spec) = extract::spec_for_extension(ext) else {
+        // No hand-written LangSpec: fall back to the tags-adapter skeleton-lite
+        // renderer (sh/svelte/other tags-registered languages) before erroring.
+        if let Some(text) = tags_adapter::tags_skeleton(&p, &content, with_lines) {
+            return Ok(json!({
+                "skeleton": text,
+                "language": ext,
+                "stale": ctx.graph_stale(),
+                "filtered": false,
+                "kept": Value::Null,
+                "total": Value::Null,
+            }));
+        }
         return Err(QError::bad(format!(
             "no skeleton for {} (unsupported language '.{ext}'); use Read",
             p.display()
@@ -399,15 +417,31 @@ fn skeleton_verb(ctx: &QCli, args: &[String]) -> Result<Value, QError> {
     let bodies: Option<Vec<String>> = flags
         .get("bodies")
         .map(|s| s.split(',').map(str::to_string).collect());
-    // Presence-only flag; line prefixes are on by default like the MCP tool.
-    let with_lines = !args.iter().any(|a| a == "--no-lines");
-    let Some(text) = skeleton::skeletonize(&content, &spec, bodies.as_deref(), with_lines) else {
+    let query = flags.get("query").map(String::as_str);
+    let only = flags.get("only").map(String::as_str);
+    let Some(out) = skeleton::skeletonize_ex(
+        &content,
+        &spec,
+        skeleton::SkeletonOptions {
+            include_bodies: bodies.as_deref(),
+            with_lines,
+            query,
+            only,
+        },
+    ) else {
         return Err(QError::bad(format!(
             "could not parse {} for skeleton; use Read",
             p.display()
         )));
     };
-    Ok(json!({ "skeleton": text, "language": spec.name, "stale": ctx.graph_stale() }))
+    Ok(json!({
+        "skeleton": out.text,
+        "language": spec.name,
+        "stale": ctx.graph_stale(),
+        "filtered": out.filtered,
+        "kept": out.kept,
+        "total": out.total,
+    }))
 }
 
 /// `grep-ast [--path P] [--pattern PAT | --query Q] [--lang L] [--limit N]

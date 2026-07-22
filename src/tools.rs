@@ -17,20 +17,18 @@ fn default_timeout() -> u64 {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExecuteRequest {
-    /// Language to run: python | javascript | typescript | bash | ruby | go.
+    /// python | javascript | typescript | bash | ruby | go.
     pub language: String,
     /// Source code to execute.
     pub code: String,
-    /// Wall-clock timeout in seconds (default 30). The process is killed on overrun.
+    /// Timeout in seconds (default 30); the process is killed on overrun.
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
-    /// Optional data piped to the script's stdin.
+    /// Data piped to the script's stdin.
     #[serde(default)]
     pub stdin: Option<String>,
-    /// Optional file to analyze (relative to repo root, or absolute): injected as
-    /// the script's first CLI argument (python sys.argv[1] / node process.argv[2] /
-    /// bash $1), so the code can open/analyze it while only its printed output
-    /// returns — the file's contents never enter context.
+    /// Optional file to analyze: injected as the first CLI argument, so only
+    /// its printed output returns.
     #[serde(default)]
     pub path: Option<String>,
 }
@@ -63,16 +61,15 @@ pub struct RetrieveRequest {
     /// A `retrieve_ref` returned by another tool.
     #[serde(rename = "ref")]
     pub reference: String,
-    /// 1-based line to start returning from (default 1, the beginning). Lets a
-    /// large ref be paged through instead of recalled all at once.
+    /// 1-based line to start returning from (default 1). Pages a large ref
+    /// instead of recalling it all at once.
     #[serde(default)]
     pub offset: Option<usize>,
-    /// Max lines to return starting at `offset` (default: the rest of the content).
+    /// Max lines to return starting at `offset` (default: the rest).
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Return only lines containing this substring (case-sensitive). Applied
-    /// before `offset`/`limit`, so the two compose: narrow to matching lines,
-    /// then page through them.
+    /// Only lines containing this substring (case-sensitive). Applied before
+    /// `offset`/`limit`, so the two compose.
     #[serde(default)]
     pub grep: Option<String>,
 }
@@ -107,16 +104,22 @@ fn default_with_lines() -> Option<bool> {
 pub struct SkeletonRequest {
     /// Path to the source file to skeletonize (relative to repo root, or absolute).
     pub path: String,
-    /// Definition names (functions, methods, etc.) whose bodies should be emitted
-    /// in full instead of elided to `…`. Names that don't match anything in the
-    /// file are silently ignored.
+    /// Definition names whose bodies emit in full instead of eliding to
+    /// `…`. Unmatched names are silently ignored.
     #[serde(default)]
     pub include_bodies: Option<Vec<String>>,
-    /// When true, prefix each definition's signature line with `L{n}: ` (its
-    /// 1-indexed source line) so callers can cite exact locations. Default true;
-    /// pass `false` to omit the prefixes.
+    /// Prefix each signature line with `L{n}: ` (its source line). Default
+    /// true; pass `false` to omit.
     #[serde(default = "default_with_lines")]
     pub with_lines: Option<bool>,
+    /// Substring match against definition names: matches get their bodies
+    /// emitted in full, unioned with `include_bodies`.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Filter emitted definitions: `"pub"` for public items, or
+    /// `"name:<prefix>"`. Non-matching definitions are dropped entirely.
+    #[serde(default)]
+    pub only: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -138,6 +141,18 @@ pub struct SkeletonResponse {
     /// `lens_recall`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skeleton_ref: Option<String>,
+    /// True when `only` was given: `skeleton` above is a subset of the file's
+    /// definitions, not the whole file. See `kept`/`total`.
+    #[serde(default)]
+    pub filtered: bool,
+    /// Present only when `filtered`: how many of the file's `total` definitions
+    /// survived the `only` filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept: Option<usize>,
+    /// Present only when `filtered`: the file's total definition count before
+    /// filtering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +332,7 @@ pub struct GraphView {
 pub struct GraphQueryRequest {
     /// Substring to match against symbol names (case-insensitive).
     pub name: String,
-    /// Optional kind filter (function, struct, class, method, interface, mod, ...).
+    /// Optional kind filter (function, struct, class, method, interface, ...).
     #[serde(default)]
     pub kind: Option<String>,
     /// Max matching nodes to expand (default 20).
@@ -329,33 +344,26 @@ pub struct GraphQueryRequest {
 pub struct GraphRequest {
     /// Node id or symbol name to start from.
     pub node: String,
-    /// Optional destination node id or symbol name. Present: return the shortest
-    /// directed path from `node` to `to`. Absent: return the local subgraph
-    /// around `node` (or, with `transitive: true`, the full directed closure).
+    /// Destination node id or symbol name. Present: shortest directed path
+    /// node -> to. Absent: local subgraph (or, with `transitive: true`, the
+    /// full closure).
     #[serde(default)]
     pub to: Option<String>,
-    /// Hops outward for the neighborhood walk, or the hop bound for the
-    /// transitive closure when `transitive: true` (default 1). Ignored when
-    /// `to` is given.
+    /// Hops outward, or the hop bound for `transitive` (default 1). Ignored
+    /// when `to` is given.
     #[serde(default = "default_depth")]
     pub depth: usize,
-    /// Which way the walk follows edges: "callers" (fan-in), "callees"
-    /// (fan-out), or "both" (undirected, the default). Unknown or absent
-    /// falls back to "both". Ignored when `to` is given. With
-    /// `transitive: true`, "both" is rejected (a closure has no undirected
-    /// sense) instead of silently falling back.
+    /// "callers" (fan-in), "callees" (fan-out), or "both" (default). Ignored
+    /// when `to` is given; with `transitive: true`, "both" is rejected.
     #[serde(default)]
     pub direction: Option<String>,
-    /// Return the COMPLETE directed closure within `depth` hops instead of a
-    /// one-hop neighborhood: every node reachable strictly following
-    /// `direction`, each carrying a `witness` (the call-site `file:line`
-    /// proving the edge) plus a `complete: true` claim. Mutually exclusive
-    /// with `to` (a closure has no destination).
+    /// COMPLETE directed closure within `depth` hops following `direction`,
+    /// each node carrying a `witness` (file:line) plus `complete: true`.
+    /// Mutually exclusive with `to`.
     #[serde(default)]
     pub transitive: bool,
-    /// With `transitive: true`, filter the reported node list to
-    /// production-origin nodes only (`count_total`/`count_prod` always report
-    /// both regardless of this flag). Ignored otherwise.
+    /// With `transitive: true`, filter the node list to production-origin
+    /// nodes only (counts always report both).
     #[serde(default)]
     pub prod_only: bool,
 }
@@ -486,9 +494,8 @@ pub struct OverviewRequest {
     /// Token budget for the overview (default 2000).
     #[serde(default = "default_overview_budget")]
     pub token_budget: usize,
-    /// Optional focus: symbols whose names match this query, plus files touched
-    /// this session, are boosted in the ranking so the map centers on a topic.
-    /// Omit for the unfocused, structurally-ranked map.
+    /// Optional focus: symbols matching this query, plus files touched this
+    /// session, are boosted in the ranking. Omit for the unfocused map.
     #[serde(default)]
     pub query: Option<String>,
 }
@@ -508,33 +515,27 @@ pub struct GrepAstRequest {
     /// File or directory to search (default ".").
     #[serde(default = "default_dot")]
     pub path: String,
-    /// A raw tree-sitter query (S-expression). Node kinds are language-specific, e.g.
+    /// A raw tree-sitter query (S-expression), e.g.
     /// `(call_expression function: (field_expression field: (field_identifier) @m))`.
     /// Set exactly one of `query` or `pattern`.
     #[serde(default)]
     pub query: Option<String>,
-    /// A code pattern with `$UPPERCASE` metavariables, compiled to a tree-sitter
-    /// query in-server: write the shape as real code, e.g. `$X.unwrap()` (rust),
-    /// `print($X)` (python), `$A.map($F)` (typescript). `$$$` / `$$$NAME` match
-    /// zero or more sibling nodes (any arity, including empty) — e.g. `f($$$)`
-    /// or `fn $NAME($$$) -> Result<$$$> $BODY`. A repeated single metavariable
-    /// must match equal text; repeated variadic names do not. Requires
-    /// `language`. Set exactly one of `query` or `pattern`.
+    /// A code pattern with `$UPPERCASE` metavariables, compiled to a
+    /// tree-sitter query in-server, e.g. `$X.unwrap()`. `$$$`/`$$$NAME` match
+    /// zero or more sibling nodes. Requires `language`. Set exactly one of
+    /// `query` or `pattern`.
     #[serde(default)]
     pub pattern: Option<String>,
-    /// Language the query targets: any graph-supported language (the 6 hand-written
-    /// rust, python, javascript, typescript, go, swift, plus the tags-adapter set
-    /// c, cpp, csharp, java, kotlin, scala, ruby, php, lua, bash; see SUPPORTED.md).
-    /// When omitted, every file is matched against the query compiled for its own
-    /// grammar, skipping files whose grammar can't compile it.
+    /// Language the query targets (rust, python, javascript, typescript, go,
+    /// swift, plus the tags-adapter set; see SUPPORTED.md). Omitted: every
+    /// file is matched against its own grammar.
     #[serde(default)]
     pub language: Option<String>,
     /// Max matches to return (default 100).
     #[serde(default = "default_grep_ast_limit")]
     pub limit: usize,
-    /// Only return production-origin matches: drops matches inside `#[cfg(test)]`
-    /// spans (Rust) and matches in bench/fixture files (a `benchmarks`/`tests`/
-    /// `fixtures` segment in the reported relative path). Default false.
+    /// Only return production-origin matches: drops `#[cfg(test)]` spans and
+    /// bench/fixture files. Default false.
     #[serde(default)]
     pub prod_only: bool,
 }

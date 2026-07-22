@@ -449,7 +449,7 @@ impl Forge {
     /// Large output is offloaded to the reversible store and replaced with a
     /// preview + ref.
     #[tool(
-        description = "Run code (python|javascript|typescript|bash|ruby|go) in a darkroom; only the script's stdout/stderr returns to context, not the data it processed. Pass `path` to analyze a file: it arrives as the script's first CLI argument (python sys.argv[1] / node process.argv[2] / bash $1), so the file's contents never enter context either. Large output is offloaded and retrievable via lens_recall. Compose against the live repo: in python the `lens` module is already imported as a global (no `import lens` needed); in js `import('./lens.mjs')` does the same — each exposes search/symbol/callers/callees/path/skeleton/grep_ast/overview/recall against this repo's live index and graph; compose and print only the answer."
+        description = "Run code (python|javascript|typescript|bash|ruby|go) in a darkroom; only stdout/stderr returns to context. Pass `path` to analyze a file: it arrives as the script's first CLI arg, so its contents never enter context either. Large output is offloaded, retrievable via lens_recall. python has `lens` pre-imported, js uses `import('./lens.mjs')`; both expose search/symbol/callers/callees/path/skeleton/grep_ast/overview/recall — compose and print only the answer."
     )]
     async fn lens_run(
         &self,
@@ -540,7 +540,7 @@ impl Forge {
     /// Skeletonize a source file: signatures + nesting, executable bodies elided,
     /// the full text stored so any body is one `lens_recall` away.
     #[tool(
-        description = "Show a source file's structure cheaply: signatures, types, and nesting with executable bodies elided to `…`. Far fewer tokens than reading the whole file, and the full text is stored so any elided body is one lens_recall away (use the returned retrieve_ref). Pass `include_bodies` with definition names to get those bodies back verbatim in the same response, without a second call. Line-number prefixes (`L{n}:`) are included by default for exact citations; pass `with_lines: false` to omit them. A skeleton too large for the response budget comes back truncated (`truncated: true`) with a `skeleton_ref` to fetch the full skeleton text via lens_recall. Do not Read a code file just to see its structure — use this first; use Read only when about to Edit."
+        description = "Show a source file's structure cheaply: signatures and nesting with bodies elided to `…`; full text is one lens_recall away. `include_bodies` (names) or `query` (substring) gets bodies back verbatim. `only: \"pub\"`/`\"name:<prefix>\"` drops non-matching defs (`filtered` + kept/total). Line numbers on by default; `with_lines: false` to omit. Oversized skeletons truncate with a `skeleton_ref`. Use instead of Read to see structure; Read only when about to Edit."
     )]
     async fn lens_skeleton(
         &self,
@@ -559,7 +559,41 @@ impl Forge {
             }
         };
         let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
-        let Some(spec) = crate::discovery::extract::spec_for_extension(ext) else {
+        let with_lines = req.with_lines.unwrap_or(true);
+        let (language, skeleton_out) = if let Some(spec) =
+            crate::discovery::extract::spec_for_extension(ext)
+        {
+            let language = spec.name.to_string();
+            let out = crate::discovery::skeleton::skeletonize_ex(
+                &content,
+                &spec,
+                crate::discovery::skeleton::SkeletonOptions {
+                    include_bodies: req.include_bodies.as_deref(),
+                    with_lines,
+                    query: req.query.as_deref(),
+                    only: req.only.as_deref(),
+                },
+            );
+            (language, out)
+        } else if let Some(text) =
+            crate::discovery::tags_adapter::tags_skeleton(&p, &content, with_lines)
+        {
+            // Tags-backed skeleton-lite: no `include_bodies`/`query`/`only` support
+            // (no elision to selectively expand or filter), so this is always
+            // unfiltered.
+            let language = crate::discovery::tags_adapter::tags_spec_for_extension(ext)
+                .map(|s| s.name.to_string())
+                .unwrap_or_else(|| ext.to_string());
+            (
+                language,
+                Some(crate::discovery::skeleton::SkeletonOutput {
+                    text,
+                    filtered: false,
+                    kept: 0,
+                    total: 0,
+                }),
+            )
+        } else {
             let msg = format!(
                 "no skeleton for {} (unsupported language '.{ext}'); use Read",
                 p.display()
@@ -567,17 +601,15 @@ impl Forge {
             op.finish(0, 0, None, "error", msg.clone(), None);
             return Err(ToolFailure::recoverable(msg));
         };
-        let language = spec.name.to_string();
-        let Some(skeleton) = crate::discovery::skeleton::skeletonize(
-            &content,
-            &spec,
-            req.include_bodies.as_deref(),
-            req.with_lines.unwrap_or(true),
-        ) else {
+        let Some(skeleton_out) = skeleton_out else {
             let msg = format!("could not parse {} for skeleton; use Read", p.display());
             op.finish(0, 0, None, "error", msg.clone(), None);
             return Err(ToolFailure::recoverable(msg));
         };
+        let filtered = skeleton_out.filtered;
+        let kept = filtered.then_some(skeleton_out.kept);
+        let total = filtered.then_some(skeleton_out.total);
+        let skeleton = skeleton_out.text;
         // Stash the full file so any elided body is recoverable; surface a cheap
         // short handle (Store::get resolves prefixes) instead of the 64-char hash.
         let reference = match self.store.put(&content) {
@@ -628,9 +660,14 @@ impl Forge {
         let _ = self.store.bump_stat("raw_bytes_processed", raw_in as i64);
         let explain = self.ops.explain(|| {
             format!(
-                "skeletonized {} ({language}): {raw_in} -> {returned} bytes; full text at ref {retrieve_ref}{}",
+                "skeletonized {} ({language}): {raw_in} -> {returned} bytes; full text at ref {retrieve_ref}{}{}",
                 p.display(),
-                if truncated { "; skeleton itself budgeted" } else { "" }
+                if truncated { "; skeleton itself budgeted" } else { "" },
+                if filtered {
+                    format!("; only-filtered {}/{} defs kept", kept.unwrap_or(0), total.unwrap_or(0))
+                } else {
+                    String::new()
+                }
             )
         });
         op.finish(
@@ -647,12 +684,15 @@ impl Forge {
             retrieve_ref,
             truncated,
             skeleton_ref,
+            filtered,
+            kept,
+            total,
         }))
     }
 
     /// Fetch a full blob previously offloaded to the reversible store.
     #[tool(
-        description = "Retrieve the full content for a retrieve_ref returned by another tool (reverses any truncation/compression). Optional `offset`/`limit` (1-based lines) and `grep` (substring filter, applied first) slice a large ref instead of returning it all at once. If the blob snapshots a file that has since changed or been deleted, the response carries a one-line `stale` warning naming the file."
+        description = "Retrieve the full content for a retrieve_ref returned by another tool (reverses any truncation/compression). Optional `offset`/`limit` (1-based lines) and `grep` (substring filter, applied first) slice a large ref instead of returning it all at once. If the blob snapshots a file since changed or deleted, the response carries a one-line `stale` warning naming the file."
     )]
     async fn lens_recall(
         &self,
@@ -713,7 +753,7 @@ impl Forge {
     /// auto-built and kept fresh per query (`ensure_index`); there is no explicit
     /// index tool.
     #[tool(
-        description = "Full-text search across all indexed content (BM25-ranked; the index is auto-built and kept fresh, no setup call needed): finds where a string, idea, or usage appears anywhere, including inside function bodies, comments, strings, and config; returns ranked snippets per query, each with path, match line, and the definition names the hit's chunk carries (`symbols` — often the answer to a which-function-does-X question). When the query names a symbol, its full definition is returned as the top hit (resolved via the graph), answering a symbol lookup in one call. The only tool that sees inside bodies and finds call-sites/usages. For a named symbol's connections use lens_symbol (it also resolves by meaning when you don't know the exact name)."
+        description = "Full-text search across all indexed content (BM25-ranked; auto-built and kept fresh): finds where a string, idea, or usage appears anywhere, including inside function bodies, comments, strings, and config; returns ranked snippets per query, each with path, match line, and the definition names the hit's chunk carries (`symbols` — often the answer to a which-function-does-X question). A query naming a symbol returns its full definition as the top hit. The only tool that sees inside bodies and finds call-sites/usages. For a symbol's connections use lens_symbol (also resolves by meaning)."
     )]
     async fn lens_search(
         &self,
@@ -755,7 +795,7 @@ impl Forge {
     /// `lens_find` engine); `matched_via` reports which path produced the result.
     /// The graph is auto-built and kept fresh per query (`ensure_graph`).
     #[tool(
-        description = "Look up a declared symbol by name substring (case-insensitive; + optional kind); returns each match's location plus its immediate connections (calls, contains, imports, ...), NOT its source body (to read the code, lens_search the name). Zero substring matches fall back to a blend-ranked match by meaning over symbol names (no embeddings; exact > prefix > word-boundary token, plus a multi-word bonus), so a natural-language description still resolves; `matched_via` in the response says which path won (\"name\" | \"meaning\"). When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. `limit` bounds the number of matching root symbols, not the total nodes returned — each root's neighbors come back on top of it. No match on either path returns an empty result, not an error. An exact-name match among several candidates is reported via `resolved` (chosen node + how many others it beat). Large results are compacted with a lens_recall ref."
+        description = "Look up a declared symbol by name substring (+ optional kind); returns each match's location plus its immediate connections (calls, contains, imports), NOT its body — lens_search the name to read code. Zero matches fall back to a meaning-ranked lexical match; `matched_via` reports which path won (\"name\" | \"meaning\"). Nodes carry `origin` (prod/test/bench) when mixed. `limit` bounds matching root symbols, not total nodes returned. No match is an empty result, not an error. Ambiguous exact-name matches surface via `resolved`. Large results compact with a lens_recall ref."
     )]
     async fn lens_symbol(
         &self,
@@ -802,7 +842,7 @@ impl Forge {
     /// dispatch, no mode enum; each form returns its natural shape unchanged.
     /// The graph is auto-built and kept fresh per query (`ensure_graph`).
     #[tool(
-        description = "Graph connections for a symbol (by node id or name; the graph is auto-built and kept fresh, no setup call needed). With `to`: the shortest directed path from `node` to `to` via BFS over calls/imports edges — no path (or an unresolvable end) returns `found: false`, not an error, and an ambiguous name is reported via `resolved` (chosen node + how many others it beat). Without `to`: the local subgraph within `depth` hops of `node`, walking `direction` \"callers\" (fan-in), \"callees\" (fan-out), or \"both\" (undirected, the default) — a `node` that resolves to nothing is an explicit error, never an empty graph. Set `transitive: true` (no `to`) for the COMPLETE directed closure instead of a one-hop-at-a-time neighborhood: every node reachable within `depth` hops strictly following `direction` (\"callers\" or \"callees\" only — \"both\" is rejected, a closure has no undirected sense), each carrying a `witness` (the call-site `file:line` proving the edge on its shortest path back to `node`, so the edge is provable, not just asserted) and the response asserting `complete: true` for the given `depth` plus `count_total`/`count_prod` — one call answers a multi-hop reachability question with proof instead of chaining atomic calls. `prod_only` filters the reported node list to production-origin nodes (the counts always report both). `transitive: true` together with `to` is rejected: a closure has no destination. When a result contains test/bench code, every node carries `origin` (prod/test/bench), so test-only callers can be excluded without opening files; no `origin` fields = all production code. Large neighborhoods are budget-trimmed and compacted, with the full subgraph recoverable via the lens_recall ref."
+        description = "Graph connections for a symbol (node id or name; auto-built and kept fresh). With `to`: shortest directed path node->to over calls/imports — no path returns `found: false`; ambiguous names surface via `resolved`. Without `to`: local subgraph within `depth` hops, `direction` \"callers\"/\"callees\"/\"both\" (default) — unresolved `node` is an explicit error. `transitive: true` (excludes `to`): the COMPLETE directed closure within `depth` hops strictly following `direction` (\"callers\"/\"callees\" only), each node carrying a `witness` (call-site file:line) plus `complete: true`, `count_total`/`count_prod`. `prod_only` filters the node list to production-origin nodes (counts report both). Nodes carry `origin` (prod/test/bench) when mixed. Large neighborhoods budget-trim and compact; full subgraph via lens_recall."
     )]
     async fn lens_graph(
         &self,
@@ -942,7 +982,7 @@ impl Forge {
 
     /// A token-budgeted map of the repo's most important symbols.
     #[tool(
-        description = "Get a token-budgeted overview of the repo: the most structurally important symbols (PageRank-ranked) with their callers/callees, as much as fits a token budget (default 2000). A high-signal map of a codebase at fixed cost instead of reading files. Pass an optional query to focus the map on a topic: symbols whose names match it, and files you have touched this session, are boosted into the budget. For one file's structure use lens_skeleton; this is the whole-repo ranked map."
+        description = "Get a token-budgeted overview of the repo: the most structurally important symbols (PageRank-ranked) with their callers/callees, as much as fits a token budget (default 2000). A high-signal map at fixed cost instead of reading files. `query` focuses the map: symbols matching it, and files touched this session, are boosted into the budget. For one file's structure use lens_skeleton; this is the whole-repo ranked map."
     )]
     async fn lens_overview(
         &self,
@@ -972,7 +1012,7 @@ impl Forge {
 
     /// Structural (tree-sitter) search: run an AST query, get path:line matches.
     #[tool(
-        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, so it finds e.g. real `.unwrap()` calls or functions returning Result without the false positives grep hits in comments/strings. Returns one deduplicated path:line match per distinct call/pattern site (a call matched more than once internally, e.g. once per extra argument, still surfaces once), plus `count`, the authoritative match total: read it for counting questions, don't count list items. `limit` caps the underlying scan of raw captures before dedup, so `truncated: true` can still return fewer than `limit` matches. No match returns an empty result, not an error. When a result contains test/bench code, every match carries `origin` (prod/test/bench: `#[cfg(test)]` spans and bench/fixture paths, the graph's own provenance rules); no `origin` fields = all production code. `prod_only: true` drops non-prod matches before they count toward `limit` — use it for any 'excluding tests' count. Rust macro invocation bodies (`matches!(…)`, `format!(…)`, …) are matched too: token-tree interiors are re-parsed structurally, so a call written inside a macro still counts. A raw query with several named captures returns each capture's text per row under `captures` (e.g. `@name` plus `@ret` answers both in one call). For plain-text/idea search use lens_search; this is for syntax-shape matches."
+        description = "Structural code search via a tree-sitter query (S-expression): matches syntax, not text, avoiding grep false positives in comments/strings. Returns one deduplicated path:line match per site, plus `count` — the authoritative total, don't count list items. `limit` caps the pre-dedup scan; `truncated: true` can return fewer than `limit` matches. No match is an empty result, not an error. Matches carry `origin` (prod/test/bench) when mixed; `prod_only: true` drops non-prod matches before `limit`. Rust macro bodies match too via token-tree re-parsing. Named captures return per-row under `captures`. For text/idea search use lens_search instead."
     )]
     async fn lens_grep_ast(
         &self,
@@ -1053,7 +1093,7 @@ impl Forge {
     /// Record a durable project-memory item (decision/constraint/rejected-approach/
     /// rule), carried across sessions unlike the live per-session event log.
     #[tool(
-        description = "Record durable project memory (category: decision | constraint | rejected-approach | rule) that survives across sessions, unlike the live event log. Also indexed for lens_search under session://memory/<category>."
+        description = "Record durable project memory (category: decision | constraint | rejected-approach | rule) that survives sessions, unlike the live event log. Also indexed for lens_search under session://memory/<category>."
     )]
     async fn lens_memory_record(
         &self,
@@ -3307,6 +3347,8 @@ mod tests {
                 path: file.display().to_string(),
                 include_bodies: None,
                 with_lines: None,
+                query: None,
+                only: None,
             }))
             .await
             .unwrap()
@@ -3373,6 +3415,8 @@ mod tests {
                 path: file.display().to_string(),
                 include_bodies: None,
                 with_lines: None,
+                query: None,
+                only: None,
             }))
             .await
             .unwrap()
@@ -3438,6 +3482,8 @@ mod tests {
                 path: file.display().to_string(),
                 include_bodies: None,
                 with_lines: None,
+                query: None,
+                only: None,
             }))
             .await
             .unwrap()

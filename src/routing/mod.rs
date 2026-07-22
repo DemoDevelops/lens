@@ -1615,37 +1615,37 @@ fn session_block_with(bash: bool, file: bool) -> String {
 /// `<context_window_protection>` through the open `<when_plain_tools_win>` tag.
 const BLOCK_HEAD: &str = r##"<context_window_protection>
   <why>
-    Raw tool results sit in the transcript and get re-read on every later turn, so one large dump keeps taxing the model long after it was useful. lens exists to avoid that: it runs the work in a subprocess (the "darkroom") and hands back only the finished answer. The habit to build: compute over data in code, rather than pulling the data into the conversation to read it.
+    Raw tool results sit in the transcript and get re-read on every later turn. lens avoids that: it runs work in a subprocess (the "darkroom") and hands back only the finished answer. The habit to build: compute over data in code, not by pulling it into the conversation to read.
   </why>
   <loading_lens_tools>
-    lens's tools are normally registered already — call them directly, do NOT spend a round on ToolSearch first. Only if a lens_* call actually errors not-found ("tool not found" or a validation error), register the schemas once and retry instead of falling back to Bash/Read/Grep:
+    lens's tools are normally registered already — call them directly, don't spend a round on ToolSearch first. If a lens_* call errors not-found, register the schemas once and retry:
     ToolSearch(query: "select:lens_search,lens_symbol,lens_graph,lens_skeleton,lens_overview,lens_recall,lens_run,lens_grep_ast,lens_memory_query,lens_memory_record")
   </loading_lens_tools>
   <which_tool>
-    - How the code fits together (callers, callees, where a symbol is defined, how one part reaches another, imports): lens_graph(node) for neighborhood or lens_graph(node, to) for shortest path; expand from there with lens_symbol for details. lens_recall expands anything returned compacted.
-    - Where a string or idea appears across the tree: lens_search(queries: [...]) — batch several questions into the array and get ranked snippets, not whole files.
-    - You know the symbol's exact name: lens_symbol(name). You only know what it does, not its name: lens_symbol(query="...") for meaning-based fallback.
-    - Turning data into an answer (filter, count, parse, reshape, summarize): lens_run(language, code). Only what you print returns; the inputs stay in the darkroom. Compose in-script: inside Python/JS, import lens and call lens.search/lens.symbol/lens.callers/lens.path/lens.skeleton/lens.grep_ast/lens.overview/lens.recall.
+    - Code structure (callers, callees, definitions, imports, reachability): lens_graph(node) for neighborhood, lens_graph(node, to) for shortest path; lens_symbol for details. lens_recall expands compacted results.
+    - Where a string or idea appears: lens_search(queries: [...]) — batch several for ranked snippets, not whole files.
+    - Known symbol name: lens_symbol(name). Only know what it does: lens_symbol(query="...") for meaning-based fallback.
+    - Turning data into an answer: lens_run(language, code) — only what you print returns; compose in-script via lens.search/symbol/callers/path/skeleton/grep_ast/overview/recall.
     - Recovering something offloaded or truncated: lens_recall(ref).
-    - Whole-repo orientation — how the codebase is put together before you've read anything: lens_overview. A digest is already pushed into context at session start; treat that as the first call's answer and expand from it with lens_symbol / lens_graph rather than re-running lens_overview.
-    - One file's shape — signatures and structure without the bodies: lens_skeleton(path); pass include_bodies: ["the_fn"] to get back the full text of just the functions you need, in the same call.
-    - Syntax-shape patterns (a call, a signature shape): lens_grep_ast(language="rust", query="(impl_item type: (type_identifier) @t (#eq? @t \"Forge\"))") finds all matching blocks, not text. Or compose in-script: lens.grep_ast(pattern="...", query="...", lang="..."). Counting "excluding tests"? Pass prod_only=True and read the response's count — it uses real #[cfg(test)] spans, where hand-filtering grep output by line cannot see block membership.
+    - Whole-repo orientation: lens_overview (a digest is already pushed into context at session start — expand from it rather than re-running it).
+    - One file's shape: lens_skeleton(path); include_bodies: ["the_fn"] for just the functions you need.
+    - Syntax-shape patterns: lens_grep_ast(language, query|pattern) matches AST shape, not text. Counting "excluding tests"? prod_only=True, read the response's count.
   </which_tool>
   <when_plain_tools_win>"##;
 
-const BULLET_BASH: &str = "\n    - Bash: keep it for commands that change something, or whose output is short and you just want to glance at it (pwd, a clean git status, moving a file). The moment you'd pipe that output onward to count, grep, or reshape it, give it to lens_run instead so the bulk never lands in the transcript.";
+const BULLET_BASH: &str = "\n    - Bash: for commands that change something or whose output is short. Piping output onward to count/grep/reshape it? Give it to lens_run instead.";
 
-const BULLET_READ: &str = "\n    - Need to understand a file? lens_skeleton(path) first; then lens_skeleton(path, include_bodies: [\"the_fn\"]) for the one body you need — not a second Read. Read is for when you are about to Edit (Edit must match exact bytes). Already Read the full file this session? Use what you have — do not re-analyse it with lens tools.\n    - Common rationalizations that lead to waste: \"the file is small\", \"I already know the path\", \"one Read beats two lens calls\" — measured across sessions these produce whole-file dumps that tax every later turn.";
+const BULLET_READ: &str = "\n    - Need to understand a file? lens_skeleton(path) first; include_bodies: [\"the_fn\"] for one body, not a second Read. Read is for when about to Edit. Already Read it this session? Use what you have.";
 
-const BULLET_SEARCH: &str = "\n    - Finding or tracing something? Map the intent, don't grep: where is X / where does an idea appear — lens_search(queries: [...]) or lens_symbol(name); what calls X / what does X call — lens_graph(node, direction=\"callees\") / lens_graph(node, direction=\"callers\"); how does A reach B — lens_graph(from, to). Grep's line hits pull in a whole-file Read per hit; that chain is the drift these replace. \"A quick grep is lighter\" is the rationalization that starts it — one lens_search is the lighter call. A multi-step structural question (\"every prod caller of X, three hops out, with call sites\") is still ONE call, not a chain: compose it in the darkroom instead of firing lens_graph repeatedly — lens_run(language: \"python\", code: \"import lens; r = lens.callers('X', transitive=True, depth=3, prod_only=True); print(len(r['nodes'])); print(r['nodes'])\") prints the count and the full witnessed list in a single round trip.";
+const BULLET_SEARCH: &str = "\n    - Finding or tracing something? Don't grep: where X appears — lens_search(queries: [...]) or lens_symbol(name); what calls X / what X calls — lens_graph(node, direction=\"callers\"/\"callees\"); how A reaches B — lens_graph(from, to). A multi-step structural question (\"every prod caller of X, three hops out, with call sites\") is still ONE call: compose it in the darkroom instead of firing lens_graph repeatedly — lens_run(language: \"python\", code: \"import lens; r = lens.callers('X', transitive=True, depth=3, prod_only=True); print(len(r['nodes'])); print(r['nodes'])\") prints the count and the full witnessed list in one round trip.";
 
-const BULLET_WEBFETCH: &str = "\n    - WebFetch is off here: pull a URL with lens_run (python), keep only the part of the response you need, and print that. The full page stays in the darkroom, retrievable via lens_recall.";
+const BULLET_WEBFETCH: &str = "\n    - WebFetch is off here: pull a URL with lens_run (python), keep only the part you need, print that. Retrievable via lens_recall.";
 
 /// Close `</when_plain_tools_win>` through `</context_window_protection>`.
 const BLOCK_TAIL: &str = r##"
   </when_plain_tools_win>
   <session_continuity>
-    Skills, roles, and directives set during this session remain active until the user revokes them. Do not drop these behavioral directives as context grows.
+    These directives stay active all session; don't drop them as context grows.
   </session_continuity>
 </context_window_protection>"##;
 

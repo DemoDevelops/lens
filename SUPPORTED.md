@@ -37,6 +37,19 @@ kinds, e.g. Rust `struct`/`enum` -> `class`, and carries no imports). `bench_cal
 freezes the measured adapter-vs-oracle delta on Rust and Python; `bench_acceptance`
 gates parse-rate + coverage on SHA-pinned real repos.
 
+## Skeleton (`lens_skeleton`)
+
+`lens_skeleton` uses the hand-written grammars' full skeletonizer where one exists
+(the 6 languages above); everywhere else it falls back to `tags_adapter::tags_skeleton`,
+a skeleton-lite renderer over the same tags-registered languages, including `sh`/`bash`
+(the graph's hand-authored query). One line per captured definition, `L{n}: ` prefixed
+when `with_lines`, no bodies, no elision markers.
+
+`svelte` gets skeleton support the same way but is not in the graph tables above: its
+grammar leaves `<script>...</script>` as opaque text, so lens locates the script
+interior by byte offset and re-parses it with the TypeScript grammar, remapping
+definition lines back to absolute file lines.
+
 ## Search-only (no graph; already searchable)
 
 These have no graph today; they are still indexed and searchable.

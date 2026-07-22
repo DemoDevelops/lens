@@ -17,6 +17,7 @@
 //! [`TagsLangSpec::imports_query`] and refining kinds, gated by its fixture test.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use streaming_iterator::StreamingIterator;
@@ -536,6 +537,146 @@ fn compile_cached(
     compiled
 }
 
+/// One `@definition.*` capture, reduced to what a skeleton-lite line needs:
+/// where it sits (for nesting + line number) and its own source line verbatim.
+struct DefSpan {
+    start_byte: usize,
+    end_byte: usize,
+    /// 1-indexed line, relative to the parsed source (shifted to an absolute
+    /// file line by callers that parsed a sub-document, e.g. svelte's script
+    /// interior).
+    line: usize,
+    text: String,
+}
+
+/// Skeleton-lite rendering for a tags-registered language: `lens_skeleton`'s
+/// fallback when no hand-written [`LangSpec`] exists for the file's extension.
+/// One line per captured definition (no bodies, no elision markers), `L{n}: `
+/// prefixed when `with_lines`, indented by capture-row containment (a
+/// definition starting inside a still-open enclosing definition nests one
+/// level deeper). Returns `None` for an unregistered extension or a grammar
+/// that fails to parse.
+pub fn tags_skeleton(path: &Path, source: &str, with_lines: bool) -> Option<String> {
+    let ext = path.extension().and_then(|e| e.to_str())?;
+    if ext.eq_ignore_ascii_case("svelte") {
+        return svelte_skeleton(source, with_lines);
+    }
+    let spec = tags_spec_for_extension(ext)?;
+    let spans = definition_spans(source, &spec)?;
+    Some(render_definitions(&spans, with_lines))
+}
+
+/// Parse `source` under `spec` and collect its `@definition.*` spans in source
+/// order, deduped by definition-node id (mirrors the dedup in
+/// `extract_tags_from_tree`, minus the def-kind priority: a skeleton line
+/// only needs one entry per node, not the most specific kind).
+fn definition_spans(source: &str, spec: &TagsLangSpec) -> Option<Vec<DefSpan>> {
+    let language = (spec.language)();
+    let mut parser = Parser::new();
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    let src = source.as_bytes();
+    let query = cached_tags_query(spec)?;
+    let qref: &Query = &query;
+    let cap_names = qref.capture_names();
+
+    let mut seen: BTreeSet<usize> = BTreeSet::new();
+    let mut spans: Vec<DefSpan> = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut it = cursor.matches(qref, root, src);
+    while let Some(m) = it.next() {
+        let def = m.captures.iter().find_map(|c| {
+            let cn = cap_names[c.index as usize];
+            cn.starts_with("definition.").then_some(c.node)
+        });
+        let Some(dn) = def else { continue };
+        if !seen.insert(dn.id()) {
+            continue;
+        }
+        let line0 = dn.start_position().row;
+        let text = source.lines().nth(line0).unwrap_or_default().trim().to_string();
+        spans.push(DefSpan {
+            start_byte: dn.start_byte(),
+            end_byte: dn.end_byte(),
+            line: line0 + 1,
+            text,
+        });
+    }
+    spans.sort_by_key(|s| s.start_byte);
+    Some(spans)
+}
+
+/// Render already-collected, already-sorted spans: one line each, `L{n}: `
+/// prefixed when `with_lines`, indented two spaces per still-open enclosing
+/// span (tracked as a stack of end bytes).
+fn render_definitions(spans: &[DefSpan], with_lines: bool) -> String {
+    let mut out = String::new();
+    let mut open_ends: Vec<usize> = Vec::new();
+    for s in spans {
+        while matches!(open_ends.last(), Some(&end) if end <= s.start_byte) {
+            open_ends.pop();
+        }
+        let indent = "  ".repeat(open_ends.len());
+        out.push_str(&indent);
+        if with_lines {
+            out.push_str(&format!("L{}: {}", s.line, s.text));
+        } else {
+            out.push_str(&s.text);
+        }
+        out.push('\n');
+        open_ends.push(s.end_byte);
+    }
+    out
+}
+
+// Svelte ships no `TagsLangSpec` entry: the `tree-sitter-svelte-ng` crate
+// (checked at authoring time, `tree-sitter = "0.25"`-compatible) parses
+// `<script>...</script>` content as an opaque `raw_text` node rather than
+// structurally, so a tags query on the svelte grammar itself cannot see the
+// functions inside. Instead, slice the script interior by byte offset and
+// re-parse it with the TypeScript grammar (already a dependency), remapping
+// def lines to absolute file lines — the same virtual-document technique as
+// `push_macro_interiors` in `structural.rs`.
+const SVELTE_SCRIPT_TAGS_QUERY: &str = r#"
+    (function_declaration name: (identifier) @name) @definition.function
+    (class_declaration name: (_) @name) @definition.class
+    (method_definition name: (property_identifier) @name) @definition.method
+"#;
+
+fn svelte_script_spec() -> TagsLangSpec {
+    TagsLangSpec {
+        // Distinct from a hypothetical future "typescript" tags-registry entry so
+        // the compiled-query cache (keyed by `name`) never collides with it.
+        name: "svelte-script",
+        extensions: &[],
+        language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        tags_query: SVELTE_SCRIPT_TAGS_QUERY,
+        imports_query: None,
+    }
+}
+
+fn svelte_skeleton(source: &str, with_lines: bool) -> Option<String> {
+    let (interior, line_off) = svelte_script_interior(source)?;
+    let mut spans = definition_spans(&interior, &svelte_script_spec())?;
+    for s in &mut spans {
+        s.line += line_off;
+    }
+    Some(render_definitions(&spans, with_lines))
+}
+
+/// Slice the first `<script ...>...</script>` block's interior text plus the
+/// 0-indexed line its first character sits on, so def lines found inside can
+/// be shifted to absolute file lines by simple addition.
+fn svelte_script_interior(source: &str) -> Option<(String, usize)> {
+    let open_start = source.find("<script")?;
+    let open_end = source[open_start..].find('>')? + open_start + 1;
+    let close = source[open_end..].find("</script>")? + open_end;
+    let interior = source[open_end..close].to_string();
+    let line_off = source[..open_end].matches('\n').count();
+    Some((interior, line_off))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,5 +916,32 @@ fn helper() {}
         let fx = extracts("sh", "helper() { echo hi; }\nmain() { helper; ls; }\n");
         assert!(has_def(&fx, "helper") && has_def(&fx, "main"), "defs: {:?}", def_names(&fx));
         assert!(has_call(&fx, "helper"), "calls: {:?}", fx.calls);
+    }
+
+    // --- T2: tags_skeleton renderer ---
+
+    /// A bash fixture with two functions yields both names with correct lines.
+    #[test]
+    fn bash_skeleton_lists_both_functions_with_lines() {
+        let src = "say() {\n  echo hi\n}\n\ndie() {\n  echo bye\n}\n";
+        let out = tags_skeleton(Path::new("setup.sh"), src, true).expect("sh has a tags spec");
+        assert!(out.contains("L1: say() {"), "out: {out}");
+        assert!(out.contains("L5: die() {"), "out: {out}");
+    }
+
+    /// A svelte fixture with two script functions yields both with absolute lines
+    /// (the `<script>` block, not line 1 of the file).
+    #[test]
+    fn svelte_skeleton_lists_script_functions_with_absolute_lines() {
+        let src = "<script>\nfunction foo() {\n  return 1;\n}\nfunction bar() {\n  return 2;\n}\n</script>\n<div>{foo()}</div>\n";
+        let out = tags_skeleton(Path::new("App.svelte"), src, true).expect("svelte skeleton");
+        assert!(out.contains("L2: function foo() {"), "out: {out}");
+        assert!(out.contains("L5: function bar() {"), "out: {out}");
+    }
+
+    /// Unregistered extension returns `None`.
+    #[test]
+    fn tags_skeleton_none_for_unregistered_extension() {
+        assert!(tags_skeleton(Path::new("a.unknownext"), "whatever", true).is_none());
     }
 }

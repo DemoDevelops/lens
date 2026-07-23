@@ -210,23 +210,15 @@ fn bash_grep_shape(cmd: &str) -> bool {
         .is_some_and(|c| !matches!(c, routing::reroute::bash_grep::BashGrepClass::NarrowExact))
 }
 
-/// Nearest enclosing repo root at or above `start`: the deepest ancestor that
-/// holds a `.git` entry, or — failing that — one that already holds a
-/// `.lens` data dir. `.git` is preferred so a pre-existing stray `.lens`
-/// in a subdirectory can't pin the search below the real root. Returns `None`
-/// when neither marker is found, leaving the caller's candidate untouched (e.g.
-/// a tempdir under `/var` in tests).
+/// Nearest enclosing project root at or above `start`, via the shared
+/// `discovery::anchor_root` walk: the deepest ancestor holding a `.git` entry,
+/// else one holding any other project marker (`.lens`, Cargo.toml,
+/// package.json, ...). `.git` is preferred so a stray marker in a subdirectory
+/// can't pin the search below the real root; markers at `$HOME` are ignored.
+/// Returns `None` when no marker is found, leaving the caller's candidate
+/// untouched (e.g. a tempdir under `/var` in tests).
 fn repo_root(start: &Path) -> Option<PathBuf> {
-    let mut ctx_root = None;
-    for dir in start.ancestors() {
-        if dir.join(".git").exists() {
-            return Some(dir.to_path_buf());
-        }
-        if ctx_root.is_none() && dir.join(".lens").is_dir() {
-            ctx_root = Some(dir.to_path_buf());
-        }
-    }
-    ctx_root
+    crate::discovery::anchor_root(start)
 }
 
 /// CLI entry: `args` is everything after `hook` (i.e. `[platform, event]`).
@@ -255,6 +247,28 @@ fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<Stri
     }
 
     let project = input.project();
+    // Scope guard: a session rooted in a non-project tree (a home directory: no
+    // project marker, over the probe budget) gets no lens. No `.lens` dir
+    // scattered there, no store writes, no routing guide, and no auto-index of a
+    // million-file tree. SessionStart says so in one line; every other event
+    // returns its default no-op response. Cheap for real projects: the first
+    // marker hit answers the classification.
+    if !crate::discovery::indexable_root(&project) {
+        if event == "SessionStart" {
+            return Ok(serde_json::to_string(&json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": format!(
+                        "lens idle: {} is not a code project (no .git or build \
+                         manifest), so lens tools are inactive this session. Start \
+                         sessions from a project directory to enable them.",
+                        project.display()
+                    ),
+                }
+            }))?);
+        }
+        return Ok(default_response(event));
+    }
     let project_str = project.to_string_lossy().to_string();
     let session_id = input.session_id();
     let data_dir = super::resolve_data_dir(&project);
@@ -1099,6 +1113,24 @@ mod tests {
             cwd: Some(dir.to_string_lossy().to_string()),
             ..Default::default()
         }
+    }
+
+    /// A giant marker-less dir (home-directory shape) makes the hook idle:
+    /// SessionStart returns only the one-line idle note, no `.lens` data dir is
+    /// created in the tree, and every other event gets its default no-op.
+    #[test]
+    fn unscoped_project_idles_hook_without_lens_dir() {
+        let dir = tempdir().unwrap();
+        for i in 0..10_001 {
+            std::fs::write(dir.path().join(format!("f{i}")), "").unwrap();
+        }
+        let out = handle("claude", "SessionStart", &input_for(dir.path())).unwrap();
+        assert!(out.contains("lens idle"), "{out}");
+        assert!(!dir.path().join(".lens").exists());
+        let mut input = input_for(dir.path());
+        input.tool_name = Some("Edit".into());
+        assert_eq!(handle("claude", "PostToolUse", &input).unwrap(), "{}");
+        assert!(!dir.path().join(".lens").exists());
     }
 
     #[test]

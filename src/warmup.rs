@@ -50,6 +50,16 @@ pub fn warmup(root: &Path, data_dir: &Path) -> Result<()> {
     // (which relativizes against the same canonical repo_dir).
     let root_buf = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let root = root_buf.as_path();
+    // Same scope classification the MCP server applies to auto-builds: refuse to
+    // walk a giant non-project tree (a bare `lens warmup` from `$HOME`).
+    if !discovery::indexable_root(root) {
+        anyhow::bail!(
+            "{} is not a code project (no project marker like .git/Cargo.toml, and \
+             over 10k files) — refusing to index it. Pass a project directory, or set \
+             LENS_SCOPE_GUARD=0 to force.",
+            root.display()
+        );
+    }
     let store = Store::open(data_dir).context("opening store")?;
 
     // --- Structural graph (tree-sitter → graph.json) ---

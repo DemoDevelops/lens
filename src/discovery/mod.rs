@@ -69,6 +69,167 @@ pub fn nested_repo_roots(root: &Path) -> Vec<std::path::PathBuf> {
     roots
 }
 
+/// Marker entries that identify a directory as a code-project root for scope
+/// classification. `.git`/`.hg`/`.svn` are VCS roots; `.lens` is a lens data
+/// dir the user (or a prior session) already built here; the rest are build /
+/// package manifests, covering real projects that have no VCS checkout.
+pub const PROJECT_MARKERS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".lens",
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "setup.py",
+    "go.mod",
+    "Gemfile",
+    "CMakeLists.txt",
+    "Makefile",
+];
+
+/// File-count budget for [`indexable_root`]'s marker-less probe. A directory
+/// with no project marker and more files than this is not something lens should
+/// auto-index (a home directory, a downloads tree); real unmarked projects come
+/// in far under it, and marker-bearing monorepos never reach the probe.
+const SCOPE_PROBE_BUDGET: usize = 10_000;
+
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(Into::into)
+}
+
+/// Kill switch for scope classification: `LENS_SCOPE_GUARD=0` makes every root
+/// indexable again (same `=0` polarity as the routing rail flags).
+fn scope_guard_disabled() -> bool {
+    std::env::var("LENS_SCOPE_GUARD").is_ok_and(|v| v == "0")
+}
+
+/// Does `dir` itself carry a project marker? A marker at the literal home
+/// directory is ignored: stray `$HOME` manifests (npm drops `package.json`
+/// there, dotfile setups put `.git` there, older lens versions left `.lens`)
+/// must not turn the entire home tree into one indexable "project" — that is
+/// exactly the million-file auto-index hang this classification prevents.
+pub fn is_project_root(dir: &Path) -> bool {
+    is_project_root_at(dir, home_dir().as_deref())
+}
+
+/// [`is_project_root`] with the home directory injected, so the exception is
+/// testable without mutating the process-global `$HOME`.
+fn is_project_root_at(dir: &Path, home: Option<&Path>) -> bool {
+    if home.is_some_and(|h| h == dir) {
+        return false;
+    }
+    PROJECT_MARKERS.iter().any(|m| dir.join(m).exists())
+}
+
+/// Nearest enclosing project root at or above `start`: the deepest ancestor
+/// holding a `.git` entry (a worktree's `.git` is a FILE, hence `.exists()`),
+/// else the deepest ancestor holding any other [`PROJECT_MARKERS`] entry.
+/// `.git` gets its own pass so a nested `package.json` (a JS monorepo package,
+/// a vendored dep) can't pin the root below the real repo root. Markers at the
+/// home directory are ignored (see [`is_project_root`]).
+pub fn anchor_root(start: &Path) -> Option<std::path::PathBuf> {
+    anchor_root_from(start, home_dir().as_deref())
+}
+
+fn anchor_root_from(start: &Path, home: Option<&Path>) -> Option<std::path::PathBuf> {
+    for dir in start.ancestors() {
+        if home.is_some_and(|h| h == dir) {
+            continue;
+        }
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+    }
+    start
+        .ancestors()
+        .find(|dir| is_project_root_at(dir, home))
+        .map(Path::to_path_buf)
+}
+
+/// Should lens auto-index/graph `root`? Yes when it is a project root (marker
+/// present) or small enough that indexing is cheap regardless. A marker-less
+/// tree over the probe budget (a home directory, a workspace of unrelated
+/// trees) is unscoped: hooks stay idle and the server refuses auto-builds
+/// instead of walking millions of files.
+///
+/// The marker check always runs live (dropping a Cargo.toml flips the verdict
+/// on the next call); only the probe walk is cached (`probe_cache_file`), so an
+/// unscoped session's per-hook-event cost is a stat, not a bounded tree walk
+/// (~0.2s on a home directory, measured 2026-07-23).
+pub fn indexable_root(root: &Path) -> bool {
+    if scope_guard_disabled() || is_project_root(root) {
+        return true;
+    }
+    if let Some(v) = cached_probe_verdict(root) {
+        return v;
+    }
+    let v = files_within_budget(root, SCOPE_PROBE_BUDGET);
+    store_probe_verdict(root, v);
+    v
+}
+
+/// TTL for cached probe verdicts: long enough that an unscoped session doesn't
+/// pay the walk on every hook event, short enough that a tree crossing the
+/// budget in either direction is re-classified within minutes.
+const SCOPE_CACHE_TTL_SECS: u64 = 900;
+
+/// Probe verdicts live in the global lens home (`~/.lens`), NOT the probed tree
+/// (an unscoped tree must get no lens droppings), keyed by root-path hash with
+/// the file's own mtime as the TTL clock. Gated on the same
+/// `LENS_NO_GLOBAL_MIRROR` opt-out as the ops mirror, so cargo test runs never
+/// touch the real global home. Best-effort on both ends: any IO or parse
+/// problem just means re-probing.
+fn probe_cache_file(root: &Path) -> Option<std::path::PathBuf> {
+    if std::env::var_os("LENS_NO_GLOBAL_MIRROR").is_some() {
+        return None;
+    }
+    let hex = blake3::hash(root.to_string_lossy().as_bytes()).to_hex();
+    crate::rtk::home_root().map(|h| h.join(format!("scope.{}.probe", &hex.as_str()[..16])))
+}
+
+fn cached_probe_verdict(root: &Path) -> Option<bool> {
+    let f = probe_cache_file(root)?;
+    let age = std::fs::metadata(&f).ok()?.modified().ok()?.elapsed().ok()?;
+    if age.as_secs() > SCOPE_CACHE_TTL_SECS {
+        return None;
+    }
+    match std::fs::read_to_string(&f).ok()?.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn store_probe_verdict(root: &Path, verdict: bool) {
+    if let Some(f) = probe_cache_file(root) {
+        if let Some(dir) = f.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&f, if verdict { "1" } else { "0" });
+    }
+}
+
+/// True iff `root` holds at most `budget` files (standard ignore filters
+/// applied). Aborts the walk at `budget + 1`, so the huge-tree case costs
+/// milliseconds, not a full traversal.
+fn files_within_budget(root: &Path, budget: usize) -> bool {
+    let mut n = 0usize;
+    let mut builder = WalkBuilder::new(root);
+    builder.standard_filters(true);
+    for entry in builder.build().flatten() {
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            n += 1;
+            if n > budget {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Discover the structural graph under `root`. `languages` optionally filters to
 /// a subset (by language name). The graph is returned; the caller persists it.
 pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOutcome> {
@@ -1226,6 +1387,47 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn scope_markers_classify_project_roots() {
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        fs::create_dir_all(proj.join("src")).unwrap();
+        assert!(!is_project_root_at(&proj, None));
+        fs::write(proj.join("Cargo.toml"), "[package]").unwrap();
+        assert!(is_project_root_at(&proj, None));
+        // A marker at the (injected) home directory is ignored.
+        assert!(!is_project_root_at(&proj, Some(&proj)));
+        // The ancestor walk resolves a deep start to the marker root.
+        assert_eq!(
+            anchor_root_from(&proj.join("src"), None),
+            Some(proj.clone())
+        );
+    }
+
+    #[test]
+    fn scope_git_beats_nested_weak_marker() {
+        // A JS package inside a git repo must not pin the root below the repo.
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let web = repo.join("web");
+        fs::create_dir_all(web.join("src")).unwrap();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(web.join("package.json"), "{}").unwrap();
+        assert_eq!(anchor_root_from(&web.join("src"), None), Some(repo));
+    }
+
+    #[test]
+    fn scope_probe_counts_files_against_budget() {
+        let tmp = tempdir().unwrap();
+        for i in 0..5 {
+            fs::write(tmp.path().join(format!("f{i}")), "x").unwrap();
+        }
+        assert!(files_within_budget(tmp.path(), 5));
+        assert!(!files_within_budget(tmp.path(), 4));
+        // Marker-less but small -> indexable via the probe.
+        assert!(indexable_root(tmp.path()));
+    }
 
     /// Cross-file call precision: a call whose name matches a symbol IMPORTED from
     /// one file must NOT also link to same-named definitions in unrelated files.

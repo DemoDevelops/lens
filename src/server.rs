@@ -89,10 +89,36 @@ impl ToolFailure {
 
 /// Any internal `ErrorData` (from the index/graph helpers) becomes a recoverable
 /// failure, so `?` at a handler boundary delivers it as content the model can act on.
+/// The one exception is the unscoped-root refusal ([`unscoped_error`]): that message
+/// is delivered verbatim, because wrapping it in the transient-lock recovery prose
+/// would invite a retry that can never succeed.
 impl From<ErrorData> for ToolFailure {
     fn from(e: ErrorData) -> Self {
+        if e.message.starts_with(UNSCOPED_MSG_PREFIX) {
+            return ToolFailure::plain(e.message.to_string());
+        }
         ToolFailure::recoverable(e.message)
     }
+}
+
+/// Marker prefix identifying the unscoped-root refusal, so `From<ErrorData> for
+/// ToolFailure` can deliver it as-is instead of as a "transient lock" failure.
+const UNSCOPED_MSG_PREFIX: &str = "lens is idle here:";
+
+/// The refusal every auto-build path returns when the resolved root failed scope
+/// classification (`discovery::indexable_root`): not a code project, too big to
+/// index blind. Self-contained -- names the cause, the fix, and the override.
+fn unscoped_error(root: &Path) -> ErrorData {
+    ErrorData::internal_error(
+        format!(
+            "{UNSCOPED_MSG_PREFIX} {} is not a code project (no project marker like \
+             .git/Cargo.toml/package.json, and over 10k files), so lens will not \
+             auto-index it. Use plain tools here, or start the session from a project \
+             directory. LENS_SCOPE_GUARD=0 overrides.",
+            root.display()
+        ),
+        None,
+    )
 }
 
 impl IntoContents for ToolFailure {
@@ -191,6 +217,11 @@ pub struct Forge {
     /// from `index_walk` so an index re-walk doesn't suppress a graph re-walk (and vice
     /// versa); each tracks its own freshness.
     graph_walk: WalkDebounce,
+    /// Whether `repo_dir` classified as an indexable project root at construction
+    /// (`discovery::indexable_root`). When false, `ensure_index`/`ensure_graph`
+    /// refuse to auto-build (returning `unscoped_error`) instead of walking a giant
+    /// non-project tree such as a home directory.
+    scoped: bool,
 }
 
 /// Resolve the repo root the server indexes and graphs against, independent of the
@@ -235,11 +266,14 @@ fn resolve_repo_root() -> PathBuf {
 ///    that exists on disk -> used directly. This is how Claude Code's own env
 ///    naturally flows through at runtime; `setup::register_mcp` needs no explicit
 ///    `--cwd`/`--env` registration for it.
-/// 3. Else walk up from `cwd` toward the filesystem root; the nearest ancestor
-///    (including `cwd` itself) that owns a `.git` entry wins. Checked via `.exists()`,
-///    not `.is_dir()`: a git worktree's `.git` is a FILE (a gitdir pointer), not a
-///    directory.
-/// 4. Else (no `.git` found above `cwd`) -> `cwd` as-is (pre-fix behavior).
+/// 3. Else walk up from `cwd` toward the filesystem root via
+///    [`discovery::anchor_root`]: the nearest ancestor (including `cwd` itself) that
+///    owns a `.git` entry wins (checked via `.exists()`, not `.is_dir()`: a git
+///    worktree's `.git` is a FILE, a gitdir pointer); failing that, the nearest
+///    ancestor with any other project marker (Cargo.toml, package.json, ...), so
+///    non-git projects resolve to their real root too. Markers at `$HOME` itself are
+///    ignored -- a stray `~/package.json` must not make home "the project".
+/// 4. Else (no marker found above `cwd`) -> `cwd` as-is (pre-fix behavior).
 ///
 /// Takes its inputs as parameters (rather than reading the environment/cwd itself) so
 /// the decision logic is exercisable with fabricated `tempfile::tempdir()` trees under
@@ -261,10 +295,8 @@ fn resolve_repo_root_from(
             return dir.to_path_buf();
         }
     }
-    for dir in cwd.ancestors() {
-        if dir.join(".git").exists() {
-            return dir.to_path_buf();
-        }
+    if let Some(root) = discovery::anchor_root(cwd) {
+        return root;
     }
     cwd.to_path_buf()
 }
@@ -349,6 +381,19 @@ mod resolve_repo_root_tests {
         assert_eq!(got, repo);
     }
 
+    /// (f) Non-git project: a deep cwd resolves to the nearest ancestor holding a
+    /// weak project marker (Cargo.toml), not to bare cwd.
+    #[test]
+    fn walks_up_to_weak_marker_when_no_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        let deep = proj.join("src").join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(proj.join("Cargo.toml"), "[package]").unwrap();
+        let got = resolve_repo_root_from(None, None, &deep);
+        assert_eq!(got, proj);
+    }
+
     /// (e) Neither env var present and no `.git` anywhere above cwd: fall back to cwd
     /// as-is (pre-fix behavior). Relies on the OS temp root's own ancestry not
     /// containing a stray `.git`, true of any normal dev/CI machine.
@@ -423,6 +468,10 @@ impl Forge {
         let store = Store::open(&data_dir)?;
         let index = Index::open(&data_dir)?.with_repo_root(&repo_dir);
         let ops = OpLog::open(&data_dir);
+        // Classified once at construction: the root never changes for the life of
+        // this server. Cheap for real projects (first marker hit answers it); the
+        // marker-less giant-tree case aborts its probe walk at the budget.
+        let scoped = discovery::indexable_root(&repo_dir);
         Ok(Forge {
             repo_dir,
             data_dir,
@@ -437,7 +486,15 @@ impl Forge {
             // via Forge::new.
             index_walk: WalkDebounce::new(std::time::Duration::ZERO),
             graph_walk: WalkDebounce::new(std::time::Duration::ZERO),
+            scoped,
         })
+    }
+
+    /// Test-only override for the scope classification, so the unscoped refusal is
+    /// provable without fabricating an over-budget tree on disk.
+    #[cfg(test)]
+    fn set_scoped(&mut self, scoped: bool) {
+        self.scoped = scoped;
     }
 }
 
@@ -1912,6 +1969,11 @@ impl Forge {
     /// itself fresh as the user adds/removes files, with no explicit `lens_map`
     /// and no server restart. Works for every project (it is in the query path).
     fn ensure_graph(&self) -> Result<(), ErrorData> {
+        // Unscoped root: refuse before the freshness probe, whose manifest walk
+        // would itself traverse the whole giant tree.
+        if !self.scoped {
+            return Err(unscoped_error(&self.repo_dir));
+        }
         // Freshness probe: the persisted graph is present, non-empty, and its manifest
         // matches the current source mtimes. Recomputed on each call so a waiter
         // re-checks the winner's just-written manifest before deciding to build.
@@ -1955,6 +2017,11 @@ impl Forge {
     /// chunks for deleted files internally (a separate prune walk is redundant), and
     /// leaves unchanged files untouched.
     fn ensure_index(&self) -> Result<(), ErrorData> {
+        // Unscoped root: refuse before the freshness probe, whose manifest walk
+        // would itself traverse the whole giant tree.
+        if !self.scoped {
+            return Err(unscoped_error(&self.repo_dir));
+        }
         // Debounce: within the walk window of the last staleness check, skip the
         // gitignore walk and assume the index is fresh (staleness bounded to the TTL).
         if self.index_walk.fresh() {
@@ -2414,6 +2481,22 @@ mod tests {
         let data = dir.path().join(".lens");
         let f = Forge::with_paths(dir.path().to_path_buf(), data, max_inline).unwrap();
         (f, dir)
+    }
+
+    /// An unscoped root (scope classification failed) refuses every auto-build with
+    /// the self-explanatory idle message, delivered verbatim: not wrapped in the
+    /// transient-lock recovery prose, which would invite a doomed retry.
+    #[test]
+    fn unscoped_root_refuses_auto_builds() {
+        let (mut f, _dir) = forge_with_source();
+        f.set_scoped(false);
+        let e = f.ensure_index().unwrap_err();
+        assert!(e.message.starts_with(UNSCOPED_MSG_PREFIX), "{}", e.message);
+        let e = f.ensure_graph().unwrap_err();
+        assert!(e.message.starts_with(UNSCOPED_MSG_PREFIX), "{}", e.message);
+        let tf: ToolFailure = e.into();
+        assert!(tf.message.contains("lens is idle here"), "{}", tf.message);
+        assert!(!tf.message.contains("transient"), "{}", tf.message);
     }
 
     /// A Forge over a temp repo containing one rust source file.

@@ -136,6 +136,49 @@ pub fn reset(data_dir: &Path, session: &str, key: &str) {
         .insert((session.to_string(), key.to_string()), 0);
 }
 
+/// Cross-process atomic test-and-set for a once-per-session mark: records the
+/// fire and returns true iff this call WON it; false if `(session, key)` had
+/// already fired. [`fired`] + [`mark`] is check-then-act across processes:
+/// each hook event is its own process whose cache loads once, so two parallel
+/// tool calls in one message both pass the `fired` check and both fire (the
+/// v0.10 gate log shows 30 sessions with a doubled achain deny). Locking the
+/// log file and re-reading it under the lock closes that window. Best-effort
+/// like the rest of the module: an IO failure falls back to the cache verdict.
+pub fn try_mark(data_dir: &Path, session: &str, key: &str) -> bool {
+    let mut map = throttle().0.lock().unwrap();
+    let state = map.entry(data_dir.to_path_buf()).or_default();
+    ensure_loaded(state, data_dir);
+    let ck = (session.to_string(), key.to_string());
+    if state.counts.contains_key(&ck) {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(data_dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(log_path(data_dir))
+    {
+        // Re-read under the lock: another hook process may have appended the
+        // mark after this process loaded its cache. O_APPEND only pins the
+        // write cursor; reads start at offset 0. Lock released on drop.
+        let mut text = String::new();
+        let already = f.lock().is_ok()
+            && std::io::Read::read_to_string(&mut f, &mut text).is_ok()
+            && text.lines().any(|l| {
+                let mut it = l.splitn(3, '\t');
+                it.next() == Some(session) && it.next() == Some(key)
+            });
+        if already {
+            state.counts.insert(ck, 1);
+            return false;
+        }
+        let _ = f.write_all(format!("{session}\t{key}\n").as_bytes());
+    }
+    state.counts.insert(ck, 1);
+    true
+}
+
 /// Atomic check-and-consume for one-shot armed markers: if `(session, key)`
 /// has a positive count, zero it and return true; otherwise leave it and
 /// return false. Unlike [`fired`], a reset-to-zero key reads as disarmed.
@@ -303,6 +346,28 @@ mod tests {
             );
         }
         assert_eq!(lines, 8 * 200, "every append must land as exactly one line");
+    }
+
+    #[test]
+    fn try_mark_wins_once_then_reports_fired() {
+        let d = tempdir().unwrap();
+        assert!(try_mark(d.path(), "s", "k:done"), "first caller wins");
+        assert!(!try_mark(d.path(), "s", "k:done"), "second caller loses");
+        assert!(fired(d.path(), "s", "k:done"), "the win is a recorded fire");
+        assert!(try_mark(d.path(), "s2", "k:done"), "other sessions unaffected");
+    }
+
+    #[test]
+    fn try_mark_sees_another_processes_mark_despite_stale_cache() {
+        let d = tempdir().unwrap();
+        // Load this process's cache while the log is empty.
+        assert!(!fired(d.path(), "s", "k:done"));
+        // Another hook process appends the mark (cache now stale).
+        append(d.path(), "s", "k:done");
+        assert!(
+            !try_mark(d.path(), "s", "k:done"),
+            "the under-lock re-read must see the other process's mark"
+        );
     }
 
     #[test]

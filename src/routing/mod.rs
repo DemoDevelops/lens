@@ -644,10 +644,13 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
             // writes the counter.
             if atomic_lens && atomic_chain_deny_enabled() && ctx.level.steers() && ctx.mcp_ready {
                 let n = throttle::bump(ctx.data_dir, ctx.session_id, "achain-run");
+                // try_mark, not fired+mark: two parallel tool calls in one
+                // message run as concurrent hook processes, and the stale-cache
+                // check-then-act doubled the deny (30 sessions in the v0.10
+                // gate log).
                 if n >= ATOMIC_CHAIN_THRESHOLD
-                    && !throttle::fired(ctx.data_dir, ctx.session_id, "achain:done")
+                    && throttle::try_mark(ctx.data_dir, ctx.session_id, "achain:done")
                 {
-                    throttle::mark(ctx.data_dir, ctx.session_id, "achain:done");
                     throttle::reset(ctx.data_dir, ctx.session_id, "achain-run");
                     return Decision::Deny(reroute::atomic_chain::deny_reason(
                         t.strip_prefix("mcp__lens__").unwrap_or(t),

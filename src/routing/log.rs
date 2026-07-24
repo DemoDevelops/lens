@@ -47,12 +47,23 @@ pub fn emit(data_dir: &Path, e: RoutingEvent) {
         }
     }
     if let Some(w) = guard.as_mut() {
+        // ts + pid identify the event: rows carry no tool_input for non-Bash
+        // tools, so without them two different consecutive calls to the same
+        // tool serialize byte-identically and log analysis can't tell a
+        // 5-file skeleton chain from one duplicated row (the v0.10 gate log
+        // read as 64% "duplicates" for exactly this reason).
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let line = json!({
             "session": e.session,
             "tool": e.tool,
             "cmd": e.cmd,
             "decision": e.decision,
             "reason": e.reason,
+            "ts": ts_ms,
+            "pid": std::process::id(),
         });
         // Flush each line: the hook process exits without unwinding this static.
         let _ = writeln!(w, "{line}");

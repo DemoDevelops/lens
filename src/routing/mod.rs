@@ -628,6 +628,32 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 throttle::mark(ctx.data_dir, ctx.session_id, "ovrb:done");
                 return Decision::Deny(reroute::overview_rebuy::deny_reason().to_string());
             }
+            // Reroute rail (cmem): a plain walk FROM a node the session's
+            // transitive closure already contains re-derives proven data (the
+            // 0060 closure-hint rerun measured 15 such depth-1 walks across 2
+            // of 3 sessions, each a full round). Members are marked by
+            // `post_route`; denied once per node per session via the
+            // race-safe `try_mark`, so the verbatim retry passes. Composed
+            // forms (`transitive`/`to`) never deny. Runs before the achain
+            // bump so a denied call does not advance the counter.
+            // Kill-switched by LENS_CLOSURE_MEMBER_DENY (default ON).
+            if t == "mcp__lens__lens_graph"
+                && closure_member_deny_enabled()
+                && ctx.level.steers()
+                && ctx.mcp_ready
+                && tool_input.get("to").is_none()
+                && !tool_input
+                    .get("transitive")
+                    .is_some_and(|v| v == &Value::Bool(true))
+            {
+                if let Some(node) = tool_input.get("node").and_then(Value::as_str) {
+                    if throttle::fired(ctx.data_dir, ctx.session_id, &format!("closurenode:{node}"))
+                        && throttle::try_mark(ctx.data_dir, ctx.session_id, &format!("cmem:{node}"))
+                    {
+                        return Decision::Deny(reroute::closure_member::deny_reason(node));
+                    }
+                }
+            }
             // Reroute rail (achain): the 3rd CONSECUTIVE atomic lens exploration
             // call (graph/skeleton/symbol/recall/overview, with nothing but
             // ToolSearch between) is denied toward one composed call — the
@@ -680,6 +706,14 @@ pub fn post_route(tool: &str, tool_response: &str, ctx: &RouteCtx) -> Decision {
     if tool == "mcp__lens__lens_graph" && graph_reverify_enabled() {
         for file in reroute::graph_reverify::files_in_graph_response(tool_response) {
             throttle::mark(ctx.data_dir, ctx.session_id, &format!("graphfile:{file}"));
+        }
+    }
+    // The cmem rail's other half: remember every closure member (name and id)
+    // so `route_inner` can deny a later plain walk from one of them (see the
+    // cmem arm there). Neighbors/path responses mark nothing.
+    if tool == "mcp__lens__lens_graph" && closure_member_deny_enabled() {
+        for node in reroute::closure_member::closure_member_names(tool_response) {
+            throttle::mark(ctx.data_dir, ctx.session_id, &format!("closurenode:{node}"));
         }
     }
     Decision::Passthrough
@@ -778,6 +812,10 @@ pub fn edit_links_deny_enabled() -> bool {
 /// Atomic-chain deny arm (`achain`): `LENS_ATOMIC_CHAIN_DENY=0` disables it.
 pub fn atomic_chain_deny_enabled() -> bool {
     std::env::var("LENS_ATOMIC_CHAIN_DENY").map_or(true, |v| v.trim() != "0")
+}
+/// Closure-member deny arm (`cmem`): `LENS_CLOSURE_MEMBER_DENY=0` disables it.
+pub fn closure_member_deny_enabled() -> bool {
+    std::env::var("LENS_CLOSURE_MEMBER_DENY").map_or(true, |v| v.trim() != "0")
 }
 /// Overview-rebuy deny arm (`ovrb`): `LENS_OVERVIEW_REBUY_DENY=0` disables it.
 pub fn overview_rebuy_deny_enabled() -> bool {
@@ -3097,6 +3135,123 @@ mod tests {
         assert!(!atomic_chain_deny_enabled());
         std::env::remove_var("LENS_ATOMIC_CHAIN_DENY");
         assert!(atomic_chain_deny_enabled(), "on by default");
+    }
+
+    // ── route(): closure-member (cmem) re-walk deny ─────────────────────────
+
+    /// A closure JSON whose members are `caller_a` (id `n1`) and `caller_b`
+    /// (id `n2`), fed to `post_route` to arm the cmem rail in tests.
+    fn cmem_closure_json() -> String {
+        serde_json::json!({
+            "root": "n0", "root_name": "root_fn", "root_file": "src/root.rs", "root_line": 1,
+            "direction": "callers", "depth": 3, "complete": true,
+            "count_total": 2, "count_prod": 2,
+            "nodes": [
+                {"id": "n1", "name": "caller_a", "kind": "function", "file": "src/a.rs", "line": 5, "hops": 1, "witness": "src/a.rs:5"},
+                {"id": "n2", "name": "caller_b", "kind": "function", "file": "src/b.rs", "line": 9, "hops": 2, "witness": "src/b.rs:9"},
+            ],
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn cmem_denies_plain_walk_on_member_once_then_retry_and_others_pass() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        assert_eq!(
+            post_route("mcp__lens__lens_graph", &cmem_closure_json(), &ctx),
+            Decision::Passthrough
+        );
+        let walk = json!({"node": "caller_a", "depth": 1});
+        match route("mcp__lens__lens_graph", &walk, &ctx) {
+            Decision::Deny(r) => {
+                assert!(r.contains("caller_a"), "{r}");
+                assert!(r.contains("verbatim retry passes"), "{r}");
+            }
+            other => panic!("member walk must deny, got {other:?}"),
+        }
+        assert_eq!(
+            route("mcp__lens__lens_graph", &walk, &ctx),
+            Decision::Passthrough,
+            "verbatim retry passes"
+        );
+        assert_eq!(
+            route("mcp__lens__lens_graph", &json!({"node": "unrelated"}), &ctx),
+            Decision::Passthrough,
+            "non-members pass"
+        );
+    }
+
+    #[test]
+    fn cmem_composed_forms_pass_and_neighbors_responses_do_not_arm() {
+        let d = tempdir().unwrap();
+        let ctx = rc(Level::Full, true, d.path());
+        // A neighbors response must not arm the rail.
+        let neighbors = serde_json::json!({
+            "nodes": [{"id": "n1", "name": "caller_a", "kind": "function", "file": "f.rs", "line": 1, "language": "rust"}],
+            "edges": [], "truncated": false,
+        })
+        .to_string();
+        let _ = post_route("mcp__lens__lens_graph", &neighbors, &ctx);
+        assert_eq!(
+            route("mcp__lens__lens_graph", &json!({"node": "caller_a"}), &ctx),
+            Decision::Passthrough,
+            "neighbors responses must not arm cmem"
+        );
+        // Armed by a real closure, composed forms on a member still pass.
+        let _ = post_route("mcp__lens__lens_graph", &cmem_closure_json(), &ctx);
+        assert_eq!(
+            route(
+                "mcp__lens__lens_graph",
+                &json!({"node": "caller_b", "transitive": true, "direction": "callers"}),
+                &ctx
+            ),
+            Decision::Passthrough,
+            "the transitive form is the composed escape, never denied"
+        );
+        // lens_run breaks the atomic chain so the next assertion exercises
+        // cmem, not achain's 3rd-consecutive-call threshold.
+        assert_eq!(
+            route("mcp__lens__lens_run", &json!({}), &ctx),
+            Decision::Passthrough
+        );
+        assert_eq!(
+            route(
+                "mcp__lens__lens_graph",
+                &json!({"node": "caller_b", "to": "root_fn"}),
+                &ctx
+            ),
+            Decision::Passthrough,
+            "the path form is composed too"
+        );
+    }
+
+    #[test]
+    fn cmem_never_fires_at_nudge_level_or_before_mcp_ready() {
+        let d = tempdir().unwrap();
+        let full = rc(Level::Full, true, d.path());
+        let _ = post_route("mcp__lens__lens_graph", &cmem_closure_json(), &full);
+        let walk = json!({"node": "caller_a"});
+        let nudge = rc(Level::Nudge, true, d.path());
+        assert_eq!(
+            route("mcp__lens__lens_graph", &walk, &nudge),
+            Decision::Passthrough
+        );
+        let not_ready = rc(Level::Full, false, d.path());
+        assert_eq!(
+            route("mcp__lens__lens_graph", &walk, &not_ready),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn cmem_kill_switch_polarity() {
+        // Route-level kill-switch runs would race the other cmem tests on the
+        // process-global env, so only the flag parse is asserted here.
+        std::env::set_var("LENS_CLOSURE_MEMBER_DENY", "0");
+        assert!(!closure_member_deny_enabled());
+        std::env::remove_var("LENS_CLOSURE_MEMBER_DENY");
+        assert!(closure_member_deny_enabled(), "on by default");
     }
 
     // ── route(): overview-rebuy (ovrb) unfocused re-buy deny ────────────────

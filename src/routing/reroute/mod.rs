@@ -16,6 +16,7 @@
 //! - `graph_reverify` → `grevf`
 //! - `atomic_chain` → `achain`
 //! - `overview_rebuy` → `ovrb`
+//! - `closure_member` → `cmem`
 //!
 //! Env flags — kill-switch polarity: every flag is ON by default and `=0`
 //! disables it (the `LENS_GREP_FIRST_DENY` pattern), one flag per rail:
@@ -30,6 +31,7 @@
 //! - `LENS_GRAPH_REVERIFY`
 //! - `LENS_ATOMIC_CHAIN_DENY`
 //! - `LENS_OVERVIEW_REBUY_DENY`
+//! - `LENS_CLOSURE_MEMBER_DENY`
 //!
 //! Every rail is DENY-only, firing under `Level::steers` (Steer|Full). The
 //! nudge arms were retired 2026-07-19 (measured conversion 0-33% for nudges
@@ -50,6 +52,7 @@
 pub mod atomic_chain;
 pub mod bash_aggregate;
 pub mod bash_grep;
+pub mod closure_member;
 pub mod edit_callers;
 pub mod graph_reverify;
 pub mod grep_ast;
@@ -77,3 +80,5 @@ pub const PREFIX_GRAPH_REVERIFY: &str = "grevf";
 pub const PREFIX_ATOMIC_CHAIN: &str = "achain";
 #[allow(dead_code)]
 pub const PREFIX_OVERVIEW_REBUY: &str = "ovrb";
+#[allow(dead_code)]
+pub const PREFIX_CLOSURE_MEMBER: &str = "cmem";

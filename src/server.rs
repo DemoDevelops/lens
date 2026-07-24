@@ -961,7 +961,15 @@ impl Forge {
             };
             return match gquery::transitive_closure(&graph, &req.node, direction, req.depth, req.prod_only)
             {
-                Ok(closure) => {
+                Ok(mut closure) => {
+                    // Trust framing: the 0060 reruns measured sessions
+                    // re-deriving a closure they already held (depth-1 walks
+                    // on members), so say outright that the list is
+                    // exhaustive and witnessed.
+                    closure.note = Some(format!(
+                        "complete: every transitive {} within {} hops is listed with its call-site witness; walking members with further lens_graph calls re-derives this response",
+                        closure.direction, closure.depth
+                    ));
                     let returned = obs::json_len(&closure);
                     let note = format!(
                         "complete={}, count_total={}, count_prod={}",
@@ -2843,6 +2851,33 @@ mod tests {
             !got_json.contains("matched_via"),
             "matched_via is lens_symbol-only and must not appear here: {got_json}"
         );
+    }
+
+    /// Closure responses carry the server-stamped trust note: exhaustive
+    /// within depth, witnessed, re-walking members re-derives it.
+    #[tokio::test]
+    async fn lens_graph_closure_carries_trust_note() {
+        let (f, _dir) = forge_with_source();
+        let resp = f
+            .lens_graph(Parameters(GraphRequest {
+                node: "helper".into(),
+                to: None,
+                depth: 3,
+                direction: Some("callers".into()),
+                transitive: true,
+                prod_only: false,
+            }))
+            .await
+            .unwrap();
+        match resp.0 {
+            crate::tools::GraphResponse::Closure(c) => {
+                let n = c.note.expect("closure must carry the trust note");
+                assert!(n.contains("complete"), "{n}");
+                assert!(n.contains("witness"), "{n}");
+                assert!(n.contains("callers") && n.contains("3 hops"), "{n}");
+            }
+            _ => panic!("expected the closure shape"),
+        }
     }
 
     /// The 2nd+ consecutive plain walk carries the pasteable closure call for

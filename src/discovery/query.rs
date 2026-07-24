@@ -543,6 +543,13 @@ pub struct TransitiveClosure {
     /// won (by importance, like [`path`]) and how many candidates it beat.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resolved: Vec<ResolvedNote>,
+    /// One-line trust framing stamped by the MCP server on closure responses:
+    /// the list is exhaustive within `depth` and witnessed, so re-walking
+    /// members re-derives it (the 0060 reruns measured exactly that waste).
+    /// `None` outside the server path and skipped when absent, so CLI/API
+    /// outputs stay byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Directed transitive closure with witnesses: every node within `depth` hops of
@@ -680,6 +687,7 @@ pub fn transitive_closure(
         count_prod,
         nodes,
         resolved,
+        note: None,
     })
 }
 

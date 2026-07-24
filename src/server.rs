@@ -222,6 +222,11 @@ pub struct Forge {
     /// refuse to auto-build (returning `unscoped_error`) instead of walking a giant
     /// non-project tree such as a home directory.
     scoped: bool,
+    /// Consecutive plain (`to`-less, non-transitive) `lens_graph` walks this
+    /// process has served (process lifetime = one client session). The 2nd+
+    /// walk stamps `closure_hint` on the response; a composed call
+    /// (`transitive` or `to`) resets it. Arc'd because `Forge` is `Clone`.
+    walk_streak: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Resolve the repo root the server indexes and graphs against, independent of the
@@ -487,6 +492,7 @@ impl Forge {
             index_walk: WalkDebounce::new(std::time::Duration::ZERO),
             graph_walk: WalkDebounce::new(std::time::Duration::ZERO),
             scoped,
+            walk_streak: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
 
@@ -496,6 +502,12 @@ impl Forge {
     fn set_scoped(&mut self, scoped: bool) {
         self.scoped = scoped;
     }
+}
+
+/// Kill switch for the neighborhood closure hint (`LENS_GRAPH_CLOSURE_HINT=0`
+/// disables; default ON, matching the routing rails' flag polarity).
+fn closure_hint_enabled() -> bool {
+    std::env::var("LENS_GRAPH_CLOSURE_HINT").map_or(true, |v| v.trim() != "0")
 }
 
 #[tool_router]
@@ -934,6 +946,12 @@ impl Forge {
             op.finish(0, 0, None, "error", msg.clone(), None);
             return Err(ToolFailure::plain(msg));
         }
+        // A composed call (closure or path) ends any hop-by-hop walk streak the
+        // closure hint below is watching for.
+        if req.transitive || req.to.is_some() {
+            self.walk_streak
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         // `transitive: true`, no `to`: the complete directed closure with witnesses.
         if req.transitive {
             let direction = match req.direction.as_deref() {
@@ -1032,6 +1050,26 @@ impl Forge {
             if let Ok(r) = self.store.put(&full_json) {
                 compacted.retrieve_ref = Some(r);
             }
+        }
+        // Response-side closure hint: sonnet walks neighborhoods hop-by-hop and
+        // ignored even the achain deny's pasteable closure call (v0.10 gate: 0
+        // of 60 lens_graph ops used `transitive`), so the 2nd+ consecutive
+        // plain walk carries the closure call for its own node in the response
+        // the model is already reading. Composed calls reset the streak above.
+        // Kill switch: LENS_GRAPH_CLOSURE_HINT=0.
+        let streak = 1 + self
+            .walk_streak
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if streak >= 2 && nodes_before_breadth_trim > 1 && closure_hint_enabled() {
+            let dir = req
+                .direction
+                .as_deref()
+                .filter(|d| matches!(*d, "callers" | "callees"))
+                .unwrap_or("callers");
+            compacted.closure_hint = Some(format!(
+                "hop-by-hop walk ({streak} consecutive lens_graph calls): ONE closure call replaces it - lens_graph {{\"node\": \"{}\", \"transitive\": true, \"direction\": \"{dir}\", \"depth\": 3}} returns every node within 3 hops, each with a file:line witness",
+                req.node
+            ));
         }
         self.record_graph_op(op, raw_payload, &compacted);
         Ok(Json(GraphResponse::Neighbors(compacted)))
@@ -2092,6 +2130,7 @@ impl Forge {
             total_matches: view.total_matches,
             trim_note: view.trim_note,
             matched_via: view.matched_via,
+            closure_hint: view.closure_hint,
         }
     }
 
@@ -2803,6 +2842,47 @@ mod tests {
         assert!(
             !got_json.contains("matched_via"),
             "matched_via is lens_symbol-only and must not appear here: {got_json}"
+        );
+    }
+
+    /// The 2nd+ consecutive plain walk carries the pasteable closure call for
+    /// its own node; a composed (`transitive: true`) call resets the streak so
+    /// the next plain walk is hint-free again.
+    #[tokio::test]
+    async fn lens_graph_second_walk_hints_the_closure_and_a_composed_call_resets() {
+        let (f, _dir) = forge_with_source();
+        let walk = || GraphRequest {
+            node: "helper".into(),
+            to: None,
+            depth: 1,
+            direction: Some("callers".into()),
+            transitive: false,
+            prod_only: false,
+        };
+        let first = neighbors_of(f.lens_graph(Parameters(walk())).await.unwrap());
+        assert!(first.closure_hint.is_none(), "first walk is hint-free");
+        let second = neighbors_of(f.lens_graph(Parameters(walk())).await.unwrap());
+        let hint = second
+            .closure_hint
+            .expect("2nd consecutive walk must carry the closure hint");
+        assert!(hint.contains(r#""node": "helper""#), "{hint}");
+        assert!(hint.contains(r#""transitive": true"#), "{hint}");
+        assert!(hint.contains(r#""direction": "callers""#), "{hint}");
+        let _ = f
+            .lens_graph(Parameters(GraphRequest {
+                node: "helper".into(),
+                to: None,
+                depth: 3,
+                direction: Some("callers".into()),
+                transitive: true,
+                prod_only: false,
+            }))
+            .await
+            .unwrap();
+        let after = neighbors_of(f.lens_graph(Parameters(walk())).await.unwrap());
+        assert!(
+            after.closure_hint.is_none(),
+            "a composed call must reset the walk streak"
         );
     }
 
@@ -3729,6 +3809,7 @@ mod tests {
             total_matches: None,
             trim_note: None,
             matched_via: None,
+            closure_hint: None,
         };
         let out = f.maybe_compact(view);
         assert!(!out.truncated);
@@ -3762,6 +3843,7 @@ mod tests {
             total_matches: None,
             trim_note: None,
             matched_via: None,
+            closure_hint: None,
         };
         let out = f.maybe_compact(view);
         assert!(out.truncated);

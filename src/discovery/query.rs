@@ -358,6 +358,7 @@ pub fn neighbors_dir(graph: &Graph, node_id: &str, depth: usize, dir: Option<&st
         total_matches: None,
         trim_note: None,
         matched_via: None,
+        closure_hint: None,
     }
 }
 
@@ -713,6 +714,7 @@ fn subgraph(graph: &Graph, ids: &[String]) -> GraphView {
         total_matches: None,
         trim_note: None,
         matched_via: None,
+        closure_hint: None,
     }
 }
 

@@ -326,6 +326,14 @@ pub struct GraphView {
     /// producer's output, so those stay byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_via: Option<String>,
+    /// Stamped by `lens_graph`'s neighborhood form on the 2nd+ consecutive
+    /// plain walk this server serves: the literal `transitive: true` closure
+    /// call for this node. Response-side because the v0.10 gate measured the
+    /// achain deny's pasteable snippet going unused (0 of 60 graph ops used
+    /// `transitive`) while the model demonstrably reads these responses.
+    /// Omitted otherwise, so unaffected outputs stay byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closure_hint: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

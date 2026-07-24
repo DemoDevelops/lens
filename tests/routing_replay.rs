@@ -56,6 +56,19 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_lens")
 }
 
+/// The fixtures were mined on the machine whose checkout lived at this prefix.
+/// `grep_scope` (src/routing/classify.rs) stats a Grep `path` input: a real
+/// directory is Broad (deniable) but ENOENT is Unknown (passthrough bias), so
+/// replaying the recorded absolute paths on another machine (CI) flips deny
+/// verdicts to passthrough. Rewrite the recorded checkout prefix to this
+/// checkout's root before replaying; on the mining machine this is a no-op.
+const MINED_CHECKOUT: &str = "/Users/gene/Documents/AI Stuff/lens/";
+
+fn localize(input: &Value) -> Value {
+    let here = format!("{}/", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_str(&input.to_string().replace(MINED_CHECKOUT, &here)).unwrap()
+}
+
 /// Seed a populated `index.db` in `data_dir` so `routing::index_present`
 /// returns true — mirrors `routing_tests.rs`'s own `seed_index` (the in-crate
 /// `#[cfg(test)]` fixture is unreachable from this integration crate).
@@ -145,7 +158,7 @@ fn replay(tool: &str, tool_input: &Value, prime_prompt: Option<&str>, graph_name
         "session_id": sess,
         "cwd": d.path().to_string_lossy(),
         "tool_name": tool,
-        "tool_input": tool_input,
+        "tool_input": localize(tool_input),
     });
     let out = run_hook("PreToolUse", &payload, d.path());
     grade_of(&out)

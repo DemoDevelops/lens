@@ -1,1381 +1,5021 @@
 {
-  "bench_binary": "/Users/gene/Documents/AI Stuff/lens/target/release/lens",
-  "groups": [
+ "bench_binary": "/Users/gene/Documents/AI Stuff/lens/target/release/lens",
+ "mode": "real",
+ "model": "claude-sonnet-5 (via claude-agentic)",
+ "groups": [
+  "darkroom",
+  "discovery",
+  "search",
+  "skeleton"
+ ],
+ "overall": [
+  {
+   "fn": "overall",
+   "arm": "lens",
+   "n": 34,
+   "success_mean": 0.9705882352941176,
+   "success_std": 0.12439781902401491,
+   "tokens_mean": 286808.1176470588,
+   "tokens_std": 528221.41767604,
+   "duration_ms_mean": 15894.392156862745,
+   "duration_ms_std": 48144.881202773984
+  },
+  {
+   "fn": "overall",
+   "arm": "baseline",
+   "n": 34,
+   "success_mean": 0.9215686274509803,
+   "success_std": 0.19899787382533765,
+   "tokens_mean": 440596.85294117645,
+   "tokens_std": 347699.92967836664,
+   "duration_ms_mean": 26584.166666666668,
+   "duration_ms_std": 35043.60842231485
+  }
+ ],
+ "per_function": [
+  {
+   "fn": "darkroom",
+   "arm": "lens",
+   "n": 8,
+   "success_mean": 1.0,
+   "success_std": 0.0,
+   "tokens_mean": 253066.58333333334,
+   "tokens_std": 95140.25367213717,
+   "duration_ms_mean": 12943.708333333334,
+   "duration_ms_std": 8354.378244099684
+  },
+  {
+   "fn": "darkroom",
+   "arm": "baseline",
+   "n": 8,
+   "success_mean": 0.8333333333333333,
+   "success_std": 0.16666666666666669,
+   "tokens_mean": 740231.6666666666,
+   "tokens_std": 473973.54454245535,
+   "duration_ms_mean": 49052.583333333336,
+   "duration_ms_std": 30783.32996334127
+  },
+  {
+   "fn": "discovery",
+   "arm": "lens",
+   "n": 5,
+   "success_mean": 1.0,
+   "success_std": 0.0,
+   "tokens_mean": 805342.2666666666,
+   "tokens_std": 1248479.3615744696,
+   "duration_ms_mean": 63414.6,
+   "duration_ms_std": 113735.8010039837
+  },
+  {
+   "fn": "discovery",
+   "arm": "baseline",
+   "n": 5,
+   "success_mean": 1.0,
+   "success_std": 0.0,
+   "tokens_mean": 722888.8666666667,
+   "tokens_std": 273728.5811768536,
+   "duration_ms_mean": 58858.333333333336,
+   "duration_ms_std": 61890.91506370077
+  },
+  {
+   "fn": "search",
+   "arm": "lens",
+   "n": 9,
+   "success_mean": 1.0,
+   "success_std": 0.0,
+   "tokens_mean": 163549.74074074073,
+   "tokens_std": 17520.799690567266,
+   "duration_ms_mean": 4875.444444444444,
+   "duration_ms_std": 865.9815810774685
+  },
+  {
+   "fn": "search",
+   "arm": "baseline",
+   "n": 9,
+   "success_mean": 1.0,
+   "success_std": 0.0,
+   "tokens_mean": 298985.74074074073,
+   "tokens_std": 67938.43405791324,
+   "duration_ms_mean": 11852.925925925925,
+   "duration_ms_std": 2761.8720962409743
+  },
+  {
+   "fn": "skeleton",
+   "arm": "lens",
+   "n": 12,
+   "success_mean": 0.9166666666666666,
+   "success_std": 0.19837301190396806,
+   "tokens_mean": 185690.36111111112,
+   "tokens_std": 20412.851023703057,
+   "duration_ms_mean": 6325.638888888889,
+   "duration_ms_std": 1054.3155885879266
+  },
+  {
+   "fn": "skeleton",
+   "arm": "baseline",
+   "n": 12,
+   "success_mean": 0.8888888888888888,
+   "success_std": 0.28327886186626583,
+   "tokens_mean": 229426.97222222222,
+   "tokens_std": 73465.07547259223,
+   "duration_ms_mean": 9206.083333333334,
+   "duration_ms_std": 3266.7721216680247
+  }
+ ],
+ "tasks": [
+  {
+   "control": {
+    "answer": {
+     "caller_1": "any_spec_for_language",
+     "caller_2": "grep_ast",
+     "caller_3": "grep_ast_filtered",
+     "caller_4": "lens_grep_ast"
+    },
+    "context_bytes": 718,
+    "correct": true,
+    "duration_ms": 229426,
+    "rounds": 19,
+    "tokens": 1646065,
+    "tools": [
+     "Grep",
+     "Read",
+     "Grep",
+     "Read",
+     "Read",
+     "Grep",
+     "Grep",
+     "Grep",
+     "Read",
+     "Read",
+     "Read",
+     "ToolSearch",
+     "ToolSearch",
+     "Read",
+     "Grep",
+     "Bash",
+     "Bash",
+     "Bash",
+     "ReportFindings"
+    ]
+   },
+   "control_runs": [
     {
-      "control_acc": 0.0,
-      "control_tokens": 3607702,
-      "mechanism": "darkroom",
-      "n": 2,
-      "stats": {
-        "control_millis": 239644.66666666666,
-        "control_millis_sd": 45216.318008239265,
-        "control_rounds": 65.66666666666667,
-        "control_rounds_sd": 13.531855420122959,
-        "control_tokens": 2823810.333333333,
-        "control_tokens_sd": 1077585.7688015164,
-        "runs": 3,
-        "treatment_millis": 181399.66666666666,
-        "treatment_millis_sd": 87670.38347634216,
-        "treatment_rounds": 22.333333333333336,
-        "treatment_rounds_sd": 10.934146311237816,
-        "treatment_tokens": 1266461.3333333333,
-        "treatment_tokens_sd": 598594.5753839664
-      },
-      "treatment_acc": 0.3333333333333333,
-      "treatment_tokens": 924761
+     "answer": {
+      "caller_1": "any_spec_for_language",
+      "caller_2": "grep_ast",
+      "caller_3": "grep_ast_filtered",
+      "caller_4": "lens_grep_ast"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "ToolSearch",
+      "ToolSearch",
+      "Read",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Bash",
+      "ReportFindings"
+     ]
     },
     {
-      "control_acc": 1.0,
-      "control_tokens": 5143263,
-      "mechanism": "discovery",
-      "n": 5,
-      "stats": {
-        "control_millis": 210752.66666666666,
-        "control_millis_sd": 51260.94089612046,
-        "control_rounds": 65.33333333333333,
-        "control_rounds_sd": 14.015864027752423,
-        "control_tokens": 4068680.3333333335,
-        "control_tokens_sd": 977005.7048128679,
-        "runs": 3,
-        "treatment_millis": 209998.66666666663,
-        "treatment_millis_sd": 52067.77719259559,
-        "treatment_rounds": 44.66666666666667,
-        "treatment_rounds_sd": 13.114877048604,
-        "treatment_tokens": 2416029.6666666665,
-        "treatment_tokens_sd": 885782.0830490232
-      },
-      "treatment_acc": 0.9333333333333332,
-      "treatment_tokens": 1620765
+     "answer": {
+      "caller_1": "any_spec_for_language",
+      "caller_2": "grep_ast",
+      "caller_3": "grep_ast_filtered",
+      "caller_4": "lens_grep_ast"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Bash",
+      "Grep",
+      "Read",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Bash"
+     ]
     },
     {
-      "control_acc": 0.9583333333333333,
-      "control_tokens": 2826856,
-      "mechanism": "search",
-      "n": 8,
-      "stats": {
-        "control_millis": 125091.66666666666,
-        "control_millis_sd": 16256.948333285405,
-        "control_rounds": 42.0,
-        "control_rounds_sd": 8.432740427115679,
-        "control_tokens": 1992335.333333333,
-        "control_tokens_sd": 424712.9608618037,
-        "runs": 3,
-        "treatment_millis": 145167.33333333334,
-        "treatment_millis_sd": 33848.24729419367,
-        "treatment_rounds": 33.66666666666667,
-        "treatment_rounds_sd": 8.096638534327413,
-        "treatment_tokens": 2109536.6666666665,
-        "treatment_tokens_sd": 493764.8953236753
-      },
-      "treatment_acc": 0.8749999999999999,
-      "treatment_tokens": 1534825
+     "answer": {
+      "caller_1": "any_spec_for_language",
+      "caller_2": "grep_ast",
+      "caller_3": "grep_ast_filtered",
+      "caller_4": "lens_grep_ast"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "ToolSearch",
+      "ToolSearch",
+      "Grep",
+      "Grep",
+      "Grep"
+     ]
     }
-  ],
-  "mode": "real",
-  "model": "claude-haiku-4-5 (via claude-agentic)",
-  "overall": [
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 181625.33333333334,
+    "mean_rounds": 14.666666666666666,
+    "mean_tokens": 1156347.0,
+    "runs": 3,
+    "stddev_millis": 97424.50780419107,
+    "stddev_rounds": 4.784233364802441,
+    "stddev_tokens": 429323.09797633765,
+    "success_rate": 1.0
+   },
+   "id": "0060_real_agentic_transitive_callers_spec_for_language",
+   "mechanism": "discovery",
+   "treatment": {
+    "answer": {
+     "caller_1": "any_spec_for_language",
+     "caller_2": "grep_ast",
+     "caller_3": "grep_ast_filtered",
+     "caller_4": "lens_grep_ast"
+    },
+    "context_bytes": 718,
+    "correct": true,
+    "duration_ms": 338371,
+    "rounds": 34,
+    "tokens": 4509403,
+    "tools": [
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_search",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_run",
+     "mcp__lens__lens_run",
+     "mcp__lens__lens_run",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "Read",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_search",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_run",
+     "mcp__lens__lens_run",
+     "mcp__lens__lens_run",
+     "mcp__lens__lens_run",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_search",
+     "Bash",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_run",
+     "mcp__lens__lens_run",
+     "Bash"
+    ]
+   },
+   "treatment_runs": [
     {
-      "arm": "lens",
-      "duration_ms_mean": 35771.04444444445,
-      "duration_ms_std": 34787.981218053654,
-      "fn": "overall",
-      "n": 15,
-      "success_mean": 0.8222222222222223,
-      "success_std": 0.26851213274654606,
-      "tokens_mean": 386135.1777777778,
-      "tokens_std": 275432.0674961934
+     "answer": {
+      "caller_1": "any_spec_for_language",
+      "caller_2": "grep_ast",
+      "caller_3": "grep_ast_filtered",
+      "caller_4": "lens_grep_ast"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "Read",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_search",
+      "Bash",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "Bash"
+     ]
     },
     {
-      "arm": "baseline",
-      "duration_ms_mean": 38365.93333333334,
-      "duration_ms_std": 41523.69165779762,
-      "fn": "overall",
-      "n": 15,
-      "success_mean": 0.8444444444444446,
-      "success_std": 0.34138425546082707,
-      "tokens_mean": 592321.7333333332,
-      "tokens_std": 633747.409043478
+     "answer": {
+      "caller_1": "any_spec_for_language",
+      "caller_2": "grep_ast",
+      "caller_3": "grep_ast_filtered",
+      "caller_4": "lens_grep_ast"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_search",
+      "Read",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_symbol",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "any_spec_for_language",
+      "caller_2": "grep_ast",
+      "caller_3": "grep_ast_filtered",
+      "caller_4": "lens_grep_ast"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_symbol",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_search",
+      "Read",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "Bash"
+     ]
     }
-  ],
-  "per_function": [
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 290869.0,
+    "mean_rounds": 26.666666666666668,
+    "mean_tokens": 3301418.6666666665,
+    "runs": 3,
+    "stddev_millis": 39106.707387181894,
+    "stddev_rounds": 5.2493385826745405,
+    "stddev_tokens": 861567.5718813676,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "reach_1": "yes",
+     "reach_2": "no",
+     "reach_3": "no"
+    },
+    "context_bytes": 826,
+    "correct": true,
+    "duration_ms": 41945,
+    "rounds": 15,
+    "tokens": 1109005,
+    "tools": [
+     "Read",
+     "Grep",
+     "Grep",
+     "Grep",
+     "Read",
+     "Grep",
+     "Grep",
+     "Read",
+     "Grep",
+     "Grep",
+     "Read",
+     "Grep",
+     "Read",
+     "Grep",
+     "Bash"
+    ]
+   },
+   "control_runs": [
     {
-      "arm": "lens",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_grep_ast",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
+     "answer": {
+      "reach_1": "yes",
+      "reach_2": "no",
+      "reach_3": "no"
+     },
+     "correct": true,
+     "tools": [
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Grep",
+      "Bash"
+     ]
     },
     {
-      "arm": "baseline",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_grep_ast",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
+     "answer": {
+      "reach_1": "yes",
+      "reach_2": "no",
+      "reach_3": "no"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Grep"
+     ]
     },
     {
-      "arm": "lens",
-      "duration_ms_mean": 79978.33333333333,
-      "duration_ms_std": 33696.99999999999,
-      "fn": "lens_links",
-      "n": 2,
-      "success_mean": 0.8333333333333333,
-      "success_std": 0.16666666666666669,
-      "tokens_mean": 870678.5,
-      "tokens_std": 277946.8333333333
-    },
-    {
-      "arm": "baseline",
-      "duration_ms_mean": 84052.5,
-      "duration_ms_std": 29872.5,
-      "fn": "lens_links",
-      "n": 2,
-      "success_mean": 1.0,
-      "success_std": 0.0,
-      "tokens_mean": 1671033.6666666667,
-      "tokens_std": 657540.3333333333
-    },
-    {
-      "arm": "lens",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_map",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
-    },
-    {
-      "arm": "baseline",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_map",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
-    },
-    {
-      "arm": "lens",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_overview",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
-    },
-    {
-      "arm": "baseline",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_overview",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
-    },
-    {
-      "arm": "lens",
-      "duration_ms_mean": 14053.666666666666,
-      "duration_ms_std": 0.0,
-      "fn": "lens_path",
-      "n": 1,
-      "success_mean": 1.0,
-      "success_std": 0.0,
-      "tokens_mean": 180952.66666666663,
-      "tokens_std": 0.0
-    },
-    {
-      "arm": "baseline",
-      "duration_ms_mean": 16517.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_path",
-      "n": 1,
-      "success_mean": 1.0,
-      "success_std": 0.0,
-      "tokens_mean": 236658.0,
-      "tokens_std": 0.0
-    },
-    {
-      "arm": "lens",
-      "duration_ms_mean": 90699.83333333333,
-      "duration_ms_std": 27650.166666666668,
-      "fn": "lens_run",
-      "n": 2,
-      "success_mean": 0.3333333333333333,
-      "success_std": 0.0,
-      "tokens_mean": 633230.6666666666,
-      "tokens_std": 73804.0
-    },
-    {
-      "arm": "baseline",
-      "duration_ms_mean": 119822.33333333333,
-      "duration_ms_std": 13742.333333333328,
-      "fn": "lens_run",
-      "n": 2,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 1411905.1666666665,
-      "tokens_std": 162144.16666666663
-    },
-    {
-      "arm": "lens",
-      "duration_ms_mean": 17994.166666666668,
-      "duration_ms_std": 1250.5,
-      "fn": "lens_run_file",
-      "n": 2,
-      "success_mean": 1.0,
-      "success_std": 0.0,
-      "tokens_mean": 246860.0,
-      "tokens_std": 1512.0
-    },
-    {
-      "arm": "baseline",
-      "duration_ms_mean": 13065.333333333334,
-      "duration_ms_std": 3651.333333333334,
-      "fn": "lens_run_file",
-      "n": 2,
-      "success_mean": 1.0,
-      "success_std": 0.0,
-      "tokens_mean": 244977.5,
-      "tokens_std": 70544.5
-    },
-    {
-      "arm": "lens",
-      "duration_ms_mean": 18145.916666666668,
-      "duration_ms_std": 10112.71000434327,
-      "fn": "lens_search",
-      "n": 8,
-      "success_mean": 0.8749999999999999,
-      "success_std": 0.23199018178458422,
-      "tokens_mean": 263692.0833333333,
-      "tokens_std": 150010.2129800714
-    },
-    {
-      "arm": "baseline",
-      "duration_ms_mean": 15636.458333333332,
-      "duration_ms_std": 6506.633841143078,
-      "fn": "lens_search",
-      "n": 8,
-      "success_mean": 0.9583333333333333,
-      "success_std": 0.11023963796102462,
-      "tokens_mean": 249041.91666666663,
-      "tokens_std": 120462.50436163275
-    },
-    {
-      "arm": "lens",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_skeleton",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
-    },
-    {
-      "arm": "baseline",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_skeleton",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
-    },
-    {
-      "arm": "lens",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_symbol",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
-    },
-    {
-      "arm": "baseline",
-      "duration_ms_mean": 0.0,
-      "duration_ms_std": 0.0,
-      "fn": "lens_symbol",
-      "n": 0,
-      "success_mean": 0.0,
-      "success_std": 0.0,
-      "tokens_mean": 0.0,
-      "tokens_std": 0.0
+     "answer": {
+      "reach_1": "yes",
+      "reach_2": "no",
+      "reach_3": "no"
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Grep",
+      "ReportFindings"
+     ]
     }
-  ],
-  "tasks": [
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 39407.0,
+    "mean_rounds": 14.0,
+    "mean_tokens": 888105.6666666666,
+    "runs": 3,
+    "stddev_millis": 3275.547689572946,
+    "stddev_rounds": 0.816496580927726,
+    "stddev_tokens": 205541.32508465435,
+    "success_rate": 1.0
+   },
+   "id": "0061_real_agentic_reachability_trio",
+   "mechanism": "discovery",
+   "treatment": {
+    "answer": {
+     "reach_1": "yes",
+     "reach_2": "no",
+     "reach_3": "no"
+    },
+    "context_bytes": 826,
+    "correct": true,
+    "duration_ms": 9518,
+    "rounds": 4,
+    "tokens": 217657,
+    "tools": [
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_graph"
+    ]
+   },
+   "treatment_runs": [
     {
-      "control": {
-        "answer": {
-          "caller_1": "any_spec_for_language",
-          "caller_2": "grep_ast",
-          "caller_3": "grep_ast_filtered",
-          "caller_4": "lens_grep_ast"
-        },
-        "context_bytes": 718,
-        "correct": true,
-        "duration_ms": 168262,
-        "rounds": 38,
-        "tokens": 3164225,
-        "tools": [
-          "Read",
-          "Grep",
-          "Read",
-          "Read",
-          "Grep",
-          "Read",
-          "Read",
-          "Grep",
-          "Read",
-          "Read",
-          "Grep",
-          "Bash",
-          "Read",
-          "Read",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Read",
-          "Bash",
-          "Read",
-          "Read",
-          "Bash",
-          "Bash",
-          "Read",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Read"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 113925.0,
-        "mean_rounds": 30.0,
-        "mean_tokens": 2328574.0,
-        "runs": 3,
-        "stddev_millis": 46446.52594830604,
-        "stddev_rounds": 8.640987597877148,
-        "stddev_tokens": 827052.9456050561,
-        "success_rate": 1.0
-      },
-      "id": "0060_real_agentic_transitive_callers_spec_for_language",
-      "mechanism": "discovery",
-      "treatment": {
-        "answer": {
-          "caller_1": "any_spec_for_language",
-          "caller_2": "grep_ast",
-          "caller_3": "grep_ast_filtered",
-          "caller_4": "lens_grep_ast"
-        },
-        "context_bytes": 718,
-        "correct": true,
-        "duration_ms": 100299,
-        "rounds": 14,
-        "tokens": 858131,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_map",
-          "mcp__lens__lens_symbol",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_links",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 113675.33333333331,
-        "mean_rounds": 17.666666666666668,
-        "mean_tokens": 1148625.3333333333,
-        "runs": 3,
-        "stddev_millis": 50387.24924907976,
-        "stddev_rounds": 12.119772641798562,
-        "stddev_tokens": 837967.5306018061,
-        "success_rate": 0.6666666666666666
-      }
+     "answer": {
+      "reach_1": "yes",
+      "reach_2": "no",
+      "reach_3": "no"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph"
+     ]
     },
     {
-      "control": {
-        "answer": {
-          "reach_1": true,
-          "reach_2": false,
-          "reach_3": false
-        },
-        "context_bytes": 826,
-        "correct": true,
-        "duration_ms": 19387,
-        "rounds": 12,
-        "tokens": 336551,
-        "tools": [
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Grep",
-          "Grep",
-          "Grep",
-          "Grep",
-          "Grep",
-          "Grep",
-          "Grep",
-          "Grep"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 16517.0,
-        "mean_rounds": 7.666666666666667,
-        "mean_tokens": 236658.0,
-        "runs": 3,
-        "stddev_millis": 2843.2840167665277,
-        "stddev_rounds": 3.2998316455372216,
-        "stddev_tokens": 81399.4850475112,
-        "success_rate": 1.0
-      },
-      "id": "0061_real_agentic_reachability_trio",
-      "mechanism": "discovery",
-      "treatment": {
-        "answer": {
-          "reach_1": true,
-          "reach_2": false,
-          "reach_3": false
-        },
-        "context_bytes": 826,
-        "correct": true,
-        "duration_ms": 15549,
-        "rounds": 5,
-        "tokens": 181003,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_map",
-          "mcp__lens__lens_path",
-          "mcp__lens__lens_path",
-          "mcp__lens__lens_path"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 14053.666666666666,
-        "mean_rounds": 5.0,
-        "mean_tokens": 180952.66666666663,
-        "runs": 3,
-        "stddev_millis": 1057.3653841296089,
-        "stddev_rounds": 0.0,
-        "stddev_tokens": 820.1269549418689,
-        "success_rate": 1.0
-      }
+     "answer": {
+      "reach_1": "yes",
+      "reach_2": "no",
+      "reach_3": "no"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph"
+     ]
     },
     {
-      "control": {
-        "answer": {
-          "caller_1": "latest_tag",
-          "caller_2": "main",
-          "caller_3": "run_update_check_cli",
-          "caller_4": "run_update_cli"
-        },
-        "context_bytes": 709,
-        "correct": true,
-        "duration_ms": 66572,
-        "rounds": 27,
-        "tokens": 1084531,
-        "tools": [
-          "Bash",
-          "Read",
-          "Bash",
-          "Bash",
-          "Read",
-          "Bash",
-          "Bash",
-          "Agent",
-          "Bash",
-          "Grep",
-          "Read",
-          "Bash",
-          "Grep",
-          "Read",
-          "Bash",
-          "Read",
-          "Bash",
-          "Grep",
-          "Bash",
-          "Bash",
-          "Read",
-          "Read",
-          "Read",
-          "Bash",
-          "Grep",
-          "Read",
-          "Read"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 54180.0,
-        "mean_rounds": 21.666666666666668,
-        "mean_tokens": 1013493.3333333334,
-        "runs": 3,
-        "stddev_millis": 21234.24857786747,
-        "stddev_rounds": 10.49867716534908,
-        "stddev_tokens": 510497.7980914533,
-        "success_rate": 1.0
-      },
-      "id": "0062_real_agentic_transitive_callers_tag_from_release_url",
-      "mechanism": "discovery",
-      "treatment": {
-        "answer": {
-          "caller_1": "latest_tag",
-          "caller_2": "main",
-          "caller_3": "run_update_check_cli",
-          "caller_4": "run_update_cli"
-        },
-        "context_bytes": 709,
-        "correct": true,
-        "duration_ms": 30596,
-        "rounds": 8,
-        "tokens": 268843,
-        "tools": [
-          "ToolSearch",
-          "Bash",
-          "Grep",
-          "Grep",
-          "Agent",
-          "mcp__lens__lens_map",
-          "mcp__lens__lens_symbol",
-          "mcp__lens__lens_links"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 46281.333333333336,
-        "mean_rounds": 13.666666666666666,
-        "mean_tokens": 592731.6666666666,
-        "runs": 3,
-        "stddev_millis": 11190.421568863654,
-        "stddev_rounds": 4.027681991198191,
-        "stddev_tokens": 237033.02333266183,
-        "success_rate": 1.0
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "count": 47
-        },
-        "context_bytes": 709,
-        "correct": false,
-        "duration_ms": 159906,
-        "rounds": 37,
-        "tokens": 1114322,
-        "tools": [
-          "Grep",
-          "Grep",
-          "Bash",
-          "Bash",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Read",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Read",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Read",
-          "Read",
-          "Read",
-          "Bash",
-          "Bash",
-          "Bash"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 133564.66666666666,
-        "mean_rounds": 35.333333333333336,
-        "mean_tokens": 1574049.3333333333,
-        "runs": 3,
-        "stddev_millis": 31106.071490234113,
-        "stddev_rounds": 7.039570693980959,
-        "stddev_tokens": 540390.9023193817,
-        "success_rate": 0.0
-      },
-      "id": "0063_real_agentic_darkroom_distinct_env_names",
-      "mechanism": "darkroom",
-      "treatment": {
-        "answer": {
-          "count": 45
-        },
-        "context_bytes": 709,
-        "correct": false,
-        "duration_ms": 51877,
-        "rounds": 8,
-        "tokens": 487488,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_grep_ast",
-          "mcp__lens__lens_grep_ast",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 63049.666666666664,
-        "mean_rounds": 9.333333333333334,
-        "mean_tokens": 559426.6666666666,
-        "runs": 3,
-        "stddev_millis": 23988.670122001808,
-        "stddev_rounds": 5.792715732327589,
-        "stddev_tokens": 336140.4585847344,
-        "success_rate": 0.3333333333333333
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "count": 23
-        },
-        "context_bytes": 635,
-        "correct": false,
-        "duration_ms": 127604,
-        "rounds": 39,
-        "tokens": 2493380,
-        "tools": [
-          "Grep",
-          "Grep",
-          "Read",
-          "Read",
-          "Read",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Read",
-          "Read",
-          "Bash",
-          "Bash",
-          "Read",
-          "Bash",
-          "Bash",
-          "Read",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Read",
-          "Read",
-          "Bash",
-          "Read",
-          "Read",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Read",
-          "Read",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 106080.0,
-        "mean_rounds": 30.333333333333332,
-        "mean_tokens": 1249761.0,
-        "runs": 3,
-        "stddev_millis": 32816.57707114907,
-        "stddev_rounds": 11.55662388223981,
-        "stddev_tokens": 932292.2083842596,
-        "success_rate": 0.0
-      },
-      "id": "0064_real_agentic_darkroom_nontest_unwrap_total",
-      "mechanism": "darkroom",
-      "treatment": {
-        "answer": {
-          "count": 19
-        },
-        "context_bytes": 635,
-        "correct": false,
-        "duration_ms": 58759,
-        "rounds": 8,
-        "tokens": 437273,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_grep_ast",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_recall",
-          "Bash",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run",
-          "mcp__lens__lens_run"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 118350.0,
-        "mean_rounds": 13.0,
-        "mean_tokens": 707034.6666666666,
-        "runs": 3,
-        "stddev_millis": 84324.6099585801,
-        "stddev_rounds": 9.273618495495704,
-        "stddev_tokens": 495302.995934363,
-        "success_rate": 0.3333333333333333
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "count": 1
-        },
-        "context_bytes": 522,
-        "correct": true,
-        "duration_ms": 17290,
-        "rounds": 5,
-        "tokens": 383586,
-        "tools": [
-          "Read",
-          "Read",
-          "Bash",
-          "Bash",
-          "Read"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 16716.666666666668,
-        "mean_rounds": 4.0,
-        "mean_tokens": 315522.0,
-        "runs": 3,
-        "stddev_millis": 3333.190396935378,
-        "stddev_rounds": 0.816496580927726,
-        "stddev_tokens": 57355.82023357932,
-        "success_rate": 1.0
-      },
-      "id": "0065_real_agentic_ast_unwraps_index_mod",
-      "mechanism": "discovery",
-      "treatment": {
-        "answer": {
-          "count": 1
-        },
-        "context_bytes": 522,
-        "correct": true,
-        "duration_ms": 14814,
-        "rounds": 2,
-        "tokens": 134179,
-        "tools": [
-          "mcp__lens__lens_run_file",
-          "mcp__lens__lens_run_file"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 19244.666666666668,
-        "mean_rounds": 4.333333333333333,
-        "mean_tokens": 245348.0,
-        "runs": 3,
-        "stddev_millis": 3852.110273026404,
-        "stddev_rounds": 2.0548046676563256,
-        "stddev_tokens": 95188.86731475832,
-        "success_rate": 1.0
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "count": 2
-        },
-        "context_bytes": 526,
-        "correct": true,
-        "duration_ms": 8688,
-        "rounds": 2,
-        "tokens": 174370,
-        "tools": [
-          "Read",
-          "Grep"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 9414.0,
-        "mean_rounds": 2.0,
-        "mean_tokens": 174433.0,
-        "runs": 3,
-        "stddev_millis": 562.6313180049614,
-        "stddev_rounds": 0.0,
-        "stddev_tokens": 65.31462317123173,
-        "success_rate": 1.0
-      },
-      "id": "0066_real_agentic_ast_unwraps_discovery_mod",
-      "mechanism": "discovery",
-      "treatment": {
-        "answer": {
-          "count": 2
-        },
-        "context_bytes": 526,
-        "correct": true,
-        "duration_ms": 12855,
-        "rounds": 3,
-        "tokens": 178609,
-        "tools": [
-          "ToolSearch",
-          "ToolSearch",
-          "mcp__lens__lens_run_file"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 16743.666666666668,
-        "mean_rounds": 4.0,
-        "mean_tokens": 248372.0,
-        "runs": 3,
-        "stddev_millis": 5567.425337522623,
-        "stddev_rounds": 2.160246899469287,
-        "stddev_tokens": 131049.87252441974,
-        "success_rate": 1.0
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "function": "enclosing_nested_repo"
-        },
-        "context_bytes": 724,
-        "correct": true,
-        "duration_ms": 44805,
-        "rounds": 18,
-        "tokens": 875980,
-        "tools": [
-          "Grep",
-          "Grep",
-          "Read",
-          "Read",
-          "Bash",
-          "Read",
-          "Grep",
-          "Read",
-          "Bash",
-          "Read",
-          "Bash",
-          "Grep",
-          "Grep",
-          "Grep",
-          "Bash",
-          "Bash",
-          "Bash",
-          "Bash"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 25858.333333333332,
-        "mean_rounds": 9.333333333333334,
-        "mean_tokens": 450941.0,
-        "runs": 3,
-        "stddev_millis": 13404.8681289879,
-        "stddev_rounds": 6.342099196813483,
-        "stddev_tokens": 307247.37796223204,
-        "success_rate": 1.0
-      },
-      "id": "0067_real_agentic_search_inner_repo_boundary",
-      "mechanism": "search",
-      "treatment": {
-        "answer": {
-          "function": "enclosing_nested_repo"
-        },
-        "context_bytes": 724,
-        "correct": true,
-        "duration_ms": 11886,
-        "rounds": 2,
-        "tokens": 140687,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_search"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 26782.666666666668,
-        "mean_rounds": 6.333333333333333,
-        "mean_tokens": 364138.0,
-        "runs": 3,
-        "stddev_millis": 13792.559185622113,
-        "stddev_rounds": 3.6817870057290873,
-        "stddev_tokens": 187303.51077506976,
-        "success_rate": 1.0
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "function": "mcp_redirect"
-        },
-        "context_bytes": 803,
-        "correct": true,
-        "duration_ms": 19789,
-        "rounds": 8,
-        "tokens": 248311,
-        "tools": [
-          "Grep",
-          "Grep",
-          "Grep",
-          "Grep",
-          "Read",
-          "Grep",
-          "Grep",
-          "Grep"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 18098.666666666668,
-        "mean_rounds": 5.666666666666667,
-        "mean_tokens": 270166.3333333333,
-        "runs": 3,
-        "stddev_millis": 1720.3992430699204,
-        "stddev_rounds": 1.699673171197595,
-        "stddev_tokens": 16419.779156723012,
-        "success_rate": 0.6666666666666666
-      },
-      "id": "0068_real_agentic_search_deny_requires_server",
-      "mechanism": "search",
-      "treatment": {
-        "answer": {
-          "function": "mcp_redirect"
-        },
-        "context_bytes": 803,
-        "correct": true,
-        "duration_ms": 14878,
-        "rounds": 3,
-        "tokens": 195801,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_search",
-          "mcp__lens__lens_search"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 41161.0,
-        "mean_rounds": 9.666666666666666,
-        "mean_tokens": 618152.0,
-        "runs": 3,
-        "stddev_millis": 30220.197186649857,
-        "stddev_rounds": 6.79869268479038,
-        "stddev_tokens": 439671.3465055461,
-        "success_rate": 0.6666666666666666
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "function": "chunk_by_ast"
-        },
-        "context_bytes": 654,
-        "correct": true,
-        "duration_ms": 5030,
-        "rounds": 1,
-        "tokens": 76557,
-        "tools": [
-          "Grep"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 5260.666666666667,
-        "mean_rounds": 1.0,
-        "mean_tokens": 76581.33333333333,
-        "runs": 3,
-        "stddev_millis": 471.64204882752153,
-        "stddev_rounds": 0.0,
-        "stddev_tokens": 20.885933597094056,
-        "success_rate": 1.0
-      },
-      "id": "0074_real_agentic_search_ast_chunk_boundaries",
-      "mechanism": "search",
-      "treatment": {
-        "answer": {
-          "function": "chunk_by_ast"
-        },
-        "context_bytes": 654,
-        "correct": true,
-        "duration_ms": 10900,
-        "rounds": 2,
-        "tokens": 139392,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_search"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 8783.0,
-        "mean_rounds": 1.6666666666666667,
-        "mean_tokens": 123733.0,
-        "runs": 3,
-        "stddev_millis": 1510.523750227053,
-        "stddev_rounds": 0.4714045207910317,
-        "stddev_tokens": 23090.573588948948,
-        "success_rate": 1.0
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "function": "prune_missing"
-        },
-        "context_bytes": 613,
-        "correct": true,
-        "duration_ms": 7912,
-        "rounds": 3,
-        "tokens": 117541,
-        "tools": [
-          "Grep",
-          "Grep",
-          "Read"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 9214.666666666666,
-        "mean_rounds": 3.3333333333333335,
-        "mean_tokens": 146418.33333333334,
-        "runs": 3,
-        "stddev_millis": 3393.3960701469687,
-        "stddev_rounds": 1.247219128924647,
-        "stddev_tokens": 70821.64598639474,
-        "success_rate": 1.0
-      },
-      "id": "0075_real_agentic_search_prune_deleted_files",
-      "mechanism": "search",
-      "treatment": {
-        "answer": {
-          "function": "prune_missing"
-        },
-        "context_bytes": 613,
-        "correct": true,
-        "duration_ms": 14215,
-        "rounds": 3,
-        "tokens": 189069,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_search",
-          "mcp__lens__lens_symbol"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 12084.666666666666,
-        "mean_rounds": 2.6666666666666665,
-        "mean_tokens": 172530.33333333334,
-        "runs": 3,
-        "stddev_millis": 2630.749238440554,
-        "stddev_rounds": 0.4714045207910317,
-        "stddev_tokens": 22833.57151700588,
-        "success_rate": 1.0
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "function": "federate_nested_search"
-        },
-        "context_bytes": 636,
-        "correct": true,
-        "duration_ms": 30795,
-        "rounds": 12,
-        "tokens": 754451,
-        "tools": [
-          "Grep",
-          "Grep",
-          "Grep",
-          "Read",
-          "Grep",
-          "Grep",
-          "Read",
-          "Bash",
-          "Read",
-          "Bash",
-          "Read",
-          "Read"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 23994.0,
-        "mean_rounds": 8.0,
-        "mean_tokens": 416224.3333333333,
-        "runs": 3,
-        "stddev_millis": 6005.4770002057285,
-        "stddev_rounds": 4.320493798938574,
-        "stddev_tokens": 261283.8673796928,
-        "success_rate": 1.0
-      },
-      "id": "0076_real_agentic_search_fold_inner_repo_hits",
-      "mechanism": "search",
-      "treatment": {
-        "answer": {
-          "function": "federate_nested_search"
-        },
-        "context_bytes": 636,
-        "correct": true,
-        "duration_ms": 15240,
-        "rounds": 4,
-        "tokens": 239288,
-        "tools": [
-          "ToolSearch",
-          "ToolSearch",
-          "mcp__lens__lens_search",
-          "mcp__lens__lens_symbol"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 16693.333333333332,
-        "mean_rounds": 3.6666666666666665,
-        "mean_tokens": 220099.0,
-        "runs": 3,
-        "stddev_millis": 4973.646102765611,
-        "stddev_rounds": 1.247219128924647,
-        "stddev_tokens": 57284.60931757034,
-        "success_rate": 1.0
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "function": "split_subwords"
-        },
-        "context_bytes": 616,
-        "correct": true,
-        "duration_ms": 14162,
-        "rounds": 4,
-        "tokens": 205383,
-        "tools": [
-          "Grep",
-          "Grep",
-          "Read",
-          "Read"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 14559.0,
-        "mean_rounds": 4.333333333333333,
-        "mean_tokens": 187358.33333333337,
-        "runs": 3,
-        "stddev_millis": 3721.986655895835,
-        "stddev_rounds": 1.247219128924647,
-        "stddev_tokens": 52045.8365951484,
-        "success_rate": 1.0
-      },
-      "id": "0077_real_agentic_search_compound_name_parts",
-      "mechanism": "search",
-      "treatment": {
-        "answer": {
-          "function": "tokenize"
-        },
-        "context_bytes": 616,
-        "correct": false,
-        "duration_ms": 9085,
-        "rounds": 2,
-        "tokens": 141130,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_search"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 10200.666666666666,
-        "mean_rounds": 2.3333333333333335,
-        "mean_tokens": 157836.66666666666,
-        "runs": 3,
-        "stddev_millis": 903.5464693208768,
-        "stddev_rounds": 0.4714045207910317,
-        "stddev_tokens": 24901.80230871296,
-        "success_rate": 0.3333333333333333
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "function": "min_cover_span"
-        },
-        "context_bytes": 638,
-        "correct": true,
-        "duration_ms": 14857,
-        "rounds": 5,
-        "tokens": 236353,
-        "tools": [
-          "Grep",
-          "Grep",
-          "Read",
-          "Grep",
-          "Read"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 15322.333333333334,
-        "mean_rounds": 5.333333333333333,
-        "mean_tokens": 249000.0,
-        "runs": 3,
-        "stddev_millis": 2988.5833135822436,
-        "stddev_rounds": 1.247219128924647,
-        "stddev_tokens": 51563.008620521745,
-        "success_rate": 1.0
-      },
-      "id": "0078_real_agentic_search_tightest_term_window",
-      "mechanism": "search",
-      "treatment": {
-        "answer": {
-          "function": "min_cover_span"
-        },
-        "context_bytes": 638,
-        "correct": true,
-        "duration_ms": 12077,
-        "rounds": 3,
-        "tokens": 189005,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_search",
-          "mcp__lens__lens_symbol"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 14066.0,
-        "mean_rounds": 4.0,
-        "mean_tokens": 242735.0,
-        "runs": 3,
-        "stddev_millis": 2320.481415568761,
-        "stddev_rounds": 1.4142135623730951,
-        "stddev_tokens": 77402.08067401462,
-        "success_rate": 1.0
-      }
-    },
-    {
-      "control": {
-        "answer": {
-          "function": "ensure_index"
-        },
-        "context_bytes": 613,
-        "correct": true,
-        "duration_ms": 17485,
-        "rounds": 8,
-        "tokens": 312280,
-        "tools": [
-          "Grep",
-          "Grep",
-          "Grep",
-          "Grep",
-          "Read",
-          "Grep",
-          "Grep",
-          "Read"
-        ]
-      },
-      "control_stats": {
-        "lens_runs": 0,
-        "mean_millis": 12784.0,
-        "mean_rounds": 5.0,
-        "mean_tokens": 195645.66666666663,
-        "runs": 3,
-        "stddev_millis": 3324.147108658099,
-        "stddev_rounds": 2.160246899469287,
-        "stddev_tokens": 84012.26349501337,
-        "success_rate": 1.0
-      },
-      "id": "0079_real_agentic_search_index_freshness_gate",
-      "mechanism": "search",
-      "treatment": {
-        "answer": {
-          "function": "ensure_index"
-        },
-        "context_bytes": 613,
-        "correct": true,
-        "duration_ms": 17207,
-        "rounds": 5,
-        "tokens": 300453,
-        "tools": [
-          "ToolSearch",
-          "mcp__lens__lens_search",
-          "mcp__lens__lens_skeleton",
-          "mcp__lens__lens_recall",
-          "mcp__lens__lens_symbol"
-        ]
-      },
-      "treatment_stats": {
-        "lens_runs": 3,
-        "mean_millis": 15396.0,
-        "mean_rounds": 3.3333333333333335,
-        "mean_tokens": 210312.66666666663,
-        "runs": 3,
-        "stddev_millis": 1438.0989766586536,
-        "stddev_rounds": 1.247219128924647,
-        "stddev_tokens": 66805.82964748576,
-        "success_rate": 1.0
-      }
+     "answer": {
+      "reach_1": "yes",
+      "reach_2": "no",
+      "reach_3": "no"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_graph"
+     ]
     }
-  ]
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 8704.333333333334,
+    "mean_rounds": 4.0,
+    "mean_tokens": 217540.0,
+    "runs": 3,
+    "stddev_millis": 719.6806390491704,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 106.68645649753299,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "caller_1": "latest_tag",
+     "caller_2": "main",
+     "caller_3": "run_update_check_cli",
+     "caller_4": "run_update_cli"
+    },
+    "context_bytes": 709,
+    "correct": true,
+    "duration_ms": 34852,
+    "rounds": 10,
+    "tokens": 723153,
+    "tools": [
+     "Grep",
+     "Read",
+     "Grep",
+     "Read",
+     "Read",
+     "Grep",
+     "Read",
+     "Grep",
+     "Grep",
+     "Read"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "caller_1": "latest_tag",
+      "caller_2": "main",
+      "caller_3": "run_update_check_cli",
+      "caller_4": "run_update_cli"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Read",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "latest_tag",
+      "caller_2": "main",
+      "caller_3": "run_update_check_cli",
+      "caller_4": "run_update_cli"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Read",
+      "Grep",
+      "Read",
+      "Bash",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "latest_tag",
+      "caller_2": "main",
+      "caller_3": "run_update_check_cli",
+      "caller_4": "run_update_cli"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Read",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 33056.0,
+    "mean_rounds": 9.333333333333334,
+    "mean_tokens": 675648.0,
+    "runs": 3,
+    "stddev_millis": 1466.019781585501,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 33593.921325144525,
+    "success_rate": 1.0
+   },
+   "id": "0062_real_agentic_transitive_callers_tag_from_release_url",
+   "mechanism": "discovery",
+   "treatment": {
+    "answer": {
+     "caller_1": "latest_tag",
+     "caller_2": "main",
+     "caller_3": "run_update_check_cli",
+     "caller_4": "run_update_cli"
+    },
+    "context_bytes": 709,
+    "correct": true,
+    "duration_ms": 5520,
+    "rounds": 1,
+    "tokens": 144718,
+    "tools": [
+     "mcp__lens__lens_graph"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "caller_1": "latest_tag",
+      "caller_2": "main",
+      "caller_3": "run_update_check_cli",
+      "caller_4": "run_update_cli"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "latest_tag",
+      "caller_2": "main",
+      "caller_3": "run_update_check_cli",
+      "caller_4": "run_update_cli"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "latest_tag",
+      "caller_2": "main",
+      "caller_3": "run_update_check_cli",
+      "caller_4": "run_update_cli"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 5192.666666666667,
+    "mean_rounds": 1.0,
+    "mean_tokens": 144745.33333333334,
+    "runs": 3,
+    "stddev_millis": 444.66116938131165,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 23.79542439676633,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 54
+    },
+    "context_bytes": 945,
+    "correct": false,
+    "duration_ms": 36015,
+    "rounds": 7,
+    "tokens": 561536,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Grep",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 54
+     },
+     "correct": false,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 54
+     },
+     "correct": false,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 54
+     },
+     "correct": false,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Bash"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 90960.0,
+    "mean_rounds": 18.333333333333332,
+    "mean_tokens": 1446413.0,
+    "runs": 3,
+    "stddev_millis": 40245.11863568053,
+    "stddev_rounds": 11.440668201153676,
+    "stddev_tokens": 883557.897143513,
+    "success_rate": 1.0
+   },
+   "id": "0063_real_agentic_darkroom_distinct_env_names",
+   "mechanism": "darkroom",
+   "treatment": {
+    "answer": {
+     "count": 54
+    },
+    "context_bytes": 945,
+    "correct": false,
+    "duration_ms": 24267,
+    "rounds": 4,
+    "tokens": 316789,
+    "tools": [
+     "mcp__lens__lens_run",
+     "mcp__lens__lens_grep_ast",
+     "mcp__lens__lens_grep_ast",
+     "mcp__lens__lens_run"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 54
+     },
+     "correct": false,
+     "tools": [
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_grep_ast",
+      "mcp__lens__lens_grep_ast",
+      "mcp__lens__lens_run"
+     ]
+    },
+    {
+     "answer": {
+      "count": 54
+     },
+     "correct": false,
+     "tools": [
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_grep_ast",
+      "mcp__lens__lens_grep_ast",
+      "mcp__lens__lens_run"
+     ]
+    },
+    {
+     "answer": {
+      "count": 54
+     },
+     "correct": false,
+     "tools": [
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_grep_ast",
+      "mcp__lens__lens_grep_ast",
+      "mcp__lens__lens_run",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 30861.333333333332,
+    "mean_rounds": 4.333333333333333,
+    "mean_tokens": 338750.3333333333,
+    "runs": 3,
+    "stddev_millis": 4979.096727542278,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 33824.17602182728,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 28
+    },
+    "context_bytes": 635,
+    "correct": true,
+    "duration_ms": 137087,
+    "rounds": 20,
+    "tokens": 1538109,
+    "tools": [
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Write",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 28
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Write",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {},
+     "correct": false,
+     "tools": [
+      "Bash",
+      "Write",
+      "Write"
+     ]
+    },
+    {
+     "answer": {
+      "count": 28
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Bash"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 74078.66666666667,
+    "mean_rounds": 10.666666666666666,
+    "mean_tokens": 816071.3333333334,
+    "runs": 3,
+    "stddev_millis": 44783.272980979054,
+    "stddev_rounds": 7.039570693980959,
+    "stddev_tokens": 534973.3028506085,
+    "success_rate": 0.6666666666666666
+   },
+   "id": "0064_real_agentic_darkroom_nontest_unwrap_total",
+   "mechanism": "darkroom",
+   "treatment": {
+    "answer": {
+     "count": 28
+    },
+    "context_bytes": 635,
+    "correct": true,
+    "duration_ms": 5053,
+    "rounds": 1,
+    "tokens": 144724,
+    "tools": [
+     "mcp__lens__lens_grep_ast"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 28
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 28
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 28
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 5080.0,
+    "mean_rounds": 1.0,
+    "mean_tokens": 144791.33333333334,
+    "runs": 3,
+    "stddev_millis": 413.9959742155311,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 81.49164919725756,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 1
+    },
+    "context_bytes": 522,
+    "correct": true,
+    "duration_ms": 33260,
+    "rounds": 8,
+    "tokens": 576632,
+    "tools": [
+     "Bash",
+     "Grep",
+     "Grep",
+     "Bash",
+     "Bash",
+     "Bash",
+     "Grep",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 1
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 1
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "count": 1
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Read",
+      "Grep",
+      "Bash"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 24127.666666666668,
+    "mean_rounds": 6.333333333333333,
+    "mean_tokens": 498077.0,
+    "runs": 3,
+    "stddev_millis": 6652.1939405148305,
+    "stddev_rounds": 1.247219128924647,
+    "stddev_tokens": 55611.90723217466,
+    "success_rate": 1.0
+   },
+   "id": "0065_real_agentic_ast_unwraps_index_mod",
+   "mechanism": "discovery",
+   "treatment": {
+    "answer": {
+     "count": 1
+    },
+    "context_bytes": 522,
+    "correct": true,
+    "duration_ms": 4563,
+    "rounds": 1,
+    "tokens": 143608,
+    "tools": [
+     "mcp__lens__lens_grep_ast"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 1
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 1
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 1
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast",
+      "Bash",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_grep_ast"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 7375.0,
+    "mean_rounds": 2.0,
+    "mean_tokens": 219300.33333333334,
+    "runs": 3,
+    "stddev_millis": 3899.947777428137,
+    "stddev_rounds": 1.4142135623730951,
+    "stddev_tokens": 107088.26077690412,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 2
+    },
+    "context_bytes": 526,
+    "correct": true,
+    "duration_ms": 22862,
+    "rounds": 7,
+    "tokens": 503334,
+    "tools": [
+     "Bash",
+     "Bash",
+     "Bash",
+     "Read",
+     "Bash",
+     "Bash",
+     "Grep"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Read",
+      "Bash",
+      "Grep",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 16075.666666666666,
+    "mean_rounds": 5.333333333333333,
+    "mean_tokens": 396266.6666666667,
+    "runs": 3,
+    "stddev_millis": 5044.327529237393,
+    "stddev_rounds": 1.699673171197595,
+    "stddev_tokens": 108045.69558087706,
+    "success_rate": 1.0
+   },
+   "id": "0066_real_agentic_ast_unwraps_discovery_mod",
+   "mechanism": "discovery",
+   "treatment": {
+    "answer": {
+     "count": 2
+    },
+    "context_bytes": 526,
+    "correct": true,
+    "duration_ms": 4236,
+    "rounds": 1,
+    "tokens": 143683,
+    "tools": [
+     "mcp__lens__lens_grep_ast"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 4932.0,
+    "mean_rounds": 1.0,
+    "mean_tokens": 143707.0,
+    "runs": 3,
+    "stddev_millis": 1117.662143345057,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 53.391634800469134,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "nested_repo_roots"
+    },
+    "context_bytes": 779,
+    "correct": true,
+    "duration_ms": 10498,
+    "rounds": 3,
+    "tokens": 253134,
+    "tools": [
+     "Grep",
+     "Grep",
+     "ReportFindings"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "nested_repo_roots"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "nested_repo_roots"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "function": "nested_repo_roots"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 10380.666666666666,
+    "mean_rounds": 3.3333333333333335,
+    "mean_tokens": 272823.0,
+    "runs": 3,
+    "stddev_millis": 2011.1101964393256,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 30394.338628545065,
+    "success_rate": 1.0
+   },
+   "id": "0067_real_agentic_search_inner_repo_boundary",
+   "mechanism": "search",
+   "treatment": {
+    "answer": {
+     "function": "nested_repo_roots"
+    },
+    "context_bytes": 779,
+    "correct": true,
+    "duration_ms": 7201,
+    "rounds": 2,
+    "tokens": 222103,
+    "tools": [
+     "mcp__lens__lens_search",
+     "mcp__lens__lens_symbol"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "nested_repo_roots"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_symbol"
+     ]
+    },
+    {
+     "answer": {
+      "function": "nested_repo_roots"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "nested_repo_roots"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 5420.333333333333,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 172765.66666666666,
+    "runs": 3,
+    "stddev_millis": 1259.4274713359066,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 34886.7704565626,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "mcp_redirect"
+    },
+    "context_bytes": 803,
+    "correct": true,
+    "duration_ms": 12711,
+    "rounds": 4,
+    "tokens": 322401,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Grep",
+     "Read"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "mcp_redirect"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "function": "mcp_redirect"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "mcp_redirect"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 13348.666666666666,
+    "mean_rounds": 4.666666666666667,
+    "mean_tokens": 364381.0,
+    "runs": 3,
+    "stddev_millis": 4802.210902860843,
+    "stddev_rounds": 1.699673171197595,
+    "stddev_tokens": 106627.62100256512,
+    "success_rate": 1.0
+   },
+   "id": "0068_real_agentic_search_deny_requires_server",
+   "mechanism": "search",
+   "treatment": {
+    "answer": {
+     "function": "mcp_redirect"
+    },
+    "context_bytes": 803,
+    "correct": true,
+    "duration_ms": 4367,
+    "rounds": 1,
+    "tokens": 147434,
+    "tools": [
+     "mcp__lens__lens_search"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "mcp_redirect"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "mcp_redirect"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_search",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "mcp_redirect"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 6234.0,
+    "mean_rounds": 1.6666666666666667,
+    "mean_tokens": 199257.66666666666,
+    "runs": 3,
+    "stddev_millis": 2905.1674650525742,
+    "stddev_rounds": 0.9428090415820634,
+    "stddev_tokens": 73243.06816044475,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "first_module": "client",
+     "mod_count": 15
+    },
+    "context_bytes": 577,
+    "correct": true,
+    "duration_ms": 4466,
+    "rounds": 1,
+    "tokens": 123650,
+    "tools": [
+     "Grep"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "first_module": "client",
+      "mod_count": 15
+     },
+     "correct": true,
+     "tools": [
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "first_module": "client",
+      "mod_count": 15
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "first_module": "client",
+      "mod_count": 15
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 5753.0,
+    "mean_rounds": 2.0,
+    "mean_tokens": 185968.0,
+    "runs": 3,
+    "stddev_millis": 1007.8713542246683,
+    "stddev_rounds": 0.816496580927726,
+    "stddev_tokens": 50938.45606219333,
+    "success_rate": 1.0
+   },
+   "id": "0069_real_agentic_lib_pub_mod_count",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "first_module": "client",
+     "mod_count": 15
+    },
+    "context_bytes": 577,
+    "correct": true,
+    "duration_ms": 4675,
+    "rounds": 1,
+    "tokens": 143948,
+    "tools": [
+     "mcp__lens__lens_grep_ast"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "first_module": "client",
+      "mod_count": 15
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "first_module": "client",
+      "mod_count": 15
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_run"
+     ]
+    },
+    {
+     "answer": {
+      "first_module": "client",
+      "mod_count": 15
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 2,
+    "mean_millis": 5091.333333333333,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 167783.33333333334,
+    "runs": 3,
+    "stddev_millis": 801.8654639166236,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 33885.1820646659,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "first_alpha": "find",
+     "fn_count": 11
+    },
+    "context_bytes": 592,
+    "correct": true,
+    "duration_ms": 3473,
+    "rounds": 1,
+    "tokens": 123939,
+    "tools": [
+     "Grep"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "first_alpha": "find",
+      "fn_count": 11
+     },
+     "correct": true,
+     "tools": [
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "first_alpha": "find",
+      "fn_count": 11
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "first_alpha": "find",
+      "fn_count": 11
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 7409.0,
+    "mean_rounds": 1.6666666666666667,
+    "mean_tokens": 166008.66666666666,
+    "runs": 3,
+    "stddev_millis": 2919.0359139049087,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 29747.857517624507,
+    "success_rate": 1.0
+   },
+   "id": "0070_real_agentic_query_pub_fn_survey",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "first_alpha": "find",
+     "fn_count": 11
+    },
+    "context_bytes": 592,
+    "correct": true,
+    "duration_ms": 11479,
+    "rounds": 3,
+    "tokens": 285717,
+    "tools": [
+     "Grep",
+     "Read",
+     "mcp__lens__lens_skeleton"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "first_alpha": "find",
+      "fn_count": 11
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "first_alpha": "find",
+      "fn_count": 11
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "first_alpha": "find",
+      "fn_count": 11
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 7807.666666666667,
+    "mean_rounds": 1.6666666666666667,
+    "mean_tokens": 191907.33333333334,
+    "runs": 3,
+    "stddev_millis": 2698.4712132777863,
+    "stddev_rounds": 0.9428090415820634,
+    "stddev_tokens": 66333.4848189225,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "param_name": "data_dir"
+    },
+    "context_bytes": 487,
+    "correct": true,
+    "duration_ms": 5766,
+    "rounds": 1,
+    "tokens": 123520,
+    "tools": [
+     "Grep"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "param_name": "data_dir"
+     },
+     "correct": true,
+     "tools": [
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "param_name": "data_dir"
+     },
+     "correct": true,
+     "tools": [
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "param_name": "data_dir"
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Read"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 5695.666666666667,
+    "mean_rounds": 1.6666666666666667,
+    "mean_tokens": 165086.33333333334,
+    "runs": 3,
+    "stddev_millis": 2082.2520393928194,
+    "stddev_rounds": 0.9428090415820634,
+    "stddev_tokens": 58783.672338120865,
+    "success_rate": 1.0
+   },
+   "id": "0071_real_agentic_warmup_second_param",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "param_name": "data_dir"
+    },
+    "context_bytes": 487,
+    "correct": true,
+    "duration_ms": 5566,
+    "rounds": 1,
+    "tokens": 144661,
+    "tools": [
+     "mcp__lens__lens_skeleton"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "param_name": "data_dir"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "param_name": "data_dir"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "param_name": "data_dir"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 4222.666666666667,
+    "mean_rounds": 1.0,
+    "mean_tokens": 145293.33333333334,
+    "runs": 3,
+    "stddev_millis": 950.1551920022796,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 926.2563839935943,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 2,
+     "method_1": "find_by_name",
+     "method_2": "incident"
+    },
+    "context_bytes": 572,
+    "correct": true,
+    "duration_ms": 7253,
+    "rounds": 2,
+    "tokens": 186161,
+    "tools": [
+     "Grep",
+     "Grep"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 2,
+      "method_1": "find_by_name",
+      "method_2": "incident"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2,
+      "method_1": "find_by_name",
+      "method_2": "incident"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2,
+      "method_1": "find_by_name",
+      "method_2": "incident"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 8460.666666666666,
+    "mean_rounds": 2.0,
+    "mean_tokens": 186205.0,
+    "runs": 3,
+    "stddev_millis": 2049.983793973883,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 43.36665385600631,
+    "success_rate": 1.0
+   },
+   "id": "0072_real_agentic_graph_vec_returning_methods",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "count": 2,
+     "method_1": "find_by_name",
+     "method_2": "incident"
+    },
+    "context_bytes": 572,
+    "correct": true,
+    "duration_ms": 3912,
+    "rounds": 1,
+    "tokens": 143808,
+    "tools": [
+     "mcp__lens__lens_grep_ast"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 2,
+      "method_1": "find_by_name",
+      "method_2": "incident"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2,
+      "method_1": "find_by_name",
+      "method_2": "incident"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2,
+      "method_1": "find_by_name",
+      "method_2": "incident"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 5525.333333333333,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 168328.33333333334,
+    "runs": 3,
+    "stddev_millis": 1223.0381115166535,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 34702.44691020441,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "param_type": "&str"
+    },
+    "context_bytes": 519,
+    "correct": true,
+    "duration_ms": 7123,
+    "rounds": 1,
+    "tokens": 123517,
+    "tools": [
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "param_type": "&str"
+     },
+     "correct": true,
+     "tools": [
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "param_type": "&str"
+     },
+     "correct": true,
+     "tools": [
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "param_type": "&str"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 6555.333333333333,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 144204.66666666666,
+    "runs": 3,
+    "stddev_millis": 2672.09584824763,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 29273.04373575723,
+    "success_rate": 1.0
+   },
+   "id": "0073_real_agentic_extract_spec_for_extension_param",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "param_type": "&str"
+    },
+    "context_bytes": 519,
+    "correct": true,
+    "duration_ms": 3977,
+    "rounds": 1,
+    "tokens": 147136,
+    "tools": [
+     "mcp__lens__lens_skeleton"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "param_type": "&str"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "param_type": "&str"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "param_type": "&str"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 6336.666666666667,
+    "mean_rounds": 1.6666666666666667,
+    "mean_tokens": 195296.0,
+    "runs": 3,
+    "stddev_millis": 1727.1715478074423,
+    "stddev_rounds": 0.9428090415820634,
+    "stddev_tokens": 68068.22405498766,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "chunk_by_ast"
+    },
+    "context_bytes": 654,
+    "correct": true,
+    "duration_ms": 3733,
+    "rounds": 1,
+    "tokens": 123602,
+    "tools": [
+     "Grep"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "chunk_by_ast"
+     },
+     "correct": true,
+     "tools": [
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "function": "chunk_by_ast"
+     },
+     "correct": true,
+     "tools": [
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "function": "chunk_by_ast"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 7122.666666666667,
+    "mean_rounds": 2.0,
+    "mean_tokens": 186026.33333333334,
+    "runs": 3,
+    "stddev_millis": 4340.1668426711685,
+    "stddev_rounds": 1.4142135623730951,
+    "stddev_tokens": 88198.62026257679,
+    "success_rate": 1.0
+   },
+   "id": "0074_real_agentic_search_ast_chunk_boundaries",
+   "mechanism": "search",
+   "treatment": {
+    "answer": {
+     "function": "chunk_by_ast"
+    },
+    "context_bytes": 654,
+    "correct": true,
+    "duration_ms": 8596,
+    "rounds": 1,
+    "tokens": 145419,
+    "tools": [
+     "mcp__lens__lens_symbol"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "chunk_by_ast"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_symbol"
+     ]
+    },
+    {
+     "answer": {
+      "function": "chunk_by_ast"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "chunk_by_ast"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_symbol"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 5628.333333333333,
+    "mean_rounds": 1.0,
+    "mean_tokens": 145966.66666666666,
+    "runs": 3,
+    "stddev_millis": 2103.512353712766,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 780.8902327187577,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "prune_missing"
+    },
+    "context_bytes": 613,
+    "correct": true,
+    "duration_ms": 10849,
+    "rounds": 3,
+    "tokens": 187360,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Read"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "prune_missing"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "function": "prune_missing"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "function": "prune_missing"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 12793.666666666666,
+    "mean_rounds": 4.333333333333333,
+    "mean_tokens": 314315.0,
+    "runs": 3,
+    "stddev_millis": 2049.933386451591,
+    "stddev_rounds": 1.247219128924647,
+    "stddev_tokens": 104422.19410004113,
+    "success_rate": 1.0
+   },
+   "id": "0075_real_agentic_search_prune_deleted_files",
+   "mechanism": "search",
+   "treatment": {
+    "answer": {
+     "function": "prune_missing"
+    },
+    "context_bytes": 613,
+    "correct": true,
+    "duration_ms": 6826,
+    "rounds": 1,
+    "tokens": 146787,
+    "tools": [
+     "mcp__lens__lens_search"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "prune_missing"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "prune_missing"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "prune_missing"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search",
+      "Read"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 5538.666666666667,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 171908.33333333334,
+    "runs": 3,
+    "stddev_millis": 1315.4186490323991,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 35786.752132908376,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "federate_nested_search"
+    },
+    "context_bytes": 636,
+    "correct": true,
+    "duration_ms": 12312,
+    "rounds": 5,
+    "tokens": 376962,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Grep",
+     "Grep",
+     "ReportFindings"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "federate_nested_search"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "federate_nested_search"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "federate_nested_search"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 15865.333333333334,
+    "mean_rounds": 5.333333333333333,
+    "mean_tokens": 401791.0,
+    "runs": 3,
+    "stddev_millis": 2719.4005875478433,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 30069.693857215552,
+    "success_rate": 1.0
+   },
+   "id": "0076_real_agentic_search_fold_inner_repo_hits",
+   "mechanism": "search",
+   "treatment": {
+    "answer": {
+     "function": "federate_nested_search"
+    },
+    "context_bytes": 636,
+    "correct": true,
+    "duration_ms": 4704,
+    "rounds": 2,
+    "tokens": 221875,
+    "tools": [
+     "mcp__lens__lens_search",
+     "ReportFindings"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "federate_nested_search"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "federate_nested_search"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "federate_nested_search"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 4278.333333333333,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 171881.0,
+    "runs": 3,
+    "stddev_millis": 603.3983390394404,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 35351.15982067161,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "split_subwords"
+    },
+    "context_bytes": 616,
+    "correct": true,
+    "duration_ms": 12937,
+    "rounds": 3,
+    "tokens": 248820,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Grep"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "split_subwords"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "function": "split_subwords"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "function": "split_subwords"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 8265.0,
+    "mean_rounds": 2.3333333333333335,
+    "mean_tokens": 207108.0,
+    "runs": 3,
+    "stddev_millis": 3303.7410108340314,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 29495.533130741453,
+    "success_rate": 1.0
+   },
+   "id": "0077_real_agentic_search_compound_name_parts",
+   "mechanism": "search",
+   "treatment": {
+    "answer": {
+     "function": "split_subwords"
+    },
+    "context_bytes": 616,
+    "correct": true,
+    "duration_ms": 3938,
+    "rounds": 1,
+    "tokens": 146999,
+    "tools": [
+     "mcp__lens__lens_search"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "split_subwords"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "split_subwords"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "split_subwords"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 4757.666666666667,
+    "mean_rounds": 1.0,
+    "mean_tokens": 146724.33333333334,
+    "runs": 3,
+    "stddev_millis": 679.9756531589119,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 422.10767452024476,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "min_cover_span"
+    },
+    "context_bytes": 638,
+    "correct": true,
+    "duration_ms": 14885,
+    "rounds": 4,
+    "tokens": 313495,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Read",
+     "ReportFindings"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "min_cover_span"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "min_cover_span"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "function": "min_cover_span"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 10710.333333333334,
+    "mean_rounds": 3.3333333333333335,
+    "mean_tokens": 271073.3333333333,
+    "runs": 3,
+    "stddev_millis": 3233.069370668615,
+    "stddev_rounds": 0.9428090415820634,
+    "stddev_tokens": 59550.4905232153,
+    "success_rate": 1.0
+   },
+   "id": "0078_real_agentic_search_tightest_term_window",
+   "mechanism": "search",
+   "treatment": {
+    "answer": {
+     "function": "min_cover_span"
+    },
+    "context_bytes": 638,
+    "correct": true,
+    "duration_ms": 3410,
+    "rounds": 1,
+    "tokens": 146474,
+    "tools": [
+     "mcp__lens__lens_search"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "min_cover_span"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "min_cover_span"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "min_cover_span"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 3444.0,
+    "mean_rounds": 1.0,
+    "mean_tokens": 146378.0,
+    "runs": 3,
+    "stddev_millis": 229.06767558955147,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 71.12430433168866,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "ensure_index"
+    },
+    "context_bytes": 613,
+    "correct": true,
+    "duration_ms": 15616,
+    "rounds": 6,
+    "tokens": 442375,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Read",
+     "Grep",
+     "Grep",
+     "ReportFindings"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "ensure_index"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "ensure_index"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "function": "ensure_index"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 14667.0,
+    "mean_rounds": 4.666666666666667,
+    "mean_tokens": 358517.6666666667,
+    "runs": 3,
+    "stddev_millis": 3296.230877836078,
+    "stddev_rounds": 1.247219128924647,
+    "stddev_tokens": 80234.43511083977,
+    "success_rate": 1.0
+   },
+   "id": "0079_real_agentic_search_index_freshness_gate",
+   "mechanism": "search",
+   "treatment": {
+    "answer": {
+     "function": "ensure_index"
+    },
+    "context_bytes": 613,
+    "correct": true,
+    "duration_ms": 5617,
+    "rounds": 2,
+    "tokens": 220972,
+    "tools": [
+     "mcp__lens__lens_search",
+     "ReportFindings"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "ensure_index"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "ensure_index"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "ensure_index"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 4785.0,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 171301.66666666666,
+    "runs": 3,
+    "stddev_millis": 737.1585085086291,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 35122.27276561445,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "caller_1": "neighbors",
+     "caller_2": "neighbors_dir",
+     "caller_3": "neighbors_directed"
+    },
+    "context_bytes": 801,
+    "correct": true,
+    "duration_ms": 68833,
+    "rounds": 7,
+    "tokens": 525691,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Read",
+     "Grep",
+     "Read",
+     "Grep",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "caller_1": "neighbors",
+      "caller_2": "neighbors_dir",
+      "caller_3": "neighbors_directed"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Grep",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "neighbors (src/discovery/graph.rs:444)",
+      "caller_2": "neighbors (src/discovery/query.rs:334)",
+      "caller_3": "neighbors_directed (src/discovery/graph.rs:457)"
+     },
+     "correct": false,
+     "tools": [
+      "Grep",
+      "Read",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "neighbors",
+      "caller_2": "neighbors_dir",
+      "caller_3": "neighbors_directed"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Bash",
+      "Bash"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 40225.0,
+    "mean_rounds": 5.666666666666667,
+    "mean_tokens": 436785.0,
+    "runs": 3,
+    "stddev_millis": 20282.347858831992,
+    "stddev_rounds": 1.247219128924647,
+    "stddev_tokens": 83435.26921312514,
+    "success_rate": 0.6666666666666666
+   },
+   "id": "0080_real_agentic_composed_callers_audit",
+   "mechanism": "darkroom",
+   "treatment": {
+    "answer": {
+     "caller_1": "neighbors",
+     "caller_2": "neighbors_dir",
+     "caller_3": "neighbors_directed"
+    },
+    "context_bytes": 801,
+    "correct": true,
+    "duration_ms": 16050,
+    "rounds": 7,
+    "tokens": 389043,
+    "tools": [
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "caller_1": "neighbors",
+      "caller_2": "neighbors_dir",
+      "caller_3": "neighbors_directed"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "neighbors",
+      "caller_2": "neighbors_dir",
+      "caller_3": "neighbors_directed"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "neighbors",
+      "caller_2": "neighbors_dir",
+      "caller_3": "neighbors_directed"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "Read",
+      "mcp__lens__lens_run"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 20078.0,
+    "mean_rounds": 7.333333333333333,
+    "mean_tokens": 412277.3333333333,
+    "runs": 3,
+    "stddev_millis": 6141.524457874174,
+    "stddev_rounds": 1.247219128924647,
+    "stddev_tokens": 100141.92883547275,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 34
+    },
+    "context_bytes": 658,
+    "correct": true,
+    "duration_ms": 103292,
+    "rounds": 23,
+    "tokens": 1756053,
+    "tools": [
+     "Bash",
+     "Bash",
+     "ToolSearch",
+     "Bash",
+     "Grep",
+     "Bash",
+     "Grep",
+     "Grep",
+     "Grep",
+     "Bash",
+     "Read",
+     "Read",
+     "Read",
+     "Read",
+     "Read",
+     "Read",
+     "Read",
+     "Read",
+     "Read",
+     "Read",
+     "Bash",
+     "Read",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 34
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash",
+      "ToolSearch",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 34
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash",
+      "ToolSearch",
+      "Agent",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 35
+     },
+     "correct": false,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 48981.0,
+    "mean_rounds": 46.333333333333336,
+    "mean_tokens": 827469.0,
+    "runs": 3,
+    "stddev_millis": 41411.21539711998,
+    "stddev_rounds": 43.27688631231329,
+    "stddev_tokens": 695849.2374995224,
+    "success_rate": 0.6666666666666666
+   },
+   "id": "0081_real_agentic_composed_search_aggregate",
+   "mechanism": "darkroom",
+   "treatment": {
+    "answer": {
+     "count": 34
+    },
+    "context_bytes": 658,
+    "correct": true,
+    "duration_ms": 5257,
+    "rounds": 1,
+    "tokens": 145907,
+    "tools": [
+     "mcp__lens__lens_grep_ast"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 34
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 34
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 34
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 6396.0,
+    "mean_rounds": 1.0,
+    "mean_tokens": 145886.33333333334,
+    "runs": 3,
+    "stddev_millis": 1797.7732522948122,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 25.104227178350307,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "caller_1": "route",
+     "caller_2": "snapshot_json",
+     "caller_3": "snapshot_json_since"
+    },
+    "context_bytes": 883,
+    "correct": true,
+    "duration_ms": 66379,
+    "rounds": 17,
+    "tokens": 1254645,
+    "tools": [
+     "Grep",
+     "Read",
+     "Read",
+     "Read",
+     "Read",
+     "Grep",
+     "Read",
+     "Grep",
+     "Read",
+     "Read",
+     "Read",
+     "Read",
+     "Grep",
+     "Read",
+     "Grep",
+     "Grep",
+     "ToolSearch"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "caller_1": "route",
+      "caller_2": "snapshot_json",
+      "caller_3": "snapshot_json_since"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "ToolSearch"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "route",
+      "caller_2": "snapshot_json",
+      "caller_3": "snapshot_json_since"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Read",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Read",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "route",
+      "caller_2": "snapshot_json",
+      "caller_3": "snapshot_json_since"
+     },
+     "correct": true,
+     "tools": [
+      "Agent",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Read",
+      "Grep",
+      "Read",
+      "Grep",
+      "Read",
+      "Read",
+      "Read"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 90753.66666666667,
+    "mean_rounds": 26.666666666666668,
+    "mean_tokens": 1505513.0,
+    "runs": 3,
+    "stddev_millis": 75588.5896386191,
+    "stddev_rounds": 8.65383665716478,
+    "stddev_tokens": 1130997.1325012278,
+    "success_rate": 1.0
+   },
+   "id": "0082_real_agentic_composed_pricing_callers_audit",
+   "mechanism": "darkroom",
+   "treatment": {
+    "answer": {
+     "caller_1": "route",
+     "caller_2": "snapshot_json",
+     "caller_3": "snapshot_json_since"
+    },
+    "context_bytes": 883,
+    "correct": true,
+    "duration_ms": 12851,
+    "rounds": 7,
+    "tokens": 238059,
+    "tools": [
+     "mcp__lens__lens_graph",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "caller_1": "route",
+      "caller_2": "snapshot_json",
+      "caller_3": "snapshot_json_since"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "route",
+      "caller_2": "snapshot_json",
+      "caller_3": "snapshot_json_since"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "caller_1": "route",
+      "caller_2": "snapshot_json",
+      "caller_3": "snapshot_json_since"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 12209.0,
+    "mean_rounds": 7.0,
+    "mean_tokens": 267427.3333333333,
+    "runs": 3,
+    "stddev_millis": 1561.6279966752645,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 41403.76216668668,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 39
+    },
+    "context_bytes": 736,
+    "correct": true,
+    "duration_ms": 16075,
+    "rounds": 3,
+    "tokens": 259622,
+    "tools": [
+     "Bash",
+     "Grep",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 39
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 39
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 35
+     },
+     "correct": false,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Bash"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 22423.666666666668,
+    "mean_rounds": 5.333333333333333,
+    "mean_tokens": 386469.0,
+    "runs": 3,
+    "stddev_millis": 4921.387089925856,
+    "stddev_rounds": 1.699673171197595,
+    "stddev_tokens": 104124.82339000629,
+    "success_rate": 0.6666666666666666
+   },
+   "id": "0083_real_agentic_composed_session_pubfn_count",
+   "mechanism": "darkroom",
+   "treatment": {
+    "answer": {
+     "count": 39
+    },
+    "context_bytes": 736,
+    "correct": true,
+    "duration_ms": 5303,
+    "rounds": 1,
+    "tokens": 146794,
+    "tools": [
+     "mcp__lens__lens_grep_ast"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 39
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 39
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 39
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast",
+      "Grep",
+      "Read",
+      "mcp__lens__lens_skeleton",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 9232.666666666666,
+    "mean_rounds": 2.3333333333333335,
+    "mean_tokens": 250164.0,
+    "runs": 3,
+    "stddev_millis": 5160.9632391207315,
+    "stddev_rounds": 1.8856180831641267,
+    "stddev_tokens": 146161.80083729126,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 13
+    },
+    "context_bytes": 684,
+    "correct": true,
+    "duration_ms": 13740,
+    "rounds": 4,
+    "tokens": 356331,
+    "tools": [
+     "Bash",
+     "Read",
+     "Read",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 13
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Read",
+      "Read",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 13
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 13
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Read",
+      "Read",
+      "Bash"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 12299.666666666666,
+    "mean_rounds": 3.3333333333333335,
+    "mean_tokens": 299953.3333333333,
+    "runs": 3,
+    "stddev_millis": 3190.0288748257785,
+    "stddev_rounds": 0.9428090415820634,
+    "stddev_tokens": 79887.08993044843,
+    "success_rate": 1.0
+   },
+   "id": "0084_real_agentic_composed_store_pubfn_count",
+   "mechanism": "darkroom",
+   "treatment": {
+    "answer": {
+     "count": 13
+    },
+    "context_bytes": 684,
+    "correct": true,
+    "duration_ms": 4647,
+    "rounds": 1,
+    "tokens": 144660,
+    "tools": [
+     "mcp__lens__lens_grep_ast"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 13
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 13
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    },
+    {
+     "answer": {
+      "count": 13
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 4936.333333333333,
+    "mean_rounds": 1.0,
+    "mean_tokens": 144693.33333333334,
+    "runs": 3,
+    "stddev_millis": 326.7306059873928,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 33.9934634239519,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "callee_1": "flat_scalar_columns",
+     "callee_2": "homogeneous_object_columns"
+    },
+    "context_bytes": 811,
+    "correct": true,
+    "duration_ms": 15144,
+    "rounds": 3,
+    "tokens": 269381,
+    "tools": [
+     "Bash",
+     "Read",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "callee_1": "flat_scalar_columns",
+      "callee_2": "homogeneous_object_columns"
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Read",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "callee_1": "flat_scalar_columns",
+      "callee_2": "homogeneous_object_columns"
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "callee_1": "flat_scalar_columns",
+      "callee_2": "homogeneous_object_columns"
+     },
+     "correct": true,
+     "tools": [
+      "Read"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 12699.0,
+    "mean_rounds": 2.0,
+    "mean_tokens": 203179.66666666666,
+    "runs": 3,
+    "stddev_millis": 1732.4123835469043,
+    "stddev_rounds": 0.816496580927726,
+    "stddev_tokens": 53260.63835725425,
+    "success_rate": 1.0
+   },
+   "id": "0085_real_agentic_composed_compress_callees_audit",
+   "mechanism": "darkroom",
+   "treatment": {
+    "answer": {
+     "callee_1": "flat_scalar_columns",
+     "callee_2": "homogeneous_object_columns"
+    },
+    "context_bytes": 811,
+    "correct": true,
+    "duration_ms": 14490,
+    "rounds": 3,
+    "tokens": 295734,
+    "tools": [
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_skeleton",
+     "mcp__lens__lens_run"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "callee_1": "flat_scalar_columns",
+      "callee_2": "homogeneous_object_columns"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_run"
+     ]
+    },
+    {
+     "answer": {
+      "callee_1": "flat_scalar_columns",
+      "callee_2": "homogeneous_object_columns"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_graph",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "callee_1": "flat_scalar_columns",
+      "callee_2": "homogeneous_object_columns"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_run",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton",
+      "mcp__lens__lens_skeleton"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 14756.333333333334,
+    "mean_rounds": 8.333333333333334,
+    "mean_tokens": 320542.6666666667,
+    "runs": 3,
+    "stddev_millis": 238.13488241377453,
+    "stddev_rounds": 3.7712361663282534,
+    "stddev_tokens": 21386.331777303207,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "compile_pattern"
+    },
+    "context_bytes": 596,
+    "correct": true,
+    "duration_ms": 8703,
+    "rounds": 3,
+    "tokens": 250898,
+    "tools": [
+     "Grep",
+     "Grep",
+     "ReportFindings"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "compile_pattern"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "compile_pattern"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Read",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "compile_pattern"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 13627.333333333334,
+    "mean_rounds": 4.333333333333333,
+    "mean_tokens": 335571.3333333333,
+    "runs": 3,
+    "stddev_millis": 5486.907831880863,
+    "stddev_rounds": 1.8856180831641267,
+    "stddev_tokens": 120517.74429057694,
+    "success_rate": 1.0
+   },
+   "id": "0086_real_agentic_skeleton_compile_pattern",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "function": "compile_pattern"
+    },
+    "context_bytes": 596,
+    "correct": true,
+    "duration_ms": 8469,
+    "rounds": 2,
+    "tokens": 224605,
+    "tools": [
+     "mcp__lens__lens_search",
+     "mcp__lens__lens_skeleton"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "compile_pattern"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "function": "compile_pattern"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "compile_pattern"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 6068.333333333333,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 173273.0,
+    "runs": 3,
+    "stddev_millis": 1888.6673138015128,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 36316.481740388896,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "snippet_candidates"
+    },
+    "context_bytes": 689,
+    "correct": true,
+    "duration_ms": 12496,
+    "rounds": 4,
+    "tokens": 317052,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Read",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "snippet_candidates"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "function": "snippet_candidates"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "snippet_candidates"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 11874.333333333334,
+    "mean_rounds": 4.0,
+    "mean_tokens": 317690.6666666667,
+    "runs": 3,
+    "stddev_millis": 1086.9401496351531,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 1894.189419133038,
+    "success_rate": 1.0
+   },
+   "id": "0087_real_agentic_skeleton_snippet_candidates",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "function": "snippet_candidates"
+    },
+    "context_bytes": 689,
+    "correct": true,
+    "duration_ms": 7737,
+    "rounds": 2,
+    "tokens": 223341,
+    "tools": [
+     "mcp__lens__lens_search",
+     "ReportFindings"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "snippet_candidates"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "snippet_candidates"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "function": "snippet_candidates"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 7594.666666666667,
+    "mean_rounds": 1.6666666666666667,
+    "mean_tokens": 199052.33333333334,
+    "runs": 3,
+    "stddev_millis": 784.1982459103622,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 37418.0502015924,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "substitute_metavars"
+    },
+    "context_bytes": 647,
+    "correct": true,
+    "duration_ms": 12233,
+    "rounds": 4,
+    "tokens": 313419,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Read",
+     "ReportFindings"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "substitute_metavars"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "substitute_metavars"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "function": "substitute_metavars"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 9810.0,
+    "mean_rounds": 3.0,
+    "mean_tokens": 251474.0,
+    "runs": 3,
+    "stddev_millis": 2213.012577159621,
+    "stddev_rounds": 0.816496580927726,
+    "stddev_tokens": 51124.02617817445,
+    "success_rate": 1.0
+   },
+   "id": "0088_real_agentic_symbol_substitute_metavars",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "function": "substitute_metavars"
+    },
+    "context_bytes": 647,
+    "correct": true,
+    "duration_ms": 4449,
+    "rounds": 1,
+    "tokens": 145734,
+    "tools": [
+     "mcp__lens__lens_search"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "substitute_metavars"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "compile_pattern"
+     },
+     "correct": false,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "substitute_metavars"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "mcp__lens__lens_search",
+      "Bash"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 5727.0,
+    "mean_rounds": 1.6666666666666667,
+    "mean_tokens": 192844.0,
+    "runs": 3,
+    "stddev_millis": 1810.1940964069754,
+    "stddev_rounds": 0.9428090415820634,
+    "stddev_tokens": 66506.25572580873,
+    "success_rate": 0.6666666666666666
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "shortest_path"
+    },
+    "context_bytes": 617,
+    "correct": true,
+    "duration_ms": 8471,
+    "rounds": 2,
+    "tokens": 185995,
+    "tools": [
+     "Grep",
+     "Grep"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "shortest_path"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "function": "shortest_path"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "function": "shortest_path"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 7268.333333333333,
+    "mean_rounds": 2.3333333333333335,
+    "mean_tokens": 207631.33333333334,
+    "runs": 3,
+    "stddev_millis": 1135.7491898400026,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 30016.220085517467,
+    "success_rate": 1.0
+   },
+   "id": "0089_real_agentic_symbol_shortest_path",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "function": "shortest_path"
+    },
+    "context_bytes": 617,
+    "correct": true,
+    "duration_ms": 10600,
+    "rounds": 3,
+    "tokens": 330488,
+    "tools": [
+     "mcp__lens__lens_symbol",
+     "Read",
+     "mcp__lens__lens_skeleton"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "shortest_path"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_symbol",
+      "Read",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "function": "shortest_path"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "shortest_path"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 6363.333333333333,
+    "mean_rounds": 1.6666666666666667,
+    "mean_tokens": 207612.0,
+    "runs": 3,
+    "stddev_millis": 2995.7868563849615,
+    "stddev_rounds": 0.9428090415820634,
+    "stddev_tokens": 86886.47739819279,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 2
+    },
+    "context_bytes": 505,
+    "correct": true,
+    "duration_ms": 4036,
+    "rounds": 1,
+    "tokens": 123474,
+    "tools": [
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 6
+     },
+     "correct": false,
+     "tools": [
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 5966.666666666667,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 144187.33333333334,
+    "runs": 3,
+    "stddev_millis": 1979.7544179911697,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 29305.098559048656,
+    "success_rate": 0.6666666666666666
+   },
+   "id": "0090_real_agentic_grep_ast_structural_pubfn_count",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "count": 2
+    },
+    "context_bytes": 505,
+    "correct": true,
+    "duration_ms": 6995,
+    "rounds": 2,
+    "tokens": 217432,
+    "tools": [
+     "mcp__lens__lens_grep_ast",
+     "mcp__lens__lens_skeleton"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_grep_ast",
+      "mcp__lens__lens_skeleton"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 6838.333333333333,
+    "mean_rounds": 1.6666666666666667,
+    "mean_tokens": 193329.66666666666,
+    "runs": 3,
+    "stddev_millis": 126.18592983724012,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 34066.04961280692,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "count": 2
+    },
+    "context_bytes": 504,
+    "correct": true,
+    "duration_ms": 20092,
+    "rounds": 5,
+    "tokens": 378185,
+    "tools": [
+     "Bash",
+     "Grep",
+     "Bash",
+     "Read",
+     "Bash"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Bash",
+      "Read",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 15647.0,
+    "mean_rounds": 4.333333333333333,
+    "mean_tokens": 334648.6666666667,
+    "runs": 3,
+    "stddev_millis": 3147.2655856579163,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 30791.86115770782,
+    "success_rate": 1.0
+   },
+   "id": "0091_real_agentic_grep_ast_graph_option_methods",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "count": 2
+    },
+    "context_bytes": 504,
+    "correct": true,
+    "duration_ms": 8290,
+    "rounds": 1,
+    "tokens": 145515,
+    "tools": [
+     "mcp__lens__lens_skeleton"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "count": 2
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_skeleton",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 6516.666666666667,
+    "mean_rounds": 1.3333333333333333,
+    "mean_tokens": 169890.33333333334,
+    "runs": 3,
+    "stddev_millis": 1265.3846143454655,
+    "stddev_rounds": 0.4714045207910317,
+    "stddev_tokens": 34648.854000609535,
+    "success_rate": 1.0
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "overview"
+    },
+    "context_bytes": 621,
+    "correct": false,
+    "duration_ms": 11986,
+    "rounds": 4,
+    "tokens": 313671,
+    "tools": [
+     "Grep",
+     "Grep",
+     "Grep",
+     "Read"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": false,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": false,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read"
+     ]
+    },
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": false,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "ReportFindings"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 12405.666666666666,
+    "mean_rounds": 4.0,
+    "mean_tokens": 314447.6666666667,
+    "runs": 3,
+    "stddev_millis": 575.2114587021214,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 1374.3501090414416,
+    "success_rate": 0.0
+   },
+   "id": "0092_real_agentic_overview_repo_map_block",
+   "mechanism": "skeleton",
+   "treatment": {
+    "answer": {
+     "function": "overview"
+    },
+    "context_bytes": 621,
+    "correct": false,
+    "duration_ms": 9318,
+    "rounds": 3,
+    "tokens": 299131,
+    "tools": [
+     "mcp__lens__lens_search",
+     "mcp__lens__lens_search",
+     "ReportFindings"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": false,
+     "tools": [
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_search",
+      "ReportFindings"
+     ]
+    },
+    {
+     "answer": {
+      "function": "repo_map_block"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search",
+      "mcp__lens__lens_skeleton"
+     ]
+    },
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": false,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 7815.666666666667,
+    "mean_rounds": 2.0,
+    "mean_tokens": 223674.66666666666,
+    "runs": 3,
+    "stddev_millis": 2002.843700563998,
+    "stddev_rounds": 0.816496580927726,
+    "stddev_tokens": 62096.48096488418,
+    "success_rate": 0.3333333333333333
+   }
+  },
+  {
+   "control": {
+    "answer": {
+     "function": "overview"
+    },
+    "context_bytes": 643,
+    "correct": true,
+    "duration_ms": 6777,
+    "rounds": 1,
+    "tokens": 125272,
+    "tools": [
+     "Grep"
+    ]
+   },
+   "control_runs": [
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": true,
+     "tools": [
+      "Grep"
+     ]
+    },
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Read",
+      "Bash"
+     ]
+    },
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": true,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Grep"
+     ]
+    }
+   ],
+   "control_stats": {
+    "lens_runs": 0,
+    "mean_millis": 13523.0,
+    "mean_rounds": 4.0,
+    "mean_tokens": 314836.3333333333,
+    "runs": 3,
+    "stddev_millis": 4914.27824473408,
+    "stddev_rounds": 2.160246899469287,
+    "stddev_tokens": 137023.34690198684,
+    "success_rate": 1.0
+   },
+   "id": "0093_real_agentic_overview_engine",
+   "mechanism": "search",
+   "treatment": {
+    "answer": {
+     "function": "overview"
+    },
+    "context_bytes": 643,
+    "correct": true,
+    "duration_ms": 3195,
+    "rounds": 1,
+    "tokens": 145685,
+    "tools": [
+     "mcp__lens__lens_search"
+    ]
+   },
+   "treatment_runs": [
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    },
+    {
+     "answer": {
+      "function": "overview"
+     },
+     "correct": true,
+     "tools": [
+      "mcp__lens__lens_search"
+     ]
+    }
+   ],
+   "treatment_stats": {
+    "lens_runs": 3,
+    "mean_millis": 3792.6666666666665,
+    "mean_rounds": 1.0,
+    "mean_tokens": 145764.33333333334,
+    "runs": 3,
+    "stddev_millis": 425.5869150035304,
+    "stddev_rounds": 0.0,
+    "stddev_tokens": 56.387547876774676,
+    "success_rate": 1.0
+   }
+  }
+ ]
 }

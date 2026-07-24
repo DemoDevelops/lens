@@ -649,7 +649,10 @@ fn route_inner(tool: &str, tool_input: &Value, ctx: &RouteCtx) -> Decision {
                 {
                     throttle::mark(ctx.data_dir, ctx.session_id, "achain:done");
                     throttle::reset(ctx.data_dir, ctx.session_id, "achain-run");
-                    return Decision::Deny(reroute::atomic_chain::deny_reason().to_string());
+                    return Decision::Deny(reroute::atomic_chain::deny_reason(
+                        t.strip_prefix("mcp__lens__").unwrap_or(t),
+                        tool_input,
+                    ));
                 }
             }
             Decision::Passthrough
@@ -2990,9 +2993,10 @@ mod tests {
         );
         match route("mcp__lens__lens_recall", &ti, &ctx) {
             Decision::Deny(r) => {
-                assert!(r.contains("transitive: true"), "names the closure escape");
+                // The reason is tailored to the denied call (here lens_recall).
                 assert!(r.contains("include_bodies"), "names the bodies escape");
                 assert!(r.contains("lens_run"), "names the composed program");
+                assert!(r.contains("verbatim"), "names the retry promise");
             }
             other => panic!("3rd consecutive atomic call must deny, got {other:?}"),
         }

@@ -1,0 +1,21 @@
+{
+  "id": "0104_real_holdout_ga_fragment_test_fns_discovery",
+  "prompt": "How many `#[test]` functions are defined under src/discovery/? Answer with key `count`.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "count": 142
+  },
+  "check": "numeric_tolerance",
+  "primary_mechanism": "darkroom",
+  "lens_fn": "lens_grep_ast",
+  "evidence": [
+    "142"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import lens, json\nr = lens.grep_ast(pattern='#[test] fn $NAME($$$) $BODY', lang=\"rust\", path='src/discovery', limit=2000)\nprint(json.dumps({'count': r.get('count')}))\n"
+  },
+  "notes": "Mined class GA-FRAGMENT (attribute-fragment structural pattern). Derivation: lens q grep-ast --pattern '#[test] fn $NAME($$$) $BODY' --path src/discovery --limit 2000 -> count 142 (default limit 100 silently capped; that cap is part of why the mined session fell back). HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run."
+}

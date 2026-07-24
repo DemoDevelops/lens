@@ -1,0 +1,25 @@
+{
+  "id": "0102_real_holdout_search_followup_achain_killswitch",
+  "prompt": "The atomic-chain ('achain') deny rail has an environment-variable kill-switch. Name the variable (`env_var`) and give the `file` and `line` where production code reads it to decide whether the rail is enabled.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "env_var": "LENS_ATOMIC_CHAIN_DENY",
+    "file": "src/routing/mod.rs",
+    "line": 774
+  },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_search",
+  "evidence": [
+    "LENS_ATOMIC_CHAIN_DENY",
+    "774"
+  ],
+  "treatment": {
+    "queries": [
+      "achain atomic chain deny kill-switch env"
+    ]
+  },
+  "notes": "Mined class SEARCH-FOLLOWUP. Derivation: grep -rn LENS_ATOMIC_CHAIN_DENY src/ -> prod read src/routing/mod.rs:774 (3089/3091 are cfg(test)). HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run."
+}

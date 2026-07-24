@@ -1,0 +1,22 @@
+{
+  "id": "0105_real_holdout_ga_result_pubfns_store",
+  "prompt": "How many `pub fn` in src/session/store.rs return a `Result<...>` (excluding test code)? Answer with key `count`.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "count": 19
+  },
+  "check": "numeric_tolerance",
+  "primary_mechanism": "darkroom",
+  "lens_fn": "lens_grep_ast",
+  "evidence": [
+    "19",
+    "ensure_session"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import lens, json\nr = lens.grep_ast(pattern='pub fn $NAME($$$) -> Result<$$$> $BODY', lang=\"rust\", path='src/session/store.rs', prod_only=True, limit=2000)\nprint(json.dumps({'count': r.get('count')}))\n"
+  },
+  "notes": "Mined class GA-SEXPR (raw S-expr for Result-returning fns; same info need expressed as a pattern). Derivation 2026-07-22: 19 (open..project_memory_summary). HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run."
+}

@@ -1,0 +1,25 @@
+{
+  "id": "0107_real_holdout_symbol_followup_config_dirs_callsites",
+  "prompt": "How many production (non-test) call sites does `claude_config_dirs` have? Answer with key `count`, plus `file` and `line` of the call site.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "count": 1,
+    "file": "src/obs/usage.rs",
+    "line": 91
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "lens_fn": "lens_symbol",
+  "evidence": [
+    "claude_config_dirs",
+    "91"
+  ],
+  "treatment": {
+    "graph_op": "neighbors",
+    "name": "claude_config_dirs",
+    "depth": 1
+  },
+  "notes": "Mined class SYMBOL-FOLLOWUP (re-verify callers with text grep after lens_symbol). Derivation: grep_ast 'claude_config_dirs()' prod-only -> 1 site, src/obs/usage.rs:91 (501/522 are cfg(test)). HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run."
+}

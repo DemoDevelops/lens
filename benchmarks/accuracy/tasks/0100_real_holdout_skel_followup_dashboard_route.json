@@ -1,0 +1,22 @@
+{
+  "id": "0100_real_holdout_skel_followup_dashboard_route",
+  "prompt": "In src/obs/dashboard.rs, which function dispatches an incoming HTTP request path to the right response (the request router), and on which line does its definition start? Answer with keys `function` and `line`.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "function": "route",
+    "line": 182
+  },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_skeleton",
+  "evidence": [
+    "route",
+    "182"
+  ],
+  "treatment": {
+    "skeleton": "../../src/obs/dashboard.rs"
+  },
+  "notes": "Mined class SKEL-FOLLOWUP (20/98: Read-after-skeleton to pin exact lines). Derivation: grep -n 'fn route' src/obs/dashboard.rs -> 182. HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run."
+}

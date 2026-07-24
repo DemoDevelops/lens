@@ -1,0 +1,23 @@
+{
+  "id": "0109_real_holdout_skel_lang_setup_sh",
+  "prompt": "Which shell functions does the repo's setup.sh define, and on which lines? Keys: `functions`, `lines`.",
+  "fixtures": [
+    "../../setup.sh"
+  ],
+  "ground_truth": {
+    "functions": "die",
+    "lines": "23"
+  },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_skeleton",
+  "evidence": [
+    "say",
+    "die"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import re, json\nfns, lines = [], []\nfor i, l in enumerate(open('../../setup.sh'), 1):\n    m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\\(\\)', l)\n    if m:\n        fns.append(m.group(1)); lines.append(i)\nprint(json.dumps({'functions': fns, 'lines': lines}))\n"
+  },
+  "notes": "Mined class SKEL-LANG (skeleton of a non-core-language file; .sh has no skeleton support yet, a known board gap). Measures fallback quality, not lens success. Derivation: grep -nE '^[a-z_]+\\(\\)' setup.sh -> say:22, die:23. HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run. GT-shape fix 2026-07-22 after K=1 smoke: contains_eq serializes the whole expected value, so array GTs require an exact serialized-list substring; switched to scalar substring anchors (house style, cf 0060)."
+}

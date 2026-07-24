@@ -1,0 +1,25 @@
+{
+  "id": "0106_real_holdout_ignored_grep_mcp_ready",
+  "prompt": "Before a routing deny fires, lens checks whether its MCP server is actually reachable. Which `function` makes that decision, in which `file`, and which environment variable (`env_var`) force-overrides the result?",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "function": "mcp_ready",
+    "file": "src/routing/mod.rs",
+    "env_var": "LENS_ROUTING_MCP"
+  },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_search",
+  "evidence": [
+    "mcp_ready",
+    "LENS_ROUTING_MCP"
+  ],
+  "treatment": {
+    "queries": [
+      "mcp server reachable heartbeat routing deny"
+    ]
+  },
+  "notes": "Mined class IGNORED-GREP (broad concept grep 'lens.*server|reachable|routing.*steer' in a lens-enabled session). Derivation: pub fn mcp_ready at src/routing/mod.rs:1521; env override LENS_ROUTING_MCP. HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run."
+}

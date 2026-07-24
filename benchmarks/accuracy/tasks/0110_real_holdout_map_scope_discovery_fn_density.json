@@ -1,0 +1,23 @@
+{
+  "id": "0110_real_holdout_map_scope_discovery_fn_density",
+  "prompt": "Within src/discovery/, which file contains the most function definitions in production code (excluding #[cfg(test)]), and how many? Keys: `file`, `count`.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "file": "src/discovery/extract.rs",
+    "count": 36
+  },
+  "check": "contains",
+  "primary_mechanism": "darkroom",
+  "lens_fn": "lens_run",
+  "evidence": [
+    "extract.rs",
+    "36"
+  ],
+  "treatment": {
+    "language": "python",
+    "script": "import lens, glob, json\nbest = ('', 0)\nfor f in sorted(glob.glob('src/discovery/*.rs')):\n    n = lens.grep_ast(pattern='fn $NAME($$$) $BODY', lang='rust', path=f, prod_only=True, limit=2000).get('count', 0)\n    if n > best[1]:\n        best = (f, n)\nprint(json.dumps({'file': best[0], 'count': best[1]}))\n"
+  },
+  "notes": "Mined class MAP-SCOPE (scoped structural aggregation over a subdirectory; lens_map subpath hits the shrink-guard). Derivation per-file prod counts: extract 36, query 30, pattern 27, graph 24, skeleton 22, tags_adapter 21, mod 17, structural 4. HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run."
+}

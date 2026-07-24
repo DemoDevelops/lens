@@ -1,0 +1,24 @@
+{
+  "id": "0111_real_holdout_links_cap_macro_interiors_reach",
+  "prompt": "Which single function directly calls `push_macro_interiors`, and which functions reach it within exactly 2 call hops in production code? Keys: `direct_caller`, `two_hop_callers`.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "direct_caller": "grep_ast_filtered",
+    "two_hop_callers": "lens_grep_ast"
+  },
+  "check": "contains",
+  "primary_mechanism": "discovery",
+  "lens_fn": "lens_graph",
+  "evidence": [
+    "grep_ast_filtered",
+    "lens_grep_ast"
+  ],
+  "treatment": {
+    "graph_op": "neighbors",
+    "name": "push_macro_interiors",
+    "depth": 2
+  },
+  "notes": "Mined class LINKS-CAP (depth-10 neighborhood expansion; the directed transitive closure is the intended path). Derivation via closure depth 3 prod: 1-hop grep_ast_filtered (witness structural.rs:255); 2-hop qcli::grep_ast (qcli.rs:444), server::lens_grep_ast (server.rs:1025), structural::grep_ast (structural.rs:33). HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run. GT-shape fix 2026-07-22 after K=1 smoke: contains_eq serializes the whole expected value, so array GTs require an exact serialized-list substring; switched to scalar substring anchors (house style, cf 0060)."
+}

@@ -1,0 +1,23 @@
+{
+  "id": "0108_real_holdout_skel_cap_routing_mod",
+  "prompt": "src/routing/mod.rs: how many top-level `pub fn` (not methods inside impl blocks) does it declare, and which are first and last in file order? Keys: `count`, `first`, `last`.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "count": 22,
+    "first": "to_hook_json",
+    "last": "session_block_for"
+  },
+  "check": "contains",
+  "primary_mechanism": "skeleton",
+  "lens_fn": "lens_skeleton",
+  "evidence": [
+    "to_hook_json",
+    "session_block_for"
+  ],
+  "treatment": {
+    "skeleton": "../../src/routing/mod.rs"
+  },
+  "notes": "Mined class SKEL-CAP (large-file skeleton; this file is ~160KB, stresses the budget; the c92a1dc doc-elision fix must keep all declarations visible). Derivation: 22 column-0 'pub fn' lines, first to_hook_json, last session_block_for. HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run."
+}

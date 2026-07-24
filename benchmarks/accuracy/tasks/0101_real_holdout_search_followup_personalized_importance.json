@@ -1,0 +1,25 @@
+{
+  "id": "0101_real_holdout_search_followup_personalized_importance",
+  "prompt": "Which function implements query-seeded (personalized) PageRank importance for the code graph? Give `function`, `file`, and the `line` its definition starts on.",
+  "fixtures": [
+    "../../src"
+  ],
+  "ground_truth": {
+    "function": "personalized_importance",
+    "file": "src/discovery/graph.rs",
+    "line": 254
+  },
+  "check": "contains",
+  "primary_mechanism": "search",
+  "lens_fn": "lens_search",
+  "evidence": [
+    "personalized_importance",
+    "254"
+  ],
+  "treatment": {
+    "queries": [
+      "personalized pagerank importance seed"
+    ]
+  },
+  "notes": "Mined class SEARCH-FOLLOWUP (20/98: search hit then grep/Read to pin file:line). Derivation: grep -rn personalized_importance src/ -> def at src/discovery/graph.rs:254. HELD-OUT (promoted from tests/fixtures/mined_replay.jsonl 2026-07-22, tree db657c8): never mine this task's transcripts for fixes; on first dev use, graduate it to the dev set and replace it from the mined pool. Live-tree GT: recount against HEAD before scoring any run."
+}

@@ -343,7 +343,7 @@ fn rtk_lines(snap: &Value, _inner: usize, _color: Theme) -> Vec<String> {
             r["avg_savings_pct"].as_f64().unwrap_or(0.0),
         )]
     } else {
-        vec!["not installed — run `lens rtk install`".to_string()]
+        vec!["not installed — see github.com/rtk-ai/rtk".to_string()]
     }
 }
 

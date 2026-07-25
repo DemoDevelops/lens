@@ -803,7 +803,7 @@ fn render(dir: &Path, filters: &Filters) -> String {
         ));
         o.push_str(&format!("    avg savings     : {pct:.1}%\n"));
     } else {
-        o.push_str("    not installed   : run `lens rtk install` to enable\n");
+        o.push_str("    not installed   : see https://github.com/rtk-ai/rtk to enable\n");
     }
     o.push('\n');
 
@@ -1020,6 +1020,9 @@ esac
         let home = tempdir().unwrap();
         write_stub_rtk(home.path());
         std::env::set_var("LENS_HOME", home.path());
+        // Pin resolution at the stub: lens reads PATH now, and the dev machine's
+        // real rtk would otherwise answer with its live numbers.
+        std::env::set_var("LENS_RTK_BIN", home.path().join("bin").join("rtk"));
 
         // Seed an `rtk_shell` OpRecord (RTK's own number, raw/returned bytes 0)
         // plus a regular MCP op, so by_mechanism/by_tool can be checked.
@@ -1071,19 +1074,15 @@ esac
             "by_tool should include rtk_shell, got: {tools:?}"
         );
 
-        // --- 2. ABSENT: empty home (no bin/rtk). PATH has no managed rtk here
-        // (the real binary lives only under ~/.lens, which we've overridden).
+        // --- 2. ABSENT: point the seam at a path that holds no binary.
         let empty = tempdir().unwrap();
         std::env::set_var("LENS_HOME", empty.path());
+        std::env::set_var("LENS_RTK_BIN", empty.path().join("bin").join("rtk"));
         let snap2 = snapshot_json(data.path(), None);
-        let installed = snap2["rtk"]["installed"].as_bool();
-        // Normally false; if a stray `rtk` is on PATH it could read true — either
-        // way "installed" must be a bool and the key must exist.
-        assert!(installed.is_some(), "rtk.installed must be a bool");
-        if installed == Some(false) {
-            assert_eq!(snap2["rtk"], json!({ "installed": false }));
-        }
+        // The seam pins resolution, so a stray `rtk` on PATH can't make this true.
+        assert_eq!(snap2["rtk"], json!({ "installed": false }));
 
+        std::env::remove_var("LENS_RTK_BIN");
         std::env::remove_var("LENS_HOME");
     }
 

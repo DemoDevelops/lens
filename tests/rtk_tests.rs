@@ -1,15 +1,14 @@
-//! End-to-end tests for the lens⇄RTK integration (plan §4 T5), driving the
-//! REAL compiled binary the way Claude Code / a user would — but **network-free**:
-//! a stub `rtk` (a tiny shell script on the managed `LENS_HOME/bin` path)
-//! stands in for the downloaded binary and answers `--version` / `gain --format
-//! json` / `init` with canned output. The real download path is verified
-//! on-machine only (T1), never here.
+//! End-to-end tests for the lens⇄RTK integration, driving the REAL compiled
+//! binary the way Claude Code / a user would. A stub `rtk` (a tiny shell script,
+//! pinned via `$LENS_RTK_BIN`) stands in for the user's own install and answers
+//! `--version` / `gain --format json` with canned output. lens does not install
+//! RTK, so there is no download path to test.
 //!
-//! Covered: `rtk install`/`status` (idempotent, against the stub) → `rtk sync`
-//! (one `rtk_shell` op whose `tokens_saved_est` == Δ`total_saved`; idempotent on
-//! no-op) → `lens stats` & the `/api/stats` aggregate both surface the RTK
-//! shell-savings plane → routing defers Bash to RTK when active (and is unchanged
-//! when not). All additive: with no RTK present everything is a no-op.
+//! Covered: `rtk status` (against the stub) → `rtk sync` (one `rtk_shell` op whose
+//! `tokens_saved_est` == Δ`total_saved`; idempotent on no-op) → `lens stats` & the
+//! `/api/stats` aggregate both surface the RTK shell-savings plane → routing defers
+//! Bash to RTK when active (and is unchanged when not). All additive: with no RTK
+//! present everything is a no-op.
 
 #![cfg(unix)]
 
@@ -32,7 +31,7 @@ const STUB_COMMANDS: i64 = 42;
 
 /// Write an executable stub `rtk` at `<home>/bin/rtk` that emulates the subset of
 /// the RTK CLI lens shells out to. `total_saved` lets a test grow RTK's
-/// cumulative figure between syncs.
+/// cumulative figure between syncs. Point `$LENS_RTK_BIN` at the written path.
 fn write_stub_rtk(home: &Path, total_saved: i64, commands: i64) {
     let bindir = home.join("bin");
     std::fs::create_dir_all(&bindir).unwrap();
@@ -104,7 +103,7 @@ fn rtk_shell_lines(ops_log: &Path) -> Vec<Value> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rtk_e2e_install_status_sync_stats_against_stub() {
+fn rtk_e2e_status_sync_stats_against_stub() {
     let home = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
     let settings = home.path().join("settings.json");
@@ -113,45 +112,34 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
     let home_s = home.path().to_str().unwrap();
     let data_s = data.path().to_str().unwrap();
     let settings_s = settings.to_str().unwrap();
-    // HOME scopes rtk's default hook-script dir into the tempdir, so registration is
-    // hermetic: the stub's `init` writes no script and lens registers the entry
-    // by path. LENS_CLAUDE_SETTINGS is the settings file lens patches itself.
+    let stub = home.path().join("bin").join("rtk");
+    let stub_s = stub.to_str().unwrap();
+    // LENS_RTK_BIN pins resolution at the stub, so the host's own rtk (if any)
+    // can't answer instead. LENS_CLAUDE_SETTINGS is the settings file lens reads
+    // when detecting whether rtk's hook is registered.
     let base = [
         ("HOME", home_s),
         ("LENS_HOME", home_s),
+        ("LENS_RTK_BIN", stub_s),
         ("LENS_CLAUDE_SETTINGS", settings_s),
     ];
     let with_data = [
         ("HOME", home_s),
         ("LENS_HOME", home_s),
+        ("LENS_RTK_BIN", stub_s),
         ("LENS_CLAUDE_SETTINGS", settings_s),
         ("LENS_DIR", data_s),
     ];
 
-    // install: the stub is already at LENS_HOME/bin/rtk, so install takes the
-    // idempotent path (verifies --version, registers the hook) WITHOUT a download.
-    let (ok, out, err) = run(&["rtk", "install"], &base);
-    assert!(
-        ok,
-        "rtk install (idempotent, stub) must succeed: {out}{err}"
-    );
-
-    // install patches the config-dir settings.json itself (rtk init can't target
-    // $CLAUDE_CONFIG_DIR): the PreToolUse entry now references rtk-rewrite.sh.
-    let written = std::fs::read_to_string(&settings).unwrap_or_default();
-    assert!(
-        written.contains("rtk-rewrite.sh") && written.contains("PreToolUse"),
-        "install must register the RTK hook in the settings file: {written}"
-    );
-
-    // status: reports installed + version + hook-registered.
+    // status: reports the detected binary + version. The hook is rtk's to register,
+    // so with an unpatched settings file it reads "not registered".
     let (ok, out, err) = run(&["rtk", "status"], &base);
     let s = format!("{out}{err}");
     assert!(ok, "rtk status must succeed: {s}");
     assert!(s.contains("0.28.2"), "status shows the version: {s}");
     assert!(
-        s.to_lowercase().contains("regist"),
-        "status reports hook registration: {s}"
+        s.contains("not registered"),
+        "status reports hook registration state: {s}"
     );
 
     // sync #1: one rtk_shell op whose tokens_saved_est == Δtotal_saved (full, since
@@ -196,9 +184,11 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
 
     // /api/stats aggregate (what the dashboard serves) carries the rtk block sourced
     // from `rtk gain`, plus rtk_shell under by_tool and "shell" under by_mechanism.
-    // LENS_HOME is needed in-process here for the rtk block; set tightly.
+    // The rtk block resolves in-process here, so pin the stub tightly.
     std::env::set_var("LENS_HOME", home_s);
+    std::env::set_var("LENS_RTK_BIN", stub_s);
     let snap = lens::obs::stats::snapshot_json(data.path(), None);
+    std::env::remove_var("LENS_RTK_BIN");
     std::env::remove_var("LENS_HOME");
     assert_eq!(
         snap["rtk"]["installed"],
@@ -227,13 +217,18 @@ fn rtk_e2e_install_status_sync_stats_against_stub() {
         "by_mechanism buckets rtk_shell under 'shell'"
     );
 
-    // uninstall: removes lens's hook entry from the config-dir settings.json.
-    let (ok, _, _) = run(&["rtk", "uninstall"], &base);
-    assert!(ok, "rtk uninstall must succeed");
-    let after = std::fs::read_to_string(&settings).unwrap_or_default();
+    // lens owns no rtk lifecycle commands: install/uninstall are rtk's own.
+    for sub in ["install", "uninstall"] {
+        let (ok, out, err) = run(&["rtk", sub], &base);
+        assert!(!ok, "`lens rtk {sub}` must not exist: {out}{err}");
+        assert!(
+            format!("{out}{err}").contains("unknown subcommand"),
+            "`lens rtk {sub}` should report an unknown subcommand: {out}{err}"
+        );
+    }
     assert!(
-        !after.contains("rtk-rewrite.sh"),
-        "uninstall must remove the RTK hook entry: {after}"
+        !settings.exists(),
+        "lens must not have written the settings file: rtk owns its own hook"
     );
 }
 
@@ -378,13 +373,11 @@ fn rtk_absent_is_a_noop() {
         "no rtk_shell op when RTK is absent"
     );
 
-    // status reports "not installed" without erroring.
+    // status reports the absence without erroring.
     let (ok, out, err) = run(&["rtk", "status"], &envs);
     assert!(ok, "status must not error when RTK is absent");
     assert!(
-        format!("{out}{err}")
-            .to_lowercase()
-            .contains("not installed"),
-        "status says not installed: {out}{err}"
+        format!("{out}{err}").contains("not on PATH"),
+        "status says rtk is not on PATH: {out}{err}"
     );
 }

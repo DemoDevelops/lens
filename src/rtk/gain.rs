@@ -252,7 +252,8 @@ mod tests {
                 "--nocapture",
                 "rtk::gain::tests::sync_child",
             ])
-            .env("LENS_HOME", home.path()) // stub rtk resolves here
+            .env("LENS_HOME", home.path()) // stub rtk is written here
+            .env("LENS_RTK_BIN", home.path().join("bin").join("rtk")) // and resolves from here
             .env("LENS_DIR", datadir.path()) // ops.log + watermark land here
             // Keep the child deterministic regardless of the outer env.
             .env_remove("LENS_AGENT_ID")

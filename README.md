@@ -32,7 +32,7 @@ Read each percentage as "what this mechanism does to a workload of this shape," 
 
 ## Install
 
-One line downloads the binary, registers the MCP server, installs the session hooks (Claude) or commands/ (opencode), installs RTK (Claude), sets routing, and prints a verification report:
+One line downloads the binary, registers the MCP server, installs the session hooks (Claude) or commands/ (opencode), sets routing, and prints a verification report:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DemoDevelops/lens/master/install.sh | sh
@@ -58,7 +58,7 @@ cargo build --release
 ./target/release/lens setup
 ```
 
-`lens setup` does the same wiring from a binary you built (copies it to `~/.local/bin`, registers the MCP server, installs the hooks + `/dashboard` + RTK for Claude or commands for opencode, sets routing). Target a specific config dir with `lens setup --config-dir <dir>`. Use `--client opencode` when targeting opencode.
+`lens setup` does the same wiring from a binary you built (copies it to `~/.local/bin`, registers the MCP server, installs the hooks + `/dashboard` for Claude or commands for opencode, sets routing). Target a specific config dir with `lens setup --config-dir <dir>`. Use `--client opencode` when targeting opencode.
 
 **Current limitations (opencode):** RTK shell compression is Claude-only for now. opencode gets full MCP tools (`lens_*`), bundled commands (`/dashboard`, `warmup`), darkroom execution, search, graph, dashboard, and lifecycle hooks via the bundled `plugins/lens.js` bridge (tool before/after routing + adoption counters, prompt attribution, session events; SessionStart context injection is still limited because opencode has no injection channel). Claude Code support is unchanged and fully backward-compatible.
 
@@ -192,7 +192,7 @@ See also `cargo test`, `cargo clippy -- -D warnings`, and the e2e MCP handshake 
 
 ## How it works
 
-lens is one Rust binary that attaches to Claude Code or opencode two ways: as an **MCP stdio server** (the `lens_*` tools, `src/server.rs`) and as **hook handlers** the same binary runs on PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, and SessionStart events — wired natively in Claude Code's settings.json, and through the bundled `plugins/lens.js` bridge in opencode (its plugin hooks shell each event into `lens hook opencode <event>`). Per-repo state lives in `.lens/` (the symbol graph, the FTS index, and the reversible blob store); the managed RTK binary lives in `~/.lens/bin`. RTK shell compression is Claude-only today.
+lens is one Rust binary that attaches to Claude Code or opencode two ways: as an **MCP stdio server** (the `lens_*` tools, `src/server.rs`) and as **hook handlers** the same binary runs on PreToolUse, PostToolUse, UserPromptSubmit, PreCompact, and SessionStart events — wired natively in Claude Code's settings.json, and through the bundled `plugins/lens.js` bridge in opencode (its plugin hooks shell each event into `lens hook opencode <event>`). Per-repo state lives in `.lens/` (the symbol graph, the FTS index, and the reversible blob store). RTK shell compression is Claude-only today, and is your own install rather than something lens ships.
 
 **Darkroom (`lens_run`).** Run your script in a subprocess; lens captures only its stdout/stderr. The raw data the script reads never enters the model's context. Anything large that lens would otherwise truncate is first written to a content-addressed store (blobs keyed by blake3 hash), so `lens_recall` can reverse any truncation losslessly. The subprocess gives you process isolation and a timeout, not an OS sandbox (see [Security](#security)).
 
@@ -214,7 +214,7 @@ lens is one Rust binary that attaches to Claude Code or opencode two ways: as an
 
 Above the levels sit per-pattern rails (broad greps, whole-file reads for structure, aggregation pipelines) that redirect specific wasteful call shapes to the equivalent lens tool. Every rail is individually kill-switchable (`LENS_<RAIL>=0`), and all of them stand down automatically when the lens server is unreachable.
 
-**RTK (optional).** lens ships and installs a pinned RTK binary and surfaces RTK's own measured shell-command savings. RTK owns Bash rewriting via its own hook; when it is active, lens defers Bash to it so the two never double-wrap. lens is additive to whatever else your setup runs: it keeps byte-floods out of context and stays out of the way otherwise.
+**RTK (optional).** If you install [RTK](https://github.com/rtk-ai/rtk) yourself, lens detects it and surfaces RTK's own measured shell-command savings. RTK owns Bash rewriting via its own hook; when it is active, lens defers Bash to it so the two never double-wrap. lens does not bundle, pin, or upgrade RTK, so it tracks whatever version you install. lens is additive to whatever else your setup runs: it keeps byte-floods out of context and stays out of the way otherwise.
 
 ## Development
 

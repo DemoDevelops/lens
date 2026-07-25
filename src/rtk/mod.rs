@@ -1,22 +1,26 @@
-//! RTK integration — the **headroom pattern**: lens ships/installs the
-//! prebuilt RTK binary (Apache-2.0, version-pinned) and surfaces RTK's *own*
-//! measured shell-command savings. RTK owns Bash command rewriting via its own
-//! Claude Code hook; lens keeps its MCP / compaction / continuity lane and
-//! **defers Bash to RTK** when RTK is active so the two hooks never double-wrap.
+//! RTK integration — lens **detects** an RTK the user installed themselves and
+//! surfaces RTK's *own* measured shell-command savings. RTK owns Bash command
+//! rewriting via its own Claude Code hook; lens keeps its MCP / compaction /
+//! continuity lane and **defers Bash to RTK** when RTK is active so the two hooks
+//! never double-wrap.
+//!
+//! lens does **not** package, download, pin, or install RTK, and does not own its
+//! hook — install it from <https://github.com/rtk-ai/rtk> and register the hook
+//! with `rtk init`. Decoupling the two means RTK upgrades on its own cadence
+//! instead of being frozen at whatever version lens last vendored.
 //!
 //! Everything here is **additive and default-off**: with no RTK binary present,
 //! every entry point is a cheap no-op and existing lens behavior is unchanged.
 //!
-//! Layout (file ownership per `LENS_RTK_PLAN.md` §4 / `RTK_NOTES.md` §9):
-//!   * [`install`] — download + install the pinned binary, register its hook (T1).
-//!   * [`gain`]    — read `rtk gain --format json` and bridge deltas to the op log (T2).
-//!   * [`rtk_active`] — tells the PreToolUse router to pass Bash through (T4).
+//! Layout:
+//!   * [`gain`]       — read `rtk gain --format json` and bridge deltas to the op log.
+//!   * [`rtk_active`] — tells the PreToolUse router to pass Bash through.
+//!   * [`status`]     — report the detected binary, version, and hook registration.
 //!
 //! This is reached only via the `lens rtk …` subcommand (a separate process);
 //! it never touches the MCP server's JSON-RPC stdout.
 
 pub mod gain;
-pub mod install;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,15 +30,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::client;
 
-/// Pinned RTK release (headroom's pin; verified runnable on-machine in T0).
-pub const RTK_VERSION: &str = "v0.28.2";
-
-/// Managed binary file name (platform-specific).
+/// RTK binary file name (platform-specific).
 #[cfg(windows)]
 pub const RTK_EXE: &str = "rtk.exe";
-/// Managed binary file name (platform-specific).
+/// RTK binary file name (platform-specific).
 #[cfg(not(windows))]
 pub const RTK_EXE: &str = "rtk";
+
+/// Where to get RTK, shown whenever it isn't found.
+pub const RTK_INSTALL_HINT: &str = "install it from https://github.com/rtk-ai/rtk";
 
 // ---------------------------------------------------------------------------
 // `rtk gain --format json` shape (mirrors RTK's ExportData / ExportSummary)
@@ -94,19 +98,16 @@ pub fn home_root() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".lens"))
 }
 
-/// The managed bin dir — `home_root()/bin` (mirrors headroom `bin_dir()`).
-pub fn bin_dir() -> Option<PathBuf> {
-    home_root().map(|r| r.join("bin"))
-}
-
-/// Resolve the RTK binary: the managed install (`~/.lens/bin/rtk`) if present,
-/// else `rtk` on `PATH`. lens is **managed-first** (its pinned binary is
-/// authoritative once installed); headroom is PATH-first — see RTK_NOTES.md §2.
+/// Resolve the RTK binary: whatever `rtk` is on `PATH`. lens no longer keeps a
+/// managed copy to prefer, so the user's own install is the only one.
+///
+/// Honors `$LENS_RTK_BIN` (test seam, mirroring `$LENS_CLAUDE_SETTINGS`) so a test
+/// can pin a stub without mutating the process-global `PATH`.
 pub fn rtk_bin_path() -> Option<PathBuf> {
-    if let Some(b) = bin_dir() {
-        let p = b.join(RTK_EXE);
-        if p.is_file() {
-            return Some(p);
+    if let Some(p) = std::env::var_os("LENS_RTK_BIN") {
+        if !p.is_empty() {
+            let p = PathBuf::from(p);
+            return p.is_file().then_some(p);
         }
     }
     which_rtk()
@@ -136,10 +137,11 @@ pub fn is_rtk_supported() -> bool {
 }
 
 /// Run the resolved RTK binary with `args`, capturing stdout/stderr. Errors if
-/// RTK isn't installed or the process can't be spawned. Shared by install/status
-/// (T1) and the gain bridge (T2).
+/// RTK isn't installed or the process can't be spawned. Shared by [`status`] and
+/// the gain bridge.
 pub fn run_rtk(args: &[&str]) -> Result<std::process::Output> {
-    let bin = rtk_bin_path().context("rtk binary not found (run `lens rtk install`)")?;
+    let bin =
+        rtk_bin_path().with_context(|| format!("rtk binary not found on PATH — {RTK_INSTALL_HINT}"))?;
     Command::new(&bin)
         .args(args)
         .output()
@@ -152,19 +154,18 @@ pub fn run_rtk(args: &[&str]) -> Result<std::process::Output> {
 
 /// The Claude config dir whose `settings.json` *this user's* Claude Code actually
 /// reads — `$CLAUDE_CONFIG_DIR` if set, else `~/.claude`. This is where lens
-/// registers + detects the RTK hook, so the hook fires for the running Claude Code.
+/// **detects** the RTK hook that `rtk init` registered.
 ///
-/// NB: `rtk init --global` (v0.28.2) ignores `$CLAUDE_CONFIG_DIR` and always writes
-/// to `dirs::home_dir()/.claude` (see [`rtk_default_hook_script`]). So when
-/// `$CLAUDE_CONFIG_DIR` differs from `~/.claude`, lens
-/// patches the config-dir settings itself rather than relying on `rtk init`'s patch.
+/// NB: `rtk init --global` ignores `$CLAUDE_CONFIG_DIR` and always writes to
+/// `dirs::home_dir()/.claude`. When `$CLAUDE_CONFIG_DIR` differs from `~/.claude`,
+/// run `rtk init` with it exported (or register the hook by hand) so the hook
+/// lands in the dir the running Claude Code reads.
 pub fn claude_config_dir() -> Option<PathBuf> {
-    // delegate to client abstraction (T1: replaces inline Claude path hardcode)
     client::config_dir_for(client::Host::Claude)
 }
 
-/// Path to the Claude settings file lens registers/detects the RTK hook in.
-/// Honors `$LENS_CLAUDE_SETTINGS` (test seam), else [`claude_config_dir`]'s
+/// Path to the Claude settings file lens detects the RTK hook in. Honors
+/// `$LENS_CLAUDE_SETTINGS` (test seam), else [`claude_config_dir`]'s
 /// `settings.json`.
 pub fn claude_settings_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("LENS_CLAUDE_SETTINGS") {
@@ -175,20 +176,10 @@ pub fn claude_settings_path() -> Option<PathBuf> {
     claude_config_dir().map(|d| d.join("settings.json"))
 }
 
-/// Where `rtk init` writes its hook script — always `dirs::home_dir()/.claude/
-/// hooks/rtk-rewrite.sh` (rtk ignores `$CLAUDE_CONFIG_DIR`). lens copies this
-/// into the active config dir's `hooks/` when the two differ, so the hook is
-/// self-contained under the dir the running Claude Code reads.
-pub fn rtk_default_hook_script() -> Option<PathBuf> {
-    // use abstraction so Claude path not hardcoded here (T1)
-    client::config_dir_for(client::Host::Claude)
-        .map(|d| d.join("hooks").join("rtk-rewrite.sh"))
-}
-
 /// True if RTK's PreToolUse hook is registered in Claude settings — any
-/// `hooks.PreToolUse[].hooks[].command` mentioning `rtk` (covers v0.28.2's
-/// `rtk-rewrite.sh` and older `rtk hook` markers). Missing/unreadable/malformed
-/// settings read as "not registered".
+/// `hooks.PreToolUse[].hooks[].command` mentioning `rtk` (covers `rtk-rewrite.sh`
+/// and older `rtk hook` markers). Missing/unreadable/malformed settings read as
+/// "not registered".
 pub fn rtk_hook_registered() -> bool {
     if !client::is_claude() {
         return false;
@@ -262,17 +253,15 @@ fn env_flag(name: &str) -> Option<bool> {
 // `lens rtk <command>` dispatcher
 // ---------------------------------------------------------------------------
 
-/// `lens rtk <install|status|uninstall|sync>`. A separate process — its
-/// stdout is its own response channel, never the MCP JSON-RPC stream.
+/// `lens rtk <status|sync>`. A separate process — its stdout is its own response
+/// channel, never the MCP JSON-RPC stream.
 pub fn run_cli(args: &[String]) -> Result<()> {
     if !is_rtk_supported() {
         println!("RTK is Claude-specific today; shell savings via opencode plugins TBD.");
         return Ok(());
     }
     match args.first().map(|s| s.as_str()) {
-        Some("install") => install::install(),
-        Some("status") => install::status(),
-        Some("uninstall") => install::uninstall(),
+        Some("status") => status(),
         Some("sync") => gain::sync(),
         Some(other) => {
             eprintln!("lens rtk: unknown subcommand '{other}'");
@@ -290,16 +279,137 @@ fn print_usage() {
     println!(
         "usage: lens rtk <command>\n\
 \n\
-lens ships and surfaces the RTK shell-command compressor (headroom pattern):\n\
-RTK owns Bash rewriting via its own hook; lens installs it and reports its savings.\n\
+lens surfaces the savings of an RTK you installed yourself: RTK owns Bash\n\
+rewriting via its own hook, lens reads its `gain` numbers. lens does not\n\
+install, pin, or upgrade RTK — {hint}.\n\
 \n\
 commands:\n  \
-install     download + install the pinned RTK binary ({ver}) and register its Claude hook\n  \
-status      show whether RTK is installed, its version, and hook registration\n  \
-uninstall   remove RTK's Claude hook (rtk init --global --uninstall)\n  \
+status      show whether RTK is on PATH, its version, and hook registration\n  \
 sync        read `rtk gain` and append shell-savings deltas to the lens op log\n",
-        ver = RTK_VERSION
+        hint = RTK_INSTALL_HINT
     );
+}
+
+// ---------------------------------------------------------------------------
+// `lens rtk status`
+// ---------------------------------------------------------------------------
+
+/// Run `<bin> --version` and return its trimmed stdout, or `Err` if it can't be
+/// spawned or exits nonzero.
+fn run_version(bin: &Path) -> Result<String> {
+    let out = Command::new(bin)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("failed to run {} --version", bin.display()))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "{} --version exited {}: {}",
+            bin.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Does `name` resolve on `PATH`? Mirrors the hook's own `command -v <name>`
+/// check, so `status` reports exactly what the live hook will find.
+fn cmd_exists(name: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {name}"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Count PreToolUse hook entries whose command mentions `rtk`. Drives `lens
+/// setup`'s check that RTK's hook isn't registered more than once (two entries
+/// double-fire the rewrite on every Bash call).
+pub fn count_rtk_hooks(settings: &Path) -> usize {
+    let Ok(raw) = std::fs::read_to_string(settings) else {
+        return 0;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return 0;
+    };
+    root.get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|e| {
+                    e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.contains("rtk"))
+                        })
+                    })
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Report detected state: binary path, `--version`, hook registration, whether the
+/// hook can rewrite live (rtk on PATH + jq), and a one-line gain summary.
+/// Best-effort — never errors when RTK is absent.
+pub fn status() -> Result<()> {
+    if !client::is_claude() {
+        println!("RTK is Claude-specific today; shell savings via opencode plugins TBD.");
+        return Ok(());
+    }
+    match rtk_bin_path() {
+        Some(bin) => {
+            println!("rtk binary: {}", bin.display());
+            match run_version(&bin) {
+                Ok(v) => println!("version:    {v}"),
+                Err(e) => println!("version:    (failed: {e:#})"),
+            }
+        }
+        None => println!("rtk binary: not on PATH ({RTK_INSTALL_HINT})"),
+    }
+
+    println!(
+        "hook:       {}",
+        if rtk_hook_registered() {
+            "registered in Claude settings"
+        } else {
+            "not registered (run `rtk init`)"
+        }
+    );
+
+    // The hook shells out to `rtk` and `jq`, and runs outside your interactive
+    // shell — so both must resolve on the PATH that hook inherits.
+    let rtk_ok = rtk_available();
+    let jq = cmd_exists("jq");
+    if rtk_ok && jq {
+        println!("rewrite:    live (rtk + jq on PATH)");
+    } else {
+        let mut needs = Vec::new();
+        if !rtk_ok {
+            needs.push(format!("install rtk ({RTK_INSTALL_HINT})"));
+        }
+        if !jq {
+            needs.push("install jq".to_string());
+        }
+        println!(
+            "rewrite:    inactive — to enable live rewriting: {}",
+            needs.join("; ")
+        );
+    }
+
+    let gain_line = match gain::read_gain(gain::Scope::Global) {
+        Ok(g) => format!(
+            "{} commands, {} tokens saved ({:.1}% avg)",
+            g.summary.total_commands, g.summary.total_saved, g.summary.avg_savings_pct
+        ),
+        Err(_) => "n/a".to_string(),
+    };
+    println!("gain:       {gain_line}");
+
+    Ok(())
 }
 
 /// Shared guard serializing the unit tests that mutate the process-global
@@ -319,7 +429,7 @@ mod tests {
 
     #[test]
     fn hook_detection_matches_rtk_commands_only() {
-        // v0.28.2 marker (rtk-rewrite.sh) and the older `rtk hook` marker both match.
+        // rtk's own marker (rtk-rewrite.sh) and the older `rtk hook` marker both match.
         for cmd in ["/Users/x/.claude/hooks/rtk-rewrite.sh", "rtk hook claude"] {
             let s = json!({"hooks": {"PreToolUse": [
                 {"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]}
@@ -351,7 +461,22 @@ mod tests {
         let _g = env_test_lock();
         std::env::set_var("LENS_HOME", "/tmp/lens-home-test");
         assert_eq!(home_root().unwrap(), PathBuf::from("/tmp/lens-home-test"));
-        assert_eq!(bin_dir().unwrap(), PathBuf::from("/tmp/lens-home-test/bin"));
         std::env::remove_var("LENS_HOME");
+    }
+
+    #[test]
+    fn count_rtk_hooks_counts_rtk_entries_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let v = json!({ "hooks": { "PreToolUse": [
+            { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/h/.claude/hooks/rtk-rewrite.sh" } ] },
+            { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/h/.claude-personal/hooks/rtk-rewrite.sh" } ] },
+            { "matcher": "", "hooks": [ { "type": "command", "command": "lens hook claude PreToolUse" } ] }
+        ] } });
+        std::fs::write(&settings, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        // The duplicate spelling is exactly what `lens setup` must flag.
+        assert_eq!(count_rtk_hooks(&settings), 2);
+        // Missing file reads as zero, not an error.
+        assert_eq!(count_rtk_hooks(&dir.path().join("nope.json")), 0);
     }
 }

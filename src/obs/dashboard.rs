@@ -935,7 +935,7 @@ async function tick(){
     document.getElementById('savedTop').textContent=humanCount(measuredFloor)+' measured · ~'+humanCount((d.tokens_saved_mcp||0)+dSaved)+' classified';
     savedTotal=(d.tokens_saved_mcp||0)+dSaved; renderCost();
   } else {
-    document.getElementById('rtkCards').innerHTML='<span class="dim2">not installed — run lens rtk install</span>';
+    document.getElementById('rtkCards').innerHTML='<span class="dim2">not installed — see github.com/rtk-ai/rtk</span>';
     document.getElementById('savedTop').textContent=humanCount(measuredFloor)+' measured · ~'+humanCount(savedMcp)+' classified';
     savedTotal=savedMcp; renderCost();
   }

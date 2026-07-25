@@ -137,22 +137,14 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         session::install::install(&settings, &bin_str).context("installing session hooks")?;
         say("Installed session hooks (5 lifecycle events).");
 
-        // 4. RTK shell compression — install, then dedup to exactly one rtk hook so a
-        //    pre-existing rtk install can't double-fire alongside lens's managed one.
-        match rtk::install::install() {
-            Ok(()) => {
-                match rtk::install::dedup_rtk_hooks(&settings) {
-                    Ok(n) if n > 0 => say(&format!(
-                        "Deduplicated RTK hooks (removed {n} extra so exactly one remains)."
-                    )),
-                    Ok(_) => {}
-                    Err(e) => warn(&format!("could not dedup RTK hooks: {e:#}")),
-                }
-                say("Installed RTK shell compression.");
-            }
-            Err(e) => warn(&format!(
-                "RTK install skipped (non-fatal): {e:#}\n  retry later with: lens rtk install"
-            )),
+        // 4. RTK shell compression is the user's own install — lens only reports it.
+        if rtk::rtk_available() {
+            say("Detected RTK shell compression.");
+        } else {
+            say(&format!(
+                "RTK not detected (optional) — for shell-command compression, {}",
+                rtk::RTK_INSTALL_HINT
+            ));
         }
 
         // 5. Routing level.
@@ -165,7 +157,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         say("Allow-listed lens tools.");
     } else if opts.dry_run {
         if client::is_claude() {
-            println!("dry-run: would install session hooks + RTK + routing + allow-list into Claude settings.json");
+            println!("dry-run: would install session hooks + routing + allow-list into Claude settings.json");
         } else {
             println!("dry-run: MCP environment already carries LENS_ROUTING; would install commands (/dashboard, /warmup) + plugins/lens.js");
         }
@@ -223,7 +215,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     }
     if client::is_claude() {
         println!(
-            "Uninstall: lens session uninstall && lens rtk uninstall && claude mcp remove lens && rm {}",
+            "Uninstall: lens session uninstall && claude mcp remove lens && rm {}",
             bin.display()
         );
         // Offer the same lens-tool sync for the user's own custom subagents.
@@ -865,8 +857,13 @@ fn doctor(settings: &Path, bin: &Path, bin_dir: &Path, path_added: bool) -> bool
     ));
     checks.push(("Context Mode not present".into(), !st.conflict, String::new()));
 
-    let n = rtk::install::count_rtk_hooks(settings);
-    checks.push(("exactly one RTK hook".into(), n == 1, format!("{n} found")));
+    // RTK is the user's own install, so zero hooks is fine; two double-fire the rewrite.
+    let n = rtk::count_rtk_hooks(settings);
+    checks.push((
+        "no duplicate RTK hook".into(),
+        n <= 1,
+        format!("{n} found"),
+    ));
 
     let cmd_present = settings
         .parent()

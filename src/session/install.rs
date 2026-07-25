@@ -61,11 +61,6 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                     if host == Host::Claude {
                         println!("lens session hooks installed at {}", target.display());
                         println!("  binary: {bin}");
-                        println!("\nInstalling RTK shell compressor...");
-                        if let Err(e) = crate::rtk::install::install() {
-                            eprintln!("warning: RTK install failed: {e:#}");
-                            eprintln!("  Run `lens rtk install` manually to retry.");
-                        }
                         println!("\nNext: uninstall Context Mode if you have it, then verify with `lens session status`.");
                     } else {
                         println!("lens session commands + lifecycle plugin installed at {}", target.display());

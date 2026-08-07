@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::data_dir;
+use super::data_dir_for;
 use super::pricing;
 use super::stats::snapshot_json_since;
 
@@ -197,7 +198,7 @@ fn route(target: &str, dir: &Path, session: Option<&str>) -> (u16, &'static str,
                     None => (dir.to_path_buf(), session),
                 },
                 Some(p) if p != "repo" && !p.is_empty() => {
-                    (PathBuf::from(pct_decode(p)).join(".lens"), None)
+                    (data_dir_for(&PathBuf::from(pct_decode(p))), None)
                 }
                 _ => (dir.to_path_buf(), session),
             };
@@ -214,7 +215,7 @@ fn route(target: &str, dir: &Path, session: Option<&str>) -> (u16, &'static str,
                         let real: Vec<String> = projs
                             .into_iter()
                             .filter(|p| {
-                                let d = Path::new(p).join(".lens");
+                                let d = data_dir_for(&PathBuf::from(p));
                                 d.is_dir() && d != home
                             })
                             .take(30)

@@ -1,10 +1,10 @@
 //! `lens warmup` — build the structural graph + FTS index for a repo up front,
 //! instead of waiting for the MCP server's lazy first-call build.
 //!
-//! Writes to the SAME data dir the server reads (`$LENS_DIR`, else
-//! `<cwd>/.lens`), so a server that's already running picks the graph up on its
-//! next `lens_symbol` with no restart (the graph is a plain file it re-reads; the
-//! index is WAL SQLite both processes can share).
+//! Writes to the SAME data dir the server reads (`obs::data_dir_for`, resolved
+//! from the `path` argument), so a server that's already running picks the graph
+//! up on its next `lens_symbol` with no restart (the graph is a plain file it
+//! re-reads; the index is WAL SQLite both processes can share).
 //!
 //! A separate process whose stdout is its own response channel — never the MCP
 //! JSON-RPC stream.
@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 
+use crate::disabled;
 use crate::discovery;
 use crate::index::Index;
 use crate::obs;
@@ -38,10 +39,21 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             other => root = PathBuf::from(other),
         }
     }
-    let data_dir = obs::data_dir();
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    if let Some(entry) = disabled::covering_entry(&root) {
+        anyhow::bail!(
+            "lens warmup: {} is disabled (lens off {}); run `lens on {}` first.",
+            root.display(),
+            entry.display(),
+            entry.display()
+        );
+    }
+    let data_dir = obs::data_dir_for(&root);
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating {}", data_dir.display()))?;
-    warmup(&root, &data_dir)
+    warmup(&root, &data_dir)?;
+    obs::record_registry(&root, &data_dir);
+    Ok(())
 }
 
 /// Build the graph (→ `graph.json`) and FTS index for `root`, persisting both into
@@ -160,6 +172,8 @@ pub fn watch(root: &Path, data_dir: &Path, debounce: Duration, poll: Duration) -
 
     if let Err(e) = warmup(root, data_dir) {
         eprintln!("  initial build skipped: {e}");
+    } else {
+        obs::record_registry(root, data_dir);
     }
     let mut last_built = signature(root);
     let mut last_seen = last_built.clone();
@@ -226,13 +240,16 @@ pub fn run_watch_cli(args: &[String]) -> Result<()> {
             other => root = PathBuf::from(other),
         }
     }
-    // Write where the server reads: $LENS_DIR, else <repo>/.lens.
-    let data_dir = match std::env::var_os("LENS_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => std::fs::canonicalize(&root)
-            .unwrap_or_else(|_| root.clone())
-            .join(".lens"),
-    };
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    if let Some(entry) = disabled::covering_entry(&root) {
+        anyhow::bail!(
+            "lens warmup: {} is disabled (lens off {}); run `lens on {}` first.",
+            root.display(),
+            entry.display(),
+            entry.display()
+        );
+    }
+    let data_dir = obs::data_dir_for(&root);
     watch(&root, &data_dir, debounce, poll)
 }
 
@@ -555,6 +572,16 @@ fn warmup_background(root: &Path, data_dir: &Path) -> Result<()> {
             root.display()
         );
     }
+    // A builder must not trust its spawner: re-check the denylist independently,
+    // even though the server already checked before spawning us.
+    if let Some(entry) = disabled::covering_entry(root) {
+        anyhow::bail!(
+            "lens warmup: {} is disabled (lens off {}); run `lens on {}` first.",
+            root.display(),
+            entry.display(),
+            entry.display()
+        );
+    }
     let store = Store::open(data_dir).context("opening store")?;
     let index = Index::open(data_dir)
         .context("opening index")?
@@ -602,6 +629,7 @@ fn warmup_background(root: &Path, data_dir: &Path) -> Result<()> {
             let _ = store.set_stat("graph_edges", outcome.response.edges as i64);
         }
     }
+    obs::record_registry(root, data_dir);
     Ok(())
 }
 
@@ -969,6 +997,106 @@ mod tests {
                 .unwrap(),
             before,
             "a current graph must not be rewritten"
+        );
+    }
+
+    /// `lens warmup` on a disabled root must bail before building anything: no
+    /// `.lens` in the tree, no central dir under home.
+    #[test]
+    fn run_cli_bails_on_disabled_root_and_creates_nothing() {
+        let _g = crate::rtk::env_test_lock();
+        let prev_home = std::env::var_os("LENS_HOME");
+        let prev_dir = std::env::var_os("LENS_DIR");
+        std::env::remove_var("LENS_DIR");
+
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let target = tmp.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        let target_canon = std::fs::canonicalize(&target).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("disabled"),
+            format!("{}\n", target_canon.display()),
+        )
+        .unwrap();
+
+        std::env::set_var("LENS_HOME", &home);
+        let result = run_cli(&[target.to_string_lossy().to_string()]);
+        match prev_home {
+            Some(v) => std::env::set_var("LENS_HOME", v),
+            None => std::env::remove_var("LENS_HOME"),
+        }
+        if let Some(v) = prev_dir {
+            std::env::set_var("LENS_DIR", v);
+        }
+
+        let err = result.unwrap_err().to_string();
+        assert_eq!(
+            err,
+            format!(
+                "lens warmup: {} is disabled (lens off {}); run `lens on {}` first.",
+                target_canon.display(),
+                target_canon.display(),
+                target_canon.display()
+            )
+        );
+        assert!(!target.join(".lens").exists(), "disabled root must gain no in-tree .lens");
+        assert!(
+            !home.join("projects").exists(),
+            "disabled root must gain no central dir"
+        );
+    }
+
+    /// The verified quirk: `lens warmup <path>` used to write into `<cwd>/.lens`
+    /// instead of the resolver's dir for `<path>`. Runs from the process's real
+    /// cwd (this crate's own directory, untouched by the fix) against a target
+    /// elsewhere, and asserts the build landed at the resolver's dir for the
+    /// target, never at cwd's `.lens`.
+    #[test]
+    fn run_cli_writes_into_the_resolvers_dir_for_the_path_not_cwd() {
+        let _g = crate::rtk::env_test_lock();
+        let prev_home = std::env::var_os("LENS_HOME");
+        let prev_dir = std::env::var_os("LENS_DIR");
+        std::env::remove_var("LENS_DIR");
+
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let target = tmp.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        fs::write(target.join("lib.rs"), "fn cwd_quirk_unique() {}\n").unwrap();
+        let target_canon = std::fs::canonicalize(&target).unwrap();
+
+        let cwd = std::env::current_dir().unwrap();
+        let cwd_lens = cwd.join(".lens");
+        let cwd_lens_existed_before = cwd_lens.exists();
+
+        std::env::set_var("LENS_HOME", &home);
+        run_cli(&[target.to_string_lossy().to_string()]).unwrap();
+        let expected_dir = home.join("projects").join(obs::project_hash(&target_canon));
+
+        match prev_home {
+            Some(v) => std::env::set_var("LENS_HOME", v),
+            None => std::env::remove_var("LENS_HOME"),
+        }
+        if let Some(v) = prev_dir {
+            std::env::set_var("LENS_DIR", v);
+        }
+
+        assert!(
+            expected_dir.join("graph.json").exists(),
+            "warmup must write into the resolver's dir for the path argument"
+        );
+        assert_eq!(
+            cwd_lens.exists(),
+            cwd_lens_existed_before,
+            "cwd's .lens must be untouched by a warmup targeting a different path"
+        );
+        assert!(
+            !target.join(".lens").exists(),
+            "a fresh root must not gain an in-tree .lens"
         );
     }
 }

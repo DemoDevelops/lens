@@ -423,14 +423,130 @@ pub fn count_tokens(text: &str) -> usize {
     bpe.encode_ordinary(text).len()
 }
 
-/// Resolve the data dir the way the server does: `$LENS_DIR`, else
-/// `<cwd>/.lens`. Used by the read-only CLI subcommands.
+/// Stable identity for a project root: blake3 of its canonicalized path string,
+/// first 16 hex. Canonicalizing is what keeps the identity stable across the
+/// spellings the different planes see — the hook's cwd-resolved path, a
+/// `lens warmup ../proj` argument, a symlinked checkout — which is the whole
+/// point of a shared seam: hook, server and warmup must land on ONE dir or the
+/// rails read the server as down. A root that cannot be canonicalized (it does
+/// not exist yet) hashes the path as given.
+///
+/// The recipe is byte-identical to the one `server::unscoped_data_dir_from` and
+/// `discovery`'s probe cache hash with today, so pointing those call sites at
+/// this helper leaves every `~/.lens/unscoped/<hash>` dir already on disk exactly
+/// where it is.
+pub fn project_hash(root: &Path) -> String {
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    blake3::hash(canonical.to_string_lossy().as_bytes()).to_hex()[..16].to_string()
+}
+
+/// Where `root`'s persistent state lives — the one resolver every plane (server,
+/// hook, warmup, federation, dashboard, status) shares. Four rules, in order:
+///   1. `$LENS_DIR`, set and non-empty: an explicit pin always wins (the bench
+///      and test harnesses set it and depend on state landing exactly there);
+///   2. `<root>/.lens` already holding real artifacts: keep-if-present, so an
+///      index built before central storage never moves out from under a repo;
+///   3. `LENS_CENTRAL_STORE=0`: the pre-central layout, `<root>/.lens`;
+///   4. otherwise `<home>/projects/<project_hash>` — a fresh index leaves no
+///      droppings in the tree at all.
+///
+/// PURE: resolution only ever stats, never creates. `lens status` resolves a
+/// never-indexed directory read-only and must leave it exactly as it found it.
+pub fn data_dir_for(root: &Path) -> PathBuf {
+    let lens_dir = std::env::var_os("LENS_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    let central = std::env::var("LENS_CENTRAL_STORE").ok();
+    data_dir_for_from(
+        root,
+        lens_dir.as_deref(),
+        central.as_deref(),
+        crate::rtk::home_root(),
+    )
+}
+
+/// [`data_dir_for`] with the environment injected, so every rule is exercisable
+/// without mutating process-global env vars (same split, and same reason, as
+/// `index::build_threads_from` / `server::unscoped_data_dir_from`; `$LENS_DIR` in
+/// particular is read unguarded by `session::hook`'s own tests, so setting it
+/// in-process would corrupt siblings).
+fn data_dir_for_from(
+    root: &Path,
+    lens_dir: Option<&Path>,
+    central_store: Option<&str>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(pinned) = lens_dir {
+        return pinned.to_path_buf();
+    }
+    let in_tree = root.join(".lens");
+    // Same artifact predicate as `discovery::is_project_root_at`'s `.lens` arm: a
+    // bare `.lens/` (stray heartbeats and nothing else) is not an index, so one
+    // dropping cannot opt a repo out of central storage for good.
+    if in_tree.join("index.db").exists() || in_tree.join("graph.json").exists() {
+        return in_tree;
+    }
+    if central_store == Some("0") {
+        return in_tree;
+    }
+    match home {
+        Some(h) => h.join("projects").join(project_hash(root)),
+        // No home at all: fall back to the pre-central layout rather than
+        // scattering state into a temp dir the user could never find (and that
+        // `lens clean` would never look in).
+        None => in_tree,
+    }
+}
+
+/// Resolve the data dir for the current directory (see [`data_dir_for`]). Used by
+/// the read-only CLI subcommands.
 pub fn data_dir() -> PathBuf {
-    match std::env::var_os("LENS_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(".lens"),
+    data_dir_for(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// Record `root -> data_dir` in the machine-global registry
+/// (`<home>/registry.tsv`), the index `lens clean` reads to find every data dir
+/// lens ever opened for write — without it, a central dir whose root is long gone
+/// is unattributable garbage. Called from the write paths only; resolution itself
+/// stays pure.
+///
+/// Best-effort by design: a missed line costs `lens clean` a blind spot, never a
+/// failed build, so every error is swallowed. Skipped entirely under
+/// `LENS_NO_GLOBAL_MIRROR`, the same isolation switch the ops mirror and the probe
+/// cache respect, so test and bench runs never touch the real `~/.lens`.
+pub fn record_registry(root: &Path, data_dir: &Path) {
+    record_registry_from(
+        root,
+        data_dir,
+        std::env::var_os("LENS_NO_GLOBAL_MIRROR").is_some(),
+        crate::rtk::home_root(),
+    );
+}
+
+/// [`record_registry`] with the environment injected (same `_from` split as
+/// [`data_dir_for_from`]).
+fn record_registry_from(root: &Path, data_dir: &Path, no_mirror: bool, home: Option<PathBuf>) {
+    if no_mirror {
+        return;
+    }
+    let Some(home) = home else {
+        return;
+    };
+    let entry = format!("{}\t{}", root.display(), data_dir.display());
+    let path = home.join("registry.tsv");
+    // Dedup is a read-then-append under no lock: two processes racing the same new
+    // root can both miss and write the line twice, which readers dedup. Holding a
+    // lock across every data-dir open would cost far more than that is worth.
+    if std::fs::read_to_string(&path).is_ok_and(|s| s.lines().any(|l| l == entry)) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&home);
+    // One `write_all` of the whole line on an O_APPEND handle: appends position at
+    // EOF atomically, so parallel writers never interleave into a corrupt line
+    // (same discipline as `write_line`; `writeln!` would not — it can split the
+    // line across several writes).
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(format!("{entry}\n").as_bytes());
     }
 }
 
@@ -625,6 +741,234 @@ mod tests {
             .finish(48000, 100, Some("r".into()), "ok", "", trail);
         let explain = std::fs::read_to_string(dir.path().join("explain.log")).unwrap();
         assert!(explain.contains("decision: offloaded 47KB"));
+    }
+
+    // ── data-dir resolution: the seam every plane agrees on ──────────────────
+    //
+    // Every case drives `data_dir_for_from` / `record_registry_from` directly:
+    // `$LENS_DIR` is read unguarded by `session::hook`'s tests, so mutating it
+    // in-process to exercise the wrapper would corrupt siblings (the same reason
+    // `server`'s `unscoped_data_dir_from` tests keep to the injected core).
+
+    /// Rule 1 outranks every other rule: a harness that pins `$LENS_DIR` gets
+    /// exactly that dir, legacy artifacts and kill switch notwithstanding. This
+    /// is what keeps the three bench binaries meaningful.
+    #[test]
+    fn lens_dir_pin_wins_over_every_other_rule() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(root.join(".lens")).unwrap();
+        std::fs::write(root.join(".lens").join("index.db"), b"legacy").unwrap();
+        let pinned = tmp.path().join("pinned");
+        let home = tmp.path().join("home");
+
+        for central in [None, Some("0"), Some("1")] {
+            assert_eq!(
+                data_dir_for_from(&root, Some(pinned.as_path()), central, Some(home.clone())),
+                pinned,
+                "$LENS_DIR must win with LENS_CENTRAL_STORE={central:?}"
+            );
+        }
+    }
+
+    /// Rule 2, keep-if-present: a repo indexed before central storage keeps using
+    /// its in-tree `.lens`, so no existing index ever moves. Both artifacts
+    /// qualify, matching `discovery`'s marker predicate exactly.
+    #[test]
+    fn legacy_in_tree_artifacts_keep_the_tree_dir() {
+        for artifact in ["index.db", "graph.json"] {
+            let tmp = tempdir().unwrap();
+            let root = tmp.path().join("proj");
+            std::fs::create_dir_all(root.join(".lens")).unwrap();
+            std::fs::write(root.join(".lens").join(artifact), b"x").unwrap();
+            assert_eq!(
+                data_dir_for_from(&root, None, None, Some(tmp.path().join("home"))),
+                root.join(".lens"),
+                "a legacy {artifact} must pin the in-tree dir"
+            );
+        }
+    }
+
+    /// A bare `.lens/` (stray heartbeats, no index) is not an artifact: it must
+    /// not pin the tree, or one dropping would opt a repo out of central storage
+    /// permanently.
+    #[test]
+    fn bare_dot_lens_does_not_pin_the_tree() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(root.join(".lens").join("heartbeats")).unwrap();
+        let home = tmp.path().join("home");
+
+        let got = data_dir_for_from(&root, None, None, Some(home.clone()));
+
+        assert_eq!(got, home.join("projects").join(project_hash(&root)));
+    }
+
+    /// Rule 4: a fresh root lands under the global home, out of the tree, and two
+    /// roots never share one data dir.
+    #[test]
+    fn fresh_roots_map_to_distinct_central_dirs() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+
+        let da = data_dir_for_from(&a, None, None, Some(home.clone()));
+        let db = data_dir_for_from(&b, None, None, Some(home.clone()));
+
+        assert_eq!(da, home.join("projects").join(project_hash(&a)));
+        assert!(!da.starts_with(&a), "central storage leaves the tree alone");
+        assert_ne!(da, db, "two roots must not share one data dir");
+    }
+
+    /// Rule 3, the kill switch: `LENS_CENTRAL_STORE=0` restores the pre-central
+    /// layout for a root with no legacy artifacts at all. Only `0` opts out.
+    #[test]
+    fn central_store_kill_switch_restores_in_tree() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let home = tmp.path().join("home");
+
+        assert_eq!(
+            data_dir_for_from(&root, None, Some("0"), Some(home.clone())),
+            root.join(".lens")
+        );
+        assert_eq!(
+            data_dir_for_from(&root, None, Some("1"), Some(home.clone())),
+            home.join("projects").join(project_hash(&root))
+        );
+    }
+
+    /// No home to hold a central dir: fall back to the pre-central layout rather
+    /// than scattering state somewhere the user could never find it.
+    #[test]
+    fn homeless_process_falls_back_to_in_tree() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert_eq!(
+            data_dir_for_from(&root, None, None, None),
+            root.join(".lens")
+        );
+    }
+
+    /// Resolution is PURE: `lens status` resolves a never-indexed directory
+    /// read-only, so a resolve may not add a single entry to the tree OR to the
+    /// global home — not even the dir it just named.
+    #[test]
+    fn resolving_creates_nothing_on_disk() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let home = tmp.path().join("home");
+
+        let central = data_dir_for_from(&root, None, None, Some(home.clone()));
+        let in_tree = data_dir_for_from(&root, None, Some("0"), Some(home.clone()));
+
+        assert!(!central.exists(), "resolver created {}", central.display());
+        assert!(!home.exists(), "resolver created the global home");
+        assert!(!in_tree.exists(), "resolver created the in-tree dir");
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "resolver left something in the tree"
+        );
+    }
+
+    /// `project_hash` must stay byte-identical to the recipe
+    /// `server::unscoped_data_dir_from` (and `discovery`'s probe cache) hash with
+    /// today — blake3 of the path string, first 16 hex — or every
+    /// `~/.lens/unscoped/<hash>` dir already on disk would move the moment those
+    /// call sites switch onto this helper.
+    #[test]
+    fn project_hash_matches_the_existing_unscoped_recipe() {
+        // The literal the server's own unscoped test hashes. It does not exist,
+        // so canonicalization falls back to the path as given.
+        let literal = Path::new("/tmp/some/markerless/tree");
+        let want = blake3::hash(literal.to_string_lossy().as_bytes()).to_hex()[..16].to_string();
+        assert_eq!(project_hash(literal), want);
+        assert_eq!(want.len(), 16);
+
+        // And a real, already-canonical root: canonicalization is the identity
+        // there, so that hash is unchanged too.
+        let tmp = tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let want = blake3::hash(root.to_string_lossy().as_bytes()).to_hex()[..16].to_string();
+        assert_eq!(project_hash(&root), want);
+    }
+
+    /// The one deliberate delta from hashing the raw path: two spellings of the
+    /// same root resolve to ONE data dir. The hook sees a cwd-resolved path and
+    /// `lens warmup` sees whatever the user typed; if those hashed differently
+    /// the rails would read a live server as down.
+    #[cfg(unix)]
+    #[test]
+    fn project_hash_is_stable_across_path_spellings() {
+        let tmp = tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let real = base.join("proj");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert_eq!(project_hash(&real), project_hash(&link));
+    }
+
+    /// The registry is what `lens clean` reads: one line per root/data-dir pair,
+    /// appended once no matter how many times the data dir is opened.
+    #[test]
+    fn registry_appends_one_line_per_distinct_pair() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let data = Path::new("/home/u/.lens/projects/aa");
+        let record = |root: &str| {
+            record_registry_from(Path::new(root), data, false, Some(home.clone()));
+        };
+
+        record("/repos/a");
+        record("/repos/a");
+        assert_eq!(
+            std::fs::read_to_string(home.join("registry.tsv")).unwrap(),
+            "/repos/a\t/home/u/.lens/projects/aa\n",
+            "an identical line must not be appended twice"
+        );
+
+        record("/repos/b");
+        let raw = std::fs::read_to_string(home.join("registry.tsv")).unwrap();
+        assert_eq!(raw.lines().count(), 2, "a distinct root is a new line");
+        assert!(raw.ends_with("/repos/b\t/home/u/.lens/projects/aa\n"));
+    }
+
+    /// Bench and test isolation: under `LENS_NO_GLOBAL_MIRROR` the registry is
+    /// skipped entirely — not even the home dir is created.
+    #[test]
+    fn registry_skipped_under_global_mirror_opt_out() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+
+        record_registry_from(
+            Path::new("/repos/a"),
+            Path::new("/d"),
+            true,
+            Some(home.clone()),
+        );
+
+        assert!(!home.exists(), "opt-out must not touch the global home");
+    }
+
+    /// Recording is best-effort: an unwritable home (here: a regular file where
+    /// the home dir should be) is swallowed, never a panic in a build path.
+    #[test]
+    fn registry_write_failure_is_silent() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::write(&home, b"not a dir").unwrap();
+
+        record_registry_from(Path::new("/repos/a"), Path::new("/d"), false, Some(home));
+        record_registry_from(Path::new("/repos/a"), Path::new("/d"), false, None);
     }
 
     #[test]

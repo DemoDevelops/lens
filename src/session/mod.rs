@@ -77,11 +77,13 @@ pub fn now_ts() -> i64 {
 }
 
 /// Resolve the lens data dir for a given project, matching the server's
-/// convention: `$LENS_DIR` if set, else `<project>/.lens`.
+/// convention: `$LENS_DIR` if set, else the shared `obs::data_dir_for`
+/// resolver — this is what keeps `routing::mcp_ready` looking at the SAME
+/// heartbeats dir the server writes.
 pub fn resolve_data_dir(project: &Path) -> PathBuf {
     match std::env::var_os("LENS_DIR") {
         Some(d) => PathBuf::from(d),
-        None => project.join(".lens"),
+        None => crate::obs::data_dir_for(project),
     }
 }
 

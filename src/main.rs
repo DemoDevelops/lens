@@ -63,6 +63,22 @@ fn main() -> Result<()> {
         Some("warmup") => return lens::warmup::run_cli(&args[2..]),
         Some("q") => return lens::qcli::run_cli(&args[2..]),
         Some("watch") => return lens::warmup::run_watch_cli(&args[2..]),
+        Some("off") => {
+            lens::disabled::run_off_cli(&args[2..]);
+            return Ok(());
+        }
+        Some("on") => {
+            lens::disabled::run_on_cli(&args[2..]);
+            return Ok(());
+        }
+        Some("status") => {
+            lens::status_cli::run_cli(&args[2..]);
+            return Ok(());
+        }
+        Some("clean") => {
+            lens::clean_cli::run_cli(&args[2..]);
+            return Ok(());
+        }
         Some("--version") | Some("-V") => {
             println!("lens {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -91,6 +107,10 @@ fn print_usage() {
     println!("    lens update");
     println!("    lens warmup [path]");
     println!("    lens watch [path]");
+    println!("    lens off [path]             disable indexing for a tree");
+    println!("    lens on [path]              re-enable a disabled tree");
+    println!("    lens status [path]          show project state and data storage");
+    println!("    lens clean [--all] [--yes]  remove orphaned and probe data");
     println!("    lens q <verb> [args]        read-only queries over an existing .lens/");
     println!("    lens dashboard [--port <n>] [--tui ...]");
     println!("    lens top                    alias for `dashboard --tui`");

@@ -221,6 +221,25 @@ fn repo_root(start: &Path) -> Option<PathBuf> {
     crate::discovery::anchor_root(start)
 }
 
+/// The denylist entry covering `project`, if any: `crate::disabled::covering_entry`
+/// in production. In test builds, a per-thread override (set by
+/// `tests::with_disabled_override`) takes priority when present: `covering_entry`
+/// reads `rtk::home_root()` (`$LENS_HOME`), a process-global env var, and this repo's
+/// tests run in parallel on their own OS threads — mutating `$LENS_HOME` from one
+/// test would race every OTHER concurrently-running test that resolves a data dir
+/// through the same shared resolver. The `thread_local` override sidesteps that
+/// entirely (each test thread sees only its own value) while still exercising the
+/// exact `handle()` code path the real hook runs.
+fn disabled_entry_for(project: &Path) -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        if let Some(entry) = tests::disabled_override() {
+            return Some(entry);
+        }
+    }
+    crate::disabled::covering_entry(project)
+}
+
 /// CLI entry: `args` is everything after `hook` (i.e. `[platform, event]`).
 /// Always exits 0 and prints a valid hook response, even on malformed input.
 pub fn run_cli(args: &[String]) -> anyhow::Result<()> {
@@ -248,11 +267,30 @@ fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<Stri
 
     let project = input.project();
     // Scope guard: a session rooted in a non-project tree (a home directory: no
-    // project marker, over the probe budget) gets no lens. No `.lens` dir
+    // project marker, over the probe budget) gets no lens, and neither does a
+    // tree the user explicitly disabled via `lens off`. No `.lens` dir
     // scattered there, no store writes, no routing guide, and no auto-index of a
     // million-file tree. SessionStart says so in one line; every other event
-    // returns its default no-op response. Cheap for real projects: the first
-    // marker hit answers the classification.
+    // returns its default no-op response. The denylist check runs FIRST: it's a
+    // cheap file read (vs. the probe's directory walk) and the message differs.
+    if let Some(entry) = disabled_entry_for(&project) {
+        if event == "SessionStart" {
+            return Ok(serde_json::to_string(&json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": format!(
+                        "lens off: {} is disabled (lens off {}). Run `lens on {}` to \
+                         re-enable.",
+                        project.display(),
+                        entry.display(),
+                        entry.display()
+                    ),
+                }
+            }))?);
+        }
+        return Ok(default_response(event));
+    }
+    // Cheap for real projects: the first marker hit answers the classification.
     if !crate::discovery::indexable_root(&project) {
         if event == "SessionStart" {
             return Ok(serde_json::to_string(&json!({
@@ -1099,6 +1137,38 @@ mod tests {
     // right before the read. Poison-tolerant so one panicking test can't cascade.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    thread_local! {
+        // See `disabled_entry_for`: a per-thread stand-in for `disabled::covering_entry`
+        // so the disabled-project test doesn't have to mutate `$LENS_HOME`.
+        static DISABLED_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn disabled_override() -> Option<PathBuf> {
+        DISABLED_OVERRIDE.with(|o| o.borrow().clone())
+    }
+
+    /// Runs `f` with `DISABLED_OVERRIDE` set to `entry` for the current test
+    /// thread, then clears it again (even on panic) so a later test recycled
+    /// onto the same pooled thread never inherits it.
+    fn with_disabled_override<T>(entry: PathBuf, f: impl FnOnce() -> T) -> T {
+        DISABLED_OVERRIDE.with(|o| *o.borrow_mut() = Some(entry));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        DISABLED_OVERRIDE.with(|o| *o.borrow_mut() = None);
+        match result {
+            Ok(v) => v,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    }
+
+    /// Every call in this file that resolves a data dir goes through
+    /// `obs::data_dir_for`, which falls back to `rtk::home_root()`
+    /// (`$LENS_HOME`, process-global) once a fresh tempdir project has no
+    /// `LENS_DIR` pin and no pre-existing in-tree artifacts. Other test files
+    /// (`session::store`, `obs`, `rtk`) mutate `$LENS_HOME` under
+    /// `crate::rtk::env_test_lock()`; every test here that resolves a data dir
+    /// must hold the SAME lock for its whole body, or a concurrently-running
+    /// mutator can flip the value mid-test and two calls for the same nominal
+    /// project resolve to two different actual directories.
     fn run(event: &str, input: HookInput) -> (String, SessionStore, PathBuf) {
         let dir = input.project();
         let data_dir = super::super::resolve_data_dir(&dir);
@@ -1113,6 +1183,36 @@ mod tests {
             cwd: Some(dir.to_string_lossy().to_string()),
             ..Default::default()
         }
+    }
+
+    /// A project covered by the `lens off` denylist makes SessionStart return the
+    /// off note (naming the covering entry) instead of the usual guide, and
+    /// leaves no data dir behind anywhere -- the disabled check runs before
+    /// `resolve_data_dir` is ever called, so nothing is created in the tree or
+    /// under the (temp, injected) home. Mutates process-global `LENS_HOME`, so
+    /// it's serialized against every other test that does the same via the
+    /// crate-wide `env_test_lock`.
+    #[test]
+    fn sessionstart_on_disabled_project_returns_off_note_and_creates_no_data_dir() {
+        let project = tempdir().unwrap();
+        let entry = project.path().to_path_buf();
+
+        let out = with_disabled_override(entry.clone(), || {
+            handle("claude", "SessionStart", &input_for(project.path())).unwrap()
+        });
+        assert!(out.contains("lens off:"), "{out}");
+        assert!(out.contains("is disabled"), "{out}");
+        assert!(out.contains(&entry.display().to_string()), "{out}");
+        assert!(!project.path().join(".lens").exists());
+
+        // Every other event idles the same way: no store writes, no `.lens`.
+        let post_out = with_disabled_override(entry, || {
+            let mut edit = input_for(project.path());
+            edit.tool_name = Some("Edit".into());
+            handle("claude", "PostToolUse", &edit).unwrap()
+        });
+        assert_eq!(post_out, "{}");
+        assert!(!project.path().join(".lens").exists());
     }
 
     /// A giant marker-less dir (home-directory shape) makes the hook idle:
@@ -1135,6 +1235,7 @@ mod tests {
 
     #[test]
     fn posttooluse_stores_file_event_and_returns_empty_obj() {
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let mut input = input_for(dir.path());
         input.tool_name = Some("Edit".into());
@@ -1150,6 +1251,7 @@ mod tests {
 
     #[test]
     fn handle_publishes_current_session_for_server() {
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let mut input = input_for(dir.path());
         input.tool_name = Some("Edit".into());
@@ -1162,6 +1264,7 @@ mod tests {
 
     #[test]
     fn posttooluse_edit_fires_supersession_notice_once() {
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let file = dir.path().join("widget.rs");
         std::fs::write(&file, "pub fn one() -> i32 { 2 }\n").unwrap();
@@ -1197,6 +1300,7 @@ mod tests {
     fn posttooluse_edit_matching_snapshot_stays_silent() {
         // The file's bytes still equal the recorded snapshot (e.g. a revert):
         // nothing in context went stale, so no notice.
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let file = dir.path().join("widget.rs");
         let content = "pub fn one() -> i32 { 1 }\n";
@@ -1219,6 +1323,7 @@ mod tests {
         // Regression: a hook fired with cwd set to a SUBDIRECTORY of the repo must
         // resolve its data dir to the repo-root `.lens` and must NOT scatter a
         // nested stray `.lens` under the subdir (that broke an xcodegen build).
+        let _guard = crate::rtk::env_test_lock();
         let repo = tempdir().unwrap();
         std::fs::create_dir_all(repo.path().join(".git")).unwrap();
         let subdir = repo.path().join("Sources").join("Core");
@@ -1234,14 +1339,18 @@ mod tests {
 
         handle("claude", "PostToolUse", &input).unwrap();
 
-        // Canonical data dir at the repo root; nothing scattered under the subdir.
-        assert!(repo.path().join(".lens").is_dir());
+        // Canonical data dir resolves for the repo root (the shared `obs`
+        // resolver, not a hardcoded in-tree path); nothing scattered under the
+        // subdir either way.
+        let data_dir = super::super::resolve_data_dir(repo.path());
+        assert!(data_dir.is_dir());
         assert!(!subdir.join(".lens").exists());
         assert!(!repo.path().join("Sources").join(".lens").exists());
     }
 
     #[test]
     fn userpromptsubmit_skips_system_messages() {
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let mut input = input_for(dir.path());
         input.prompt = Some("<system-reminder>noise</system-reminder>".into());
@@ -1251,6 +1360,7 @@ mod tests {
 
     #[test]
     fn precompact_builds_and_stores_snapshot() {
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         // seed events
         let mut p = input_for(dir.path());
@@ -1274,6 +1384,7 @@ mod tests {
 
     #[test]
     fn sessionstart_compact_injects_guide() {
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let mut t = input_for(dir.path());
         t.tool_name = Some("Edit".into());
@@ -1296,6 +1407,7 @@ mod tests {
 
     #[test]
     fn sessionstart_startup_clears_prior_events() {
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let mut t = input_for(dir.path());
         t.tool_name = Some("Edit".into());
@@ -1325,6 +1437,7 @@ mod tests {
         // tools. tempdir() has no heartbeats dir, so mcp_ready is false here; the guide
         // must still appear. (LENS_ROUTING is read by no other test.)
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rtk_guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let prev = std::env::var("LENS_ROUTING").ok();
         std::env::set_var("LENS_ROUTING", "full");
@@ -1374,6 +1487,7 @@ mod tests {
         let _mcp_guard = crate::routing::MCP_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _rtk_guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let data_dir = super::super::resolve_data_dir(dir.path());
         std::fs::create_dir_all(&data_dir).unwrap();
@@ -1438,6 +1552,7 @@ mod tests {
 
     #[test]
     fn opencode_hook_posttooluse_with_bare_lens_tool_is_safe_and_recognizes_in_is_lens() {
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let mut input = input_for(dir.path());
         input.tool_name = Some("lens_search".into());
@@ -1472,6 +1587,7 @@ mod tests {
 
     #[test]
     fn opencode_event_handling_returns_empty_for_unsupported() {
+        let _guard = crate::rtk::env_test_lock();
         let dir = tempdir().unwrap();
         let mut input = input_for(dir.path());
         input.tool_name = Some("lens_search".into());

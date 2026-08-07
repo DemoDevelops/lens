@@ -218,10 +218,12 @@ pub struct Forge {
     /// from `index_walk` so an index re-walk doesn't suppress a graph re-walk (and vice
     /// versa); each tracks its own freshness.
     graph_walk: WalkDebounce,
-    /// Whether `repo_dir` classified as an indexable project root at construction
-    /// (`discovery::indexable_root`). When false, `ensure_index`/`ensure_graph`
+    /// Whether lens indexes `repo_dir` at all, decided once at construction: it
+    /// must classify as an indexable project root (`discovery::indexable_root`)
+    /// AND not be covered by the `lens off` denylist
+    /// (`disabled::covering_entry`). When false, `ensure_index`/`ensure_graph`
     /// refuse to auto-build (returning `unscoped_error`) instead of walking a giant
-    /// non-project tree such as a home directory.
+    /// non-project tree such as a home directory (or a tree the user switched off).
     scoped: bool,
     /// Consecutive plain (`to`-less, non-transitive) `lens_graph` walks this
     /// process has served (process lifetime = one client session). The 2nd+
@@ -452,13 +454,17 @@ mod resolve_repo_root_tests {
 /// never `<root>/.lens`. A root lens refuses to index must get no droppings at all --
 /// and a planted `.lens` is itself a project marker, so it would flip the very
 /// classification that refused it (that is what poisons a folder permanently).
-/// Hashing matches `discovery`'s probe cache: blake3 of the root path, first 16 hex.
+/// Keyed by [`obs::project_hash`], the shared root identity (blake3 of the
+/// canonicalized path, first 16 hex).
 ///
 /// An explicit `$LENS_DIR` still wins, but only for the dir it actually pins:
 /// bench and test harnesses set it and depend on their state landing exactly there,
 /// while an unrelated `with_paths` caller (or a stray inherited `$LENS_DIR`) must not
 /// silently re-enable writes into the tree.
-fn unscoped_data_dir(repo_dir: &Path, requested: PathBuf) -> PathBuf {
+///
+/// Visible to the crate so `lens status` can report the dir this server would
+/// actually use, rather than re-deriving the redirect and drifting from it.
+pub(crate) fn unscoped_data_dir(repo_dir: &Path, requested: PathBuf) -> PathBuf {
     let lens_dir = std::env::var_os("LENS_DIR")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from);
@@ -486,8 +492,25 @@ fn unscoped_data_dir_from(
     // that must never be reachable from here is `repo_dir` itself, so this falls
     // sideways rather than failing construction.
     let home = home.unwrap_or_else(|| std::env::temp_dir().join("lens"));
-    let hex = blake3::hash(repo_dir.to_string_lossy().as_bytes()).to_hex();
-    home.join("unscoped").join(&hex.as_str()[..16])
+    home.join("unscoped").join(obs::project_hash(repo_dir))
+}
+
+/// Where federation reads (and builds) a nested repo's index: the shared resolver's
+/// answer for that repo, so a legacy `<nested>/.lens` keeps being used in place
+/// while a fresh build lands centrally and is found again by a later session opened
+/// directly on that repo.
+///
+/// The one exception is a collision with `parent_data_dir`. `$LENS_DIR` pins ONE
+/// directory (rule 1 of [`obs::data_dir_for`]), so under a pin every root -- parent
+/// and nested alike -- resolves to it; a nested repo sharing the parent's dir would
+/// federate the parent's own index back into itself under a nested prefix, and
+/// index the nested tree into the parent's manifest. A nested repo always owns its
+/// own state, so fall back to its in-tree `.lens` there.
+fn nested_data_dir(nested_root: &Path, parent_data_dir: &Path) -> PathBuf {
+    match obs::data_dir_for(nested_root) {
+        resolved if resolved == parent_data_dir => nested_root.join(".lens"),
+        resolved => resolved,
+    }
 }
 
 impl Forge {
@@ -496,10 +519,12 @@ impl Forge {
         let repo_dir = resolve_repo_root();
         let data_dir = match std::env::var_os("LENS_DIR") {
             Some(d) => PathBuf::from(d),
-            // The default only holds for a root that classifies as a project:
-            // `with_paths` redirects an unscoped one to `unscoped_data_dir` before
-            // anything is opened, so `<root>/.lens` is never created there.
-            None => repo_dir.join(".lens"),
+            // The shared resolver: a legacy in-tree `.lens` keeps being used, a
+            // fresh project's state goes central (`<lens home>/projects/<hash>`).
+            // It only holds for a root that classifies as a project: `with_paths`
+            // redirects an unscoped one to `unscoped_data_dir` before anything is
+            // opened, so nothing is ever created under an idle root.
+            None => obs::data_dir_for(&repo_dir),
         };
         let max_inline = std::env::var("LENS_MAX_INLINE")
             .ok()
@@ -530,7 +555,13 @@ impl Forge {
         // `Store::open`/`Index::open` create it, and `<root>/.lens` is itself a
         // project marker, so classifying afterwards saw the dropping lens had just
         // made and always answered "scoped" -- the guard was inert on this plane.
-        let scoped = discovery::indexable_root(&repo_dir);
+        //
+        // `lens off` is a second, independent axis: a disabled root may well be a
+        // perfectly good project, and it takes the SAME path an out-of-scope root
+        // takes -- redirected data dir, refusals from every auto-build, no
+        // heartbeat, no federation -- so the tree is left untouched either way.
+        let scoped = discovery::indexable_root(&repo_dir)
+            && crate::disabled::covering_entry(&repo_dir).is_none();
         let data_dir = if scoped {
             data_dir
         } else {
@@ -539,6 +570,14 @@ impl Forge {
         let store = Store::open(&data_dir)?;
         let index = Index::open(&data_dir)?.with_repo_root(&repo_dir);
         let ops = OpLog::open(&data_dir);
+        // The dir is now open for WRITE, so record where this root's state lives:
+        // `lens clean` has no other way to attribute a central dir back to a root
+        // that has since been deleted. Unscoped roots are deliberately left out --
+        // their redirected dirs are orphans by construction, and the registry is
+        // the list of roots lens actually indexes.
+        if scoped {
+            obs::record_registry(&repo_dir, &data_dir);
+        }
         Ok(Forge {
             repo_dir,
             data_dir,
@@ -1686,14 +1725,19 @@ impl Forge {
     /// can tell which repo it came from (matching how the graph merge prefixes node
     /// files).
     ///
+    /// Each nested repo's data dir comes from the shared resolver
+    /// ([`obs::data_dir_for`]), so a legacy `<nested>/.lens` keeps being read in
+    /// place while a fresh build lands centrally and is found again by a later
+    /// session opened directly on that repo.
+    ///
     /// A nested repo with no `.lens/fts` yet is auto-built (index only — federation
     /// never reads the graph) instead of silently skipped, behind
     /// `LENS_NESTED_AUTOBUILD` (default on) and a file-count cap
     /// (`LENS_NESTED_AUTOBUILD_MAX_FILES`). Every outcome that isn't "already built"
-    /// (built / skipped-too-large / skipped-autobuild-off / build failure) appends a
-    /// one-line note to `resp.notes`, so an absent nested repo is never silent. A
-    /// still-unreadable index after a build attempt is a no-op for that repo's
-    /// federation, same as before.
+    /// (built / skipped-disabled / skipped-too-large / skipped-autobuild-off / build
+    /// failure) appends a one-line note to `resp.notes`, so an absent nested repo is
+    /// never silent. A still-unreadable index after a build attempt is a no-op for
+    /// that repo's federation, same as before.
     ///
     /// An unscoped top-level root (`!self.scoped`) is a no-op here: nothing is
     /// walked, nothing is built, no notes are produced. Fresh builds within a single
@@ -1725,12 +1769,21 @@ impl Forge {
         let mut repos_built = 0usize;
         let mut repos_skipped_cap = 0usize;
         for nested_root in discovery::nested_repo_roots(&self.repo_dir) {
-            let data_dir = nested_root.join(".lens");
             let prefix = nested_root
                 .strip_prefix(&self.repo_dir)
                 .unwrap_or(&nested_root)
                 .to_string_lossy()
                 .to_string();
+            // `lens off` on a nested repo is honored here too, and checked FIRST:
+            // a disabled tree is neither read nor built, so its data dir is never
+            // even resolved. Noted rather than silently dropped, same as every
+            // other skip reason.
+            if crate::disabled::covering_entry(&nested_root).is_some() {
+                resp.notes
+                    .push(format!("nested repo {prefix}: skipped: disabled (lens off)"));
+                continue;
+            }
+            let data_dir = nested_data_dir(&nested_root, &self.data_dir);
             if !data_dir.join("fts").exists() {
                 if !nested_autobuild_enabled() {
                     resp.notes
@@ -1752,6 +1805,7 @@ impl Forge {
                 match self.build_nested_index(&nested_root, &data_dir) {
                     Ok(files_indexed) => {
                         repos_built += 1;
+                        obs::record_registry(&nested_root, &data_dir);
                         resp.notes.push(format!(
                             "nested repo {prefix}: built ({files_indexed} files)"
                         ));
@@ -2958,6 +3012,57 @@ mod tests {
         );
     }
 
+    /// `lens off` on a perfectly good project root (a real `.git` marker, so scope
+    /// classification alone would say yes) makes the server plane treat it exactly
+    /// like an out-of-scope root: not scoped, every auto-build refused with the
+    /// verbatim idle message, the data dir redirected out of the tree, and NOTHING
+    /// written under the root -- which is the whole promise of the switch.
+    #[test]
+    fn disabled_root_is_unscoped_refuses_and_writes_nothing() {
+        let home = TempLensHome::new();
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("lib.rs"), "fn helper() -> i32 { 1 }\n").unwrap();
+        home.disable(&root);
+
+        let f = Forge::with_paths(root.clone(), root.join(".lens"), 8192).unwrap();
+
+        assert!(
+            !f.scoped(),
+            "a disabled root must not be scoped even with a .git marker"
+        );
+        for refusal in [f.ensure_index(), f.ensure_graph()] {
+            let msg = refusal
+                .expect_err("a disabled root must refuse to auto-build")
+                .message;
+            assert!(msg.starts_with(UNSCOPED_MSG_PREFIX), "{msg}");
+        }
+        // Zero writes into the tree: no `.lens`, and the only entries are what the
+        // test itself put there.
+        assert!(
+            !root.join(".lens").exists(),
+            "a disabled root must get no .lens: {}",
+            root.display()
+        );
+        let left: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            left.iter().filter(|n| *n != ".git" && *n != "lib.rs").count(),
+            0,
+            "a disabled root must be left exactly as it was found, got {left:?}"
+        );
+        // The redirect leaves the tree entirely, landing under the temp lens home.
+        assert!(
+            f.data_dir().starts_with(home.path()),
+            "disabled state belongs under the lens home, got {}",
+            f.data_dir().display()
+        );
+    }
+
     /// The three data-dir outcomes for an unscoped root: an explicit `$LENS_DIR` keeps
     /// the dir it pinned; anything else is redirected under the lens home, keyed by
     /// root path; with no home at all it still leaves the tree (temp, never `<root>/.lens`).
@@ -3138,6 +3243,62 @@ mod tests {
             None => std::env::remove_var(key),
         }
         out
+    }
+
+    /// Points `$LENS_HOME` at a fresh temp dir until it drops, so everything that
+    /// resolves against the global lens home -- central data dirs
+    /// (`obs::data_dir_for`), the unscoped redirect, the `lens off` denylist --
+    /// lands in a tempdir instead of the developer's real `~/.lens`.
+    ///
+    /// Holds `rtk::env_test_lock` for its whole lifetime: `$LENS_HOME` is
+    /// process-global and `cargo test` runs in parallel, and that is the lock every
+    /// other `LENS_HOME` mutator in this crate (obs, session::store, rtk) already
+    /// takes. Fields are ordered so the temp dir is removed, then the prior value
+    /// restored, and only then the lock released.
+    struct TempLensHome {
+        dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TempLensHome {
+        fn new() -> Self {
+            let guard = crate::rtk::env_test_lock();
+            let previous = std::env::var_os("LENS_HOME");
+            let dir = tempdir().unwrap();
+            std::env::set_var("LENS_HOME", dir.path());
+            TempLensHome {
+                dir,
+                previous,
+                _guard: guard,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self.dir.path()
+        }
+
+        /// Disable `path` for the life of this temp home by writing its canonical
+        /// spelling into the denylist (`covering_entry` canonicalizes what it is
+        /// handed, and on macOS a tempdir's `/var/...` canonicalizes to
+        /// `/private/var/...`, so an uncanonicalized entry would never match).
+        fn disable(&self, path: &Path) {
+            let canonical = std::fs::canonicalize(path).unwrap();
+            std::fs::write(
+                self.path().join("disabled"),
+                format!("{}\n", canonical.display()),
+            )
+            .unwrap();
+        }
+    }
+
+    impl Drop for TempLensHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var("LENS_HOME", v),
+                None => std::env::remove_var("LENS_HOME"),
+            }
+        }
     }
 
     /// A Forge over a temp repo containing one rust source file.
@@ -3952,10 +4113,12 @@ mod tests {
     /// The fresh-build cap (`LENS_NESTED_AUTOBUILD_MAX_REPOS` in production, injected
     /// here so no process-global env is mutated under a parallel suite): with three
     /// repos all needing a build and the cap at 1, exactly one gets built (and its
-    /// `.lens` written), the other two are skipped with a single summary note naming
-    /// the count, and neither of them gets a `.lens` directory.
+    /// index written), the other two are skipped with a single summary note naming
+    /// the count, and neither of them gets a data dir at all. Under a temp
+    /// `$LENS_HOME`, so the fresh build lands in a tempdir rather than the real one.
     #[test]
     fn nested_autobuild_caps_repos_built_per_call() {
+        let home = TempLensHome::new();
         let parent = tempdir().unwrap();
         let data = parent.path().join(".lens");
         std::fs::write(parent.path().join("notes.md"), "widget in the parent repo\n").unwrap();
@@ -3993,13 +4156,155 @@ mod tests {
             capped[0]
         );
 
-        let built_lens_dirs = ["alpha", "beta", "gamma"]
+        // Central storage: exactly one repo has a data dir, it lives under the temp
+        // lens home, and no repo got an in-tree `.lens`.
+        let built_data_dirs: Vec<PathBuf> = ["alpha", "beta", "gamma"]
             .iter()
-            .filter(|name| parent.path().join(name).join(".lens").exists())
-            .count();
+            .map(|name| obs::data_dir_for(&parent.path().join(name)))
+            .filter(|d| d.exists())
+            .collect();
         assert_eq!(
-            built_lens_dirs, 1,
-            "only the one repo under the cap should have a .lens dir written"
+            built_data_dirs.len(),
+            1,
+            "only the one repo under the cap should have a data dir, got {built_data_dirs:?}"
+        );
+        assert!(
+            built_data_dirs[0].starts_with(home.path()),
+            "the built repo's data dir belongs under the lens home, got {}",
+            built_data_dirs[0].display()
+        );
+        for name in ["alpha", "beta", "gamma"] {
+            assert!(
+                !parent.path().join(name).join(".lens").exists(),
+                "a fresh nested build must leave no .lens in {name}"
+            );
+        }
+    }
+
+    /// (T3-b) A nested repo covered by the `lens off` denylist is skipped before its
+    /// data dir is even resolved: a note names it, nothing is built for it anywhere
+    /// (neither in-tree nor centrally), and its non-disabled sibling still builds
+    /// and federates as usual.
+    #[test]
+    fn federation_skips_a_disabled_nested_repo() {
+        let home = TempLensHome::new();
+        let parent = tempdir().unwrap();
+        let data = parent.path().join(".lens");
+        std::fs::write(parent.path().join("notes.md"), "widget in the parent repo\n").unwrap();
+        let f = Forge::with_paths(parent.path().to_path_buf(), data, 8192).unwrap();
+
+        for name in ["alpha", "beta"] {
+            let nested = parent.path().join(name);
+            std::fs::create_dir_all(nested.join(".git")).unwrap();
+            std::fs::write(nested.join("notes.md"), format!("widget in {name}\n")).unwrap();
+        }
+        home.disable(&parent.path().join("alpha"));
+
+        let mut resp = SearchResponse {
+            results: vec![],
+            notes: vec![],
+        };
+        f.federate_nested_search_capped(&mut resp, &["widget".to_string()], 5, 8);
+
+        assert!(
+            resp.notes
+                .contains(&"nested repo alpha: skipped: disabled (lens off)".to_string()),
+            "the disabled nested repo must be named in the notes, got {:?}",
+            resp.notes
+        );
+        assert!(
+            resp.notes.iter().any(|n| n.starts_with("nested repo beta: built (")),
+            "the non-disabled sibling must still build, got {:?}",
+            resp.notes
+        );
+
+        let alpha = parent.path().join("alpha");
+        assert!(
+            !alpha.join(".lens").exists(),
+            "a disabled nested repo must get no in-tree .lens"
+        );
+        assert!(
+            !obs::data_dir_for(&alpha).exists(),
+            "a disabled nested repo must get no central data dir either: {}",
+            obs::data_dir_for(&alpha).display()
+        );
+        assert!(
+            obs::data_dir_for(&parent.path().join("beta")).exists(),
+            "the sibling's index must have been written"
+        );
+    }
+
+    /// A nested repo's data dir is the resolver's, EXCEPT when that would alias the
+    /// parent's own dir -- what a `$LENS_DIR` pin produces, since rule 1 answers the
+    /// same directory for every root. Driven with the collision fabricated (the
+    /// parent's dir set to the nested repo's central dir) rather than by setting
+    /// `$LENS_DIR`, which is process-global and read unguarded by other tests.
+    #[test]
+    fn nested_data_dir_never_aliases_the_parents_own_dir() {
+        let home = TempLensHome::new();
+        let tmp = tempdir().unwrap();
+        let nested = tmp.path().join("alpha");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let central = obs::data_dir_for(&nested);
+        assert!(
+            central.starts_with(home.path()),
+            "a fresh nested repo resolves centrally, got {}",
+            central.display()
+        );
+        assert_eq!(
+            nested_data_dir(&nested, Path::new("/some/other/parent/.lens")),
+            central,
+            "no collision: the resolver's answer stands"
+        );
+        assert_eq!(
+            nested_data_dir(&nested, &central),
+            nested.join(".lens"),
+            "a nested repo must never share the parent's data dir"
+        );
+    }
+
+    /// (T3-c) A fresh nested build lands CENTRALLY: no `<nested>/.lens` is written,
+    /// the index goes to the resolver's dir under the lens home, and the repo's
+    /// content still federates into the parent's search results from there.
+    #[tokio::test]
+    async fn fresh_nested_build_lands_centrally_and_still_federates() {
+        let home = TempLensHome::new();
+        let parent = tempdir().unwrap();
+        let data = parent.path().join(".lens");
+        std::fs::write(parent.path().join("notes.md"), "widget in the parent repo\n").unwrap();
+        let f = Forge::with_paths(parent.path().to_path_buf(), data, 8192).unwrap();
+
+        let nested = parent.path().join("alpha");
+        std::fs::create_dir_all(nested.join(".git")).unwrap();
+        std::fs::write(nested.join("notes.md"), "widget in alpha\n").unwrap();
+
+        let out = f
+            .lens_search(Parameters(SearchRequest {
+                queries: vec!["widget".into()],
+                limit_per_query: 5,
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            !nested.join(".lens").exists(),
+            "a fresh nested build must write no <nested>/.lens"
+        );
+        let central = obs::data_dir_for(&nested);
+        assert!(
+            central.starts_with(home.path()) && central.join("fts").exists(),
+            "the nested index belongs under the lens home, got {}",
+            central.display()
+        );
+        let paths: Vec<&str> = out.0.results[0]
+            .hits
+            .iter()
+            .map(|h| h.path.as_str())
+            .collect();
+        assert!(
+            paths.contains(&"alpha/notes.md"),
+            "a centrally-built nested repo must still federate, got {paths:?}"
         );
     }
 
@@ -4051,6 +4356,9 @@ mod tests {
     /// never read the stray file (or either nested repo) into the parent's own index.
     #[tokio::test]
     async fn nested_repo_parent_open_does_not_hang() {
+        // (b) below is built fresh by federation, which now resolves centrally: run
+        // under a temp lens home so that build lands in a tempdir, not the real one.
+        let _home = TempLensHome::new();
         let parent = tempdir().unwrap();
         let data = parent.path().join(".lens");
         std::fs::write(parent.path().join("top.rs"), "fn top_widget() {}\n").unwrap();

@@ -170,6 +170,41 @@ lens top --full --interval 2   # framed layout, refresh every 2s
 
 The `$` headline prices the measured tokens-saved at the model input rate (`--rate <$/M>` or `--model opus|sonnet|haiku`). Applied-value figures (tokens plus time, at `--rt-seconds` per avoided round-trip, default 4s) are estimates and never enter that headline.
 
+## Controls
+
+Turn indexing off for a tree, check what lens has built, and reclaim disk from stale indexes.
+
+```sh
+lens off .        # lens off: /Users/you/project — lens will ignore this tree (undo: lens on .)
+lens on .         # lens on: /Users/you/project — re-enabled
+lens status .     # root, scope verdict, data dir + rule, index/graph state, nested repos
+lens clean --yes  # remove orphaned indexes + probe files, skip anything live
+```
+
+`lens off [path]` covers the whole subtree (default cwd); a nested `lens on` under a disabled
+ancestor doesn't edit anything, it names the ancestor to re-enable instead. `lens clean` never
+touches `~/.lens/bin`, `ops.log*`, `usage*`, or a dir with a live build in progress; `--all`
+deletes everything it lists, `--yes` skips the confirmation prompt.
+
+**Storage.** New indexes land under `~/.lens/projects/<hash>` instead of `<root>/.lens`; an
+existing in-tree `.lens` with a real index keeps being used where it is (keep-if-present).
+Set `LENS_CENTRAL_STORE=0` to opt out and restore `<root>/.lens` everywhere. Every data dir
+lens opens for a scoped project gets a line in `~/.lens/registry.tsv`, which is how `lens
+clean` finds everything to report on.
+
+**Env knobs.**
+
+| Var | Effect |
+| --- | --- |
+| `LENS_SCOPE_GUARD=0` | disable the scope guard (index any root, no marker/probe check) |
+| `LENS_BACKGROUND_BUILD=0` | disable the detached background builder, always build in the foreground |
+| `LENS_BUILD_PROFILE` | override the index build profile |
+| `LENS_BUILD_THREADS` | override the index build thread count |
+| `LENS_BACKGROUND_BUILD_MIN_FILES` | file-count floor before a build backgrounds itself |
+| `LENS_NESTED_AUTOBUILD=0` | disable auto-building nested repos found under the current root |
+| `LENS_NESTED_AUTOBUILD_MAX_FILES` | per-nested-repo file cap for nested autobuild |
+| `LENS_NESTED_AUTOBUILD_MAX_REPOS` | cap on how many nested repos autobuild in one pass |
+
 ## Verification (opencode)
 
 For opencode (after `lens setup --client opencode` or `LENS_HOST=opencode lens setup` on a clean temp config):

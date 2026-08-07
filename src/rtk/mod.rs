@@ -79,6 +79,8 @@ pub struct ExportSummary {
 // ---------------------------------------------------------------------------
 
 /// The user's home directory (`$HOME`, else `$USERPROFILE`). `None` if unset.
+/// Only used by `home_root()`'s non-test fallback (test builds skip it).
+#[cfg_attr(test, allow(dead_code))]
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -89,13 +91,30 @@ fn home_dir() -> Option<PathBuf> {
 /// lens's global home — `$LENS_HOME` if set, else `~/.lens`. Mirrors
 /// headroom's `workspace_dir()` (≙ `$HEADROOM_WORKSPACE_DIR` / `~/.headroom`).
 /// Distinct from the per-project data dir `$LENS_DIR` (`<proj>/.lens`).
+///
+/// In test builds, the `~/.lens` fallback is suppressed unless `LENS_HOME` is
+/// set: without this, every caller downstream of `home_root()` (the denylist,
+/// the central data-dir resolver's keep-if-present fallback, the registry, the
+/// probe cache, ...) would read and write the developer's REAL `~/.lens` on
+/// every `cargo test`, and two tests resolving it concurrently while a THIRD
+/// test scopes `LENS_HOME` to a temp dir would race on which value they see.
+/// Mirrors the same gate already used ad hoc by `obs::global_ops_path` and
+/// `session::store::global_session_path` for exactly this reason; centralizing
+/// it here covers every caller instead of requiring each one to repeat it.
 pub fn home_root() -> Option<PathBuf> {
     if let Some(h) = std::env::var_os("LENS_HOME") {
         if !h.is_empty() {
             return Some(PathBuf::from(h));
         }
     }
-    home_dir().map(|h| h.join(".lens"))
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        home_dir().map(|h| h.join(".lens"))
+    }
 }
 
 /// Resolve the RTK binary: whatever `rtk` is on `PATH`. lens no longer keeps a

@@ -120,10 +120,25 @@ pub fn is_project_root(dir: &Path) -> bool {
 /// [`is_project_root`] with the home directory injected, so the exception is
 /// testable without mutating the process-global `$HOME`.
 fn is_project_root_at(dir: &Path, home: Option<&Path>) -> bool {
+    first_marker_at(dir, home).is_some()
+}
+
+/// The [`PROJECT_MARKERS`] entry `dir` matches, if any — the same qualification
+/// `is_project_root` uses (bare `.lens/` with no real artifacts doesn't count,
+/// and a marker at the literal home directory is ignored), but naming the
+/// marker instead of a bool. `lens status` (T8) uses this to report e.g.
+/// "project (.git)".
+pub fn first_marker(dir: &Path) -> Option<&'static str> {
+    first_marker_at(dir, home_dir().as_deref())
+}
+
+/// [`first_marker`] with the home directory injected, so the exception is
+/// testable without mutating the process-global `$HOME`.
+fn first_marker_at(dir: &Path, home: Option<&Path>) -> Option<&'static str> {
     if home.is_some_and(|h| h == dir) {
-        return false;
+        return None;
     }
-    PROJECT_MARKERS.iter().any(|m| {
+    PROJECT_MARKERS.iter().copied().find(|m| {
         if *m == ".lens" {
             // A bare `.lens/` (e.g. only stray heartbeat files) must not
             // self-perpetuate as a marker; only real artifacts count.
@@ -334,7 +349,7 @@ pub fn discover(root: &Path, languages: Option<&[String]>) -> Result<DiscoverOut
 /// [`Graph::add_node`]/[`Graph::add_edge`] dedup by id, so this is safe to call
 /// once per nested root.
 fn merge_nested_graph(graph: &mut Graph, nested_root: &Path, walk_root: &Path) {
-    let graph_path = nested_root.join(".lens").join("graph.json");
+    let graph_path = crate::obs::data_dir_for(nested_root).join("graph.json");
     if !graph_path.exists() {
         return;
     }
@@ -1437,6 +1452,38 @@ mod tests {
         assert!(!is_project_root_at(&proj, None));
         fs::write(proj.join(".lens").join("index.db"), "").unwrap();
         assert!(is_project_root_at(&proj, None));
+    }
+
+    #[test]
+    fn first_marker_names_the_matching_marker() {
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        assert_eq!(first_marker_at(&proj, None), None);
+        fs::write(proj.join("Cargo.toml"), "[package]").unwrap();
+        assert_eq!(first_marker_at(&proj, None), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn first_marker_bare_lens_dir_does_not_count() {
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        fs::create_dir_all(proj.join(".lens").join("heartbeats")).unwrap();
+        fs::write(proj.join(".lens").join("heartbeats").join("1.pid"), "1").unwrap();
+        assert_eq!(first_marker_at(&proj, None), None);
+        fs::write(proj.join(".lens").join("index.db"), "").unwrap();
+        assert_eq!(first_marker_at(&proj, None), Some(".lens"));
+    }
+
+    #[test]
+    fn first_marker_ignores_home_directory() {
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        fs::write(proj.join("Cargo.toml"), "[package]").unwrap();
+        // Injected home == the marker-bearing dir: the exception fires.
+        assert_eq!(first_marker_at(&proj, Some(&proj)), None);
+        assert!(!is_project_root_at(&proj, Some(&proj)));
     }
 
     #[test]

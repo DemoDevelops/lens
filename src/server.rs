@@ -16,6 +16,7 @@ use crate::obs::{self, OpLog};
 use crate::session::{self, store::SessionStore};
 use crate::store::Store;
 use crate::tools::*;
+use crate::warmup;
 
 /// Default inline stdout limit (bytes) before offloading to the store.
 const DEFAULT_MAX_INLINE: usize = 8 * 1024;
@@ -227,6 +228,12 @@ pub struct Forge {
     /// walk stamps `closure_hint` on the response; a composed call
     /// (`transitive` or `to`) resets it. Arc'd because `Forge` is `Clone`.
     walk_streak: Arc<std::sync::atomic::AtomicU32>,
+    /// When this process last spawned a detached background builder, or `None` if
+    /// it never has. Held behind a mutex so a burst of concurrent tool calls on a
+    /// cold repo serializes here and starts exactly one builder, and so a spawn
+    /// that produced no builder isn't retried on every call. Arc'd because `Forge`
+    /// is `Clone`.
+    builder_spawn: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 /// Resolve the repo root the server indexes and graphs against, independent of the
@@ -441,12 +448,57 @@ mod resolve_repo_root_tests {
     }
 }
 
+/// Where an unscoped root's persistent state goes: `~/.lens/unscoped/<root-hash>`,
+/// never `<root>/.lens`. A root lens refuses to index must get no droppings at all --
+/// and a planted `.lens` is itself a project marker, so it would flip the very
+/// classification that refused it (that is what poisons a folder permanently).
+/// Hashing matches `discovery`'s probe cache: blake3 of the root path, first 16 hex.
+///
+/// An explicit `$LENS_DIR` still wins, but only for the dir it actually pins:
+/// bench and test harnesses set it and depend on their state landing exactly there,
+/// while an unrelated `with_paths` caller (or a stray inherited `$LENS_DIR`) must not
+/// silently re-enable writes into the tree.
+fn unscoped_data_dir(repo_dir: &Path, requested: PathBuf) -> PathBuf {
+    let lens_dir = std::env::var_os("LENS_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    unscoped_data_dir_from(
+        repo_dir,
+        requested,
+        lens_dir.as_deref(),
+        crate::rtk::home_root(),
+    )
+}
+
+/// [`unscoped_data_dir`] with the environment injected, so each branch is exercisable
+/// without mutating process-global env vars (same split, and same reason, as
+/// [`resolve_repo_root_from`]).
+fn unscoped_data_dir_from(
+    repo_dir: &Path,
+    requested: PathBuf,
+    lens_dir: Option<&Path>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    if lens_dir == Some(requested.as_path()) {
+        return requested;
+    }
+    // The temp dir only when the process has no home at all: the one destination
+    // that must never be reachable from here is `repo_dir` itself, so this falls
+    // sideways rather than failing construction.
+    let home = home.unwrap_or_else(|| std::env::temp_dir().join("lens"));
+    let hex = blake3::hash(repo_dir.to_string_lossy().as_bytes()).to_hex();
+    home.join("unscoped").join(&hex.as_str()[..16])
+}
+
 impl Forge {
     /// Build the handler, resolving paths from the environment.
     pub fn new() -> anyhow::Result<Self> {
         let repo_dir = resolve_repo_root();
         let data_dir = match std::env::var_os("LENS_DIR") {
             Some(d) => PathBuf::from(d),
+            // The default only holds for a root that classifies as a project:
+            // `with_paths` redirects an unscoped one to `unscoped_data_dir` before
+            // anything is opened, so `<root>/.lens` is never created there.
             None => repo_dir.join(".lens"),
         };
         let max_inline = std::env::var("LENS_MAX_INLINE")
@@ -470,13 +522,23 @@ impl Forge {
         data_dir: PathBuf,
         max_inline: usize,
     ) -> anyhow::Result<Self> {
-        let store = Store::open(&data_dir)?;
-        let index = Index::open(&data_dir)?.with_repo_root(&repo_dir);
-        let ops = OpLog::open(&data_dir);
         // Classified once at construction: the root never changes for the life of
         // this server. Cheap for real projects (first marker hit answers it); the
         // marker-less giant-tree case aborts its probe walk at the budget.
+        //
+        // The order is load-bearing: this must run before anything opens `data_dir`.
+        // `Store::open`/`Index::open` create it, and `<root>/.lens` is itself a
+        // project marker, so classifying afterwards saw the dropping lens had just
+        // made and always answered "scoped" -- the guard was inert on this plane.
         let scoped = discovery::indexable_root(&repo_dir);
+        let data_dir = if scoped {
+            data_dir
+        } else {
+            unscoped_data_dir(&repo_dir, data_dir)
+        };
+        let store = Store::open(&data_dir)?;
+        let index = Index::open(&data_dir)?.with_repo_root(&repo_dir);
+        let ops = OpLog::open(&data_dir);
         Ok(Forge {
             repo_dir,
             data_dir,
@@ -493,6 +555,7 @@ impl Forge {
             graph_walk: WalkDebounce::new(std::time::Duration::ZERO),
             scoped,
             walk_streak: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            builder_spawn: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -845,6 +908,12 @@ impl Forge {
                 self.federate_nested_search(&mut resp, &req.queries, req.limit_per_query);
                 let targets = self.symbol_fetch_targets(&req.queries);
                 self.inject_symbol_defs(&mut resp, &targets, req.limit_per_query);
+                // Exactly one note while a background build is still filling the
+                // index in, so a thin result set reads as "not done yet" rather than
+                // "nothing here". Gone the moment the build is.
+                if let Some(progress) = self.build_progress_note() {
+                    resp.notes.push(progress);
+                }
                 let returned = obs::json_len(&resp);
                 let hits: usize = resp.results.iter().map(|r| r.hits.len()).sum();
                 let note = format!("{} queries, {} hits", resp.results.len(), hits);
@@ -1371,6 +1440,13 @@ impl Forge {
         &self.data_dir
     }
 
+    /// Whether the resolved root passed scope classification at construction. Callers
+    /// outside the auto-build path (the heartbeat writer, nested federation) gate on
+    /// it so an idle root is left completely untouched.
+    pub fn scoped(&self) -> bool {
+        self.scoped
+    }
+
     /// Drop schemars' Rust integer `format` markers (`uint`, `uint64`, `int32`, …)
     /// from a schema tree; they aren't JSON Schema formats.
     fn strip_rust_int_formats(value: &mut serde_json::Value) {
@@ -1618,12 +1694,24 @@ impl Forge {
     /// one-line note to `resp.notes`, so an absent nested repo is never silent. A
     /// still-unreadable index after a build attempt is a no-op for that repo's
     /// federation, same as before.
+    ///
+    /// An unscoped top-level root (`!self.scoped`) is a no-op here: nothing is
+    /// walked, nothing is built, no notes are produced. Fresh builds within a single
+    /// call are further capped at `LENS_NESTED_AUTOBUILD_MAX_REPOS` (default 8);
+    /// already-built repos still federate and never count against it. Hitting the
+    /// cap appends one summary note naming how many repos were skipped.
     fn federate_nested_search(
         &self,
         resp: &mut SearchResponse,
         queries: &[String],
         limit_per_query: usize,
     ) {
+        if !self.scoped {
+            return;
+        }
+        let mut repos_built = 0usize;
+        let mut repos_skipped_cap = 0usize;
+        let max_repos = nested_autobuild_max_repos();
         for nested_root in discovery::nested_repo_roots(&self.repo_dir) {
             let data_dir = nested_root.join(".lens");
             let prefix = nested_root
@@ -1637,6 +1725,10 @@ impl Forge {
                         .push(format!("nested repo {prefix}: skipped: autobuild off"));
                     continue;
                 }
+                if repos_built >= max_repos {
+                    repos_skipped_cap += 1;
+                    continue;
+                }
                 let file_count = crate::index::file_manifest(&nested_root).len();
                 let cap = nested_autobuild_max_files();
                 if file_count > cap {
@@ -1647,6 +1739,7 @@ impl Forge {
                 }
                 match self.build_nested_index(&nested_root, &data_dir) {
                     Ok(files_indexed) => {
+                        repos_built += 1;
                         resp.notes.push(format!(
                             "nested repo {prefix}: built ({files_indexed} files)"
                         ));
@@ -1675,6 +1768,11 @@ impl Forge {
                     target.hits.push(hit);
                 }
             }
+        }
+        if repos_skipped_cap > 0 {
+            resp.notes.push(format!(
+                "nested repo build cap: skipped {repos_skipped_cap} repo(s) (LENS_NESTED_AUTOBUILD_MAX_REPOS={max_repos})"
+            ));
         }
         // Re-rank each query's merged hits by score and cap back to the caller's
         // limit. A no-nested-repo search leaves this a stable no-op: the parent hits
@@ -1955,6 +2053,72 @@ impl Forge {
         })
     }
 
+    /// Make sure a detached background builder is working on this data dir, starting
+    /// one if not. Returns whether a builder is now on it.
+    ///
+    /// The mutex is held across the whole check-and-spawn, so a burst of concurrent
+    /// tool calls on a cold repo starts exactly one builder rather than racing: the
+    /// loser sees the winner's seeded progress file and reports the same `true`.
+    /// Cross-process the guarantee is the builder's own `O_EXCL` lock, so a redundant
+    /// spawn (two sessions in the same repo) costs one process that exits at once,
+    /// never a duplicate build.
+    fn ensure_background_builder(&self) -> bool {
+        let Ok(mut last) = self.builder_spawn.lock() else {
+            return false;
+        };
+        // Already on it: this process's earlier spawn, a peer session's builder, or
+        // one that outlived the session that started it.
+        if live_background_build(&self.data_dir).is_some() || build_lock_is_live(&self.data_dir) {
+            return true;
+        }
+        if last.is_some_and(|t| t.elapsed() < BUILDER_SPAWN_RETRY) {
+            return false;
+        }
+        let Some(exe) = builder_exe() else {
+            return false;
+        };
+        // Null stdio, not inherited: this process's stdout IS the MCP JSON-RPC
+        // channel, and a child holding the parent's pipes open would also keep the
+        // parent's disconnect from being observed promptly (what T5 just fixed).
+        let spawned = std::process::Command::new(exe)
+            .arg("__build")
+            .arg(&self.repo_dir)
+            .arg(&self.data_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        *last = Some(std::time::Instant::now());
+        let Ok(child) = spawned else {
+            return false;
+        };
+        // Publish the builder's existence before returning, so the very first
+        // response can say the index is filling in rather than looking empty for the
+        // ~100ms the child needs to reach its own first write. `create_new`, so it
+        // can never clobber counts a builder already published.
+        warmup::seed_progress(&self.data_dir, child.id());
+        reap_builder(child, self.data_dir.clone());
+        true
+    }
+
+    /// The one note a response carries while a background build is filling the index
+    /// in, or `None` once it is done (readiness is the progress file's absence — a
+    /// stat, never a chunk count). Only the index phase gets a note: during the graph
+    /// phase the index is complete and search results are no longer partial.
+    fn build_progress_note(&self) -> Option<String> {
+        let state = live_background_build(&self.data_dir)?;
+        if !state.indexing {
+            return None;
+        }
+        Some(match state.total {
+            0 => "index building in the background: just started, results are partial".to_string(),
+            total => format!(
+                "index building in the background: {}/{total} files, results are partial",
+                state.done
+            ),
+        })
+    }
+
     /// Run `build` under the cross-process single-flight lock (`<data_dir>/build.pid`),
     /// but skip it entirely if `is_fresh()` becomes true first. The normal multi-session
     /// case is that one cold session builds and every other finds the artifact already
@@ -2031,6 +2195,30 @@ impl Forge {
                     && read_manifest(&self.graph_manifest_file()).as_ref() == Some(&current)
             )
         };
+        // The same probe `build_locked` opens with, hoisted so the background-build
+        // checks below only run when there is actually work to do.
+        if is_fresh() {
+            return Ok(());
+        }
+        // Background-build plane (T7). Never wait on a detached builder: it holds
+        // `build.pid` for its whole run, so `build_locked` would park this call for
+        // the length of a deliberately throttled, minutes-long build — putting lens
+        // right back on the user's critical path, which is the bug being fixed. And
+        // a repo whose graph has never been built at all hands that first build off
+        // rather than blocking on it. A warm-but-stale graph still rebuilds here and
+        // now: `reparse_incremental` re-parses only what changed, so the catch-up is
+        // milliseconds and blocking on it is both cheaper and more accurate.
+        if background_build_enabled() {
+            if live_background_build(&self.data_dir).is_some() {
+                return Err(graph_building_error(&self.data_dir));
+            }
+            if !self.graph_file().exists()
+                && discovery::source_manifest(&self.repo_dir).len() >= background_build_min_files()
+                && self.ensure_background_builder()
+            {
+                return Err(graph_building_error(&self.data_dir));
+            }
+        }
         self.build_locked(&self.data_dir, is_fresh, || {
             let op = self
                 .ops
@@ -2072,6 +2260,33 @@ impl Forge {
         // gitignore walk and assume the index is fresh (staleness bounded to the TTL).
         if self.index_walk.fresh() {
             return Ok(());
+        }
+        // Background-build plane (T7): answer from whatever is already committed
+        // instead of building here, for either of two reasons.
+        //
+        // A detached builder is mid-run — waiting for it would put a deliberately
+        // throttled, minutes-long build back on the caller's critical path. Or this
+        // repo has never been indexed and is big enough that the first build is worth
+        // deferring; the manifest is written only by a build that completed, so its
+        // absence is a stat-cheap "never built here" that also reads correctly after
+        // a build that was killed part-way.
+        //
+        // A warm-but-stale index keeps building synchronously: `index_path` re-reads
+        // only what changed, so the catch-up is milliseconds and blocking on it beats
+        // handing back a partial answer.
+        //
+        // Either way the caller stamps `build_progress_note` on its response, so the
+        // model is told the results are partial rather than left to infer it.
+        if background_build_enabled() {
+            if live_background_build(&self.data_dir).is_some() {
+                return Ok(());
+            }
+            if !self.index_manifest_file().exists()
+                && crate::index::file_manifest(&self.repo_dir).len() >= background_build_min_files()
+                && self.ensure_background_builder()
+            {
+                return Ok(());
+            }
         }
         // Freshness probe: a live (reloaded) chunk count > 0 AND a matching manifest.
         // Gate on the live chunk count, not the cached `index_chunks` stat: a schema/
@@ -2315,6 +2530,113 @@ fn nested_autobuild_max_files() -> usize {
         .unwrap_or(NESTED_AUTOBUILD_MAX_FILES_DEFAULT)
 }
 
+/// Default cap on how many nested repos a single call may freshly *build* (an
+/// already-built repo still federates and never counts against this cap).
+/// `LENS_NESTED_AUTOBUILD_MAX_REPOS` overrides.
+const NESTED_AUTOBUILD_MAX_REPOS_DEFAULT: usize = 8;
+
+/// Per-call cap on nested repo builds. Falls back to
+/// [`NESTED_AUTOBUILD_MAX_REPOS_DEFAULT`] when unset or unparseable.
+fn nested_autobuild_max_repos() -> usize {
+    std::env::var("LENS_NESTED_AUTOBUILD_MAX_REPOS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(NESTED_AUTOBUILD_MAX_REPOS_DEFAULT)
+}
+
+/// Kill-switch for the cold-start hand-off to a detached background builder:
+/// `LENS_BACKGROUND_BUILD=0` restores the pre-T7 behavior, where the calling tool
+/// blocks until the repo's first full build finishes. On by default.
+fn background_build_enabled() -> bool {
+    std::env::var("LENS_BACKGROUND_BUILD").map_or(true, |v| v.trim() != "0")
+}
+
+/// A repo with at least this many files hands its FIRST build to the detached
+/// builder instead of blocking the caller. Below it the build is short enough that
+/// blocking is both cheaper and more accurate than a partial answer, and deferring
+/// would cost a needless process spawn on every small repo.
+const BACKGROUND_BUILD_MIN_FILES_DEFAULT: usize = 1000;
+
+/// File-count threshold for the cold-start hand-off. Falls back to
+/// [`BACKGROUND_BUILD_MIN_FILES_DEFAULT`] when unset or unparseable.
+fn background_build_min_files() -> usize {
+    std::env::var("LENS_BACKGROUND_BUILD_MIN_FILES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(BACKGROUND_BUILD_MIN_FILES_DEFAULT)
+}
+
+/// Don't re-spawn a builder more often than this. Only consulted after a spawn that
+/// left no builder behind (exec failed, or it exited at once because a peer owned
+/// the lock); a builder that IS running is detected directly and costs nothing.
+const BUILDER_SPAWN_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The state a *live* detached builder has published for this data dir, or `None`
+/// when no build is in flight. Cheap by construction: one open of a ~30-byte file,
+/// and once the builder is gone the file is too, so the steady-state cost is a
+/// single failed open — never a walk, a `chunk_count`, or a `graph.json` parse.
+///
+/// The pid in the file is what makes a leftover self-healing: a builder killed with
+/// SIGKILL can't clean up after itself, so a reader that finds a dead pid removes
+/// the file rather than reporting a build that will never finish.
+fn live_background_build(data_dir: &Path) -> Option<warmup::BuildProgressState> {
+    let state = warmup::read_progress(data_dir)?;
+    if pid_alive(state.pid) {
+        return Some(state);
+    }
+    let _ = std::fs::remove_file(warmup::progress_path(data_dir));
+    None
+}
+
+/// The binary to re-exec for `__build`, or `None` when this process isn't it.
+///
+/// `cargo test` runs the library's tests from a harness named `lens-<hash>`, and
+/// re-executing THAT with `__build` would launch the whole suite again as a detached
+/// process. Gating on the real binary name keeps every in-test build synchronous
+/// (which is what the suite asserts) without threading a test-only flag through the
+/// build path.
+fn builder_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    (exe.file_stem()?.to_str()? == "lens").then_some(exe)
+}
+
+/// Wait out a spawned builder on a detached thread. Two reasons, both about not
+/// lying later: an unreaped child stays a zombie, and `kill(zombie, 0)` succeeds, so
+/// `live_background_build` would report a finished builder as live forever. And a
+/// builder killed with SIGKILL never removes its own progress file, so clear it here
+/// once we know it's gone (only if it is still that builder's — a newer one may have
+/// taken over). If this server dies first the child reparents to init, which reaps it,
+/// and the dead pid in the file makes the leftover self-healing anyway.
+fn reap_builder(mut child: std::process::Child, data_dir: PathBuf) {
+    let pid = child.id() as i32;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        if warmup::read_progress(&data_dir).map(|s| s.pid) == Some(pid) {
+            let _ = std::fs::remove_file(warmup::progress_path(&data_dir));
+        }
+    });
+}
+
+/// The refusal a graph query gets while a background build is still running. The
+/// graph has no partial state to serve — `discovery::discover` assembles it in memory
+/// and `graph.json` is written once, at the end — so returning an empty subgraph here
+/// would read to the model as "symbol not found", a wrong answer dressed as a right
+/// one. This goes out through `ToolFailure::recoverable`, whose text already tells it
+/// to fall back to grep/Read for this turn instead of killing the server.
+fn graph_building_error(data_dir: &Path) -> ErrorData {
+    let progress = match live_background_build(data_dir) {
+        Some(state) if state.total > 0 => format!(" ({}/{} files done)", state.done, state.total),
+        _ => String::new(),
+    };
+    ErrorData::internal_error(
+        format!(
+            "the code graph for this repo is still building in the background{progress}, so it \
+             is not queryable yet. Retry in a few seconds, or use lens_search / grep for now."
+        ),
+        None,
+    )
+}
+
 /// Cross-process single-flight lock file for the index/graph build. Lives in the
 /// data dir; its content is the holder's pid so a crashed holder's lock can be
 /// detected (via `kill(pid, 0)`) and reclaimed.
@@ -2332,7 +2654,7 @@ const BUILD_LOCK_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(
 /// [`BuildLockGuard::try_acquire`]; its `Drop` removes the file, so the lock is
 /// released on the build's success path, any early return / `?`, and a panic — a
 /// crash mid-build can never leak the lock and stall every later session.
-struct BuildLockGuard {
+pub(crate) struct BuildLockGuard {
     path: PathBuf,
 }
 
@@ -2369,6 +2691,39 @@ impl Drop for BuildLockGuard {
     }
 }
 
+/// Take the build lock for `data_dir` WITHOUT waiting: `Ok(Some(guard))` when we own
+/// it, `Ok(None)` when a live builder already does. A lock whose recorded pid is dead
+/// (a builder SIGKILLed mid-flight, or one that self-exited on its heartbeat watchdog,
+/// neither of which runs `Drop`) is reclaimed and acquisition retried once — the same
+/// dead-holder rule [`wait_for_lock_clear`] applies, factored out here because the
+/// detached builder must never block on a peer: if someone else is already building
+/// this data dir, its whole job is done.
+pub(crate) fn try_acquire_build_lock(data_dir: &Path) -> std::io::Result<Option<BuildLockGuard>> {
+    let path = data_dir.join(BUILD_LOCK_FILE);
+    if let Some(guard) = BuildLockGuard::try_acquire(&path)? {
+        return Ok(Some(guard));
+    }
+    match read_lock_pid(&path) {
+        Some(pid) if !pid_alive(pid) => {
+            // Re-read immediately before removing, so a live builder that just
+            // re-acquired (stamping a different pid) doesn't lose its lock.
+            if read_lock_pid(&path) == Some(pid) {
+                let _ = std::fs::remove_file(&path);
+            }
+            BuildLockGuard::try_acquire(&path)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// True while `<data_dir>/build.pid` is held by a process that is still alive. An
+/// unstamped lock (the holder created the file but hasn't written its pid yet) reads
+/// as not-live here; the only caller uses this to decide whether to spawn a builder,
+/// and the spawned builder's own `O_EXCL` acquire is what actually settles the race.
+fn build_lock_is_live(data_dir: &Path) -> bool {
+    read_lock_pid(&data_dir.join(BUILD_LOCK_FILE)).is_some_and(pid_alive)
+}
+
 /// The pid recorded in a lock file, or `None` if absent / empty / not yet stamped.
 fn read_lock_pid(path: &Path) -> Option<i32> {
     std::fs::read_to_string(path).ok()?.trim().parse::<i32>().ok()
@@ -2379,7 +2734,7 @@ fn read_lock_pid(path: &Path) -> Option<i32> {
 /// alive. A non-positive pid never names a real process (0/-1 address process groups),
 /// so it is treated as dead and its lock is reclaimable.
 #[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
+pub(crate) fn pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
@@ -2392,7 +2747,7 @@ fn pid_alive(pid: i32) -> bool {
 /// No portable liveness probe off unix: assume alive so a waiter never clobbers a live
 /// holder's lock (correctness over crash-recovery on non-unix platforms).
 #[cfg(not(unix))]
-fn pid_alive(_pid: i32) -> bool {
+pub(crate) fn pid_alive(_pid: i32) -> bool {
     true
 }
 
@@ -2544,6 +2899,233 @@ mod tests {
         let tf: ToolFailure = e.into();
         assert!(tf.message.contains("lens is idle here"), "{}", tf.message);
         assert!(!tf.message.contains("transient"), "{}", tf.message);
+    }
+
+    /// The guard is live on the server plane, not just under `set_scoped(false)`: a
+    /// marker-less tree past the file-probe budget classifies as unscoped BEFORE the
+    /// store/index/op log are opened, so the root keeps its `.lens`-free state (the
+    /// data dir is redirected under the global lens home) and every auto-build
+    /// refuses. Regression for the ordering bug where `Store::open` planted `.lens`
+    /// first -- itself a project marker, which made the verdict "scoped" in every
+    /// production directory.
+    #[test]
+    fn oversized_markerless_tree_never_gets_a_lens_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        // One past discovery's SCOPE_PROBE_BUDGET (10_000) and carrying no project
+        // marker, so the file-count probe is what disqualifies the root.
+        for i in 0..10_001 {
+            std::fs::write(root.join(format!("f{i}.txt")), "x").unwrap();
+        }
+
+        let f = Forge::with_paths(root.clone(), root.join(".lens"), 8192).unwrap();
+        let planted = root.join(".lens").exists();
+        let refused = f.ensure_index();
+        let redirected = f.data_dir().to_path_buf();
+        // The redirect lands in the real `~/.lens`; clean up this run's corner of it.
+        drop(f);
+        let _ = std::fs::remove_dir_all(&redirected);
+
+        assert!(
+            !planted,
+            "an unscoped root must get no .lens: {}",
+            root.display()
+        );
+        let msg = refused
+            .expect_err("an unscoped root must refuse to auto-index")
+            .message;
+        assert!(msg.starts_with(UNSCOPED_MSG_PREFIX), "{msg}");
+        // Asserted by shape, not by absolute path: the parallel suite mutates `$HOME`
+        // (obs/usage, obs/tui), so the global home this resolves against is not stable
+        // across a run. What must hold is that the state left the tree entirely.
+        assert!(
+            !redirected.starts_with(&root)
+                && redirected.parent().is_some_and(|p| p.ends_with("unscoped")),
+            "unscoped state belongs in <lens home>/unscoped/<hash>, got {}",
+            redirected.display()
+        );
+    }
+
+    /// The three data-dir outcomes for an unscoped root: an explicit `$LENS_DIR` keeps
+    /// the dir it pinned; anything else is redirected under the lens home, keyed by
+    /// root path; with no home at all it still leaves the tree (temp, never `<root>/.lens`).
+    #[test]
+    fn unscoped_data_dir_redirects_unless_lens_dir_pinned_it() {
+        let root = Path::new("/tmp/some/markerless/tree");
+        let requested = root.join(".lens");
+        let home = PathBuf::from("/home/u/.lens");
+
+        let pinned = unscoped_data_dir_from(
+            root,
+            requested.clone(),
+            Some(requested.as_path()),
+            Some(home.clone()),
+        );
+        assert_eq!(pinned, requested, "an explicit $LENS_DIR still wins");
+
+        let elsewhere = PathBuf::from("/elsewhere/.lens");
+        let redirected = unscoped_data_dir_from(
+            root,
+            requested.clone(),
+            Some(elsewhere.as_path()),
+            Some(home.clone()),
+        );
+        let hex = blake3::hash(root.to_string_lossy().as_bytes()).to_hex();
+        assert_eq!(redirected, home.join("unscoped").join(&hex.as_str()[..16]));
+        assert_ne!(
+            redirected,
+            unscoped_data_dir_from(
+                Path::new("/tmp/other/tree"),
+                requested.clone(),
+                None,
+                Some(home)
+            ),
+            "two roots must not share one unscoped data dir"
+        );
+
+        let homeless = unscoped_data_dir_from(root, requested, None, None);
+        assert!(
+            !homeless.starts_with(root) && homeless.starts_with(std::env::temp_dir()),
+            "with no home the state still leaves the tree, got {}",
+            homeless.display()
+        );
+    }
+
+    /// The partial-results note is exactly the live background build's published
+    /// state: seeded (no counts yet), mid-index, then gone the moment the builder is.
+    /// Readiness is the progress file's absence, so a completed build needs no
+    /// bookkeeping anywhere else to stop the note.
+    #[test]
+    fn build_progress_note_tracks_the_live_builder() {
+        let (f, _dir) = forge_with_source();
+        let data = f.data_dir().to_path_buf();
+        assert_eq!(f.build_progress_note(), None, "no build, no note");
+
+        // A pid that is certainly alive: our own.
+        let live = std::process::id();
+        warmup::seed_progress(&data, live);
+        assert_eq!(
+            f.build_progress_note().as_deref(),
+            Some("index building in the background: just started, results are partial"),
+        );
+
+        std::fs::write(warmup::progress_path(&data), format!("{live} 1720 14502 index")).unwrap();
+        assert_eq!(
+            f.build_progress_note().as_deref(),
+            Some("index building in the background: 1720/14502 files, results are partial"),
+        );
+
+        // Index done, graph still building: results are complete, so no note.
+        std::fs::write(warmup::progress_path(&data), format!("{live} 14502 14502 graph")).unwrap();
+        assert_eq!(f.build_progress_note(), None);
+
+        std::fs::remove_file(warmup::progress_path(&data)).unwrap();
+        assert_eq!(f.build_progress_note(), None);
+    }
+
+    /// A builder killed with SIGKILL can't remove its own progress file, so the pid in
+    /// it is what keeps the note from sticking forever: the first reader to notice the
+    /// pid is dead treats the build as over and clears the file.
+    #[test]
+    fn dead_builder_progress_is_reclaimed_not_reported() {
+        let (f, _dir) = forge_with_source();
+        let data = f.data_dir().to_path_buf();
+        // pid 0 never names a real process, so `pid_alive` reads it as dead.
+        std::fs::write(warmup::progress_path(&data), "0 5 10 index").unwrap();
+        assert_eq!(f.build_progress_note(), None);
+        assert!(
+            !warmup::progress_path(&data).exists(),
+            "a dead builder's leftover must be cleared, not re-read every call"
+        );
+    }
+
+    /// The cold-start hand-off is exactly that: only a repo with no `index.manifest.json`
+    /// and at least `LENS_BACKGROUND_BUILD_MIN_FILES` files defers. A small repo, and a
+    /// warm-but-stale one of any size, still build synchronously — `index_path` re-reads
+    /// only what changed, so blocking on the catch-up beats a partial answer.
+    #[tokio::test]
+    async fn only_a_cold_oversized_repo_defers_to_the_background_builder() {
+        let (f, dir) = forge_with_source();
+        assert!(
+            !f.index_manifest_file().exists(),
+            "precondition: never indexed"
+        );
+        // Cold but tiny (one file, far under the threshold): builds here and now.
+        f.ensure_index().expect("small cold repo builds inline");
+        assert!(f.index_manifest_file().exists(), "built synchronously");
+        assert!(
+            !warmup::progress_path(f.data_dir()).exists(),
+            "no builder was spawned for a small repo"
+        );
+
+        // Warm but stale, with the threshold dropped to 1 so size can't be what
+        // decides: still synchronous, because only a FIRST build is worth deferring.
+        std::fs::write(dir.path().join("added.rs"), "fn added_symbol() {}\n").unwrap();
+        temp_env("LENS_BACKGROUND_BUILD_MIN_FILES", Some("1"), || {
+            f.ensure_index().expect("stale warm repo builds inline");
+        });
+        let hits = f.index.search(&["added_symbol".into()], 5).unwrap();
+        assert!(
+            hits.results[0].hits.iter().any(|h| h.path.ends_with("added.rs")),
+            "the incremental catch-up ran inline rather than being deferred"
+        );
+    }
+
+    /// While a live builder owns the data dir no query may enter `build_locked`: it
+    /// would park behind a deliberately throttled build for as long as that build
+    /// takes, which is the exact "lens is on my critical path" bug T7 exists to fix.
+    /// Search answers from what is committed; the graph, which has no partial state to
+    /// serve, says so instead of returning an empty subgraph that reads as "not found".
+    #[test]
+    fn a_live_builder_is_never_waited_on() {
+        let (f, _dir) = forge_with_source();
+        warmup::seed_progress(f.data_dir(), std::process::id());
+        f.ensure_index()
+            .expect("search serves whatever is already committed");
+        let e = f.ensure_graph().unwrap_err();
+        assert!(e.message.contains("still building"), "{}", e.message);
+        // Nothing was built, so nothing took the lock.
+        assert!(!f.data_dir().join(BUILD_LOCK_FILE).exists());
+    }
+
+    /// The detached builder reuses the server's lock rather than reimplementing it: a
+    /// live holder blocks acquisition, and a holder whose pid is dead (SIGKILL, or the
+    /// heartbeat watchdog's hard exit, neither of which runs `Drop`) is reclaimed.
+    #[test]
+    fn build_lock_blocks_a_live_holder_and_reclaims_a_dead_one() {
+        let data = tempdir().unwrap();
+        let held = try_acquire_build_lock(data.path()).unwrap();
+        assert!(held.is_some(), "uncontended acquire");
+        assert!(
+            try_acquire_build_lock(data.path()).unwrap().is_none(),
+            "a live holder (this process) must block a second builder"
+        );
+        drop(held);
+
+        // pid 0 never names a real process: a dead holder's lock is reclaimable.
+        std::fs::write(data.path().join(BUILD_LOCK_FILE), "0").unwrap();
+        assert!(
+            try_acquire_build_lock(data.path()).unwrap().is_some(),
+            "a dead holder's lock must be reclaimed, not honored forever"
+        );
+    }
+
+    /// Set an env var for the duration of `body`. Serialized against the other env
+    /// mutators in this file by its own lock, since env is process-global.
+    fn temp_env<T>(key: &str, value: Option<&str>, body: impl FnOnce() -> T) -> T {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = std::env::var_os(key);
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let out = body();
+        match previous {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        out
     }
 
     /// A Forge over a temp repo containing one rust source file.
@@ -3353,6 +3935,111 @@ mod tests {
             1,
             "merged + capped hits must respect limit_per_query = 1"
         );
+    }
+
+    /// `LENS_NESTED_AUTOBUILD_MAX_REPOS` caps how many nested repos a single call may
+    /// freshly build: with three repos all needing a build and the cap set to 1,
+    /// exactly one gets built (and its `.lens` written), the other two are skipped
+    /// with a single summary note naming the count, and neither of them gets a
+    /// `.lens` directory.
+    #[tokio::test]
+    async fn nested_autobuild_caps_repos_built_per_call() {
+        // The guard must not span the `.await` below (clippy::await_holding_lock):
+        // scope it to just the env mutation on each side instead of holding it live
+        // through the async call.
+        {
+            let _g = crate::rtk::env_test_lock();
+            std::env::set_var("LENS_NESTED_AUTOBUILD_MAX_REPOS", "1");
+        }
+
+        let parent = tempdir().unwrap();
+        let data = parent.path().join(".lens");
+        std::fs::write(parent.path().join("notes.md"), "widget in the parent repo\n").unwrap();
+        let f = Forge::with_paths(parent.path().to_path_buf(), data, 8192).unwrap();
+
+        // Three nested git repos, none pre-built: every one needs a fresh build.
+        for name in ["alpha", "beta", "gamma"] {
+            let nested = parent.path().join(name);
+            std::fs::create_dir_all(nested.join(".git")).unwrap();
+            std::fs::write(nested.join("notes.md"), format!("widget in {name}\n")).unwrap();
+        }
+
+        let out = f
+            .lens_search(Parameters(SearchRequest {
+                queries: vec!["widget".into()],
+                limit_per_query: 5,
+            }))
+            .await
+            .unwrap();
+
+        {
+            let _g = crate::rtk::env_test_lock();
+            std::env::remove_var("LENS_NESTED_AUTOBUILD_MAX_REPOS");
+        }
+
+        let notes = &out.0.notes;
+        let built: Vec<&String> = notes.iter().filter(|n| n.contains(": built (")).collect();
+        let capped: Vec<&String> = notes.iter().filter(|n| n.contains("build cap")).collect();
+        assert_eq!(
+            built.len(),
+            1,
+            "exactly one nested repo should be freshly built, got {notes:?}"
+        );
+        assert_eq!(
+            capped.len(),
+            1,
+            "exactly one cap/skip note expected, got {notes:?}"
+        );
+        assert!(
+            capped[0].contains("skipped 2 repo"),
+            "cap note should name how many repos were skipped, got {:?}",
+            capped[0]
+        );
+
+        let built_lens_dirs = ["alpha", "beta", "gamma"]
+            .iter()
+            .filter(|name| parent.path().join(name).join(".lens").exists())
+            .count();
+        assert_eq!(
+            built_lens_dirs, 1,
+            "only the one repo under the cap should have a .lens dir written"
+        );
+    }
+
+    /// An unscoped `Forge` (`set_scoped(false)`) must make `federate_nested_search` a
+    /// pure no-op: no nested repo gets built, and no notes are produced at all, even
+    /// though nested git repos are present and would otherwise need a fresh build.
+    #[tokio::test]
+    async fn federate_nested_search_noop_when_unscoped() {
+        let parent = tempdir().unwrap();
+        let data = parent.path().join(".lens");
+        std::fs::write(parent.path().join("notes.md"), "widget in the parent repo\n").unwrap();
+        let mut f = Forge::with_paths(parent.path().to_path_buf(), data, 8192).unwrap();
+        f.set_scoped(false);
+
+        for name in ["alpha", "beta"] {
+            let nested = parent.path().join(name);
+            std::fs::create_dir_all(nested.join(".git")).unwrap();
+            std::fs::write(nested.join("notes.md"), format!("widget in {name}\n")).unwrap();
+        }
+
+        let mut resp = SearchResponse {
+            results: vec![],
+            notes: vec![],
+        };
+        f.federate_nested_search(&mut resp, &["widget".to_string()], 5);
+
+        assert!(
+            resp.notes.is_empty(),
+            "unscoped forge must produce zero federation notes, got {:?}",
+            resp.notes
+        );
+        for name in ["alpha", "beta"] {
+            assert!(
+                !parent.path().join(name).join(".lens").exists(),
+                "unscoped forge must never build nested repo {name}"
+            );
+        }
     }
 
     // ── T5: combined reproduction of the reported parent-folder hang ───────

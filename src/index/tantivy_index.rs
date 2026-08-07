@@ -25,6 +25,7 @@ use tantivy::schema::{
 use tantivy::tokenizer::{
     Language, LowerCaser, NgramTokenizer, SimpleTokenizer, Stemmer, TextAnalyzer,
 };
+use tantivy::indexer::IndexWriterOptions;
 use tantivy::{doc, Index as TIndex, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
 /// The `symbols` field is weighted this many times over `content`, matching the
@@ -44,6 +45,14 @@ const HEAP_PER_THREAD: usize = 64 * 1024 * 1024;
 /// Ceiling on writer threads: Tantivy's own `writer()` heuristic caps here, and it
 /// bounds the build's peak heap (`threads * HEAP_PER_THREAD`).
 const MAX_WRITER_THREADS: usize = 8;
+
+/// Ceiling on a writer's merge threads, which are a pool of their own, sized
+/// independently of the indexing threads (`IndexWriterOptions::num_merge_threads`
+/// defaults to 4 however narrow the writer is). A build capped to
+/// [`crate::index::build_threads`] would otherwise still fan its merges across four
+/// more threads, so the cap tracks the writer width. Being Tantivy's own default, it
+/// only ever lowers the count, never raises it.
+const MAX_MERGE_THREADS: usize = 4;
 
 const NGRAM_TOKENIZER: &str = "ngram3";
 /// Re-registered in [`register_tokenizers`] as simple + lowercase + English stemmer
@@ -184,12 +193,20 @@ impl TantivyStore {
 
     /// Acquire the single exclusive writer, `num_threads`-wide, retrying briefly on a
     /// lock held by another process before surfacing the error to a best-effort caller.
+    ///
+    /// Built from explicit options rather than `writer_with_num_threads` only so the
+    /// merge pool is capped too ([`MAX_MERGE_THREADS`]); the heap per thread is the
+    /// same `HEAP_PER_THREAD` that call divides out of its overall budget.
     pub fn writer(&self, num_threads: usize) -> Result<IndexWriter> {
         let threads = num_threads.clamp(1, MAX_WRITER_THREADS);
-        let heap = threads * HEAP_PER_THREAD;
+        let options = IndexWriterOptions::builder()
+            .num_worker_threads(threads)
+            .num_merge_threads(threads.min(MAX_MERGE_THREADS))
+            .memory_budget_per_thread(HEAP_PER_THREAD)
+            .build();
         let deadline = Instant::now() + WRITER_LOCK_TIMEOUT;
         loop {
-            match self.index.writer_with_num_threads(threads, heap) {
+            match self.index.writer_with_options(options.clone()) {
                 Ok(w) => return Ok(w),
                 Err(e) => {
                     if Instant::now() >= deadline {

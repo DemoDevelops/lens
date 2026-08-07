@@ -36,6 +36,34 @@ const AST_CHUNK_BYTES: usize = 4096;
 /// (spinning up N segment threads for one file is pure overhead).
 const BULK_FILE_THRESHOLD: usize = 32;
 
+/// Tantivy writer thread count for the bulk-build branch of [`Index::index_path`].
+/// `LENS_BUILD_THREADS` wins outright (an explicit override); else
+/// `LENS_BUILD_PROFILE=background` caps it to 2 so a throttled/background build (see
+/// the plan's background-build profile) draws a bounded share of the machine instead
+/// of every core; else today's behavior, unchanged: every available core. One helper,
+/// so the Tantivy writer here and the rayon global pool a background builder spins up
+/// can never be capped inconsistently.
+pub fn build_threads() -> usize {
+    let threads_env = std::env::var("LENS_BUILD_THREADS").ok();
+    let profile_env = std::env::var("LENS_BUILD_PROFILE").ok();
+    build_threads_from(threads_env.as_deref(), profile_env.as_deref())
+}
+
+/// [`build_threads`] with the environment injected, so each branch is exercisable
+/// without mutating process-global env vars (mirrors the `_from` split used by
+/// `resolve_repo_root_from` / `unscoped_data_dir_from` in `src/server.rs`).
+fn build_threads_from(build_threads: Option<&str>, build_profile: Option<&str>) -> usize {
+    if let Some(n) = build_threads.and_then(|v| v.parse::<usize>().ok()) {
+        return n;
+    }
+    if build_profile == Some("background") {
+        return 2;
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
 /// Denylist of binary/media file extensions (lowercase, no leading dot) skipped
 /// before `fs::read`: video/audio/image/archive/font/compiled-binary formats that
 /// are never useful FTS content and can be large enough to make a naive read
@@ -155,9 +183,7 @@ impl Index {
         // there is no single-writer lock to batch around (unlike the old SQLite path).
         let store = self.store();
         let threads = if changed.len() >= BULK_FILE_THRESHOLD {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
+            build_threads()
         } else {
             1
         };
@@ -218,7 +244,16 @@ impl Index {
         // Commit makes the segments durable and searchable; reload the reader so the
         // next search sees them.
         writer.commit().context("committing tantivy index")?;
-        drop(writer);
+        // Then wait out the merges that commit scheduled, instead of dropping the
+        // writer out from under them: dropping kills the segment updater, so an
+        // in-flight merge runs to completion, finds its updater dead, and throws the
+        // result away, leaving the same segments for the next call to merge again.
+        // A one-shot build only wastes that work; the background builder's per-batch
+        // calls each add a writer (indexing + updater + merge threads) whose merges
+        // never land, measured at 479 threads and ~500% CPU on a 14.5k-file tree.
+        // Best effort: the commit above is durable either way, and a failed merge is
+        // a slower index, not a wrong one.
+        let _ = writer.wait_merging_threads();
         store.reload()?;
 
         // Mirror the change into the SQLite mtime manifest (the incremental key).
@@ -2292,4 +2327,95 @@ mod tests {
         assert_eq!(symbol_def_source(src, "x.rs", 5, 4), None);
     }
 
+    #[test]
+    fn build_threads_from_env_override_wins_regardless_of_profile() {
+        assert_eq!(build_threads_from(Some("3"), Some("background")), 3);
+        assert_eq!(build_threads_from(Some("3"), None), 3);
+    }
+
+    #[test]
+    fn build_threads_from_background_profile_defaults_to_two() {
+        assert_eq!(build_threads_from(None, Some("background")), 2);
+        // An unparseable override falls through to the profile, not a panic or 0.
+        assert_eq!(build_threads_from(Some("nope"), Some("background")), 2);
+    }
+
+    #[test]
+    fn build_threads_from_unset_matches_todays_default() {
+        let want = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        assert_eq!(build_threads_from(None, None), want);
+        // A profile value other than "background" is not recognized either.
+        assert_eq!(build_threads_from(None, Some("foreground")), want);
+    }
+
+    // Guards the two tests below, which set the real `LENS_BUILD_PROFILE` env var:
+    // mirrors `REPO_ROOT_WRAPPER_ENV_LOCK` in `src/server.rs`, since mutating
+    // process-global env would otherwise race other tests running in parallel.
+    static BUILD_PROFILE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A tree above `BULK_FILE_THRESHOLD` files, so `index_path` takes the bulk-writer
+    /// branch that reads [`build_threads`] (the branch T6 actually changed). One file
+    /// (`auth.rs`) is a distinctive `authenticate` hit; the rest are filler so the run
+    /// is a real multi-threaded build, not the single-writer small-edit path.
+    fn bulk_corpus() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("auth.rs"),
+            "fn authenticate(user: &str) {\n    // verify password hash\n    login(user);\n}\n",
+        )
+        .unwrap();
+        for i in 0..(BULK_FILE_THRESHOLD + 4) {
+            fs::write(
+                dir.path().join(format!("filler_{i}.rs")),
+                format!("fn filler_{i}(a: i32) -> i32 {{ a + {i} }}\n"),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    /// Indexing the same fixture tree under `LENS_BUILD_PROFILE=background` and unset
+    /// must produce identical chunk counts and identical top-3 search results: the
+    /// thread-count change is throughput/resource-only, never a correctness or
+    /// determinism change.
+    #[test]
+    fn background_profile_indexes_identically_to_default() {
+        let _guard = BUILD_PROFILE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("LENS_BUILD_PROFILE");
+
+        std::env::remove_var("LENS_BUILD_PROFILE");
+        let data_default = tempdir().unwrap();
+        let src_default = bulk_corpus();
+        let idx_default = Index::open(data_default.path()).unwrap();
+        let res_default = idx_default.index_path(src_default.path(), true).unwrap();
+        let hits_default = idx_default.search(&["authenticate".into()], 3).unwrap();
+
+        std::env::set_var("LENS_BUILD_PROFILE", "background");
+        let data_bg = tempdir().unwrap();
+        let src_bg = bulk_corpus();
+        let idx_bg = Index::open(data_bg.path()).unwrap();
+        let res_bg = idx_bg.index_path(src_bg.path(), true).unwrap();
+        let hits_bg = idx_bg.search(&["authenticate".into()], 3).unwrap();
+
+        match prior {
+            Some(v) => std::env::set_var("LENS_BUILD_PROFILE", v),
+            None => std::env::remove_var("LENS_BUILD_PROFILE"),
+        }
+
+        assert_eq!(res_default.chunks, res_bg.chunks);
+        assert_eq!(res_default.files_indexed, res_bg.files_indexed);
+        let paths_default: Vec<&str> = hits_default.results[0]
+            .hits
+            .iter()
+            .map(|h| h.path.rsplit('/').next().unwrap_or(h.path.as_str()))
+            .collect();
+        let paths_bg: Vec<&str> = hits_bg.results[0]
+            .hits
+            .iter()
+            .map(|h| h.path.rsplit('/').next().unwrap_or(h.path.as_str()))
+            .collect();
+        assert_eq!(paths_default, paths_bg);
+    }
 }

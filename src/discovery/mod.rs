@@ -71,8 +71,10 @@ pub fn nested_repo_roots(root: &Path) -> Vec<std::path::PathBuf> {
 
 /// Marker entries that identify a directory as a code-project root for scope
 /// classification. `.git`/`.hg`/`.svn` are VCS roots; `.lens` is a lens data
-/// dir the user (or a prior session) already built here; the rest are build /
-/// package manifests, covering real projects that have no VCS checkout.
+/// dir the user (or a prior session) already built here (see
+/// `is_project_root_at` for the extra qualification: a bare `.lens/` with no
+/// real artifacts does NOT count); the rest are build / package manifests,
+/// covering real projects that have no VCS checkout.
 pub const PROJECT_MARKERS: &[&str] = &[
     ".git",
     ".hg",
@@ -121,7 +123,16 @@ fn is_project_root_at(dir: &Path, home: Option<&Path>) -> bool {
     if home.is_some_and(|h| h == dir) {
         return false;
     }
-    PROJECT_MARKERS.iter().any(|m| dir.join(m).exists())
+    PROJECT_MARKERS.iter().any(|m| {
+        if *m == ".lens" {
+            // A bare `.lens/` (e.g. only stray heartbeat files) must not
+            // self-perpetuate as a marker; only real artifacts count.
+            dir.join(".lens").join("index.db").exists()
+                || dir.join(".lens").join("graph.json").exists()
+        } else {
+            dir.join(m).exists()
+        }
+    })
 }
 
 /// Nearest enclosing project root at or above `start`: the deepest ancestor
@@ -1415,6 +1426,17 @@ mod tests {
         fs::create_dir_all(repo.join(".git")).unwrap();
         fs::write(web.join("package.json"), "{}").unwrap();
         assert_eq!(anchor_root_from(&web.join("src"), None), Some(repo));
+    }
+
+    #[test]
+    fn scope_lens_marker_needs_real_artifacts() {
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        fs::create_dir_all(proj.join(".lens").join("heartbeats")).unwrap();
+        fs::write(proj.join(".lens").join("heartbeats").join("1.pid"), "1").unwrap();
+        assert!(!is_project_root_at(&proj, None));
+        fs::write(proj.join(".lens").join("index.db"), "").unwrap();
+        assert!(is_project_root_at(&proj, None));
     }
 
     #[test]

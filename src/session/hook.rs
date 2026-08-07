@@ -310,6 +310,14 @@ fn handle(platform: &str, event: &str, input: &HookInput) -> anyhow::Result<Stri
     let project_str = project.to_string_lossy().to_string();
     let session_id = input.session_id();
     let data_dir = super::resolve_data_dir(&project);
+    // Register the root -> data-dir pair once per session: the hook can be the
+    // only plane that ever opens this dir (MCP server absent or failed), and an
+    // unregistered central dir reads to `lens clean` as an orphan it would
+    // reclaim out from under a live project. SessionStart-gated so the
+    // per-tool-call hot path never pays the registry read.
+    if event == "SessionStart" {
+        crate::obs::record_registry(&project, &data_dir);
+    }
     // Publish the active session id where the long-lived MCP server can read it: the
     // server process never receives the per-event hook payload, so this file is the
     // only channel that lets it stamp its op records with the current session.
@@ -1213,6 +1221,49 @@ mod tests {
         });
         assert_eq!(post_out, "{}");
         assert!(!project.path().join(".lens").exists());
+    }
+
+    /// SessionStart registers the root -> data-dir pair in the machine-global
+    /// registry: the hook can be the only plane that ever opens this dir (MCP
+    /// server absent or failed), and an unregistered central dir reads to
+    /// `lens clean` as an orphan it would reclaim out from under a live
+    /// project. Mutates process-global `LENS_HOME` (and lifts the
+    /// `LENS_NO_GLOBAL_MIRROR` that `.cargo/config.toml` sets for every
+    /// cargo-launched process, which the registry respects), so it holds the
+    /// crate-wide `env_test_lock` like every other mutator.
+    #[test]
+    fn sessionstart_records_the_data_dir_in_the_registry() {
+        let _guard = crate::rtk::env_test_lock();
+        let prev_home = std::env::var_os("LENS_HOME");
+        let prev_mirror = std::env::var_os("LENS_NO_GLOBAL_MIRROR");
+        let home = tempdir().unwrap();
+        std::env::set_var("LENS_HOME", home.path());
+        std::env::remove_var("LENS_NO_GLOBAL_MIRROR");
+
+        let project = tempdir().unwrap();
+        let input = input_for(project.path());
+        let dir = input.project();
+        let out = handle("claude", "SessionStart", &input);
+        let expected = format!(
+            "{}\t{}",
+            dir.display(),
+            super::super::resolve_data_dir(&dir).display()
+        );
+        let raw = std::fs::read_to_string(home.path().join("registry.tsv")).unwrap_or_default();
+
+        match prev_home {
+            Some(v) => std::env::set_var("LENS_HOME", v),
+            None => std::env::remove_var("LENS_HOME"),
+        }
+        if let Some(v) = prev_mirror {
+            std::env::set_var("LENS_NO_GLOBAL_MIRROR", v);
+        }
+
+        out.unwrap();
+        assert!(
+            raw.lines().any(|l| l == expected),
+            "SessionStart must register the data dir, got: {raw:?}"
+        );
     }
 
     /// A giant marker-less dir (home-directory shape) makes the hook idle:

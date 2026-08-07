@@ -137,15 +137,9 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         session::install::install(&settings, &bin_str).context("installing session hooks")?;
         say("Installed session hooks (5 lifecycle events).");
 
-        // 4. RTK shell compression is the user's own install — lens only reports it.
-        if rtk::rtk_available() {
-            say("Detected RTK shell compression.");
-        } else {
-            say(&format!(
-                "RTK not detected (optional) — for shell-command compression, {}",
-                rtk::RTK_INSTALL_HINT
-            ));
-        }
+        // 4. RTK shell compression is the user's own install — lens detects it
+        //    and, interactively, offers install/update/legacy-migration.
+        rtk_concierge();
 
         // 5. Routing level.
         set_routing(&settings, &opts.routing).context("setting routing level")?;
@@ -990,6 +984,10 @@ pub fn run_update_cli(args: &[String]) -> Result<()> {
     let tag = latest_tag(&repo)?;
     if !is_newer(&tag, current) {
         println!("lens is up to date (v{current}; latest release is {tag}).");
+        // lens itself has nothing to do, but the update contract still covers
+        // rtk: check its version and offer the latest. (When lens DOES update,
+        // the new binary's `setup` re-run below reaches the same concierge.)
+        rtk_concierge();
         return Ok(());
     }
     say(&format!("Updating lens v{current} -> {tag}..."));
@@ -1106,6 +1104,340 @@ fn download_release(repo: &str, tag: &str, target: &str, dest: &Path) -> Result<
         );
     }
     Ok(())
+}
+
+// ── RTK concierge ────────────────────────────────────────────────────────────
+//
+// lens does not package or pin RTK (see src/rtk/mod.rs), but `lens setup` and
+// `lens update` act as its concierge: detect the user's install and, only in an
+// interactive terminal and only with consent, install the latest release, update
+// an outdated one in place, remove a legacy lens-managed install, and register
+// rtk's own hook via `rtk init --global`. Non-interactive runs keep the
+// detect-and-hint behavior and never touch the network.
+
+const RTK_REPO: &str = "rtk-ai/rtk";
+
+/// rtk's release target triple (upstream asset matrix; `$LENS_RTK_TARGET` overrides).
+fn rtk_triple() -> Result<String> {
+    if let Some(t) = std::env::var_os("LENS_RTK_TARGET") {
+        let t = t.to_string_lossy().trim().to_string();
+        if !t.is_empty() {
+            return Ok(t);
+        }
+    }
+    Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", _) => "x86_64-apple-darwin",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("linux", _) => "x86_64-unknown-linux-musl",
+        (os, arch) => bail!(
+            "no prebuilt rtk binary for {os}/{arch}; {}",
+            rtk::RTK_INSTALL_HINT
+        ),
+    }
+    .to_string())
+}
+
+/// The rtk release tag to install: `$LENS_RTK_VERSION` if set (pin/test seam),
+/// else the latest published release (network).
+fn rtk_tag() -> Result<String> {
+    if let Ok(v) = std::env::var("LENS_RTK_VERSION") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return Ok(v);
+        }
+    }
+    latest_tag(RTK_REPO)
+}
+
+/// Release asset URL for `tag`/`triple` (the archive holds one top-level `rtk`).
+fn rtk_asset_url(tag: &str, triple: &str) -> String {
+    format!("https://github.com/{RTK_REPO}/releases/download/{tag}/rtk-{triple}.tar.gz")
+}
+
+/// Download `tag`'s rtk archive and install the extracted binary at `dest`.
+/// Extraction happens in a scratch dir next to `dest`; the final step is a
+/// same-directory rename, so a live hook mid-Bash-call never sees a torn binary.
+fn rtk_install_at(tag: &str, dest: &Path) -> Result<()> {
+    let triple = rtk_triple()?;
+    let url = rtk_asset_url(tag, &triple);
+    let dir = dest.parent().context("rtk destination has no parent")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let scratch = dir.join(format!(".rtk-update.{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let result = (|| -> Result<()> {
+        let archive = scratch.join("rtk.tar.gz");
+        let curl = Command::new("curl")
+            .args(["-fsSL", &url, "-o"])
+            .arg(&archive)
+            .status()
+            .context("failed to spawn curl (is it installed?)")?;
+        if !curl.success() {
+            bail!("curl failed to download {url} (exit {curl})");
+        }
+        let tar = Command::new("tar")
+            .arg("xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&scratch)
+            .status()
+            .context("failed to spawn tar (is it installed?)")?;
+        if !tar.success() {
+            bail!("failed to extract rtk archive (exit {tar})");
+        }
+        let extracted = scratch.join(rtk::RTK_EXE);
+        if !extracted.is_file() {
+            bail!("rtk binary not found in the {tag} archive");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&extracted, std::fs::Permissions::from_mode(0o755))?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new("xattr")
+                .args(["-d", "com.apple.quarantine"])
+                .arg(&extracted)
+                .output();
+        }
+        std::fs::rename(&extracted, dest)
+            .with_context(|| format!("installing {}", dest.display()))?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+/// The bare `x.y.z` from `rtk --version` output (`"rtk 0.43.0"` -> `"0.43.0"`).
+fn rtk_version_digits(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .last()
+        .map(|s| s.trim_start_matches('v').to_string())
+}
+
+/// What the installed rtk at `bin` reports as its version, if it runs.
+fn rtk_installed_version(bin: &Path) -> Option<String> {
+    rtk_version_digits(&rtk::run_version(bin).ok()?)
+}
+
+/// y/N prompt on stdin; anything but an explicit `y` is a no. Only called when
+/// stdin is a terminal.
+fn confirm(prompt: &str) -> bool {
+    print!("{prompt} [y/N] ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).is_ok() && answer.trim().eq_ignore_ascii_case("y")
+}
+
+/// The RTK step shared by `lens setup` (step 4) and `lens update`.
+pub(crate) fn rtk_concierge() {
+    if !rtk::is_rtk_supported() {
+        return;
+    }
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    match rtk::rtk_bin_path() {
+        Some(bin) => rtk_offer_update(&bin, interactive),
+        None => rtk_offer_install(interactive),
+    }
+    rtk_offer_legacy_cleanup(interactive);
+    rtk_offer_init(interactive);
+}
+
+/// rtk is installed: check its version against the latest release and offer an
+/// in-place update. The network lookup only happens interactively, so scripted
+/// setups stay offline.
+fn rtk_offer_update(bin: &Path, interactive: bool) {
+    let Some(current) = rtk_installed_version(bin) else {
+        warn(&format!("rtk at {} did not report a version", bin.display()));
+        return;
+    };
+    if !interactive {
+        say(&format!("Detected RTK shell compression (rtk {current})."));
+        return;
+    }
+    let tag = match rtk_tag() {
+        Ok(t) => t,
+        Err(e) => {
+            say(&format!("Detected RTK shell compression (rtk {current})."));
+            warn(&format!("could not check rtk releases: {e:#}"));
+            return;
+        }
+    };
+    if !is_newer(&tag, &current) {
+        say(&format!(
+            "Detected RTK shell compression (rtk {current}, up to date)."
+        ));
+        return;
+    }
+    say(&format!("Detected rtk {current}; {tag} is available."));
+    if !confirm(&format!("Update rtk to {tag} (in place at {})?", bin.display())) {
+        return;
+    }
+    match rtk_install_at(&tag, bin) {
+        Ok(()) => match rtk_installed_version(bin) {
+            Some(v) => say(&format!("Updated rtk to {v}.")),
+            None => warn("rtk updated but did not report a version"),
+        },
+        Err(e) => warn(&format!("rtk update failed (non-fatal): {e:#}")),
+    }
+}
+
+/// rtk is not installed: offer to install the latest release to `~/.local/bin`.
+fn rtk_offer_install(interactive: bool) {
+    if !interactive {
+        say(&format!(
+            "RTK not detected (optional) — for shell-command compression, {}",
+            rtk::RTK_INSTALL_HINT
+        ));
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+    else {
+        say(&format!(
+            "RTK not detected (optional) — for shell-command compression, {}",
+            rtk::RTK_INSTALL_HINT
+        ));
+        return;
+    };
+    let dest_dir = home.join(".local").join("bin");
+    say("RTK not detected (optional) — it compresses shell-command output before it reaches the model.");
+    if !confirm(&format!("Install the latest rtk to {}?", dest_dir.display())) {
+        say(&format!(
+            "  Skipped — {}, then `rtk init --global`.",
+            rtk::RTK_INSTALL_HINT
+        ));
+        return;
+    }
+    let dest = dest_dir.join(rtk::RTK_EXE);
+    match rtk_tag().and_then(|tag| rtk_install_at(&tag, &dest).map(|()| tag)) {
+        Ok(tag) => {
+            say(&format!("Installed rtk {tag} at {}.", dest.display()));
+            if !dir_on_path(&dest_dir) {
+                warn(&format!(
+                    "{} is not on your PATH — add it, or the hook won't find rtk.",
+                    dest_dir.display()
+                ));
+            }
+        }
+        Err(e) => warn(&format!("rtk install failed (non-fatal): {e:#}")),
+    }
+}
+
+/// Leftovers from the era when lens packaged rtk (pre-0.11): the pinned binary at
+/// `~/.lens/bin/rtk` and the `lens-rtk-rewrite.sh` hook. They keep working but
+/// freeze rtk at the old pin, so offer to remove them.
+fn rtk_offer_legacy_cleanup(interactive: bool) {
+    let legacy_bin = rtk::home_root()
+        .map(|h| h.join("bin").join(rtk::RTK_EXE))
+        .filter(|p| p.is_file());
+    let settings = rtk::claude_settings_path();
+    let legacy_script = settings
+        .as_ref()
+        .and_then(|s| s.parent())
+        .map(|d| d.join("hooks").join("lens-rtk-rewrite.sh"))
+        .filter(|p| p.is_file());
+    let legacy_entry = settings.as_ref().is_some_and(|s| {
+        std::fs::read_to_string(s).is_ok_and(|raw| raw.contains("lens-rtk-rewrite.sh"))
+    });
+    if legacy_bin.is_none() && legacy_script.is_none() && !legacy_entry {
+        return;
+    }
+    say("Legacy lens-managed rtk detected (pre-0.11 bundled install; frozen at its old pin).");
+    if !interactive {
+        say("  Run `lens setup` in a terminal to migrate it.");
+        return;
+    }
+    if !confirm("Remove it (old hook entry, hook script, and pinned binary)?") {
+        return;
+    }
+    if legacy_entry {
+        if let Some(s) = &settings {
+            match remove_rtk_hook_entries(s, "lens-rtk-rewrite.sh") {
+                Ok(true) => say("  Removed the legacy hook entry from Claude settings."),
+                Ok(false) => {}
+                Err(e) => warn(&format!("could not edit {}: {e:#}", s.display())),
+            }
+        }
+    }
+    if let Some(p) = legacy_script {
+        match std::fs::remove_file(&p) {
+            Ok(()) => say(&format!("  Removed {}.", p.display())),
+            Err(e) => warn(&format!("could not remove {}: {e}", p.display())),
+        }
+    }
+    if let Some(p) = legacy_bin {
+        match std::fs::remove_file(&p) {
+            Ok(()) => say(&format!("  Removed {}.", p.display())),
+            Err(e) => warn(&format!("could not remove {}: {e}", p.display())),
+        }
+    }
+}
+
+/// Remove every PreToolUse hook entry whose command mentions `needle`. Returns
+/// whether anything changed.
+fn remove_rtk_hook_entries(settings_path: &Path, needle: &str) -> Result<bool> {
+    let mut root = read_json(settings_path)?;
+    let Some(arr) = root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("PreToolUse"))
+        .and_then(|p| p.as_array_mut())
+    else {
+        return Ok(false);
+    };
+    let before = arr.len();
+    arr.retain(|entry| {
+        !entry.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+            hs.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|c| c.contains(needle))
+            })
+        })
+    });
+    if arr.len() == before {
+        return Ok(false);
+    }
+    write_json(settings_path, &root)?;
+    Ok(true)
+}
+
+/// rtk is installed but its hook isn't registered: offer `rtk init --global`.
+/// A kept legacy hook counts as registered, so this never stacks a second hook.
+fn rtk_offer_init(interactive: bool) {
+    if rtk::rtk_bin_path().is_none() || rtk::rtk_hook_registered() {
+        return;
+    }
+    if !interactive {
+        say("RTK hook not registered — run `rtk init --global` to enable rewriting.");
+        return;
+    }
+    if !confirm("Register rtk's Claude hook now (`rtk init --global`)?") {
+        return;
+    }
+    match rtk::run_rtk(&["init", "--global"]) {
+        Ok(out) if out.status.success() => {
+            if rtk::rtk_hook_registered() {
+                say("RTK hook registered.");
+            } else {
+                // `rtk init --global` writes `~/.claude`; a custom
+                // `$CLAUDE_CONFIG_DIR` session reads elsewhere.
+                warn(
+                    "`rtk init` ran, but no rtk hook is visible in the active Claude \
+                     settings (custom CLAUDE_CONFIG_DIR?)",
+                );
+            }
+        }
+        Ok(out) => warn(&format!(
+            "`rtk init --global` exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => warn(&format!("could not run `rtk init`: {e:#}")),
+    }
 }
 
 /// The routing level currently recorded in `settings` (`env.LENS_ROUTING`), if any.
@@ -1312,6 +1644,57 @@ pub fn run_doctor_cli(args: &[String]) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn rtk_asset_url_matches_upstream_release_layout() {
+        assert_eq!(
+            rtk_asset_url("v0.43.0", "aarch64-apple-darwin"),
+            "https://github.com/rtk-ai/rtk/releases/download/v0.43.0/rtk-aarch64-apple-darwin.tar.gz"
+        );
+    }
+
+    #[test]
+    fn rtk_version_digits_parses_version_output() {
+        assert_eq!(rtk_version_digits("rtk 0.43.0"), Some("0.43.0".to_string()));
+        assert_eq!(rtk_version_digits("rtk v0.28.2"), Some("0.28.2".to_string()));
+        assert_eq!(rtk_version_digits(""), None);
+        // Feeds `is_newer`, which rejects unparseable input, so a weird string
+        // can never trigger a replacement.
+        assert!(!is_newer("garbage", "0.43.0"));
+    }
+
+    /// The legacy-migration edit removes exactly the entries naming the needle:
+    /// lens's own session hooks and any other PreToolUse entries survive.
+    #[test]
+    fn remove_rtk_hook_entries_removes_only_the_legacy_entry() {
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            serde_json::json!({
+                "hooks": { "PreToolUse": [
+                    { "matcher": "Bash",
+                      "hooks": [{ "type": "command", "command": "~/.claude/hooks/lens-rtk-rewrite.sh" }] },
+                    { "matcher": "Bash",
+                      "hooks": [{ "type": "command", "command": "/usr/local/bin/lens hook claude PreToolUse" }] },
+                ]},
+                "env": { "LENS_ROUTING": "full" },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(remove_rtk_hook_entries(&settings, "lens-rtk-rewrite.sh").unwrap());
+
+        let root = read_json(&settings).unwrap();
+        let pre = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "only the legacy entry goes: {pre:?}");
+        assert!(pre[0].to_string().contains("lens hook claude"));
+        assert_eq!(root["env"]["LENS_ROUTING"], "full");
+
+        // Idempotent: a second pass finds nothing and reports no change.
+        assert!(!remove_rtk_hook_entries(&settings, "lens-rtk-rewrite.sh").unwrap());
+    }
 
     #[test]
     fn resolve_routing_defaults_and_validates() {

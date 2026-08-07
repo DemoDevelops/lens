@@ -314,8 +314,8 @@ sync        read `rtk gain` and append shell-savings deltas to the lens op log\n
 // ---------------------------------------------------------------------------
 
 /// Run `<bin> --version` and return its trimmed stdout, or `Err` if it can't be
-/// spawned or exits nonzero.
-fn run_version(bin: &Path) -> Result<String> {
+/// spawned or exits nonzero. Crate-visible for `setup`'s RTK concierge.
+pub(crate) fn run_version(bin: &Path) -> Result<String> {
     let out = Command::new(bin)
         .arg("--version")
         .output()

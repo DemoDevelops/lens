@@ -3,35 +3,31 @@
 lens is an MCP tool provider that keeps work **out** of the agent's context window: it indexes, darkroomes, compresses, and graphs data so the bytes a naive agent would read never enter context. The tables below are the measured results.
 
 _Full scale curves, mechanism classifications, and methodology are in [BENCHMARKS_APPENDIX.md](BENCHMARKS_APPENDIX.md)._
-
 ## End to end (agentic, tools live)
 
-The primary product claim. Both arms are real Claude Code sessions with tools live and the agent free to work however it wants; the lens arm additionally has the lens MCP server and routing installed. The `0.11-dev` set: 26 repo-investigation tasks over this repo's `src/` (the 22 frozen `0.10` ids plus 6 composed multi-step tasks), 3 runs per arm per task, `claude-sonnet-5` at effort `medium`. A per-arm canary proves each config reaches (or, for the baseline, never reaches) the lens server before any task is scored; a zero-lens lens-arm run then scores as an adoption miss instead of being dropped, so the record carries every cell rather than only the lens-engaging ones.
+The primary product claim. Both arms are real Claude Code sessions with tools live and the agent free to work however it wants; the lens arm additionally has the lens MCP server and routing installed. The `0.12-dev` set: 34 repo-investigation tasks over this repo's `src/` (a superset of the frozen `0.10` ids), one run per arm per task, `claude-sonnet-5` at effort `medium`. A per-arm canary proves each config reaches (or, for the baseline, never reaches) the lens server before any task is scored; this run's lens arm reached a lens tool on 34/34 tasks (100% adoption, no cells dropped).
 
 | | lens | vanilla | delta |
 | --- | ---: | ---: | ---: |
-| tokens per task | 452k | 526k | **-14.0%** |
-| accuracy | 82±36% | 85±34% | -3pp |
-| time to answer | 27.4s | 40.2s | **-31.8%** |
+| tokens per task | 223k | 435k | **-48.6%** |
+| accuracy | 94±24% | 88±32% | **+5.9pp** |
+| time to answer | 12.7s | 26.2s | **-51.7%** |
 
-Per function (mean over K=3, functions with tagged tasks):
+Per function (single run, functions with tagged tasks):
 
 | fn | n | tokens (lens/vanilla) | accuracy | time (lens/vanilla) |
 | :- | -: | :- | :- | :- |
-| `lens_search` | 8 | 229k / 313k (**-27%**) | 100% / 100% | 7.7s / 13.5s (**-43%**) |
-| `lens_run` | 8 | 749k / 873k (**-14%**) | 54% / 58% | 53.7s / 75.0s (**-28%**) |
-| `lens_run_file` | 2 | 327k / 480k (**-32%**) | 100% / 100% | 15.7s / 22.9s (**-32%**) |
-| `lens_links` | 2 | 967k / 1000k (-3%) | 100% / 100% | 69.0s / 116.2s (**-41%**) |
-| `lens_path` | 1 | 171k / 389k (**-56%**) | 100% / 100% | 8.1s / 26.5s (**-69%**) |
-| `lens_map` | 1 | 169k / 182k (-7%) | 100% / 100% | 5.6s / 7.0s (-19%) |
-| `lens_overview` | 1 | 355k / 224k (**+58%**) | **0% / 33%** | 14.8s / 9.4s (+57%) |
-| `lens_symbol` | 1 | 145k / 121k (+20%) | 100% / 100% | 5.7s / 4.1s (+39%) |
-| `lens_grep_ast` | 1 | 344k / 183k (**+88%**) | 100% / 100% | 11.8s / 8.0s (+46%) |
-| `lens_skeleton` | 1 | 149k / 121k (+23%) | 100% / 100% | 5.5s / 3.4s (+60%) |
+| `lens_run` | 10 | 246k / 810k (**-70%**) | 90% / 80% | 11.3s / 58.4s (**-81%**) |
+| `lens_search` | 8 | 169k / 274k (**-38%**) | 100% / 100% | 5.8s / 12.7s (**-54%**) |
+| `lens_skeleton` | 4 | 168k / 177k (-5%) | 100% / 100% | 5.8s / 6.6s (-11%) |
+| `lens_graph` | 3 | 492k / 621k (**-21%**) | 100% / 100% | 65.1s / 34.7s (**+88%**) |
+| `lens_symbol` | 3 | 148k / 211k (**-30%**) | 100% / 100% | 4.9s / 6.9s (-29%) |
+| `lens_grep_ast` | 3 | 197k / 233k (-16%) | 100% / 100% | 6.6s / 10.4s (**-37%**) |
+| `lens_overview` | 3 | 201k / 191k (+5%) | 67% / 33% | 6.1s / 7.7s (-21%) |
 
-Honest reading: net **-14% tokens** and **-32% time** at near-parity accuracy (82% vs 85%, inside the ±36/34pp across-task spread). Wins concentrate in `lens_search` (-27% tok, -43% time), the directed graph paths `lens_path`/`lens_links` (-56%/-3% tok, -69%/-41% time), and `lens_run_file` (-32%). The losses are the single-task skeleton-family rows: `lens_grep_ast` (+88%), `lens_overview` (+58%, and a real accuracy drop, 0% vs 33%), `lens_skeleton` (+23%), `lens_symbol` (+20%), where the model spends more context reaching for the tool than a targeted read would. The 8 composed `lens_run` tasks reach lens on 91% of runs but the model iterates many small programs instead of composing one, saving only -14% tokens at 54% vs 58% accuracy. This is a wider, harder set than earlier records (it keeps the previously-hard cells instead of dropping them), so its deltas are more conservative by construction.
+Honest reading: net **-48.6% tokens** and **-51.7% time** at **+5.9pp accuracy**. Wins concentrate in the 10 composed `lens_run` tasks (-70% tokens, -81% time, 90% vs 80%) and `lens_search` (-38% tokens, -54% time); every other function is at accuracy parity with a token win. The two soft cells: `lens_graph` trades wall-clock for tokens (+88% time, -21% tokens, parity accuracy) on cold-graph builds, and `lens_overview` stays the weakest family for both arms (67% vs 33% on n=3). Single run per arm, so per-task jitter is wider than the earlier K=3 dev records; the deltas above compare identical task sets.
 
-Three within-run gates (adoption, economics, reliability) with explicit PASS/FAIL and the numbers behind each are in `benchmarks/accuracy/results/agentic/gates-0.11-dev.md`. Committed record: `benchmarks/accuracy/results/agentic/real-sonnet.json` (this table, `0.11-dev` set), `benchmarks/accuracy/results/agentic/real.json` (the earlier haiku dev-tier record, not part of this set).
+Committed record: `benchmarks/accuracy/results/agentic/real.json` (this table, `0.12-dev` set, 2026-08-07). Earlier dev-tier records remain beside it in the same directory.
 
 ## Savings
 

@@ -257,9 +257,12 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for WatchDisconnect<R
         // with the peer, so it must never be mistaken for a disconnect.
         let had_room = buf.remaining() > 0;
         let polled = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
-        let eof = had_room
-            && matches!(polled, std::task::Poll::Ready(Ok(())))
-            && buf.filled().len() == before;
+        // A read error is a disconnect too: a torn pipe surfaces as `Err`, not EOF,
+        // and rmcp shuts down through the same drain that arrives late either way.
+        let eof = matches!(polled, std::task::Poll::Ready(Err(_)))
+            || (had_room
+                && matches!(polled, std::task::Poll::Ready(Ok(())))
+                && buf.filled().len() == before);
         if eof && !self.armed {
             self.armed = true;
             arm_disconnect_watchdog();

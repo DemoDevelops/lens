@@ -1706,12 +1706,24 @@ impl Forge {
         queries: &[String],
         limit_per_query: usize,
     ) {
+        self.federate_nested_search_capped(resp, queries, limit_per_query, nested_autobuild_max_repos())
+    }
+
+    /// [`federate_nested_search`] with the fresh-build cap injected, so the cap branch
+    /// is exercisable without mutating the process-global env var (same split, and
+    /// same reason, as `resolve_repo_root_from`).
+    fn federate_nested_search_capped(
+        &self,
+        resp: &mut SearchResponse,
+        queries: &[String],
+        limit_per_query: usize,
+        max_repos: usize,
+    ) {
         if !self.scoped {
             return;
         }
         let mut repos_built = 0usize;
         let mut repos_skipped_cap = 0usize;
-        let max_repos = nested_autobuild_max_repos();
         for nested_root in discovery::nested_repo_roots(&self.repo_dir) {
             let data_dir = nested_root.join(".lens");
             let prefix = nested_root
@@ -3937,21 +3949,13 @@ mod tests {
         );
     }
 
-    /// `LENS_NESTED_AUTOBUILD_MAX_REPOS` caps how many nested repos a single call may
-    /// freshly build: with three repos all needing a build and the cap set to 1,
-    /// exactly one gets built (and its `.lens` written), the other two are skipped
-    /// with a single summary note naming the count, and neither of them gets a
-    /// `.lens` directory.
-    #[tokio::test]
-    async fn nested_autobuild_caps_repos_built_per_call() {
-        // The guard must not span the `.await` below (clippy::await_holding_lock):
-        // scope it to just the env mutation on each side instead of holding it live
-        // through the async call.
-        {
-            let _g = crate::rtk::env_test_lock();
-            std::env::set_var("LENS_NESTED_AUTOBUILD_MAX_REPOS", "1");
-        }
-
+    /// The fresh-build cap (`LENS_NESTED_AUTOBUILD_MAX_REPOS` in production, injected
+    /// here so no process-global env is mutated under a parallel suite): with three
+    /// repos all needing a build and the cap at 1, exactly one gets built (and its
+    /// `.lens` written), the other two are skipped with a single summary note naming
+    /// the count, and neither of them gets a `.lens` directory.
+    #[test]
+    fn nested_autobuild_caps_repos_built_per_call() {
         let parent = tempdir().unwrap();
         let data = parent.path().join(".lens");
         std::fs::write(parent.path().join("notes.md"), "widget in the parent repo\n").unwrap();
@@ -3964,20 +3968,13 @@ mod tests {
             std::fs::write(nested.join("notes.md"), format!("widget in {name}\n")).unwrap();
         }
 
-        let out = f
-            .lens_search(Parameters(SearchRequest {
-                queries: vec!["widget".into()],
-                limit_per_query: 5,
-            }))
-            .await
-            .unwrap();
+        let mut resp = SearchResponse {
+            results: vec![],
+            notes: vec![],
+        };
+        f.federate_nested_search_capped(&mut resp, &["widget".to_string()], 5, 1);
 
-        {
-            let _g = crate::rtk::env_test_lock();
-            std::env::remove_var("LENS_NESTED_AUTOBUILD_MAX_REPOS");
-        }
-
-        let notes = &out.0.notes;
+        let notes = &resp.notes;
         let built: Vec<&String> = notes.iter().filter(|n| n.contains(": built (")).collect();
         let capped: Vec<&String> = notes.iter().filter(|n| n.contains("build cap")).collect();
         assert_eq!(

@@ -524,6 +524,9 @@ const INDEX_BATCH_FILES: usize = 400;
 
 /// A directory with more loose files than this is indexed whole rather than split into
 /// one batch per file: splitting there would trade a handful of commits for thousands.
+/// Only honored while the directory's subtree beyond those loose files stays within one
+/// batch; past that, swallowing the subtree would collapse the whole repo into a single
+/// commit with no partial visibility and nothing to resume from.
 const INDEX_BATCH_LOOSE_MAX: usize = 64;
 
 /// The background builder's build: the same graph and FTS index `warmup` produces, but
@@ -647,7 +650,9 @@ fn indexable_files(root: &Path) -> Vec<PathBuf> {
 ///
 /// A directory at or under [`INDEX_BATCH_FILES`] is one unit; a bigger one is split
 /// into its loose files plus its subdirectories, unless it holds so many loose files
-/// that splitting would trade a handful of commits for thousands.
+/// that splitting would trade a handful of commits for thousands AND its subtree
+/// beyond them is at most one batch (a dir that is essentially loose files). A big
+/// subtree always splits, whatever sits loose next to it.
 fn index_units(root: &Path, files: &[PathBuf]) -> Vec<(PathBuf, usize)> {
     let mut counts: HashMap<&Path, usize> = HashMap::new();
     let mut loose: HashMap<&Path, Vec<&Path>> = HashMap::new();
@@ -675,7 +680,9 @@ fn index_units(root: &Path, files: &[PathBuf]) -> Vec<(PathBuf, usize)> {
             continue;
         }
         let here = loose.get(dir).map(|f| f.len()).unwrap_or(0);
-        if total <= INDEX_BATCH_FILES || here > INDEX_BATCH_LOOSE_MAX {
+        if total <= INDEX_BATCH_FILES
+            || (here > INDEX_BATCH_LOOSE_MAX && total <= here + INDEX_BATCH_FILES)
+        {
             units.push((dir.to_path_buf(), total));
             continue;
         }
@@ -855,6 +862,45 @@ mod tests {
                 .iter()
                 .any(|(unit, n)| unit.ends_with("flat") && *n == INDEX_BATCH_FILES + 50),
             "a directory of loose files stays one unit: {units:?}"
+        );
+    }
+
+    /// Many loose files next to a big subtree must not swallow it: the loose-file
+    /// exception collapsing the whole dir here would mean one monolithic commit for
+    /// the entire repo, with no partial visibility and nothing to resume from. The
+    /// loose files go one by one; the subtree keeps its own per-directory units.
+    #[test]
+    fn many_loose_files_do_not_swallow_a_big_subtree() {
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        let loose_count = INDEX_BATCH_LOOSE_MAX + 6;
+        for i in 0..loose_count {
+            fs::write(root.join(format!("l{i}.rs")), "fn l() {}\n").unwrap();
+        }
+        for d in 0..3 {
+            let dir = root.join("big").join(format!("d{d}"));
+            fs::create_dir_all(&dir).unwrap();
+            for i in 0..(INDEX_BATCH_FILES / 2) {
+                fs::write(dir.join(format!("s{i}.rs")), "fn s() {}\n").unwrap();
+            }
+        }
+
+        let files = indexable_files(root);
+        let units = index_units(root, &files);
+        assert!(
+            units.iter().all(|(unit, _)| unit != root),
+            "root must split, not become one monolithic unit: {units:?}"
+        );
+        assert!(
+            units
+                .iter()
+                .any(|(unit, n)| unit.ends_with("d0") && *n == INDEX_BATCH_FILES / 2),
+            "the subtree keeps per-directory units: {units:?}"
+        );
+        assert_eq!(
+            units.iter().map(|(_, n)| n).sum::<usize>(),
+            files.len(),
+            "still a partition"
         );
     }
 
